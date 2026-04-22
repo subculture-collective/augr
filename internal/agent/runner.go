@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -233,11 +234,74 @@ func (r *Runner) RunStrategy(ctx context.Context, strategy domain.Strategy, glob
 }
 
 // Run executes one prepared run and returns the canonical result.
-func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (*RunResult, error) {
-	slog.Info("DEBUG: runner.Run entered", slog.String("run_id", prepared.RunID.String()))
+func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResult, runErr error) {
 	if r.persister == nil {
 		return nil, fmt.Errorf("agent/runner: persister is required")
 	}
+
+	var (
+		run                 domain.PipelineRun
+		state               *PipelineState
+		phaseTimings        map[string]int64
+		warnings            []RunWarning
+		cacheStatsCollector *llm.CacheStatsCollector
+	)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			return
+		}
+
+		panicErr := fmt.Errorf("agent/runner: panic recovered: %v", recovered)
+		r.logger.Error("agent/runner: recovered panic",
+			slog.Any("panic", recovered),
+			slog.String("stack", string(debug.Stack())),
+		)
+
+		completedAt := r.currentTime().UTC()
+		phaseTimingsJSON, _ := json.Marshal(phaseTimings)
+		if run.ID != uuid.Nil {
+			_ = r.persister.RecordRunComplete(
+				context.Background(),
+				run.ID,
+				run.TradeDate,
+				domain.PipelineStatusFailed,
+				completedAt,
+				panicErr.Error(),
+				phaseTimingsJSON,
+			)
+		}
+		if cacheStatsCollector != nil {
+			r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
+		}
+		if run.ID != uuid.Nil {
+			r.helper.persistStructuredTerminalEvent(r.helper.newStructuredEvent(
+				run.ID,
+				prepared.Strategy.ID,
+				AgentEventKindPipelineFailed,
+				"",
+				"Pipeline failed",
+				panicErr.Error(),
+				map[string]any{"phase": "panic", "error_message": panicErr.Error()},
+				[]string{"pipeline", "failed"},
+			))
+		}
+		r.helper.emitEvent(PipelineEvent{
+			Type:          PipelineError,
+			PipelineRunID: run.ID,
+			StrategyID:    prepared.Strategy.ID,
+			Ticker:        prepared.Strategy.Ticker,
+			Error:         panicErr.Error(),
+			OccurredAt:    r.currentTime().UTC(),
+		})
+
+		run.Status = domain.PipelineStatusFailed
+		run.CompletedAt = &completedAt
+		run.ErrorMessage = panicErr.Error()
+		result = &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}
+		runErr = panicErr
+	}()
 
 	var cancel context.CancelFunc
 	if prepared.Runtime.PipelineTimeout > 0 {
@@ -247,11 +311,11 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (*RunResult, err
 	}
 	defer cancel()
 
-	cacheStatsCollector := llm.NewCacheStatsCollector()
+	cacheStatsCollector = llm.NewCacheStatsCollector()
 	ctx = llm.WithCacheStatsCollector(ctx, cacheStatsCollector)
 
 	now := r.currentTime().UTC()
-	run := domain.PipelineRun{
+	run = domain.PipelineRun{
 		ID:             uuid.New(),
 		StrategyID:     prepared.Strategy.ID,
 		Ticker:         prepared.Strategy.Ticker,
@@ -270,17 +334,15 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (*RunResult, err
 	if r.runRegistry != nil {
 		r.runRegistry.Register(run.ID, cancel)
 		defer r.runRegistry.Deregister(run.ID)
-		slog.Info("DEBUG: runRegistry registered", slog.String("run_id", run.ID.String()))
 	}
 
-	state := &PipelineState{
+	state = &PipelineState{
 		PipelineRunID: run.ID,
 		StrategyID:    prepared.Strategy.ID,
 		Ticker:        prepared.Strategy.Ticker,
 		mu:            &sync.Mutex{},
 	}
 	applyInitialStateSeed(state, prepared.InitialState)
-	slog.Info("DEBUG: initial state seeded, about to persist PipelineStarted", slog.String("run_id", run.ID.String()))
 
 	r.helper.persistStructuredEvent(ctx, r.helper.newStructuredEvent(
 		run.ID,
@@ -300,8 +362,8 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (*RunResult, err
 		OccurredAt:    r.currentTime().UTC(),
 	})
 
-	phaseTimings := map[string]int64{}
-	warnings := make([]RunWarning, 0)
+	phaseTimings = map[string]int64{}
+	warnings = make([]RunWarning, 0)
 	var warningsMu sync.Mutex
 	phases := []struct {
 		name  string
@@ -356,7 +418,9 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (*RunResult, err
 			run.Status = domain.PipelineStatusFailed
 			run.CompletedAt = &completedAt
 			run.ErrorMessage = err.Error()
-			return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, err
+			result = &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}
+			runErr = err
+			return
 		}
 		phaseTimings[phase.name+"_ms"] = time.Since(phaseStart).Milliseconds()
 		r.helper.persistStructuredEvent(ctx, r.helper.newStructuredEvent(
@@ -395,7 +459,9 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (*RunResult, err
 	run.Status = domain.PipelineStatusCompleted
 	run.CompletedAt = &completedAt
 
-	return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, nil
+	result = &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}
+	runErr = nil
+	return
 }
 
 func applyInitialStateSeed(state *PipelineState, seed InitialStateSeed) {

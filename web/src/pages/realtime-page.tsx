@@ -901,6 +901,7 @@ export function RealtimePage() {
         {/* Feed panel — second on mobile, first (left) on xl */}
         <div className="order-2 flex min-h-115 min-w-0 flex-col rounded-lg border border-border bg-card p-4 xl:order-1 xl:min-h-0">
           <div className="mb-4 space-y-3">
+            <div className="flex items-center justify-between gap-3">
               <div className="space-y-1">
                 <h3 className="text-lg font-semibold">Event feed</h3>
                 <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">

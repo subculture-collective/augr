@@ -47,12 +47,33 @@ describe('WatchlistTable', () => {
     expect(screen.getByText('gap_up')).toBeInTheDocument()
   })
 
-  it('renders 0.00 when score is undefined (null-guard)', () => {
+  it('falls back to watch_score when score is absent', () => {
     render(
       <WatchlistTable
         tickers={[
           {
             ticker: 'MSFT',
+            name: 'Microsoft',
+            exchange: 'XNAS',
+            index_group: 'nasdaq',
+            watch_score: 0.64,
+            active: true,
+          },
+        ]}
+      />,
+      { wrapper: Wrapper },
+    )
+
+    expect(screen.getByText('MSFT')).toBeInTheDocument()
+    expect(screen.getByText('0.64')).toBeInTheDocument()
+  })
+
+  it('renders 0.00 when score is undefined (null-guard)', () => {
+    render(
+      <WatchlistTable
+        tickers={[
+          {
+            ticker: 'NVDA',
             score: undefined as unknown as number,
             reasons: [],
             day_volume: 500000,
@@ -65,7 +86,7 @@ describe('WatchlistTable', () => {
       { wrapper: Wrapper },
     )
 
-    expect(screen.getByText('MSFT')).toBeInTheDocument()
+    expect(screen.getByText('NVDA')).toBeInTheDocument()
     expect(screen.getByText('0.00')).toBeInTheDocument()
   })
 
