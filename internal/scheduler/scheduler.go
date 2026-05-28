@@ -44,6 +44,10 @@ type backtestRunner interface {
 	Run(ctx context.Context, config domain.BacktestConfig) (*backtest.OrchestratorResult, error)
 }
 
+type backtestServiceRunner interface {
+	RunBacktest(ctx context.Context, configID uuid.UUID, actor string) (*domain.BacktestRun, error)
+}
+
 type strategyExecutor func(ctx context.Context, strategy domain.Strategy) error
 
 // SchedulerMetrics is implemented by *metrics.Metrics.
@@ -91,6 +95,20 @@ func WithBacktestScheduling(
 	}
 }
 
+// WithBacktestServiceScheduling enables cron-triggered backtest runs through
+// the backtest service without legacy persistence wiring.
+func WithBacktestServiceScheduling(
+	configRepo repository.BacktestConfigRepository,
+	runner backtestServiceRunner,
+	actor string,
+) Option {
+	return func(s *Scheduler) {
+		s.backtestConfigRepo = configRepo
+		s.backtestServiceRunner = runner
+		s.backtestRunActor = actor
+	}
+}
+
 // TickerDiscoveryConfig holds scheduler-level configuration for the ticker
 // discovery job.
 type TickerDiscoveryConfig struct {
@@ -123,28 +141,30 @@ func WithTickerDiscovery(u *universe.Universe, pc *polygon.Client, dd discovery.
 
 // Scheduler loads active strategies and triggers pipeline runs on cron schedules.
 type Scheduler struct {
-	mu                 sync.Mutex
-	cron               cronEngine
-	strategyRepo       repository.StrategyRepository
-	pipeline           pipelineExecutor
-	strategyExecution  strategyExecutor
-	metrics            SchedulerMetrics
-	riskEngine         risk.RiskEngine
-	backtestConfigRepo repository.BacktestConfigRepository
-	backtestPersister  backtest.BacktestPersister
-	backtestRunner     backtestRunner
-	tickerDiscovery    *tickerDiscoveryDeps
-	logger             *slog.Logger
-	nowFunc            func() time.Time
-	newCron            func() cronEngine
-	ctx                context.Context
-	cancel             context.CancelFunc
-	jobTimeout         time.Duration
-	dedup              strategyDedup
-	backtestDedup      strategyDedup
-	discoveryDedup     strategyDedup
-	riskMonitor        *riskMonitor
-	strategySem        chan struct{} // limits concurrent strategy executions
+	mu                    sync.Mutex
+	cron                  cronEngine
+	strategyRepo          repository.StrategyRepository
+	pipeline              pipelineExecutor
+	strategyExecution     strategyExecutor
+	metrics               SchedulerMetrics
+	riskEngine            risk.RiskEngine
+	backtestConfigRepo    repository.BacktestConfigRepository
+	backtestPersister     backtest.BacktestPersister
+	backtestRunner        backtestRunner
+	backtestServiceRunner backtestServiceRunner
+	backtestRunActor      string
+	tickerDiscovery       *tickerDiscoveryDeps
+	logger                *slog.Logger
+	nowFunc               func() time.Time
+	newCron               func() cronEngine
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	jobTimeout            time.Duration
+	dedup                 strategyDedup
+	backtestDedup         strategyDedup
+	discoveryDedup        strategyDedup
+	riskMonitor           *riskMonitor
+	strategySem           chan struct{} // limits concurrent strategy executions
 }
 
 type strategyScheduleKey struct {
@@ -388,11 +408,20 @@ func (s *Scheduler) loadActiveStrategies(ctx context.Context) ([]domain.Strategy
 }
 
 func (s *Scheduler) loadScheduledBacktests(ctx context.Context) ([]domain.BacktestConfig, error) {
-	if s.backtestConfigRepo == nil && s.backtestPersister == nil && s.backtestRunner == nil {
+	if s.backtestConfigRepo == nil {
+		if s.backtestPersister != nil || s.backtestRunner != nil {
+			return nil, fmt.Errorf("scheduler: backtest scheduling requires config repository, persister, and runner")
+		}
+		if s.backtestServiceRunner != nil {
+			return nil, fmt.Errorf("scheduler: backtest service scheduling requires config repository")
+		}
 		return nil, nil
 	}
-	if s.backtestConfigRepo == nil || s.backtestPersister == nil || s.backtestRunner == nil {
+	if s.backtestServiceRunner == nil && (s.backtestPersister != nil || s.backtestRunner != nil) && (s.backtestPersister == nil || s.backtestRunner == nil) {
 		return nil, fmt.Errorf("scheduler: backtest scheduling requires config repository, persister, and runner")
+	}
+	if s.backtestServiceRunner == nil && s.backtestPersister == nil && s.backtestRunner == nil {
+		return nil, nil
 	}
 
 	var configs []domain.BacktestConfig
@@ -567,6 +596,31 @@ func (s *Scheduler) runBacktest(config domain.BacktestConfig) {
 		slog.String("name", config.Name),
 		slog.Time("triggered_at", triggeredAt),
 	)
+
+	if s.backtestServiceRunner != nil {
+		actor := strings.TrimSpace(s.backtestRunActor)
+		if actor == "" {
+			actor = "scheduler"
+		}
+		run, err := s.backtestServiceRunner.RunBacktest(ctx, config.ID, actor)
+		if err != nil {
+			s.logger.Error("scheduler: backtest execution failed",
+				slog.String("backtest_config_id", config.ID.String()),
+				slog.String("name", config.Name),
+				slog.Any("error", err),
+			)
+			return
+		}
+		attrs := []any{
+			slog.String("backtest_config_id", config.ID.String()),
+			slog.String("name", config.Name),
+		}
+		if run != nil && run.ID != uuid.Nil {
+			attrs = append(attrs, slog.String("backtest_run_id", run.ID.String()))
+		}
+		s.logger.Info("scheduler: backtest execution completed", attrs...)
+		return
+	}
 
 	result, err := s.backtestRunner.Run(ctx, config)
 	if err != nil {

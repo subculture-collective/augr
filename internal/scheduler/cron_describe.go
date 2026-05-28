@@ -7,6 +7,8 @@ import (
 )
 
 // DescribeCron converts a 5-field cron expression to human-readable English.
+// The automation orchestrator runs cron schedules in America/New_York, so fixed
+// clock times are labeled Eastern Time rather than UTC.
 // It handles common patterns and falls back to the raw expression if unparseable.
 func DescribeCron(expr string) string {
 	expr = strings.TrimSpace(expr)
@@ -42,7 +44,7 @@ func DescribeCron(expr string) string {
 	case isNumeric(minute) && isNumeric(hour):
 		h, _ := strconv.Atoi(hour)
 		m, _ := strconv.Atoi(minute)
-		parts = append(parts, fmt.Sprintf("Daily at %s UTC", formatTime12(h, m)))
+		parts = append(parts, fmt.Sprintf("Daily at %s ET", formatTime12(h, m)))
 
 	default:
 		return expr
@@ -65,7 +67,7 @@ func DescribeCron(expr string) string {
 		h, _ := strconv.Atoi(hour)
 		m, _ := strconv.Atoi(minute)
 		dayName := describeDOW(dow)
-		result = fmt.Sprintf("Weekly on %s at %s UTC", dayName, formatTime12(h, m))
+		result = fmt.Sprintf("Weekly on %s at %s ET", dayName, formatTime12(h, m))
 		if monthStr := describeMonth(month); monthStr != "" {
 			result += ", " + monthStr
 		}

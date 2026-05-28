@@ -46,26 +46,30 @@ type StrategyTrigger interface {
 
 // OrchestratorDeps bundles external dependencies required by the orchestrator.
 type OrchestratorDeps struct {
-	Universe              *universe.Universe
-	Polygon               *polygon.Client
-	DataService           *data.DataService
-	AlpacaReconciler      *AlpacaReconciler
-	OptionsProvider       data.OptionsDataProvider
-	LLMProvider           llm.Provider
-	EmbeddingProvider     embedding.Provider // optional; nil = skip embedding during triage
-	EventsProvider        data.EventsProvider
-	StrategyRepo          repository.StrategyRepository
-	RunRepo               repository.PipelineRunRepository
-	JobRunRepo            *pgrepo.JobRunRepo
-	OptionsScanRepo       *pgrepo.OptionsScanRepo
-	NewsFeedRepo          *pgrepo.NewsFeedRepo
-	StrategyTrigger       StrategyTrigger                        // optional; nil = no event-driven triggers
-	PolymarketAccountRepo repository.PolymarketAccountRepository // optional; nil = skip profiling job
-	PolymarketCLOBURL     string                                 // optional; defaults to Polymarket CLOB base URL
-	ReportArtifactRepo    *pgrepo.ReportArtifactRepo             // optional; nil = skip report jobs
-	BacktestConfigRepo    repository.BacktestConfigRepository    // optional; needed by report jobs
-	BacktestRunRepo       repository.BacktestRunRepository       // optional; needed by report jobs
-	Logger                *slog.Logger
+	Universe               *universe.Universe
+	Polygon                *polygon.Client
+	DataService            *data.DataService
+	AlpacaReconciler       *AlpacaReconciler
+	OptionsProvider        data.OptionsDataProvider
+	LLMProvider            llm.Provider
+	EmbeddingProvider      embedding.Provider // optional; nil = skip embedding during triage
+	EventsProvider         data.EventsProvider
+	StrategyRepo           repository.StrategyRepository
+	PositionRepo           repository.PositionRepository
+	RunRepo                repository.PipelineRunRepository
+	JobRunRepo             *pgrepo.JobRunRepo
+	OptionsScanRepo        *pgrepo.OptionsScanRepo
+	NewsFeedRepo           *pgrepo.NewsFeedRepo
+	StrategyTrigger        StrategyTrigger                        // optional; nil = no event-driven triggers
+	PolymarketAccountRepo  repository.PolymarketAccountRepository // optional; nil = skip profiling job
+	PolymarketResolvedRepo repository.PolymarketResolvedMarketsRepository
+	PolymarketWatchedRepo  repository.PolymarketWatchedMarketsRepository // optional; nil = skip discovery auto-watch
+	PolymarketCLOBURL      string                                        // optional; defaults to Polymarket CLOB base URL
+	ReportArtifactRepo     *pgrepo.ReportArtifactRepo                    // optional; nil = skip report jobs
+	BacktestConfigRepo     repository.BacktestConfigRepository           // optional; needed by report jobs
+	BacktestRunRepo        repository.BacktestRunRepository              // optional; needed by report jobs
+	OvernightBacktestRuns  repository.OvernightBacktestRunRepository
+	Logger                 *slog.Logger
 }
 
 // RegisteredJob tracks a single automated job and its runtime state.
@@ -198,6 +202,8 @@ func (o *JobOrchestrator) RegisterAll() {
 	o.registerWeeklyJobs()
 	o.registerNewsJobs()
 	o.registerPolymarketProfileJob()
+	o.registerPolymarketResolutionsJob()
+	o.registerPolymarketDiscoveryJob()
 	o.registerReportJobs()
 }
 
@@ -487,10 +493,12 @@ func (o *JobOrchestrator) persistRun(jobName string, start time.Time, elapsed ti
 	job := o.jobs[jobName]
 	var lastErrorAt *time.Time
 	var consecutiveFailures int
+	var result map[string]int
 	if job != nil {
 		job.mu.Lock()
 		lastErrorAt = job.LastErrorAt
 		consecutiveFailures = job.ConsecutiveFailures
+		result = cloneSummary(job.LastSummary)
 		job.mu.Unlock()
 	}
 
@@ -500,6 +508,7 @@ func (o *JobOrchestrator) persistRun(jobName string, start time.Time, elapsed ti
 		StartedAt:           start.UTC(),
 		CompletedAt:         &completed,
 		DurationNs:          elapsed.Nanoseconds(),
+		Result:              result,
 		Error:               errMsg,
 		LastErrorAt:         lastErrorAt,
 		ConsecutiveFailures: consecutiveFailures,

@@ -111,6 +111,17 @@ type TradeFilter struct {
 	EndDate    *time.Time
 }
 
+// PolymarketAccountFilter defines filters when listing Polymarket accounts.
+type PolymarketAccountFilter struct {
+	Tracked    *bool
+	MinWinRate float64
+	MinVolume  float64
+	MinTrades  int
+	Sort       string
+	Limit      int
+	Offset     int
+}
+
 // MemorySearchFilter defines supported filters when searching agent memories.
 type MemorySearchFilter struct {
 	AgentRole         domain.AgentRole
@@ -202,6 +213,15 @@ type BacktestRunRepository interface {
 	List(ctx context.Context, filter BacktestRunFilter, limit, offset int) ([]domain.BacktestRun, error)
 	// Count returns the total number of backtest runs matching the filter.
 	Count(ctx context.Context, filter BacktestRunFilter) (int, error)
+}
+
+// OvernightBacktestRunRepository persists resumable overnight backtest progress.
+type OvernightBacktestRunRepository interface {
+	Create(ctx context.Context, run *domain.OvernightBacktestRun) error
+	Get(ctx context.Context, id uuid.UUID) (*domain.OvernightBacktestRun, error)
+	GetActive(ctx context.Context) (*domain.OvernightBacktestRun, error)
+	Update(ctx context.Context, run *domain.OvernightBacktestRun) error
+	ListLatest(ctx context.Context, limit int) ([]domain.OvernightBacktestRun, error)
 }
 
 // PipelineRunRepository provides access to pipeline runs.
@@ -343,13 +363,39 @@ type PolymarketAccountRepository interface {
 	UpsertAccount(ctx context.Context, account *domain.PolymarketAccount) error
 	// GetAccount returns a single account by wallet address.
 	GetAccount(ctx context.Context, address string) (*domain.PolymarketAccount, error)
+	// ListAccounts returns accounts matching the provided filter.
+	ListAccounts(ctx context.Context, filter PolymarketAccountFilter) ([]domain.PolymarketAccount, error)
 	// ListTrackedAccounts returns accounts where tracked=true, ordered by win_rate descending.
 	ListTrackedAccounts(ctx context.Context, minWinRate float64, limit int) ([]domain.PolymarketAccount, error)
 	// InsertTrades bulk-inserts trade records, ignoring duplicates by (account, market, timestamp).
 	InsertTrades(ctx context.Context, trades []domain.PolymarketAccountTrade) error
 	// ListTradesByAccount returns trades for a given address within the time range.
 	ListTradesByAccount(ctx context.Context, address string, from, to time.Time, limit int) ([]domain.PolymarketAccountTrade, error)
+	// ListAllTradesBySlug returns every trade for the slug across all accounts.
+	ListAllTradesBySlug(ctx context.Context, slug string, limit int) ([]domain.PolymarketAccountTrade, error)
+	// ListRecentTrades returns the most recent Polymarket trades across accounts.
+	ListRecentTrades(ctx context.Context, limit int) ([]domain.PolymarketAccountTrade, error)
 	// MarkTracked sets tracked=true for accounts whose win_rate exceeds the threshold
 	// and who have resolved at least minResolved markets.
 	MarkTracked(ctx context.Context, minWinRate float64, minResolved int) (int64, error)
+	// SetTracked updates the tracked flag for one account.
+	SetTracked(ctx context.Context, address string, tracked bool) error
+	// UpdateAccountResolutionStats increments market resolution stats.
+	UpdateAccountResolutionStats(ctx context.Context, address string, won, lost int, winRate float64) error
+	// IncrementAccountResolutionStats adds deltas to market resolution stats.
+	IncrementAccountResolutionStats(ctx context.Context, address string, wonDelta, lostDelta int) error
+}
+
+// PolymarketWatchedMarketsRepository stores watched Polymarket market slugs.
+type PolymarketWatchedMarketsRepository interface {
+	List(ctx context.Context, onlyEnabled bool) ([]domain.PolymarketWatchedMarket, error)
+	Add(ctx context.Context, m *domain.PolymarketWatchedMarket) error
+	Remove(ctx context.Context, slug string) error
+	SetEnabled(ctx context.Context, slug string, enabled bool) error
+}
+
+// PolymarketResolvedMarketsRepository tracks resolved market processing.
+type PolymarketResolvedMarketsRepository interface {
+	IsProcessed(ctx context.Context, slug string) (bool, error)
+	MarkProcessed(ctx context.Context, slug, winningSide string, resolvedAt time.Time) error
 }

@@ -1,6 +1,6 @@
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { CalendarDays, ExternalLink, Loader2, Sparkles } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { PageHeader } from '@/components/layout/page-header'
 import { Badge } from '@/components/ui/badge'
@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { apiClient } from '@/lib/api/client'
-import type { EarningsEvent, EconomicEvent, SECFiling, IPOEvent, FilingAnalysis } from '@/lib/api/types'
+import type { SECFiling, FilingAnalysis } from '@/lib/api/types'
 
 type Tab = 'earnings' | 'economic' | 'filings' | 'ipo'
 
@@ -36,6 +36,19 @@ function defaultTo(daysAhead: number): string {
   return d.toISOString().slice(0, 10)
 }
 
+function sortBySoonestDate<T>(items: T[], getDate: (item: T) => string): T[] {
+  return [...items].sort((a, b) => {
+    const aTime = new Date(getDate(a)).getTime()
+    const bTime = new Date(getDate(b)).getTime()
+
+    if (Number.isNaN(aTime) && Number.isNaN(bTime)) return 0
+    if (Number.isNaN(aTime)) return 1
+    if (Number.isNaN(bTime)) return -1
+
+    return aTime - bTime
+  })
+}
+
 function epsColor(actual?: number, estimate?: number): string {
   if (actual == null || estimate == null) return ''
   if (actual > estimate) return 'text-emerald-400'
@@ -54,7 +67,7 @@ function EarningsTab() {
     queryFn: () => apiClient.getEarningsCalendar({ from, to }),
   })
 
-  const events: EarningsEvent[] = data ?? []
+  const events = useMemo(() => sortBySoonestDate(data ?? [], (event) => event.date), [data])
 
   return (
     <div className="space-y-3">
@@ -142,7 +155,7 @@ function EconomicTab() {
     queryFn: () => apiClient.getEconomicCalendar(),
   })
 
-  const events: EconomicEvent[] = data ?? []
+  const events = useMemo(() => sortBySoonestDate(data ?? [], (event) => event.time), [data])
 
   return (
     <div className="space-y-3">
@@ -272,7 +285,7 @@ function FilingsTab() {
     },
   })
 
-  const filings: SECFiling[] = data ?? []
+  const filings = useMemo(() => sortBySoonestDate(data ?? [], (filing) => filing.filed_date), [data])
 
   return (
     <div className="space-y-3">
@@ -407,7 +420,7 @@ function IPOTab() {
     queryFn: () => apiClient.getIPOCalendar({ from, to }),
   })
 
-  const events: IPOEvent[] = data ?? []
+  const events = useMemo(() => sortBySoonestDate(data ?? [], (event) => event.date), [data])
 
   return (
     <div className="space-y-3">

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data/rss"
@@ -16,7 +17,7 @@ import (
 var (
 	newsScanSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,
-		Cron:         "*/5 * * * 1-5", // every 5 minutes during market hours
+		Cron:         "7-59/10 * * * 1-5", // every 10 minutes during market hours, staggered off shared minute boundaries
 		SkipWeekends: true,
 		SkipHolidays: true,
 	}
@@ -122,7 +123,7 @@ func (o *JobOrchestrator) newsScan(ctx context.Context) error {
 	return nil
 }
 
-// socialScan fetches StockTwits trending + sentiment for active strategy tickers.
+// socialScan fetches StockTwits trending + sentiment for active strategy and open position tickers.
 func (o *JobOrchestrator) socialScan(ctx context.Context) error {
 	if o.deps.NewsFeedRepo == nil {
 		o.logger.Info("social_scan: skipped — news feed repo not configured")
@@ -149,41 +150,57 @@ func (o *JobOrchestrator) socialScan(ctx context.Context) error {
 		o.logger.Info("social_scan: trending symbols saved", slog.Int("count", len(trending)))
 	}
 
-	// Fetch sentiment for active strategy tickers.
+	// Fetch sentiment for active strategy and open position tickers.
+	tickers := make(map[string]struct{})
+	addTicker := func(ticker string) {
+		ticker = strings.ToUpper(strings.TrimSpace(ticker))
+		if ticker == "" {
+			return
+		}
+		tickers[ticker] = struct{}{}
+	}
+
 	if o.deps.StrategyRepo != nil {
 		strategies, err := o.deps.StrategyRepo.List(ctx, repository.StrategyFilter{Status: "active"}, 50, 0)
 		if err != nil {
 			return fmt.Errorf("social_scan: list strategies: %w", err)
 		}
-
-		// Deduplicate tickers.
-		seen := make(map[string]bool)
 		for _, s := range strategies {
-			if seen[s.Ticker] {
-				continue
-			}
-			seen[s.Ticker] = true
+			addTicker(s.Ticker)
+		}
+	}
 
-			sentiment, err := client.GetSymbolSentiment(ctx, s.Ticker)
-			if err != nil {
-				o.logger.Warn("social_scan: sentiment fetch failed",
-					slog.String("ticker", s.Ticker),
-					slog.Any("error", err),
-				)
-				continue
+	if o.deps.PositionRepo != nil {
+		positions, err := o.deps.PositionRepo.GetOpen(ctx, repository.PositionFilter{}, 100, 0)
+		if err != nil {
+			o.logger.Warn("social_scan: open positions fetch failed", slog.Any("error", err))
+		} else {
+			for _, pos := range positions {
+				addTicker(pos.Ticker)
 			}
+		}
+	}
 
-			if sentiment.Total > 0 {
-				_ = o.deps.NewsFeedRepo.InsertSocialSentiment(ctx, &pgrepo.SocialSentimentRow{
-					Ticker:     sentiment.Symbol,
-					Source:     "stocktwits",
-					Sentiment:  sentiment.Score,
-					Bullish:    float64(sentiment.Bullish),
-					Bearish:    float64(sentiment.Bearish),
-					PostCount:  sentiment.Total,
-					MeasuredAt: sentiment.MeasuredAt,
-				})
-			}
+	for ticker := range tickers {
+		sentiment, err := client.GetSymbolSentiment(ctx, ticker)
+		if err != nil {
+			o.logger.Warn("social_scan: sentiment fetch failed",
+				slog.String("ticker", ticker),
+				slog.Any("error", err),
+			)
+			continue
+		}
+
+		if sentiment.Total > 0 {
+			_ = o.deps.NewsFeedRepo.InsertSocialSentiment(ctx, &pgrepo.SocialSentimentRow{
+				Ticker:     sentiment.Symbol,
+				Source:     "stocktwits",
+				Sentiment:  sentiment.Score,
+				Bullish:    float64(sentiment.Bullish),
+				Bearish:    float64(sentiment.Bearish),
+				PostCount:  sentiment.Total,
+				MeasuredAt: sentiment.MeasuredAt,
+			})
 		}
 	}
 

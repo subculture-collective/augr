@@ -54,7 +54,13 @@ describe('ActivityFeed', () => {
     vi.stubGlobal('WebSocket', MockWebSocket)
     vi.stubGlobal(
       'fetch',
-      vi.fn(() => Promise.resolve(jsonResponse({ data: [], limit: 20, offset: 0 }))),
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes('/api/v1/automation/status')) {
+          return Promise.resolve(jsonResponse([]))
+        }
+        return Promise.resolve(jsonResponse({ data: [], limit: 20, offset: 0 }))
+      }),
     )
   })
 
@@ -66,8 +72,10 @@ describe('ActivityFeed', () => {
   it('renders historical events from the API before live websocket updates arrive', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(() =>
-        Promise.resolve(
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes('/api/v1/automation/status')) return Promise.resolve(jsonResponse([]))
+        return Promise.resolve(
           jsonResponse({
             data: [
               {
@@ -83,8 +91,8 @@ describe('ActivityFeed', () => {
             limit: 20,
             offset: 0,
           }),
-        ),
-      ),
+        )
+      }),
     )
 
     render(<ActivityFeed />, { wrapper: Wrapper })
@@ -99,6 +107,38 @@ describe('ActivityFeed', () => {
 
     expect(screen.getByTestId('activity-feed')).toBeInTheDocument()
     expect(await screen.findByTestId('activity-feed-empty')).toBeInTheDocument()
+  })
+
+  it('renders automation job history when pipeline events are empty', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input)
+        if (url.includes('/api/v1/automation/status')) {
+          return Promise.resolve(
+            jsonResponse([
+              {
+                name: 'news_scan',
+                description: 'Scan news',
+                schedule: '*/10 * * * *',
+                last_run: '2026-04-22T01:00:00Z',
+                last_result: 'ok in 2s',
+                run_count: 5,
+                error_count: 0,
+                running: false,
+                enabled: true,
+              },
+            ]),
+          )
+        }
+        return Promise.resolve(jsonResponse({ data: [], limit: 20, offset: 0 }))
+      }),
+    )
+
+    render(<ActivityFeed />, { wrapper: Wrapper })
+
+    expect(await screen.findByText('Automation completed: news_scan')).toBeInTheDocument()
+    expect(screen.getByText('ok in 2s')).toBeInTheDocument()
   })
 
   it('shows connected badge after WebSocket opens', async () => {

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/llm/llamabroker"
 )
 
 // DefaultModel is the default embedding model.
@@ -28,6 +30,8 @@ type OllamaConfig struct {
 	BaseURL string
 	// Model to use for embeddings. Defaults to DefaultModel.
 	Model string
+	// APIKey for llama-line broker auth.
+	APIKey string
 	// Timeout per HTTP request. Defaults to DefaultTimeout.
 	Timeout time.Duration
 	// BatchSize is the maximum texts per /api/embed call. Defaults to DefaultBatchSize.
@@ -40,6 +44,7 @@ type OllamaConfig struct {
 type OllamaProvider struct {
 	baseURL    string
 	model      string
+	apiKey     string
 	batchSize  int
 	httpClient *http.Client
 }
@@ -47,7 +52,7 @@ type OllamaProvider struct {
 var _ Provider = (*OllamaProvider)(nil)
 
 // NewOllamaProvider constructs an embedding provider for a local Ollama server.
-func NewOllamaProvider(cfg OllamaConfig) *OllamaProvider {
+func NewOllamaProvider(cfg OllamaConfig) (*OllamaProvider, error) {
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
@@ -64,6 +69,10 @@ func NewOllamaProvider(cfg OllamaConfig) *OllamaProvider {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	apiKey := cfg.APIKey
+	if apiKey == "" {
+		return nil, fmt.Errorf("embedding: ollama api key is required (set OLLAMA_API_KEY for llama-line broker)")
+	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
@@ -71,9 +80,10 @@ func NewOllamaProvider(cfg OllamaConfig) *OllamaProvider {
 	return &OllamaProvider{
 		baseURL:    baseURL,
 		model:      model,
+		apiKey:     apiKey,
 		batchSize:  batchSize,
 		httpClient: client,
-	}
+	}, nil
 }
 
 // embedRequest is the JSON body sent to POST /api/embed.
@@ -141,6 +151,7 @@ func (p *OllamaProvider) doEmbed(ctx context.Context, texts []string) ([][]float
 		return nil, fmt.Errorf("embedding: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
@@ -152,6 +163,8 @@ func (p *OllamaProvider) doEmbed(ctx context.Context, texts []string) ([][]float
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("embedding: ollama returned %d: %s", resp.StatusCode, string(respBody))
 	}
+
+	resp.Body = io.NopCloser(llamabroker.StripSSEPreamble(resp.Body))
 
 	var result embedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {

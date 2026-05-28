@@ -32,6 +32,8 @@ var ErrUnsupportedMarketType = errors.New("data: unsupported market type")
 
 var ErrHistoricalOHLCVUnavailable = errors.New("data: historical ohlcv repository unavailable")
 
+const historicalOHLCVEmptyCoverageMaxAge = 72 * time.Hour
+
 // ProviderRegistry holds factory functions for constructing data providers.
 // Pass an explicit registry to NewDataService instead of relying on init()-time
 // global registration.
@@ -314,15 +316,14 @@ func (s *DataService) DownloadHistoricalOHLCV(
 				}
 			}
 
-			if err := s.historyRepo.UpsertHistoricalOHLCVCoverage(ctx, domain.HistoricalOHLCVCoverage{
-				Ticker:    trimmedTicker,
-				Provider:  providerName,
-				Timeframe: timeframe.String(),
-				DateFrom:  gap.From,
-				DateTo:    gap.To,
-				FetchedAt: s.currentTime().UTC(),
-			}); err != nil {
-				return nil, fmt.Errorf("data: persist historical coverage for %s: %w", trimmedTicker, err)
+			coverage, ok := historicalCoverageForBars(gap, bars, s.currentTime().UTC())
+			if ok {
+				coverage.Ticker = trimmedTicker
+				coverage.Provider = providerName
+				coverage.Timeframe = timeframe.String()
+				if err := s.historyRepo.UpsertHistoricalOHLCVCoverage(ctx, coverage); err != nil {
+					return nil, fmt.Errorf("data: persist historical coverage for %s: %w", trimmedTicker, err)
+				}
 			}
 		}
 
@@ -557,6 +558,9 @@ func (s *DataService) loadCached(ctx context.Context, key repository.MarketDataC
 
 	entry, err := s.cacheRepo.Get(ctx, key)
 	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return false
+		}
 		s.logger.Warn("failed to load market data from cache",
 			slog.String("ticker", key.Ticker),
 			slog.String("provider", key.Provider),
@@ -668,6 +672,29 @@ func historicalOHLCVRepo(cacheRepo repository.MarketDataCacheRepository) reposit
 	}
 
 	return nil
+}
+
+func historicalCoverageForBars(gap historicalOHLCVRange, bars []domain.OHLCV, now time.Time) (domain.HistoricalOHLCVCoverage, bool) {
+	if len(bars) == 0 {
+		if !gap.To.Before(now.Add(-historicalOHLCVEmptyCoverageMaxAge)) {
+			return domain.HistoricalOHLCVCoverage{}, false
+		}
+		return domain.HistoricalOHLCVCoverage{DateFrom: gap.From.UTC(), DateTo: gap.To.UTC(), FetchedAt: now.UTC()}, true
+	}
+
+	from := bars[0].Timestamp.UTC()
+	to := from
+	for _, bar := range bars[1:] {
+		ts := bar.Timestamp.UTC()
+		if ts.Before(from) {
+			from = ts
+		}
+		if ts.After(to) {
+			to = ts
+		}
+	}
+
+	return domain.HistoricalOHLCVCoverage{DateFrom: from, DateTo: to, FetchedAt: now.UTC()}, true
 }
 
 type historicalOHLCVRange struct {

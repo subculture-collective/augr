@@ -102,7 +102,27 @@ func (r *Reflector) Reflect(ctx context.Context, positionID uuid.UUID) error {
 	outcome := computeOutcome(pos)
 
 	// 5. Generate a memory for each reflection role.
+	var totalRoleDuration time.Duration
+	var completedRoles int
+
 	for _, role := range reflectionRoles {
+		// Budget check: skip if remaining deadline < 1.5× avg role time.
+		if completedRoles > 0 {
+			if deadline, ok := ctx.Deadline(); ok {
+				avgPerRole := totalRoleDuration / time.Duration(completedRoles)
+				if remaining := time.Until(deadline); remaining < time.Duration(float64(avgPerRole)*1.5) {
+					r.logger.WarnContext(ctx, "reflection: skipping remaining roles, budget exhausted",
+						"completed", completedRoles,
+						"skipped", len(reflectionRoles)-completedRoles,
+						"remaining", remaining,
+						"avg_per_role", avgPerRole,
+					)
+					break
+				}
+			}
+		}
+
+		start := time.Now()
 		decision, ok := decisionsByRole[role]
 		agentRecommendation := "no recommendation recorded"
 		if ok {
@@ -154,6 +174,9 @@ func (r *Reflector) Reflect(ctx context.Context, positionID uuid.UUID) error {
 
 		r.logger.InfoContext(ctx, "reflection memory stored",
 			"role", role, "position_id", positionID, "memory_id", mem.ID)
+
+		totalRoleDuration += time.Since(start)
+		completedRoles++
 	}
 
 	return nil

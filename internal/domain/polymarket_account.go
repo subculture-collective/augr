@@ -2,6 +2,16 @@ package domain
 
 import "time"
 
+// PolymarketWatchedMarket tracks a slug that should be monitored by the
+// Polymarket signal source.
+type PolymarketWatchedMarket struct {
+	Slug    string    `json:"slug"`
+	Enabled bool      `json:"enabled"`
+	AddedAt time.Time `json:"added_at"`
+	AddedBy string    `json:"added_by,omitempty"`
+	Note    string    `json:"note,omitempty"`
+}
+
 // PolymarketAccount profiles a known Polymarket trader by wallet address.
 type PolymarketAccount struct {
 	Address                       string         `json:"address"`

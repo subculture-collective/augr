@@ -44,7 +44,7 @@ export function CreateStrategyDialog({
   const [marketType, setMarketType] = useState<MarketType>('stock');
   const [scheduleCron, setScheduleCron] = useState('');
   const [isPaper, setIsPaper] = useState(true);
-  const [isActive, setIsActive] = useState(false);
+  const [isActive, setIsActive] = useState(true);
   const [configForm, setConfigForm] = useState<StrategyConfigForm>(() =>
     strategyConfigBoundary.load(null),
   );
@@ -83,7 +83,7 @@ export function CreateStrategyDialog({
     setMarketType('stock');
     setScheduleCron('');
     setIsPaper(true);
-    setIsActive(false);
+    setIsActive(true);
     setConfigForm(strategyConfigBoundary.load(null));
     setShowAdvanced(false);
     setFieldErrors({});

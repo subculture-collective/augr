@@ -62,7 +62,7 @@ func AnalyzeFiling(ctx context.Context, provider llm.Provider, model string, fil
 	// Fetch filing text from SEC.
 	text, err := fetchFilingText(ctx, filing.URL)
 	if err != nil {
-		logger.Warn("filing_analyzer: failed to fetch filing text, returning neutral analysis",
+		logger.Debug("filing_analyzer: failed to fetch filing text, returning neutral analysis",
 			slog.String("url", filing.URL),
 			slog.Any("error", err),
 		)

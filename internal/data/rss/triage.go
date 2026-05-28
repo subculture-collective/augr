@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 )
@@ -57,14 +58,36 @@ func Triage(ctx context.Context, provider llm.Provider, model string, articles [
 
 	// Batch headlines into groups of 10 for efficiency.
 	const batchSize = 10
+	var totalBatchDuration time.Duration
+	var completedBatches int
+
 	for i := 0; i < len(articles); i += batchSize {
+		// Budget check: skip if remaining deadline < 1.5× avg batch time.
+		if completedBatches > 0 {
+			if deadline, ok := ctx.Deadline(); ok {
+				avgPerBatch := totalBatchDuration / time.Duration(completedBatches)
+				if remaining := time.Until(deadline); remaining < time.Duration(float64(avgPerBatch)*1.5) {
+					logger.Warn("rss/triage: skipping remaining batches, budget exhausted",
+						slog.Int("completed", completedBatches),
+						slog.Duration("remaining", remaining),
+						slog.Duration("avg_per_batch", avgPerBatch),
+					)
+					break
+				}
+			}
+		}
+
 		end := i + batchSize
 		if end > len(articles) {
 			end = len(articles)
 		}
 		batch := articles[i:end]
 
+		start := time.Now()
 		batchResults := triageBatch(ctx, provider, model, batch, logger)
+		totalBatchDuration += time.Since(start)
+		completedBatches++
+
 		for k, v := range batchResults {
 			results[k] = v
 		}
@@ -90,47 +113,37 @@ func triageBatch(ctx context.Context, provider llm.Provider, model string, batch
 		}
 	}
 
-	resp, err := provider.Complete(ctx, llm.CompletionRequest{
+	request := llm.CompletionRequest{
 		Model: model,
 		Messages: []llm.Message{
 			{Role: "system", Content: triageSystemPrompt},
 			{Role: "user", Content: sb.String()},
 		},
 		ResponseFormat: &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject},
-	})
-	if err != nil {
-		logger.Warn("rss/triage: LLM call failed", slog.Any("error", err))
-		return results
 	}
 
-	// Try to parse as array first, then as wrapper object.
 	var triageResults []TriageResult
-	content := strings.TrimSpace(resp.Content)
+	for attempt := 1; attempt <= 2; attempt++ {
+		resp, err := provider.Complete(ctx, request)
+		if err != nil {
+			logger.Warn("rss/triage: LLM call failed", slog.Any("error", err))
+			return results
+		}
 
-	// Strip markdown fences if present (common with local models).
-	if strings.HasPrefix(content, "```") {
-		if idx := strings.Index(content[3:], "\n"); idx >= 0 {
-			content = content[3+idx+1:]
-		}
-		if idx := strings.LastIndex(content, "```"); idx >= 0 {
-			content = content[:idx]
-		}
-		content = strings.TrimSpace(content)
-	}
-
-	if err := json.Unmarshal([]byte(content), &triageResults); err != nil {
-		// Try wrapper: {"results": [...]}
-		var wrapper struct {
-			Results []TriageResult `json:"results"`
-		}
-		if err2 := json.Unmarshal([]byte(content), &wrapper); err2 != nil {
+		content := normalizeTriageContent(resp.Content)
+		parsed, parseErr := parseTriageResults(content)
+		if parseErr != nil {
+			if attempt == 1 && isRetryableTriageParseError(content, parseErr) {
+				continue
+			}
 			logger.Warn("rss/triage: failed to parse LLM response",
-				slog.Any("error", err),
+				slog.Any("error", parseErr),
 				slog.String("content", content[:min(200, len(content))]),
 			)
 			return results
 		}
-		triageResults = wrapper.Results
+		triageResults = parsed
+		break
 	}
 
 	for i, tr := range triageResults {
@@ -146,4 +159,47 @@ func triageBatch(ctx context.Context, provider llm.Provider, model string, batch
 	}
 
 	return results
+}
+
+func normalizeTriageContent(content string) string {
+	content = strings.TrimSpace(content)
+
+	// Strip markdown fences if present (common with local models).
+	if strings.HasPrefix(content, "```") {
+		if idx := strings.Index(content[3:], "\n"); idx >= 0 {
+			content = content[3+idx+1:]
+		}
+		if idx := strings.LastIndex(content, "```"); idx >= 0 {
+			content = content[:idx]
+		}
+		content = strings.TrimSpace(content)
+	}
+
+	return content
+}
+
+func parseTriageResults(content string) ([]TriageResult, error) {
+	var triageResults []TriageResult
+	if err := json.Unmarshal([]byte(content), &triageResults); err == nil {
+		return triageResults, nil
+	} else {
+		var wrapper struct {
+			Results []TriageResult `json:"results"`
+		}
+		if err2 := json.Unmarshal([]byte(content), &wrapper); err2 == nil {
+			return wrapper.Results, nil
+		}
+		return nil, err
+	}
+}
+
+func isRetryableTriageParseError(content string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.TrimSpace(content) == "" {
+		return true
+	}
+	errText := strings.ToLower(err.Error())
+	return strings.Contains(errText, "unexpected end of json input")
 }

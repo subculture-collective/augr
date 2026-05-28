@@ -150,31 +150,32 @@ func (o *JobOrchestrator) generateOneReport(
 	if err != nil {
 		return o.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("list backtest runs: %w", err))
 	}
-	if len(runs) == 0 {
-		return o.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("no backtest runs found for config %s", configID))
-	}
 
-	latestRun := runs[0]
-
-	// Deserialise metrics.
+	// Deserialise metrics and analytics from the latest run.
+	// If no runs exist yet (strategy newly deployed), proceed with zero
+	// values — the report will reflect "insufficient data" rather than error.
 	var btMetrics backtest.Metrics
-	if err := json.Unmarshal(latestRun.Metrics, &btMetrics); err != nil {
-		return o.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("unmarshal metrics: %w", err))
-	}
-
-	// Deserialise trade analytics from trade log if available.
 	var analytics backtest.TradeAnalytics
-	if len(latestRun.TradeLog) > 0 {
-		var trades []domain.Trade
-		if err := json.Unmarshal(latestRun.TradeLog, &trades); err != nil {
-			// Non-fatal: proceed with zero analytics.
-			o.logger.Warn("paper_validation_report: unmarshal trade log failed, using zero analytics",
-				slog.String("strategy", strategyName),
-				slog.Any("error", err),
-			)
-		} else {
-			analytics = backtest.ComputeTradeAnalytics(trades, btMetrics.StartTime, btMetrics.EndTime)
+	if len(runs) > 0 {
+		latestRun := runs[0]
+		if err := json.Unmarshal(latestRun.Metrics, &btMetrics); err != nil {
+			return o.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("unmarshal metrics: %w", err))
 		}
+		if len(latestRun.TradeLog) > 0 {
+			var trades []domain.Trade
+			if err := json.Unmarshal(latestRun.TradeLog, &trades); err != nil {
+				o.logger.Warn("paper_validation_report: unmarshal trade log failed, using zero analytics",
+					slog.String("strategy", strategyName),
+					slog.Any("error", err),
+				)
+			} else {
+				analytics = backtest.ComputeTradeAnalytics(trades, btMetrics.StartTime, btMetrics.EndTime)
+			}
+		}
+	} else {
+		o.logger.Info("paper_validation_report: no backtest runs yet, generating pending report",
+			slog.String("strategy", strategyName),
+		)
 	}
 
 	// Generate the report (pure function — no LLM call).

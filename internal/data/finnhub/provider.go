@@ -486,6 +486,9 @@ func (p *Provider) GetFilings(ctx context.Context, ticker, formType string, from
 
 	filings := make([]domain.SECFiling, 0, len(entries))
 	for _, e := range entries {
+		if e.URL == "" {
+			continue // skip filings without a document URL
+		}
 		filed, _ := time.Parse("2006-01-02 15:04:05", e.FiledDate)
 		accepted, _ := time.Parse("2006-01-02 15:04:05", e.AcceptedDate)
 		report, _ := time.Parse("2006-01-02", e.ReportDate)

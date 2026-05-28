@@ -158,12 +158,12 @@ func (o *JobOrchestrator) gapScanner(ctx context.Context) error {
 
 // discoveryRun runs the full strategy discovery pipeline on top watchlist tickers.
 func (o *JobOrchestrator) discoveryRun(ctx context.Context) error {
-	tickers, err := o.deps.Universe.GetWatchlist(ctx, 30)
+	tickers, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.deps.DataService, 300, 30)
 	if err != nil {
 		return fmt.Errorf("discovery_run: get watchlist: %w", err)
 	}
 	if len(tickers) == 0 {
-		o.logger.Info("discovery_run: watchlist empty, skipping")
+		o.logger.Info("discovery_run: no tradeable watchlist tickers, skipping")
 		return nil
 	}
 
@@ -185,10 +185,11 @@ func (o *JobOrchestrator) discoveryRun(ctx context.Context) error {
 	}
 
 	deps := discovery.DiscoveryDeps{
-		DataService: o.deps.DataService,
-		LLMProvider: o.deps.LLMProvider,
-		Strategies:  o.deps.StrategyRepo,
-		Logger:      o.logger,
+		DataService:     o.deps.DataService,
+		LLMProvider:     o.deps.LLMProvider,
+		Strategies:      o.deps.StrategyRepo,
+		BacktestConfigs: o.deps.BacktestConfigRepo,
+		Logger:          o.logger,
 	}
 
 	result, err := discovery.RunDiscovery(ctx, cfg, deps)
@@ -196,12 +197,23 @@ func (o *JobOrchestrator) discoveryRun(ctx context.Context) error {
 		return fmt.Errorf("discovery_run: %w", err)
 	}
 
+	o.SetLastSummary("discovery_run", map[string]int{
+		"candidates": result.Candidates,
+		"generated":  result.Generated,
+		"swept":      result.Swept,
+		"validated":  result.Validated,
+		"deployed":   result.Deployed,
+		"errors":     len(result.Errors),
+		"winners":    len(result.Winners),
+	})
+
 	o.logger.Info("discovery_run: complete",
 		slog.Int("candidates", result.Candidates),
 		slog.Int("generated", result.Generated),
 		slog.Int("swept", result.Swept),
 		slog.Int("validated", result.Validated),
 		slog.Int("deployed", result.Deployed),
+		slog.Int("errors", len(result.Errors)),
 		slog.Duration("duration", result.Duration),
 	)
 

@@ -262,17 +262,17 @@ func TestValidateRequiresLLMAPIKey(t *testing.T) {
 	}
 }
 
-func TestValidateAllowsOllamaWithoutAPIKey(t *testing.T) {
+func TestValidateOllamaSelectedWithoutAPIKey(t *testing.T) {
 	cfg := validConfig()
-	cfg.LLM.Providers.OpenAI.APIKey = ""
-	cfg.LLM.Providers.Anthropic.APIKey = ""
-	cfg.LLM.Providers.Google.APIKey = ""
-	cfg.LLM.Providers.OpenRouter.APIKey = ""
-	cfg.LLM.Providers.XAI.APIKey = ""
+	cfg.LLM.DefaultProvider = "ollama"
 	cfg.LLM.Providers.Ollama.BaseURL = "http://localhost:11434/v1"
 
-	if err := Validate(cfg); err != nil {
-		t.Fatalf("Validate() error = %v, want nil (Ollama requires no API key)", err)
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "LLM_DEFAULT_PROVIDER is ollama but OLLAMA_API_KEY is not set") {
+		t.Fatalf("Validate() error = %q, want Ollama API key message", err)
 	}
 }
 
@@ -329,12 +329,14 @@ func TestValidateDefaultProviderMustHaveKey(t *testing.T) {
 	}
 }
 
-func TestValidateDefaultProviderOllamaNoKey(t *testing.T) {
+func TestValidateDefaultProviderOllamaWithBaseURLAndAPIKey(t *testing.T) {
 	cfg := validConfig()
 	cfg.LLM.DefaultProvider = "ollama"
+	cfg.LLM.Providers.Ollama.BaseURL = "http://localhost:11434/v1"
+	cfg.LLM.Providers.Ollama.APIKey = "ollama-key"
 
 	if err := Validate(cfg); err != nil {
-		t.Fatalf("Validate() error = %v, want nil (Ollama needs no key)", err)
+		t.Fatalf("Validate() error = %v, want nil", err)
 	}
 }
 
@@ -579,12 +581,20 @@ func TestValidateFallbackProviderWithoutKey(t *testing.T) {
 	}
 }
 
-func TestValidateFallbackProviderOllamaNoKey(t *testing.T) {
+func TestValidateFallbackProviderOllamaWithBaseURLAndAPIKey(t *testing.T) {
 	cfg := validConfig()
 	cfg.LLM.FallbackProvider = "ollama"
+	cfg.LLM.Providers.Ollama.BaseURL = "http://localhost:11434/v1"
+	cfg.LLM.Providers.Ollama.APIKey = "ollama-key"
 
 	if err := Validate(cfg); err != nil {
-		t.Fatalf("Validate() error = %v, want nil (ollama needs no key)", err)
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestHasLLMProviderReturnsFalseWhenOnlyOllamaBaseURLSet(t *testing.T) {
+	if hasLLMProvider(LLMProviderConfigs{Ollama: OllamaConfig{BaseURL: "http://localhost:11434/v1"}}) {
+		t.Fatal("hasLLMProvider() = true, want false when Ollama API key is missing")
 	}
 }
 
@@ -727,6 +737,7 @@ func clearConfigEnv(t *testing.T) {
 		"XAI_BASE_URL",
 		"XAI_MODEL",
 		"OLLAMA_BASE_URL",
+		"OLLAMA_API_KEY",
 		"OLLAMA_MODEL",
 		"POLYGON_API_KEY",
 		"ALPHA_VANTAGE_API_KEY",

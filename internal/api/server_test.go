@@ -276,6 +276,47 @@ func TestValidateStrategyConfigPayloadRejectsInvalidRulesAndOptionsScaffolds(t *
 	}
 }
 
+func TestGuestObservationRoutesAllowReadOnlyRequests(t *testing.T) {
+	srv := newTestServer(t)
+
+	rr := doUnauthenticatedRequest(t, srv, http.MethodGet, "/api/v1/calendar/earnings", nil)
+	if rr.Code == http.StatusUnauthorized {
+		t.Fatalf("guest GET /api/v1/calendar/earnings status = %d, want auth bypass; body: %s", rr.Code, rr.Body.String())
+	}
+
+	rr = doUnauthenticatedRequest(t, srv, http.MethodPost, "/api/v1/calendar/filings/analyze", map[string]any{"url": "https://example.com/filing"})
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("guest POST /api/v1/calendar/filings/analyze status = %d, want %d; body: %s", rr.Code, http.StatusUnauthorized, rr.Body.String())
+	}
+
+	for _, path := range []string{
+		"/api/v1/strategies",
+		"/api/v1/runs",
+		"/api/v1/runs/11111111-1111-1111-1111-111111111111/decisions?include_prompt=true",
+		"/api/v1/runs/11111111-1111-1111-1111-111111111111/snapshot",
+		"/api/v1/portfolio/summary",
+		"/api/v1/orders",
+		"/api/v1/trades",
+		"/api/v1/risk/status",
+		"/api/v1/events",
+		"/api/v1/backtests/configs",
+		"/api/v1/discovery/results",
+		"/api/v1/automation/status",
+		"/api/v1/automation/health",
+		"/api/v1/automation/alpaca/verify",
+		"/api/v1/signals/evaluated",
+		"/api/v1/me",
+		"/api/v1/conversations",
+		"/api/v1/audit-log",
+		"/api/v1/api-keys",
+	} {
+		rr = doUnauthenticatedRequest(t, srv, http.MethodGet, path, nil)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("guest GET %s status = %d, want %d; body: %s", path, rr.Code, http.StatusUnauthorized, rr.Body.String())
+		}
+	}
+}
+
 func doUnauthenticatedRequest(t *testing.T, srv *Server, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 

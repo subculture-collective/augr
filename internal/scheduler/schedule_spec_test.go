@@ -255,7 +255,7 @@ func TestDescribe(t *testing.T) {
 				Cron:         "0 9 * * 1-5",
 				SkipHolidays: true,
 			},
-			want: "Daily at 9:00 AM UTC, Mon\u2013Fri (pre-market), skip holidays",
+			want: "Daily at 9:00 AM ET, Mon\u2013Fri (pre-market), skip holidays",
 		},
 		{
 			name: "at market close",
@@ -263,7 +263,7 @@ func TestDescribe(t *testing.T) {
 				Type: ScheduleTypeMarketClose,
 				Cron: "30 15 * * 1-5",
 			},
-			want: "Daily at 3:30 PM UTC, Mon\u2013Fri (at market close)",
+			want: "Daily at 3:30 PM ET, Mon\u2013Fri (at market close)",
 		},
 		{
 			name: "after hours",
@@ -271,7 +271,7 @@ func TestDescribe(t *testing.T) {
 				Type: ScheduleTypeAfterHours,
 				Cron: "0 16 * * 1-5",
 			},
-			want: "Daily at 4:00 PM UTC, Mon\u2013Fri (after hours)",
+			want: "Daily at 4:00 PM ET, Mon\u2013Fri (after hours)",
 		},
 		{
 			name: "plain cron no suffix",

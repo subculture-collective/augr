@@ -3,6 +3,7 @@ package signal
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,6 +12,11 @@ import (
 	"sync"
 	"time"
 )
+
+var redditFeedHosts = []string{
+	"https://www.reddit.com",
+	"https://old.reddit.com",
+}
 
 // DefaultSubreddits returns the default subreddits to monitor for signal events.
 func DefaultSubreddits() []string {
@@ -131,13 +137,29 @@ func (r *RedditSource) fetchAll(ctx context.Context) []RawSignalEvent {
 }
 
 func (r *RedditSource) fetchSubreddit(ctx context.Context, sub string) ([]RawSignalEvent, error) {
-	url := fmt.Sprintf("https://www.reddit.com/r/%s/.rss", sub)
+	var lastErr error
+	for _, host := range redditFeedHosts {
+		got, err := r.fetchSubredditFromHost(ctx, host, sub)
+		if err == nil {
+			return got, nil
+		}
+		lastErr = err
+		if !isRetryableRedditError(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func (r *RedditSource) fetchSubredditFromHost(ctx context.Context, host, sub string) ([]RawSignalEvent, error) {
+	url := fmt.Sprintf("%s/r/%s/.rss", strings.TrimRight(host, "/"), sub)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	// Reddit requires a descriptive User-Agent.
 	req.Header.Set("User-Agent", "get-rich-quick/1.0 signal-monitor")
+	req.Header.Set("Accept", "application/atom+xml, application/rss+xml, application/xml;q=0.9, */*;q=0.8")
 
 	resp, err := r.client.Do(req)
 	if err != nil {
@@ -146,7 +168,7 @@ func (r *RedditSource) fetchSubreddit(ctx context.Context, sub string) ([]RawSig
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		return nil, redditHTTPStatusError{status: resp.StatusCode}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
@@ -155,6 +177,25 @@ func (r *RedditSource) fetchSubreddit(ctx context.Context, sub string) ([]RawSig
 	}
 
 	return parseRedditAtom(sub, body)
+}
+
+type redditHTTPStatusError struct {
+	status int
+}
+
+func (e redditHTTPStatusError) Error() string {
+	return fmt.Sprintf("status %d", e.status)
+}
+
+func isRetryableRedditError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr redditHTTPStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.status == http.StatusTooManyRequests || statusErr.status >= http.StatusInternalServerError
 }
 
 // Reddit serves Atom 1.0 feeds; we parse only the fields we need.

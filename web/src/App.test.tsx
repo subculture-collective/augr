@@ -14,6 +14,10 @@ vi.mock('@/pages/dashboard-page', () => ({
   DashboardPage: () => <div>Dashboard page</div>,
 }))
 
+vi.mock('@/pages/calendar-page', () => ({
+  CalendarPage: () => <div>Calendar page</div>,
+}))
+
 describe('AppRoutes auth guards', () => {
   beforeEach(() => {
     vi.mocked(isAuthenticated).mockReset()
@@ -23,17 +27,31 @@ describe('AppRoutes auth guards', () => {
     cleanup()
   })
 
-  it('redirects unauthenticated users from protected routes to /login', () => {
+  it('redirects unauthenticated users away from personal dashboard data', () => {
     vi.mocked(isAuthenticated).mockReturnValue(false)
 
     render(
-      <MemoryRouter initialEntries={['/portfolio']}>
+      <MemoryRouter initialEntries={['/']}>
         <AppRoutes />
       </MemoryRouter>,
     )
 
+    expect(screen.queryByText('Dashboard page')).not.toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Sign in' })).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'Frontend scaffold' })).not.toBeInTheDocument()
+  })
+
+  it('allows unauthenticated users to observe public market pages in guest mode', () => {
+    vi.mocked(isAuthenticated).mockReturnValue(false)
+
+    render(
+      <MemoryRouter initialEntries={['/calendar']}>
+        <AppRoutes />
+      </MemoryRouter>,
+    )
+
+    expect(screen.getByText('Calendar page')).toBeInTheDocument()
+    expect(screen.getByText('Guest mode')).toBeInTheDocument()
+    expect(screen.queryByText('Portfolio')).not.toBeInTheDocument()
   })
 
   it('redirects authenticated users away from /login to /', () => {
@@ -46,6 +64,6 @@ describe('AppRoutes auth guards', () => {
     )
 
     expect(screen.getByText('Dashboard page')).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'Login' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Sign in' })).not.toBeInTheDocument()
   })
 })

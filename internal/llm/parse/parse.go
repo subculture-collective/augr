@@ -10,11 +10,42 @@ import (
 // thinkRegexp matches Qwen3-style <think>...</think> reasoning blocks that
 // appear before the actual response content.
 var thinkRegexp = regexp.MustCompile(`(?s)<think>.*?</think>`)
+var thinkCaptureRegexp = regexp.MustCompile(`(?s)<think>(.*?)</think>`)
 
 // StripThinkingTags removes <think>...</think> blocks emitted by models like
 // Qwen3 that use an explicit reasoning phase before the response.
 func StripThinkingTags(s string) string {
 	return strings.TrimSpace(thinkRegexp.ReplaceAllString(s, ""))
+}
+
+// ExtractContent strips thinking tags and returns the remaining content.
+// If the content outside <think> blocks is empty (the model put its answer
+// inside the thinking block), it falls back to extracting the last JSON
+// object or array found inside the <think> block. This handles Qwen3's
+// behaviour of embedding the final answer in the reasoning trace when
+// /no_think is not honoured.
+func ExtractContent(s string) string {
+	outside := strings.TrimSpace(thinkRegexp.ReplaceAllString(s, ""))
+	if outside != "" {
+		return outside
+	}
+	// Try to salvage JSON from inside the think block.
+	m := thinkCaptureRegexp.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return outside
+	}
+	inner := m[1]
+	// Find the last '{' or '[' that starts a JSON value.
+	lastBrace := strings.LastIndex(inner, "{")
+	lastBracket := strings.LastIndex(inner, "[")
+	start := lastBrace
+	if lastBracket > start {
+		start = lastBracket
+	}
+	if start == -1 {
+		return outside
+	}
+	return strings.TrimSpace(inner[start:])
 }
 
 // StripCodeFences removes optional markdown code fences (```json ... ``` or ``` ... ```)

@@ -81,6 +81,27 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// handleListAutomationRuns returns persisted automation job execution history.
+// GET /api/v1/automation/runs
+func (s *Server) handleListAutomationRuns(w http.ResponseWriter, r *http.Request) {
+	if s.jobRunRepo == nil {
+		respondError(w, http.StatusServiceUnavailable, "automation run history not configured", ErrCodeInternal)
+		return
+	}
+
+	limit, offset := parsePagination(r)
+	runs, err := s.jobRunRepo.List(r.Context(), limit, offset)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list automation runs", ErrCodeInternal)
+		return
+	}
+	total, err := s.jobRunRepo.Count(r.Context())
+	if err != nil {
+		s.logger.Warn("count automation runs", "error", err.Error())
+	}
+	respondListWithTotal(w, runs, total, limit, offset)
+}
+
 // handleRunAutomationJob triggers a specific job by name.
 // POST /api/v1/automation/jobs/{name}/run
 func (s *Server) handleRunAutomationJob(w http.ResponseWriter, r *http.Request) {

@@ -3,6 +3,7 @@ package reddit
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,11 @@ const (
 	fetchDelay    = 1 * time.Second // delay between subreddit fetches to respect rate limits
 	maxSubreddits = 10              // safety cap
 )
+
+var feedHosts = []string{
+	"https://www.reddit.com",
+	"https://old.reddit.com",
+}
 
 // StockSubreddits returns the default subreddits to scan for equity sentiment.
 func StockSubreddits() []string {
@@ -101,12 +107,28 @@ func (c *Client) FetchSubreddits(ctx context.Context, subreddits []string) []Red
 }
 
 func (c *Client) fetchSubreddit(ctx context.Context, sub string) ([]RedditPost, error) {
-	feedURL := fmt.Sprintf("https://www.reddit.com/r/%s/.rss", sub)
+	var lastErr error
+	for _, host := range feedHosts {
+		got, err := c.fetchSubredditFromHost(ctx, host, sub)
+		if err == nil {
+			return got, nil
+		}
+		lastErr = err
+		if !isRetryableStatusError(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func (c *Client) fetchSubredditFromHost(ctx context.Context, host, sub string) ([]RedditPost, error) {
+	feedURL := fmt.Sprintf("%s/r/%s/.rss", strings.TrimRight(host, "/"), sub)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, feedURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "application/atom+xml, application/rss+xml, application/xml;q=0.9, */*;q=0.8")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -115,7 +137,7 @@ func (c *Client) fetchSubreddit(ctx context.Context, sub string) ([]RedditPost, 
 	defer resp.Body.Close() //nolint:errcheck // best-effort close
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		return nil, statusError{status: resp.StatusCode}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
@@ -124,6 +146,22 @@ func (c *Client) fetchSubreddit(ctx context.Context, sub string) ([]RedditPost, 
 	}
 
 	return parseAtomFeed(sub, body)
+}
+
+type statusError struct {
+	status int
+}
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("status %d", e.status)
+}
+
+func isRetryableStatusError(err error) bool {
+	var statusErr statusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.status == http.StatusTooManyRequests || statusErr.status >= http.StatusInternalServerError
 }
 
 // ── Atom XML types (Reddit serves Atom 1.0) ────────────────────────────

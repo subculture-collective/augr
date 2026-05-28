@@ -231,7 +231,7 @@ func TestDataServiceDownloadHistoricalOHLCVIncrementalFetchesOnlyMissingRanges(t
 	}
 }
 
-func TestDataServiceDownloadHistoricalOHLCVTracksEmptyCoverageForIncrementalUpdates(t *testing.T) {
+func TestDataServiceDownloadHistoricalOHLCVDoesNotTrackRecentEmptyCoverage(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	from := time.Date(2026, 3, 7, 0, 0, 0, 0, time.UTC)
 	to := from.Add(24 * time.Hour)
@@ -263,8 +263,11 @@ func TestDataServiceDownloadHistoricalOHLCVTracksEmptyCoverageForIncrementalUpda
 		}
 	}
 
-	if len(provider.calls) != 1 {
-		t.Fatalf("provider calls = %d, want 1", len(provider.calls))
+	if len(provider.calls) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(provider.calls))
+	}
+	if len(repo.coverage) != 0 {
+		t.Fatalf("coverage entries = %d, want 0", len(repo.coverage))
 	}
 }
 

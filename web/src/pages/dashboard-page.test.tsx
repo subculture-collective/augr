@@ -55,6 +55,14 @@ describe('DashboardPage', () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()
 
+      if (url.includes('/healthz')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ status: 'ok', db: 'ok', redis: 'ok' }),
+        })
+      }
+
       if (url.includes('portfolio')) {
         return Promise.resolve({
           ok: true,
@@ -137,6 +145,7 @@ describe('DashboardPage', () => {
     render(<DashboardPage />, { wrapper: Wrapper })
 
     expect(await screen.findByTestId('dashboard-page')).toBeInTheDocument()
+    expect(await screen.findByText('System OK')).toBeInTheDocument()
     expect(await screen.findByText('AAPL run kicked off')).toBeInTheDocument()
     expect(screen.getAllByText('Pipeline started').length).toBeGreaterThan(0)
     expect(await screen.findByText('Recent runs')).toBeInTheDocument()

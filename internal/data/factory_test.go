@@ -1,11 +1,14 @@
 package data
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,6 +211,39 @@ func TestDataServiceGetOHLCVCacheMissCallsChainAndCachesResult(t *testing.T) {
 				t.Fatalf("cached data = %#v, want %#v", cached, want)
 			}
 		})
+	}
+}
+
+func TestDataServiceGetOHLCVCacheNotFoundDoesNotWarn(t *testing.T) {
+	now := time.Date(2026, 3, 22, 17, 0, 0, 0, time.UTC)
+	from := now.Add(-time.Hour)
+	to := now
+	want := []domain.OHLCV{{Timestamp: from, Open: 200, High: 210, Low: 190, Close: 205, Volume: 2500}}
+
+	var logs bytes.Buffer
+	provider := &serviceStubProvider{ohlcv: want}
+	cacheRepo := &fakeMarketDataCacheRepo{
+		getErr: fmt.Errorf("postgres: get market data cache AAPL/stock-chain/ohlcv: %w", repository.ErrNotFound),
+	}
+	service := &DataService{
+		stockChain: provider,
+		cacheRepo:  cacheRepo,
+		logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+		now:        func() time.Time { return now },
+	}
+
+	got, err := service.GetOHLCV(context.Background(), domain.MarketTypeStock, "AAPL", Timeframe1d, from, to)
+	if err != nil {
+		t.Fatalf("GetOHLCV() error = %v", err)
+	}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("GetOHLCV() = %#v, want %#v", got, want)
+	}
+	if provider.ohlcvCalls != 1 {
+		t.Fatalf("provider GetOHLCV calls = %d, want 1", provider.ohlcvCalls)
+	}
+	if strings.Contains(logs.String(), "failed to load market data from cache") {
+		t.Fatalf("expected cache miss not to emit warning log, got %q", logs.String())
 	}
 }
 
@@ -930,5 +966,88 @@ func TestGetOHLCVCacheHitOnSecondCall(t *testing.T) {
 	}
 	if provider.ohlcvCalls != 1 {
 		t.Fatalf("provider called %d times on second call, want 1 (cache hit)", provider.ohlcvCalls)
+	}
+}
+
+func TestDataServiceDownloadHistoricalOHLCVDoesNotWriteCoverageForRecentEmptyBars(t *testing.T) {
+	logger := discardLogger()
+	from := time.Date(2026, 5, 20, 14, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 5, 21, 14, 0, 0, 0, time.UTC)
+
+	repo := newFakeHistoricalOHLCVRepo()
+	provider := &historicalStubProvider{
+		getFn: func(_ string, _ Timeframe, gapFrom, gapTo time.Time) ([]domain.OHLCV, error) {
+			if !gapFrom.Equal(from) || !gapTo.Equal(to) {
+				t.Fatalf("unexpected gap request %s..%s, want %s..%s", gapFrom, gapTo, from, to)
+			}
+			return nil, nil
+		},
+	}
+
+	service := &DataService{
+		stockChain:  provider,
+		historyRepo: repo,
+		logger:      logger,
+		now:         func() time.Time { return to.Add(1 * time.Hour) },
+	}
+
+	got, err := service.DownloadHistoricalOHLCV(context.Background(), domain.MarketTypeStock, []string{"AAPL"}, Timeframe1d, from, to, true)
+	if err != nil {
+		t.Fatalf("DownloadHistoricalOHLCV() error = %v", err)
+	}
+	if len(got["AAPL"]) != 0 {
+		t.Fatalf("len(got[\"AAPL\"]) = %d, want 0", len(got["AAPL"]))
+	}
+	if len(repo.coverage) != 0 {
+		t.Fatalf("coverage entries = %d, want 0", len(repo.coverage))
+	}
+}
+
+func TestDataServiceDownloadHistoricalOHLCVCoverageStopsAtLastReturnedBar(t *testing.T) {
+	logger := discardLogger()
+	from := time.Date(2026, 5, 20, 14, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 5, 24, 14, 0, 0, 0, time.UTC)
+	lastBar := from.Add(2 * 24 * time.Hour)
+
+	repo := newFakeHistoricalOHLCVRepo()
+	provider := &historicalStubProvider{
+		getFn: func(_ string, _ Timeframe, gapFrom, gapTo time.Time) ([]domain.OHLCV, error) {
+			if !gapFrom.Equal(from) || !gapTo.Equal(to) {
+				t.Fatalf("unexpected gap request %s..%s, want %s..%s", gapFrom, gapTo, from, to)
+			}
+			return []domain.OHLCV{
+				{Timestamp: from, Open: 100, High: 101, Low: 99, Close: 100.5, Volume: 1000},
+				{Timestamp: from.Add(24 * time.Hour), Open: 101, High: 102, Low: 100, Close: 101.5, Volume: 1100},
+				{Timestamp: lastBar, Open: 102, High: 103, Low: 101, Close: 102.5, Volume: 1200},
+			}, nil
+		},
+	}
+
+	service := &DataService{
+		stockChain:  provider,
+		historyRepo: repo,
+		logger:      logger,
+		now:         func() time.Time { return to.Add(1 * time.Hour) },
+	}
+
+	got, err := service.DownloadHistoricalOHLCV(context.Background(), domain.MarketTypeStock, []string{"AAPL"}, Timeframe1d, from, to, true)
+	if err != nil {
+		t.Fatalf("DownloadHistoricalOHLCV() error = %v", err)
+	}
+	if len(got["AAPL"]) != 3 {
+		t.Fatalf("len(got[\"AAPL\"]) = %d, want 3", len(got["AAPL"]))
+	}
+
+	coverage, err := repo.ListHistoricalOHLCVCoverage(context.Background(), repository.HistoricalOHLCVCoverageFilter{
+		Ticker: "AAPL", Provider: cacheProviderStockChain, Timeframe: Timeframe1d.String(),
+	})
+	if err != nil {
+		t.Fatalf("ListHistoricalOHLCVCoverage() error = %v", err)
+	}
+	if len(coverage) != 1 {
+		t.Fatalf("len(coverage) = %d, want 1", len(coverage))
+	}
+	if !coverage[0].DateFrom.Equal(from) || !coverage[0].DateTo.Equal(lastBar) {
+		t.Fatalf("coverage = %s..%s, want %s..%s", coverage[0].DateFrom, coverage[0].DateTo, from, lastBar)
 	}
 }

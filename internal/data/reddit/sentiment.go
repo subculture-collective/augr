@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 )
@@ -47,7 +47,10 @@ Return ONLY the JSON array.`, ticker, ticker)
 }
 
 // ScorePosts runs LLM triage on posts to extract sentiment about a specific ticker.
-// Posts are batched for efficiency and processed with bounded concurrency.
+// Batches are processed sequentially. If the context deadline is approaching and
+// the remaining budget is less than the average time per completed batch, remaining
+// batches are skipped and partial results are returned. This prevents the last batch
+// from timing out mid-request when the GPU is under load.
 // Returns aggregated counts.
 func ScorePosts(ctx context.Context, provider llm.Provider, model, ticker string, posts []RedditPost, logger *slog.Logger) SentimentResult {
 	if provider == nil || len(posts) == 0 {
@@ -69,46 +72,51 @@ func ScorePosts(ctx context.Context, provider llm.Provider, model, ticker string
 	}
 
 	// Build batches up front.
-	type indexedBatch struct {
-		index int
-		batch []RedditPost
-	}
-	var batches []indexedBatch
+	var batches [][]RedditPost
 	for i := 0; i < len(posts); i += sentimentBatchSize {
 		end := i + sentimentBatchSize
 		if end > len(posts) {
 			end = len(posts)
 		}
-		batches = append(batches, indexedBatch{index: i / sentimentBatchSize, batch: posts[i:end]})
+		batches = append(batches, posts[i:end])
 	}
 
 	totalBatches := len(batches)
+	var result SentimentResult
+	var totalBatchDuration time.Duration
+	var completedBatches int
 
-	// Process batches with bounded concurrency.
-	sem := make(chan struct{}, sentimentConcurrency)
-	var (
-		mu     sync.Mutex
-		result SentimentResult
-	)
+	for i, batch := range batches {
+		// Budget check: if we have a deadline and the remaining time is less than
+		// the average time per batch so far (with a 1.5× safety margin), skip.
+		if completedBatches > 0 {
+			if deadline, ok := ctx.Deadline(); ok {
+				avgPerBatch := totalBatchDuration / time.Duration(completedBatches)
+				remaining := time.Until(deadline)
+				if remaining < time.Duration(float64(avgPerBatch)*1.5) {
+					logger.Warn("reddit/sentiment: skipping remaining batches, budget exhausted",
+						slog.Int("completed", completedBatches),
+						slog.Int("skipped", totalBatches-i),
+						slog.Duration("remaining", remaining),
+						slog.Duration("avg_per_batch", avgPerBatch),
+					)
+					break
+				}
+			}
+		}
 
-	var wg sync.WaitGroup
-	for _, b := range batches {
-		wg.Add(1)
-		go func(ib indexedBatch) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+		start := time.Now()
+		r := scoreBatch(ctx, provider, model, ticker, batch, i, totalBatches, logger)
+		elapsed := time.Since(start)
 
-			r := scoreBatch(ctx, provider, model, ticker, ib.batch, ib.index, totalBatches, logger)
-			mu.Lock()
-			result.Mentions += r.Mentions
-			result.Bullish += r.Bullish
-			result.Bearish += r.Bearish
-			result.Neutral += r.Neutral
-			mu.Unlock()
-		}(b)
+		result.Mentions += r.Mentions
+		result.Bullish += r.Bullish
+		result.Bearish += r.Bearish
+		result.Neutral += r.Neutral
+
+		totalBatchDuration += elapsed
+		completedBatches++
 	}
-	wg.Wait()
 
 	return result
 }

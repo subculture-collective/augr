@@ -41,8 +41,8 @@ func (r *StrategyRepo) Create(ctx context.Context, s *domain.Strategy) error {
 	}
 
 	row := r.pool.QueryRow(ctx,
-		`INSERT INTO strategies (name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`INSERT INTO strategies (name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, is_active)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 RETURNING id, created_at, updated_at`,
 		s.Name,
 		s.Description,
@@ -53,6 +53,7 @@ func (r *StrategyRepo) Create(ctx context.Context, s *domain.Strategy) error {
 		s.Status,
 		s.SkipNextRun,
 		s.IsPaper,
+		s.Status == domain.StrategyStatusActive,
 	)
 
 	if err := row.Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt); err != nil {

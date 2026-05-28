@@ -146,7 +146,7 @@ func (p *Provider) GetOHLCV(ctx context.Context, ticker string, timeframe data.T
 	// Sync httpClient in case tests changed it directly.
 	p.api.SetHTTPClient(p.httpClient)
 
-	chartPath := "/v8/finance/chart/" + url.PathEscape(ticker)
+	chartPath := "/v8/finance/chart/" + url.PathEscape(normalizeChartTicker(ticker))
 	params := url.Values{
 		"interval":       []string{mapping.interval},
 		"includePrePost": []string{"false"},
@@ -215,6 +215,13 @@ func (p *Provider) GetOHLCV(ctx context.Context, ticker string, timeframe data.T
 	}
 
 	return bars, nil
+}
+
+func normalizeChartTicker(ticker string) string {
+	if !strings.Contains(ticker, ".") {
+		return ticker
+	}
+	return strings.ReplaceAll(ticker, ".", "-")
 }
 
 // GetFundamentals is not supported by the Yahoo provider yet.

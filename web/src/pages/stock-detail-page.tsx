@@ -28,10 +28,13 @@ import { formatCurrency } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { describeCron } from '@/lib/cron-describe'
 import type {
+  HistoricalOHLCV,
   FilingAnalysis,
+  NewsFeedItem,
   OrderSide,
   OrderStatus,
   SECFiling,
+  SocialSentimentRow,
   Strategy,
   StrategyStatus,
 } from '@/lib/api/types'
@@ -40,6 +43,48 @@ import type {
 
 function todayStr(): string {
   return new Date().toISOString().slice(0, 10)
+}
+
+function tomorrowStr(): string {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  return d.toISOString().slice(0, 10)
+}
+
+type ChartPeriod = '1D' | '5D' | '1M' | '3M' | '6M' | '1Y' | '5Y'
+
+const CHART_PERIODS: ChartPeriod[] = ['1D', '5D', '1M', '3M', '6M', '1Y', '5Y']
+
+function periodStartStr(period: ChartPeriod): string {
+  const d = new Date()
+  switch (period) {
+    case '1D':
+      d.setDate(d.getDate() - 1)
+      break
+    case '5D':
+      d.setDate(d.getDate() - 5)
+      break
+    case '1M':
+      d.setMonth(d.getMonth() - 1)
+      break
+    case '3M':
+      d.setMonth(d.getMonth() - 3)
+      break
+    case '6M':
+      d.setMonth(d.getMonth() - 6)
+      break
+    case '1Y':
+      d.setFullYear(d.getFullYear() - 1)
+      break
+    case '5Y':
+      d.setFullYear(d.getFullYear() - 5)
+      break
+  }
+  return d.toISOString().slice(0, 10)
+}
+
+function periodTimeframe(period: ChartPeriod): '5m' | '1d' {
+  return period === '1D' || period === '5D' ? '5m' : '1d'
 }
 
 function thirtyDaysStr(): string {
@@ -189,12 +234,72 @@ function LoadingRows({ count = 3 }: { count?: number }) {
   )
 }
 
+function PriceChart({ bars }: { bars: HistoricalOHLCV[] }) {
+  if (bars.length === 0) {
+    return null
+  }
+
+  const width = 720
+  const height = 240
+  const paddingX = 28
+  const paddingY = 22
+  const lows = bars.map((bar) => bar.low)
+  const highs = bars.map((bar) => bar.high)
+  const min = Math.min(...lows)
+  const max = Math.max(...highs)
+  const span = max - min || 1
+  const step = bars.length > 1 ? (width - paddingX * 2) / (bars.length - 1) : width - paddingX * 2
+  const tickWidth = Math.max(2.5, Math.min(7, step * 0.35))
+  const yFor = (price: number) => height - paddingY - ((price - min) / span) * (height - paddingY * 2)
+  const firstBar = bars[0]
+  const lastBar = bars[bars.length - 1]
+
+  return (
+    <div className="space-y-2">
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-56 w-full">
+        <line x1={paddingX} y1={paddingY} x2={width - paddingX} y2={paddingY} className="stroke-border" />
+        <line x1={paddingX} y1={height / 2} x2={width - paddingX} y2={height / 2} className="stroke-border/70" />
+        <line x1={paddingX} y1={height - paddingY} x2={width - paddingX} y2={height - paddingY} className="stroke-border" />
+        <text x={paddingX} y={paddingY - 7} className="fill-muted-foreground text-[11px]">
+          ${max.toFixed(2)}
+        </text>
+        <text x={paddingX} y={height - 6} className="fill-muted-foreground text-[11px]">
+          ${min.toFixed(2)}
+        </text>
+        {bars.map((bar, index) => {
+          const x = paddingX + index * step
+          const highY = yFor(bar.high)
+          const lowY = yFor(bar.low)
+          const openY = yFor(bar.open)
+          const closeY = yFor(bar.close)
+          const up = bar.close >= bar.open
+          const strokeClass = up ? 'stroke-emerald-400' : 'stroke-red-400'
+
+          return (
+            <g key={`${bar.timestamp}-${index}`} className={strokeClass}>
+              <line x1={x} y1={highY} x2={x} y2={lowY} strokeWidth={Math.max(1, Math.min(2, step * 0.16))} />
+              <line x1={x - tickWidth} y1={openY} x2={x} y2={openY} strokeWidth={Math.max(1.5, Math.min(2.5, step * 0.2))} />
+              <line x1={x} y1={closeY} x2={x + tickWidth} y2={closeY} strokeWidth={Math.max(1.5, Math.min(2.5, step * 0.2))} />
+            </g>
+          )
+        })}
+      </svg>
+      <div className="flex justify-between text-xs text-muted-foreground">
+        <span>{formatDate(firstBar?.timestamp)}</span>
+        <span>{bars.length.toLocaleString()} daily bars</span>
+        <span>{formatDate(lastBar?.timestamp)}</span>
+      </div>
+    </div>
+  )
+}
+
 // ===================== Page =====================
 
 export function StockDetailPage() {
   const { ticker } = useParams<{ ticker: string }>()
   const navigate = useNavigate()
   const upperTicker = (ticker ?? '').toUpperCase()
+  const [chartPeriod, setChartPeriod] = useState<ChartPeriod>('1Y')
 
   // ---- data queries (parallel) ----
 
@@ -234,6 +339,29 @@ export function StockDetailPage() {
     enabled: !!ticker,
   })
 
+  const { data: priceHistoryData, isLoading: priceHistoryLoading } = useQuery({
+    queryKey: ['stock-price-history', upperTicker, chartPeriod],
+    queryFn: () =>
+      apiClient.getHistoricalOHLCV(upperTicker, {
+        timeframe: periodTimeframe(chartPeriod),
+        from: periodStartStr(chartPeriod),
+        to: tomorrowStr(),
+      }),
+    enabled: !!ticker,
+  })
+
+  const { data: newsData, isLoading: newsLoading } = useQuery({
+    queryKey: ['stock-news', upperTicker],
+    queryFn: () => apiClient.listNews({ ticker: upperTicker, limit: 10 }),
+    enabled: !!ticker,
+  })
+
+  const { data: sentimentData, isLoading: sentimentLoading } = useQuery({
+    queryKey: ['stock-social-sentiment', upperTicker],
+    queryFn: () => apiClient.getSocialSentiment(upperTicker, { limit: 20 }),
+    enabled: !!ticker,
+  })
+
   const { data: universeData } = useQuery({
     queryKey: ['stock-universe', upperTicker],
     queryFn: () => apiClient.listUniverse({ search: upperTicker, limit: 1 }),
@@ -251,9 +379,14 @@ export function StockDetailPage() {
     (e) => e.symbol.toUpperCase() === upperTicker,
   )
   const filings = filingsData ?? []
+  const priceHistory = priceHistoryData ?? []
+  const news: NewsFeedItem[] = newsData ?? []
+  const sentimentRows: SocialSentimentRow[] = sentimentData ?? []
   const universeInfo = (universeData?.data ?? []).find(
     (t) => t.ticker.toUpperCase() === upperTicker,
   )
+
+  const latestPrice = priceHistory.length > 0 ? priceHistory[priceHistory.length - 1] : undefined
 
   // backtest configs for strategies matching this ticker
   const strategyIds = useMemo(() => strategies.map((s) => s.id), [strategies])
@@ -318,7 +451,7 @@ export function StockDetailPage() {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1.4fr)_minmax(320px,0.9fr)]">
         {/* Left column: price chart stub, news stub, social stub, strategies, orders, trades, positions */}
         <div className="space-y-4">
-          {/* Price Chart — stub (endpoint not yet available) */}
+          {/* Price Chart */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
@@ -327,15 +460,56 @@ export function StockDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex h-32 items-center justify-center rounded-md border border-dashed border-border bg-muted/20">
-                <p className="text-sm text-muted-foreground">
-                  Price chart data not yet available
-                </p>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex rounded-md border border-border bg-muted/20 p-1">
+                  {CHART_PERIODS.map((period) => (
+                    <button
+                      key={period}
+                      type="button"
+                      onClick={() => setChartPeriod(period)}
+                      className={cn(
+                        'rounded px-2.5 py-1 text-xs font-medium transition-colors',
+                        chartPeriod === period
+                          ? 'bg-primary text-primary-foreground'
+                          : 'text-muted-foreground hover:bg-accent hover:text-foreground',
+                      )}
+                    >
+                      {period}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-xs text-muted-foreground">OHLC daily bars</span>
               </div>
+              {priceHistoryLoading ? (
+                <LoadingRows count={2} />
+              ) : priceHistory.length === 0 ? (
+                <div className="flex h-32 items-center justify-center rounded-md border border-dashed border-border bg-muted/20">
+                  <p className="text-sm text-muted-foreground">No stored price history.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-end justify-between gap-2">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                        Latest close
+                      </p>
+                      <p className="text-2xl font-semibold">
+                        {latestPrice ? formatCurrency(latestPrice.close) : '--'}
+                      </p>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {latestPrice ? `Data through ${formatDate(latestPrice.timestamp)} · ${latestPrice.provider}` : ''}
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-border bg-muted/10 p-2 text-primary">
+                    <PriceChart bars={priceHistory} />
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
 
-          {/* News — stub (endpoint not yet available) */}
+          {/* News */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
@@ -344,15 +518,49 @@ export function StockDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex h-24 items-center justify-center rounded-md border border-dashed border-border bg-muted/20">
-                <p className="text-sm text-muted-foreground">
-                  News feed not yet available
-                </p>
-              </div>
+              {newsLoading ? (
+                <LoadingRows />
+              ) : news.length === 0 ? (
+                <div className="flex h-24 items-center justify-center rounded-md border border-dashed border-border bg-muted/20">
+                  <p className="text-sm text-muted-foreground">No news for {upperTicker}.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {news.map((item) => (
+                    <article key={item.guid} className="rounded-lg border border-border p-3">
+                      <div className="flex flex-wrap items-start gap-2">
+                        <div className="min-w-0 flex-1 space-y-1">
+                          {item.link ? (
+                            <a
+                              href={item.link}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="font-medium transition-colors hover:text-primary"
+                            >
+                              {item.title}
+                            </a>
+                          ) : (
+                            <p className="font-medium">{item.title}</p>
+                          )}
+                          <p className="text-xs text-muted-foreground">
+                            {item.source} · {formatDate(item.published_at)}
+                          </p>
+                        </div>
+                        {item.sentiment && <SentimentBadge sentiment={item.sentiment} />}
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        {item.relevance != null && <Badge variant="outline">Relevance {item.relevance.toFixed(2)}</Badge>}
+                        {item.category && <Badge variant="secondary">{item.category}</Badge>}
+                      </div>
+                      {item.description && <p className="mt-2 text-sm text-muted-foreground">{item.description}</p>}
+                    </article>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
-          {/* Social Sentiment — stub (endpoint not yet available) */}
+          {/* Social Sentiment */}
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
@@ -361,11 +569,43 @@ export function StockDetailPage() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex h-24 items-center justify-center rounded-md border border-dashed border-border bg-muted/20">
-                <p className="text-sm text-muted-foreground">
-                  Social sentiment not yet available
-                </p>
-              </div>
+              {sentimentLoading ? (
+                <LoadingRows />
+              ) : sentimentRows.length === 0 ? (
+                <div className="flex h-24 items-center justify-center rounded-md border border-dashed border-border bg-muted/20">
+                  <p className="text-sm text-muted-foreground">No sentiment snapshots.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {sentimentRows.map((row, index) => (
+                    <div key={`${row.source}-${row.measured_at}-${index}`} className="rounded-lg border border-border p-3">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="secondary">{row.source}</Badge>
+                        {row.trending && <Badge variant="warning">Trending</Badge>}
+                        <span className="ml-auto text-xs text-muted-foreground">{formatDate(row.measured_at)}</span>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+                        <div>
+                          <span className="text-xs text-muted-foreground">Sentiment</span>
+                          <p className="font-mono">{row.sentiment.toFixed(2)}</p>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground">Bullish</span>
+                          <p className="font-mono">{row.bullish.toFixed(2)}</p>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground">Bearish</span>
+                          <p className="font-mono">{row.bearish.toFixed(2)}</p>
+                        </div>
+                        <div>
+                          <span className="text-xs text-muted-foreground">Posts</span>
+                          <p className="font-mono">{row.post_count}</p>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
           {/* Active Strategies */}
