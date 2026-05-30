@@ -21,6 +21,9 @@ function formatRelativeTime(iso?: string): string {
 }
 
 const money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
+const marketUrl = (slug: string) => `https://polymarket.com/market/${encodeURIComponent(slug)}`
+const eventUrl = (slug: string) => `https://polymarket.com/event/${encodeURIComponent(slug)}`
+const profileUrl = (address: string) => `https://polymarket.com/profile/${encodeURIComponent(address)}`
 
 export function PolymarketAccountPage() {
   const { address } = useParams<{ address: string }>()
@@ -34,11 +37,14 @@ export function PolymarketAccountPage() {
     ['total_trades', String(data?.total_trades ?? 0)],
     ['markets_entered', String(data?.markets_entered ?? 0)],
     ['W/L', `${data?.markets_won ?? 0}/${data?.markets_lost ?? 0}`],
+    ['resolved', String(data?.resolved_markets ?? 0)],
     ['win_rate', `${((data?.win_rate ?? 0) * 100).toFixed(1)}%`],
+    ['adj_win_rate', `${((data?.bayesian_win_rate ?? 0) * 100).toFixed(1)}%`],
+    ['consistency', (data?.consistency_score ?? 0).toFixed(3)],
     ['max_position', money.format(data?.max_position ?? 0)],
     ['early_entry_rate', `${((data?.early_entry_rate ?? 0) * 100).toFixed(1)}%`],
     ['last_active', formatRelativeTime(data?.last_active)],
   ], [data])
 
-  return <div className="space-y-4" data-testid="polymarket-account-page"><PageHeader title={address ?? ''} description="Polymarket account detail" actions={<Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(address ?? '')}>Copy</Button>} /><div className="flex gap-2"><Badge variant={data?.tracked ? 'success' : 'secondary'}>{data?.tracked ? 'tracked' : 'untracked'}</Badge><input type="checkbox" checked={data?.tracked ?? false} onChange={(e) => address && track.mutate({ address, tracked: e.target.checked }, { onSuccess: () => qc.invalidateQueries({ queryKey: ['polymarket-account', address] }) })} /></div><div className="grid gap-3 md:grid-cols-4">{stats.map(([k, v]) => <Card key={k}><CardContent><div className="text-xs uppercase text-muted-foreground">{k}</div><div>{v}</div></CardContent></Card>)}</div><Card><CardHeader><CardTitle>Trades</CardTitle></CardHeader><CardContent><table className="w-full text-sm"><tbody>{(trades.data?.data ?? []).map((t) => <tr key={t.id}><td>{new Date(t.timestamp).toLocaleString()}</td><td><a href={`https://polymarket.com/event/${t.market_slug}`} target="_blank" rel="noreferrer">{t.market_slug}</a></td><td><Badge>{t.side}</Badge></td><td>{t.action}</td><td>{t.price.toFixed(3)}</td><td>{money.format(t.size_usdc)}</td><td>{t.pnl == null ? '--' : <span className={t.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}>{money.format(t.pnl)}</span>}</td></tr>)}</tbody></table></CardContent></Card><Link to="/polymarket">Back to Polymarket</Link></div>
+  return <div className="space-y-4" data-testid="polymarket-account-page"><PageHeader title={address ?? ''} description="Polymarket account detail" actions={<div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(address ?? '')}>Copy</Button>{address ? <Button size="sm" variant="outline" asChild><a href={profileUrl(address)} target="_blank" rel="noreferrer">Polymarket profile</a></Button> : null}</div>} /><div className="flex gap-2"><Badge variant={data?.tracked ? 'success' : 'secondary'}>{data?.tracked ? 'tracked' : 'untracked'}</Badge><input type="checkbox" checked={data?.tracked ?? false} onChange={(e) => address && track.mutate({ address, tracked: e.target.checked }, { onSuccess: () => qc.invalidateQueries({ queryKey: ['polymarket-account', address] }) })} /></div><div className="grid gap-3 md:grid-cols-4">{stats.map(([k, v]) => <Card key={k}><CardContent><div className="text-xs uppercase text-muted-foreground">{k}</div><div>{v}</div></CardContent></Card>)}</div><Card><CardHeader><CardTitle>Trades</CardTitle></CardHeader><CardContent><table className="w-full text-sm"><tbody>{(trades.data?.data ?? []).map((t) => <tr key={t.id}><td>{new Date(t.timestamp).toLocaleString()}</td><td><div className="flex flex-col"><a href={marketUrl(t.market_slug)} target="_blank" rel="noreferrer">{t.market_slug}</a><a className="text-xs text-muted-foreground" href={eventUrl(t.market_slug)} target="_blank" rel="noreferrer">event</a></div></td><td><Badge>{t.side}</Badge></td><td>{t.action}</td><td>{t.price.toFixed(3)}</td><td>{money.format(t.size_usdc)}</td><td>{t.pnl == null ? '--' : <span className={t.pnl >= 0 ? 'text-emerald-500' : 'text-red-500'}>{money.format(t.pnl)}</span>}</td></tr>)}</tbody></table></CardContent></Card><Link to="/polymarket">Back to Polymarket</Link></div>
 }

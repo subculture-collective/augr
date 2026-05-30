@@ -111,7 +111,7 @@ func (r *PolymarketAccountRepo) ListTrackedAccounts(ctx context.Context, minWinR
 		       avg_entry_hours_before_resolution, early_entry_rate, tags, tracked, updated_at
 		FROM polymarket_accounts
 		WHERE tracked = true AND win_rate >= $1
-		ORDER BY win_rate DESC
+		ORDER BY `+polymarketConsistencyScoreSQL()+` DESC, win_rate DESC
 		LIMIT $2`, minWinRate, limit)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list tracked accounts: %w", err)
@@ -132,24 +132,78 @@ func (r *PolymarketAccountRepo) ListTrackedAccounts(ctx context.Context, minWinR
 // ListAccounts returns Polymarket accounts matching the provided filter.
 func (r *PolymarketAccountRepo) ListAccounts(ctx context.Context, filter repository.PolymarketAccountFilter) ([]domain.PolymarketAccount, error) {
 	limit := filter.Limit
-	if limit <= 0 { limit = 100 }
+	if limit <= 0 {
+		limit = 100
+	}
 	offset := filter.Offset
-	sortCol := map[string]string{"volume":"total_volume","win_rate":"win_rate","last_active":"last_active","trades":"total_trades"}[strings.ToLower(strings.TrimSpace(filter.Sort))]
-	if sortCol == "" { sortCol = "last_active" }
+	sortClause := polymarketAccountSortClause(filter.Sort)
 	query := `SELECT address, display_name, first_seen, last_active, total_trades, total_volume, markets_entered, markets_won, markets_lost, win_rate, category_stats, avg_position, max_position, avg_entry_hours_before_resolution, early_entry_rate, tags, tracked, updated_at FROM polymarket_accounts WHERE 1=1`
 	args := []any{}
-	if filter.Tracked != nil { query += fmt.Sprintf(" AND tracked = $%d", len(args)+1); args = append(args, *filter.Tracked) }
-	if filter.MinWinRate > 0 { query += fmt.Sprintf(" AND win_rate >= $%d", len(args)+1); args = append(args, filter.MinWinRate) }
-	if filter.MinVolume > 0 { query += fmt.Sprintf(" AND total_volume >= $%d", len(args)+1); args = append(args, filter.MinVolume) }
-	if filter.MinTrades > 0 { query += fmt.Sprintf(" AND total_trades >= $%d", len(args)+1); args = append(args, filter.MinTrades) }
-	query += fmt.Sprintf(" ORDER BY %s DESC LIMIT $%d OFFSET $%d", sortCol, len(args)+1, len(args)+2)
+	if filter.Tracked != nil {
+		query += fmt.Sprintf(" AND tracked = $%d", len(args)+1)
+		args = append(args, *filter.Tracked)
+	}
+	if filter.MinWinRate > 0 {
+		query += fmt.Sprintf(" AND win_rate >= $%d", len(args)+1)
+		args = append(args, filter.MinWinRate)
+	}
+	if filter.MinResolved > 0 {
+		query += fmt.Sprintf(" AND (markets_won + markets_lost) >= $%d", len(args)+1)
+		args = append(args, filter.MinResolved)
+	}
+	if filter.MinVolume > 0 {
+		query += fmt.Sprintf(" AND total_volume >= $%d", len(args)+1)
+		args = append(args, filter.MinVolume)
+	}
+	if filter.MinTrades > 0 {
+		query += fmt.Sprintf(" AND total_trades >= $%d", len(args)+1)
+		args = append(args, filter.MinTrades)
+	}
+	query += fmt.Sprintf(" ORDER BY %s, win_rate DESC, total_volume DESC LIMIT $%d OFFSET $%d", sortClause, len(args)+1, len(args)+2)
 	args = append(args, limit, offset)
 	rows, err := r.pool.Query(ctx, query, args...)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var out []domain.PolymarketAccount
-	for rows.Next() { acc, err := scanAccount(rows); if err != nil { return nil, err }; out = append(out, *acc) }
+	for rows.Next() {
+		acc, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *acc)
+	}
 	return out, rows.Err()
+}
+
+func polymarketAccountSortClause(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "volume":
+		return "total_volume DESC"
+	case "win_rate":
+		return "win_rate DESC"
+	case "last_active":
+		return "last_active DESC NULLS LAST"
+	case "trades":
+		return "total_trades DESC"
+	case "resolved", "resolved_markets":
+		return "(markets_won + markets_lost) DESC"
+	case "bayesian_win_rate":
+		return polymarketBayesianWinRateSQL() + " DESC"
+	case "consistency", "consistency_score", "":
+		return polymarketConsistencyScoreSQL() + " DESC"
+	default:
+		return polymarketConsistencyScoreSQL() + " DESC"
+	}
+}
+
+func polymarketBayesianWinRateSQL() string {
+	return "((markets_won::float + 3.0) / ((markets_won + markets_lost)::float + 6.0))"
+}
+
+func polymarketConsistencyScoreSQL() string {
+	return "(CASE WHEN (markets_won + markets_lost) <= 0 THEN 0 ELSE " + polymarketBayesianWinRateSQL() + " * LOG((markets_won + markets_lost)::float + 1.0) END)"
 }
 
 // InsertTrades bulk-inserts trade records, ignoring duplicates.
@@ -232,22 +286,42 @@ func (r *PolymarketAccountRepo) ListTradesByAccount(ctx context.Context, address
 }
 
 func (r *PolymarketAccountRepo) ListAllTradesBySlug(ctx context.Context, slug string, limit int) ([]domain.PolymarketAccountTrade, error) {
-	if limit <= 0 { limit = 1000 }
+	if limit <= 0 {
+		limit = 1000
+	}
 	rows, err := r.pool.Query(ctx, `SELECT id, account_address, market_slug, side, action, price, size_usdc, timestamp, COALESCE(outcome,''), pnl, created_at FROM polymarket_account_trades WHERE market_slug=$1 ORDER BY timestamp DESC LIMIT $2`, slug, limit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var out []domain.PolymarketAccountTrade
-	for rows.Next() { var t domain.PolymarketAccountTrade; if err := rows.Scan(&t.ID,&t.AccountAddress,&t.MarketSlug,&t.Side,&t.Action,&t.Price,&t.SizeUSDC,&t.Timestamp,&t.Outcome,&t.PnL,&t.CreatedAt); err != nil { return nil, err }; out = append(out, t) }
+	for rows.Next() {
+		var t domain.PolymarketAccountTrade
+		if err := rows.Scan(&t.ID, &t.AccountAddress, &t.MarketSlug, &t.Side, &t.Action, &t.Price, &t.SizeUSDC, &t.Timestamp, &t.Outcome, &t.PnL, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
 	return out, rows.Err()
 }
 
 func (r *PolymarketAccountRepo) ListRecentTrades(ctx context.Context, limit int) ([]domain.PolymarketAccountTrade, error) {
-	if limit <= 0 { limit = 200 }
+	if limit <= 0 {
+		limit = 200
+	}
 	rows, err := r.pool.Query(ctx, `SELECT id, account_address, market_slug, side, action, price, size_usdc, timestamp, COALESCE(outcome,''), pnl, created_at FROM polymarket_account_trades ORDER BY timestamp DESC LIMIT $1`, limit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	var out []domain.PolymarketAccountTrade
-	for rows.Next() { var t domain.PolymarketAccountTrade; if err := rows.Scan(&t.ID,&t.AccountAddress,&t.MarketSlug,&t.Side,&t.Action,&t.Price,&t.SizeUSDC,&t.Timestamp,&t.Outcome,&t.PnL,&t.CreatedAt); err != nil { return nil, err }; out = append(out, t) }
+	for rows.Next() {
+		var t domain.PolymarketAccountTrade
+		if err := rows.Scan(&t.ID, &t.AccountAddress, &t.MarketSlug, &t.Side, &t.Action, &t.Price, &t.SizeUSDC, &t.Timestamp, &t.Outcome, &t.PnL, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
 	return out, rows.Err()
 }
 
@@ -266,11 +340,29 @@ func (r *PolymarketAccountRepo) MarkTracked(ctx context.Context, minWinRate floa
 	return result.RowsAffected(), nil
 }
 
-func (r *PolymarketAccountRepo) SetTracked(ctx context.Context, address string, tracked bool) error { res, err := r.pool.Exec(ctx, `UPDATE polymarket_accounts SET tracked=$2, updated_at=NOW() WHERE address=$1`, address, tracked); if err != nil { return err }; if res.RowsAffected()==0 { return repository.ErrNotFound }; return nil }
+func (r *PolymarketAccountRepo) SetTracked(ctx context.Context, address string, tracked bool) error {
+	res, err := r.pool.Exec(ctx, `UPDATE polymarket_accounts SET tracked=$2, updated_at=NOW() WHERE address=$1`, address, tracked)
+	if err != nil {
+		return err
+	}
+	if res.RowsAffected() == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}
 
-func (r *PolymarketAccountRepo) UpdateAccountResolutionStats(ctx context.Context, address string, won, lost int, winRate float64) error { _, err := r.pool.Exec(ctx, `UPDATE polymarket_accounts SET markets_won=$2, markets_lost=$3, win_rate=$4, updated_at=NOW() WHERE address=$1`, address, won, lost, winRate); if err != nil { return err }; return nil }
+func (r *PolymarketAccountRepo) UpdateAccountResolutionStats(ctx context.Context, address string, won, lost int, winRate float64) error {
+	_, err := r.pool.Exec(ctx, `UPDATE polymarket_accounts SET markets_won=$2, markets_lost=$3, win_rate=$4, updated_at=NOW() WHERE address=$1`, address, won, lost, winRate)
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
-func (r *PolymarketAccountRepo) IncrementAccountResolutionStats(ctx context.Context, address string, wonDelta, lostDelta int) error { _, err := r.pool.Exec(ctx, `UPDATE polymarket_accounts SET markets_won = markets_won + $2, markets_lost = markets_lost + $3, win_rate = CASE WHEN (markets_won + $2 + markets_lost + $3) = 0 THEN 0 ELSE (markets_won + $2)::float / NULLIF((markets_won + $2 + markets_lost + $3),0) END, updated_at=NOW() WHERE address=$1`, address, wonDelta, lostDelta); return err }
+func (r *PolymarketAccountRepo) IncrementAccountResolutionStats(ctx context.Context, address string, wonDelta, lostDelta int) error {
+	_, err := r.pool.Exec(ctx, `UPDATE polymarket_accounts SET markets_won = markets_won + $2, markets_lost = markets_lost + $3, win_rate = CASE WHEN (markets_won + $2 + markets_lost + $3) = 0 THEN 0 ELSE (markets_won + $2)::float / NULLIF((markets_won + $2 + markets_lost + $3),0) END, updated_at=NOW() WHERE address=$1`, address, wonDelta, lostDelta)
+	return err
+}
 
 func normalizePolymarketTradeSide(side string) (string, error) {
 	switch strings.ToUpper(strings.TrimSpace(side)) {
@@ -324,6 +416,7 @@ func scanAccount(row accountScanner) (*domain.PolymarketAccount, error) {
 	if len(statsJSON) > 0 {
 		_ = json.Unmarshal(statsJSON, &acc.CategoryStats)
 	}
+	domain.EnrichPolymarketAccountScores(&acc)
 	return &acc, nil
 }
 

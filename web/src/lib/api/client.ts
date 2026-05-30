@@ -637,7 +637,7 @@ export class ApiClient {
   }
 
   async setPolymarketAccountTracked(address: string, tracked: boolean) {
-    return this.request<PolymarketAccount>(
+    return this.request<{ ok: boolean }>(
       `/api/v1/polymarket/accounts/${encodeURIComponent(address)}/tracked`,
       { method: 'PATCH', body: { tracked } },
     );

@@ -68,6 +68,20 @@ type GammaMarket struct {
 	ResolutionSource string      `json:"resolutionSource"`
 }
 
+// NewGammaMarketFromSnapshot reconstructs a market from persisted discovery
+// fields using JSON decoding so gammaString-backed fields are restored safely.
+func NewGammaMarketFromSnapshot(snapshot map[string]any) (GammaMarket, error) {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return GammaMarket{}, err
+	}
+	var m GammaMarket
+	if err := json.Unmarshal(data, &m); err != nil {
+		return GammaMarket{}, err
+	}
+	return m, nil
+}
+
 // FloatField parses a Gamma numeric field that may arrive as string or number.
 func toFloat(v any) (float64, bool) {
 	switch x := v.(type) {

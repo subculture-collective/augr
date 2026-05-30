@@ -1,6 +1,16 @@
 package domain
 
-import "time"
+import (
+	"math"
+	"time"
+)
+
+const (
+	// PolymarketWinRatePriorWins/Losses are a conservative beta prior used to
+	// avoid over-ranking accounts with tiny resolved samples, e.g. 1/1 winners.
+	PolymarketWinRatePriorWins   = 3.0
+	PolymarketWinRatePriorLosses = 3.0
+)
 
 // PolymarketWatchedMarket tracks a slug that should be monitored by the
 // Polymarket signal source.
@@ -24,6 +34,9 @@ type PolymarketAccount struct {
 	MarketsWon                    int            `json:"markets_won"`
 	MarketsLost                   int            `json:"markets_lost"`
 	WinRate                       float64        `json:"win_rate"`
+	ResolvedMarkets               int            `json:"resolved_markets"`
+	BayesianWinRate               float64        `json:"bayesian_win_rate"`
+	ConsistencyScore              float64        `json:"consistency_score"`
 	CategoryStats                 map[string]any `json:"category_stats,omitempty"`
 	AvgPosition                   float64        `json:"avg_position"`
 	MaxPosition                   float64        `json:"max_position"`
@@ -32,6 +45,31 @@ type PolymarketAccount struct {
 	Tags                          []string       `json:"tags,omitempty"`
 	Tracked                       bool           `json:"tracked"`
 	UpdatedAt                     time.Time      `json:"updated_at"`
+}
+
+// EnrichPolymarketAccountScores fills derived confidence-adjusted account
+// metrics from persisted raw win/loss counts.
+func EnrichPolymarketAccountScores(acc *PolymarketAccount) {
+	if acc == nil {
+		return
+	}
+	acc.ResolvedMarkets = acc.MarketsWon + acc.MarketsLost
+	acc.BayesianWinRate = PolymarketBayesianWinRate(acc.MarketsWon, acc.MarketsLost)
+	acc.ConsistencyScore = PolymarketConsistencyScore(acc.MarketsWon, acc.MarketsLost)
+}
+
+func PolymarketBayesianWinRate(won, lost int) float64 {
+	resolved := won + lost
+	return (float64(won) + PolymarketWinRatePriorWins) /
+		(float64(resolved) + PolymarketWinRatePriorWins + PolymarketWinRatePriorLosses)
+}
+
+func PolymarketConsistencyScore(won, lost int) float64 {
+	resolved := won + lost
+	if resolved <= 0 {
+		return 0
+	}
+	return PolymarketBayesianWinRate(won, lost) * math.Log10(float64(resolved)+1)
 }
 
 // PolymarketAccountTrade records a single trade by a known account.

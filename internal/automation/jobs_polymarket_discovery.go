@@ -2,17 +2,18 @@ package automation
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
-	"time"
 
-	"github.com/PatrickFanella/get-rich-quick/internal/polymarketdiscovery"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
 var polymarketDiscoverySpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 */6 * * *"}
 
 func (o *JobOrchestrator) registerPolymarketDiscoveryJob() {
-	if o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil {
+	if o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil || o.deps.PolymarketDiscoveryRuns == nil {
 		return
 	}
 	o.Register("polymarket_strategy_discovery",
@@ -21,29 +22,26 @@ func (o *JobOrchestrator) registerPolymarketDiscoveryJob() {
 }
 
 func (o *JobOrchestrator) polymarketDiscovery(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
-	defer cancel()
-
-	cfg := polymarketdiscovery.Config{
-		Screener:       polymarketdiscovery.DefaultScreenerConfig(),
-		MaxDeployments: 3,
-		AutoWatchSlug:  true,
+	if o.deps.PolymarketDiscoveryRuns == nil {
+		return fmt.Errorf("polymarket_strategy_discovery: progress repo not configured; enable polymarket discovery run storage")
 	}
-	deps := polymarketdiscovery.Deps{
-		LLMProvider:           o.deps.LLMProvider,
-		Strategies:            o.deps.StrategyRepo,
-		PolymarketAccountRepo: o.deps.PolymarketAccountRepo,
-		PolymarketWatchedRepo: o.deps.PolymarketWatchedRepo,
-		Logger:                o.logger,
-	}
-	res, err := polymarketdiscovery.Run(ctx, cfg, deps)
-	if err != nil {
+	chunker := newPolymarketDiscoveryChunker(o.deps, o.logger)
+	if err := chunker.RunChunk(ctx); err != nil {
 		return err
 	}
-	o.logger.Info("polymarket_strategy_discovery: done",
-		slog.Int("screened", res.Screened),
-		slog.Int("deployed", len(res.Deployed)),
-		slog.Int("skipped", res.Skipped),
+	run, err := o.deps.PolymarketDiscoveryRuns.GetActive(ctx)
+	if err != nil {
+		if !errors.Is(err, repository.ErrNotFound) {
+			return err
+		}
+		return nil
+	}
+	o.logger.Info("polymarket_strategy_discovery: chunk processed",
+		slog.String("phase", string(run.Phase)),
+		slog.String("status", string(run.Status)),
+		slog.Int("candidate_index", run.CandidateIndex),
+		slog.Int("accepted", len(run.Accepted)),
+		slog.Int("deployed", len(run.Deployed)),
 	)
 	return nil
 }

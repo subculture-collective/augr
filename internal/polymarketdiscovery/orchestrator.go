@@ -160,7 +160,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) (*Result, error) {
 
 	// Step 4: deploy each accepted proposal as a paper strategy + thesis.
 	for _, a := range accepts {
-		dep, depErr := deployStrategy(ctx, cfg, deps, a.mc, a.proposal)
+		dep, depErr := DeployStrategy(ctx, cfg, deps, a.mc, a.proposal)
 		if depErr != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("deploy %s: %v", a.mc.Market.Slug, depErr))
 			continue
@@ -182,7 +182,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) (*Result, error) {
 	return res, nil
 }
 
-func deployStrategy(
+func DeployStrategy(
 	ctx context.Context,
 	cfg Config,
 	deps Deps,

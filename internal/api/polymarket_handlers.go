@@ -68,7 +68,7 @@ func (s *Server) handleListPolymarketAccounts(w http.ResponseWriter, r *http.Req
 		return
 	}
 	q := r.URL.Query()
-	f := repository.PolymarketAccountFilter{MinWinRate: parseFloat(q.Get("min_win_rate")), MinVolume: parseFloat(q.Get("min_volume")), MinTrades: parseInt(q.Get("min_trades"), 0), Sort: q.Get("sort"), Limit: parseInt(q.Get("limit"), 100), Offset: parseInt(q.Get("offset"), 0)}
+	f := repository.PolymarketAccountFilter{MinWinRate: parseFloat(q.Get("min_win_rate")), MinResolved: parseInt(q.Get("min_resolved"), 0), MinVolume: parseFloat(q.Get("min_volume")), MinTrades: parseInt(q.Get("min_trades"), 0), Sort: q.Get("sort"), Limit: parseInt(q.Get("limit"), 100), Offset: parseInt(q.Get("offset"), 0)}
 	if tracked := q.Get("tracked"); tracked != "" {
 		v := tracked == "true"
 		f.Tracked = &v

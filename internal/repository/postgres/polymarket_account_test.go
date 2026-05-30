@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"math"
 	"testing"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -44,6 +45,41 @@ func TestNormalizePolymarketTradeSide(t *testing.T) {
 				t.Fatalf("normalizePolymarketTradeSide(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestPolymarketAccountDerivedScores(t *testing.T) {
+	t.Parallel()
+
+	acc := &domain.PolymarketAccount{MarketsWon: 1, MarketsLost: 0}
+	domain.EnrichPolymarketAccountScores(acc)
+	if acc.ResolvedMarkets != 1 {
+		t.Fatalf("ResolvedMarkets = %d, want 1", acc.ResolvedMarkets)
+	}
+	if diff := math.Abs(acc.BayesianWinRate - (4.0 / 7.0)); diff > 0.000001 {
+		t.Fatalf("BayesianWinRate = %.6f, want %.6f", acc.BayesianWinRate, 4.0/7.0)
+	}
+	if acc.ConsistencyScore <= 0 || acc.ConsistencyScore >= acc.BayesianWinRate {
+		t.Fatalf("ConsistencyScore = %.6f, want positive score scaled below bayesian rate for one resolved bet", acc.ConsistencyScore)
+	}
+}
+
+func TestPolymarketAccountSortClause(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"":                  polymarketConsistencyScoreSQL() + " DESC",
+		"consistency_score": polymarketConsistencyScoreSQL() + " DESC",
+		"bayesian_win_rate": polymarketBayesianWinRateSQL() + " DESC",
+		"resolved_markets":  "(markets_won + markets_lost) DESC",
+		"last_active":       "last_active DESC NULLS LAST",
+		"win_rate":          "win_rate DESC",
+		"volume":            "total_volume DESC",
+	}
+	for input, want := range tests {
+		if got := polymarketAccountSortClause(input); got != want {
+			t.Fatalf("polymarketAccountSortClause(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 

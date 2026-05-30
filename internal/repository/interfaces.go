@@ -113,13 +113,14 @@ type TradeFilter struct {
 
 // PolymarketAccountFilter defines filters when listing Polymarket accounts.
 type PolymarketAccountFilter struct {
-	Tracked    *bool
-	MinWinRate float64
-	MinVolume  float64
-	MinTrades  int
-	Sort       string
-	Limit      int
-	Offset     int
+	Tracked     *bool
+	MinWinRate  float64
+	MinResolved int
+	MinVolume   float64
+	MinTrades   int
+	Sort        string
+	Limit       int
+	Offset      int
 }
 
 // MemorySearchFilter defines supported filters when searching agent memories.
@@ -222,6 +223,15 @@ type OvernightBacktestRunRepository interface {
 	GetActive(ctx context.Context) (*domain.OvernightBacktestRun, error)
 	Update(ctx context.Context, run *domain.OvernightBacktestRun) error
 	ListLatest(ctx context.Context, limit int) ([]domain.OvernightBacktestRun, error)
+}
+
+// PolymarketDiscoveryRunRepository persists resumable Polymarket discovery progress.
+type PolymarketDiscoveryRunRepository interface {
+	Create(ctx context.Context, run *domain.PolymarketDiscoveryRun) error
+	Get(ctx context.Context, id uuid.UUID) (*domain.PolymarketDiscoveryRun, error)
+	GetActive(ctx context.Context) (*domain.PolymarketDiscoveryRun, error)
+	Update(ctx context.Context, run *domain.PolymarketDiscoveryRun) error
+	ListLatest(ctx context.Context, limit int) ([]domain.PolymarketDiscoveryRun, error)
 }
 
 // PipelineRunRepository provides access to pipeline runs.

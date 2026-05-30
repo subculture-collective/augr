@@ -158,6 +158,9 @@ export interface PolymarketAccount {
   markets_won: number;
   markets_lost: number;
   win_rate: number;
+  resolved_markets: number;
+  bayesian_win_rate: number;
+  consistency_score: number;
   category_stats?: Record<string, unknown>;
   avg_position: number;
   max_position: number;
@@ -190,11 +193,12 @@ export interface PolymarketWatchedMarket {
   note?: string;
 }
 
-export type PolymarketAccountSort = 'volume' | 'win_rate' | 'last_active' | 'trades';
+export type PolymarketAccountSort = 'volume' | 'win_rate' | 'bayesian_win_rate' | 'consistency_score' | 'resolved_markets' | 'last_active' | 'trades';
 
 export interface PolymarketAccountListParams {
   tracked?: boolean;
   min_win_rate?: number;
+  min_resolved?: number;
   min_volume?: number;
   min_trades?: number;
   sort?: PolymarketAccountSort;
