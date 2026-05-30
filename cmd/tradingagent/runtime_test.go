@@ -30,6 +30,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 
 	origNewDB := runtimeNewDB
@@ -253,6 +257,53 @@ func TestNewAPIServerSchemaDBUnreachableFailsBeforeSchemaGate(t *testing.T) {
 	}
 	if closed.Load() {
 		t.Fatal("runtime closed db on DB startup failure before a db handle existed")
+	}
+}
+
+func TestNewAPIServerPolymarketResolutionFailureIsNonFatal(t *testing.T) {
+	origNewDB := runtimeNewDB
+	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
+	origAfterSchemaGate := runtimeAfterSchemaGate
+	origCloseDB := runtimeCloseDB
+	origNewServer := runtimeNewServer
+	origHTTPClient := runtimeHTTPClient
+	defer func() {
+		runtimeNewDB = origNewDB
+		runtimeCurrentSchemaVersion = origCurrentSchemaVersion
+		runtimeAfterSchemaGate = origAfterSchemaGate
+		runtimeCloseDB = origCloseDB
+		runtimeNewServer = origNewServer
+		runtimeHTTPClient = origHTTPClient
+	}()
+
+	pool, err := pgxpool.New(context.Background(), "postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatalf("pgxpool.New() error = %v", err)
+	}
+	defer pool.Close()
+
+	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) { return &pgrepo.DB{Pool: pool}, nil }
+	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) { return pgrepo.RequiredSchemaVersion, nil }
+	runtimeAfterSchemaGate = func() {}
+	runtimeCloseDB = func(*pgrepo.DB) {}
+	runtimeNewServer = func(_ api.ServerConfig, _ api.Deps, _ *slog.Logger) (*api.Server, error) { return &api.Server{}, nil }
+	runtimeHTTPClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(`not found`)), Header: make(http.Header)}, nil
+	})}
+
+	cfg := config.Config{Environment: "development", Database: config.DatabaseConfig{URL: "postgres://ignored"}}
+	t.Setenv("POLYMARKET_WS_ENABLED", "true")
+	t.Setenv("POLYMARKET_WS_SLUGS", "slug-a")
+
+	server, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	if err != nil {
+		t.Fatalf("newAPIServer() error = %v", err)
+	}
+	if server == nil {
+		t.Fatal("newAPIServer() server = nil")
+	}
+	if cleanup == nil {
+		t.Fatal("newAPIServer() cleanup = nil")
 	}
 }
 

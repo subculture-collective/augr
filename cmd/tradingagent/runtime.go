@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -188,6 +189,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	polymarketAccountRepo := pgrepo.NewPolymarketAccountRepo(db.Pool)
 	polymarketWatchedRepo := pgrepo.NewPolymarketWatchedMarketsRepo(db.Pool)
 	polymarketResolvedRepo := pgrepo.NewPolymarketResolvedMarketsRepo(db.Pool)
+	riskBreakerRepo := pgrepo.NewRiskBreakerRepo(db.Pool)
+	riskBreaker := risk.NewDrawdownBreaker(risk.DrawdownBreakerConfig{}, riskBreakerRepo)
 	reportArtifactRepo := pgrepo.NewReportArtifactRepo(db.Pool)
 	runRegistry := agent.NewRunContextRegistry()
 
@@ -229,6 +232,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		APIKeys:               apiKeyRepo,
 		Users:                 userRepo,
 		Risk:                  riskEngine,
+		RiskBreaker:           riskBreaker,
+		RiskBreakerLister:     riskBreakerRepo,
 		Settings:              settingsSvc,
 		DBHealth:              api.HealthCheckFunc(db.Pool.Ping),
 		RedisHealth:           redisHealth,
@@ -265,19 +270,28 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if v := strings.TrimSpace(os.Getenv("POLYMARKET_WS_SLUGS")); v != "" {
 			pcfg.PerMarketSlugs = splitCSV(v)
 		}
-		var err error
 		pcfg.Metrics = surfersMetrics.FeedMetrics()
-		polymarketFeed, err = runtimeNewPolymarketFeed(pcfg)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		if err := polymarketFeed.Start(ctx); err != nil {
-			return nil, nil, nil, err
-		}
-		logger.Info("polymarket ws feed started", slog.Int("connections", pcfg.ConnectionsPerFeed), slog.Int("slug_count", len(pcfg.PerMarketSlugs)))
-		if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_RECORDER_ENABLED")), "true") {
-			polymarketRecorder = recorder.New(polymarketFeed, pgrepo.NewPolymarketMarketDataRepo(db.Pool), recorder.RecorderConfig{BatchSize: 5000, FlushInterval: 500 * time.Millisecond, Slugs: pcfg.PerMarketSlugs}, logger, surfersMetrics.RecorderMetrics())
-			polymarketRecorder.Start(ctx)
+		var err error
+		resolvedIDs, assetIDToSlug, resolveErr := resolvePolymarketAssetIDs(ctx, pcfg.PerMarketSlugs)
+		if resolveErr != nil {
+			logger.Warn("polymarket ws resolution failed; feed disabled", slog.String("error", resolveErr.Error()))
+		} else {
+			pcfg.AssetIDs = resolvedIDs
+			pcfg.AssetIDToSlug = assetIDToSlug
+			polymarketFeed, err = runtimeNewPolymarketFeed(pcfg)
+			if err != nil {
+				logger.Warn("polymarket ws feed construction failed; feed disabled", slog.String("error", err.Error()))
+			} else if err := polymarketFeed.Start(ctx); err != nil {
+				logger.Warn("polymarket ws feed start failed; feed disabled", slog.String("error", err.Error()))
+				polymarketFeed.Close()
+				polymarketFeed = nil
+			} else {
+				logger.Info("polymarket ws feed started", slog.Int("connections", pcfg.ConnectionsPerFeed), slog.Int("slug_count", len(pcfg.PerMarketSlugs)))
+				if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_RECORDER_ENABLED")), "true") {
+					polymarketRecorder = recorder.New(polymarketFeed, pgrepo.NewPolymarketMarketDataRepo(db.Pool), recorder.RecorderConfig{BatchSize: 5000, FlushInterval: 500 * time.Millisecond, Slugs: pcfg.PerMarketSlugs}, logger, surfersMetrics.RecorderMetrics())
+					polymarketRecorder.Start(ctx)
+				}
+			}
 		}
 	}
 	deps.MarketDataStatus = polymarketStatusSource{feed: polymarketFeed, metrics: surfersMetrics}
@@ -641,6 +655,78 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+var runtimeHTTPClient = http.DefaultClient
+
+func resolvePolymarketAssetIDs(ctx context.Context, slugs []string) ([]string, map[string]string, error) {
+	if len(slugs) == 0 {
+		return nil, map[string]string{}, nil
+	}
+	assetIDs := make([]string, 0, len(slugs))
+	assetIDToSlug := make(map[string]string, len(slugs))
+	for _, slug := range slugs {
+		ids, err := fetchPolymarketAssetIDsBySlug(ctx, slug)
+		if err != nil {
+			return nil, nil, fmt.Errorf("resolve slug %q: %w", slug, err)
+		}
+		if len(ids) == 0 {
+			return nil, nil, fmt.Errorf("resolve slug %q: no clob token ids returned", slug)
+		}
+		for _, id := range ids {
+			assetIDs = append(assetIDs, id)
+			assetIDToSlug[id] = slug
+		}
+	}
+	return assetIDs, assetIDToSlug, nil
+}
+
+func fetchPolymarketAssetIDsBySlug(ctx context.Context, slug string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://gamma-api.polymarket.com/markets/slug/"+slug, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "augr-tradingagent/1.0")
+	resp, err := runtimeHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("gamma status %d", resp.StatusCode)
+	}
+	var payload struct {
+		RawIDs    json.RawMessage `json:"clobTokenIds"`
+		RawIDsAlt json.RawMessage `json:"clob_token_ids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return nil, err
+	}
+	if ids, ok := decodeAssetIDPayload(payload.RawIDs); ok {
+		return ids, nil
+	}
+	if ids, ok := decodeAssetIDPayload(payload.RawIDsAlt); ok {
+		return ids, nil
+	}
+	return nil, nil
+}
+
+func decodeAssetIDPayload(raw json.RawMessage) ([]string, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	var ids []string
+	if err := json.Unmarshal(raw, &ids); err == nil {
+		return ids, true
+	}
+	var encoded string
+	if err := json.Unmarshal(raw, &encoded); err == nil && strings.TrimSpace(encoded) != "" {
+		if err := json.Unmarshal([]byte(encoded), &ids); err == nil {
+			return ids, true
+		}
+	}
+	return nil, false
 }
 
 func loadStaleRunTTL(logger *slog.Logger) time.Duration {

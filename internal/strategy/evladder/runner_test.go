@@ -46,7 +46,7 @@ func TestRunner_PlacesRungsOnFirstPoll(t *testing.T) {
 	books := make(chan marketdata.BookSnapshot, 1)
 	fb := &fakeBroker{}
 	sid := uuid.NewString()
-	r := NewRunner(RunnerConfig{StrategyID: sid, Slug: "m", BaseSize: 10, PollInterval: 10 * time.Millisecond}, fb, nil, fakeProb{0.5}, nil, books, slog.Default())
+	r := NewRunner(RunnerConfig{StrategyID: sid, Slug: "m", BaseSize: 10, PollInterval: time.Hour}, fb, nil, fakeProb{0.5}, nil, books, slog.Default())
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	go func() { _ = r.Run(ctx) }()
@@ -80,7 +80,7 @@ func TestRunner_RePlacesOnBigBookMove(t *testing.T) {
 	fb := &fakeBroker{}
 	sid := uuid.NewString()
 	books := make(chan marketdata.BookSnapshot, 2)
-	r := NewRunner(RunnerConfig{StrategyID: sid, Slug: "m", BaseSize: 10, PollInterval: 10 * time.Millisecond}, fb, nil, fakeProb{0.5}, nil, books, slog.Default())
+	r := NewRunner(RunnerConfig{StrategyID: sid, Slug: "m", BaseSize: 10, PollInterval: time.Hour}, fb, nil, fakeProb{0.5}, nil, books, slog.Default())
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	go func() { _ = r.Run(ctx) }()

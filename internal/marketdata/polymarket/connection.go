@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 type connection struct {
 	id               int
 	wsURL            string
-	slugs            []string
+	assetIDs         []string
+	assetIDToSlug    map[string]string
 	dropFirst        bool
 	logger           *slog.Logger
 	ticks            chan<- Tick
@@ -30,16 +32,17 @@ type connection struct {
 func newConnection(id int, cfg Config, ticks chan<- Tick, books chan<- BookSnapshot, dropped *atomic.Uint64) *connection {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &connection{
-		id:        id,
-		wsURL:     cfg.WSURL,
-		slugs:     append([]string(nil), cfg.PerMarketSlugs...),
-		dropFirst: cfg.DropFirstTickPerConn,
-		logger:    cfg.Logger,
-		ticks:     ticks,
-		books:     books,
-		dropped:   dropped,
-		ctx:       ctx,
-		cancel:    cancel,
+		id:            id,
+		wsURL:         cfg.WSURL,
+		assetIDs:      append([]string(nil), cfg.AssetIDs...),
+		assetIDToSlug: cloneStringMap(cfg.AssetIDToSlug),
+		dropFirst:     cfg.DropFirstTickPerConn,
+		logger:        cfg.Logger,
+		ticks:         ticks,
+		books:         books,
+		dropped:       dropped,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -67,15 +70,36 @@ func (c *connection) Run(ctx context.Context) error {
 	}
 	defer c.Close()
 
-	sub := map[string]any{"type": "subscribe", "markets": c.slugs}
+	sub := map[string]any{"type": "market", "assets_ids": c.assetIDs, "custom_feature_enabled": true}
 	if err := c.conn.WriteJSON(sub); err != nil {
 		return err
 	}
+	pingCtx, cancelPing := context.WithCancel(ctx)
+	defer cancelPing()
+	pingErr := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingCtx.Done():
+				pingErr <- nil
+				return
+			case <-ticker.C:
+				if err := c.conn.WriteMessage(websocket.TextMessage, []byte("PING")); err != nil {
+					pingErr <- err
+					return
+				}
+			}
+		}
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-pingErr:
+			return err
 		default:
 		}
 
@@ -98,54 +122,64 @@ func (c *connection) Close() error {
 }
 
 type wireMessage struct {
-	Event     string     `json:"event"`
-	Type      string     `json:"type"`
-	Market    string     `json:"market"`
-	Bids      [][]string `json:"bids"`
-	Asks      [][]string `json:"asks"`
-	Side      string     `json:"side"`
-	Price     string     `json:"price"`
-	Size      string     `json:"size"`
-	LastPrice string     `json:"last_price"`
+	EventType      string          `json:"event_type"`
+	Type           string          `json:"type"`
+	Market         string          `json:"market"`
+	AssetID        string          `json:"asset_id"`
+	Bids           json.RawMessage `json:"bids"`
+	Asks           json.RawMessage `json:"asks"`
+	PriceChanges   []priceChange   `json:"price_changes"`
+	Side           string          `json:"side"`
+	Price          string          `json:"price"`
+	Size           string          `json:"size"`
+	LastTradePrice string          `json:"last_trade_price"`
+	BestBid        string          `json:"best_bid"`
+	BestAsk        string          `json:"best_ask"`
+	Spread         string          `json:"spread"`
+}
+
+type priceChange struct {
+	Price string `json:"price"`
+	Side  string `json:"side"`
+	Size  string `json:"size"`
 }
 
 // handleMessage decodes provisional Polymarket CLOB websocket frames.
 // The shape is intentionally loose and may be refined in later phases.
 func (c *connection) handleMessage(msg []byte) {
+	var batch []json.RawMessage
+	if err := json.Unmarshal(msg, &batch); err == nil {
+		for _, item := range batch {
+			c.handleMessage(item)
+		}
+		return
+	}
+
 	var wm wireMessage
 	if err := json.Unmarshal(msg, &wm); err != nil {
 		c.log().Debug("dropping unparseable message", "conn_id", c.id, "err", err)
 		return
 	}
 
-	slug := wm.Market
-	if slug == "" && len(c.slugs) > 0 {
-		slug = c.slugs[0]
-	}
+	slug := c.slugForWire(wm)
 	now := time.Now().UTC()
-	if len(wm.Bids) > 0 || len(wm.Asks) > 0 || wm.Event == "book" {
+	bids := parseWireLevels(wm.Bids)
+	asks := parseWireLevels(wm.Asks)
+	if len(bids) > 0 || len(asks) > 0 || strings.EqualFold(wm.EventType, "book") || strings.EqualFold(wm.EventType, "best_bid_ask") {
 		bs := BookSnapshot{Slug: slug, ReceivedAt: now, ConnID: c.id}
-		for _, lvl := range wm.Bids {
-			if len(lvl) < 2 {
-				continue
-			}
-			p, _ := strconv.ParseFloat(lvl[0], 64)
-			s, _ := strconv.ParseFloat(lvl[1], 64)
-			bs.Bids = append(bs.Bids, Level{Price: p, Size: s})
-		}
-		for _, lvl := range wm.Asks {
-			if len(lvl) < 2 {
-				continue
-			}
-			p, _ := strconv.ParseFloat(lvl[0], 64)
-			s, _ := strconv.ParseFloat(lvl[1], 64)
-			bs.Asks = append(bs.Asks, Level{Price: p, Size: s})
-		}
+		bs.Bids = bids
+		bs.Asks = asks
 		if len(bs.Bids) > 0 {
 			bs.BestBid = bs.Bids[0].Price
 		}
 		if len(bs.Asks) > 0 {
 			bs.BestAsk = bs.Asks[0].Price
+		}
+		if bs.BestBid == 0 {
+			bs.BestBid, _ = strconv.ParseFloat(wm.BestBid, 64)
+		}
+		if bs.BestAsk == 0 {
+			bs.BestAsk, _ = strconv.ParseFloat(wm.BestAsk, 64)
 		}
 		select {
 		case c.books <- bs:
@@ -153,14 +187,14 @@ func (c *connection) handleMessage(msg []byte) {
 			c.addDropped()
 		}
 	}
-	if wm.Side != "" || wm.Price != "" || wm.LastPrice != "" || wm.Event == "price_change" {
+	if wm.Side != "" || wm.Price != "" || wm.LastTradePrice != "" || strings.EqualFold(wm.EventType, "last_trade_price") {
 		if c.dropFirst && !c.firstTickDropped {
 			c.firstTickDropped = true
 			return
 		}
 		priceStr := wm.Price
 		if priceStr == "" {
-			priceStr = wm.LastPrice
+			priceStr = wm.LastTradePrice
 		}
 		price, _ := strconv.ParseFloat(priceStr, 64)
 		size, _ := strconv.ParseFloat(wm.Size, 64)
@@ -171,6 +205,79 @@ func (c *connection) handleMessage(msg []byte) {
 			c.addDropped()
 		}
 	}
+	for _, pc := range wm.PriceChanges {
+		if c.dropFirst && !c.firstTickDropped {
+			c.firstTickDropped = true
+			continue
+		}
+		price, _ := strconv.ParseFloat(pc.Price, 64)
+		size, _ := strconv.ParseFloat(pc.Size, 64)
+		tick := Tick{Slug: slug, Side: pc.Side, Price: price, Size: size, ReceivedAt: now, ConnID: c.id}
+		select {
+		case c.ticks <- tick:
+		default:
+			c.addDropped()
+		}
+	}
+}
+
+func parseWireLevels(raw json.RawMessage) []Level {
+	if len(raw) == 0 {
+		return nil
+	}
+	var arrayLevels [][]string
+	if err := json.Unmarshal(raw, &arrayLevels); err == nil {
+		out := make([]Level, 0, len(arrayLevels))
+		for _, lvl := range arrayLevels {
+			if len(lvl) < 2 {
+				continue
+			}
+			p, _ := strconv.ParseFloat(lvl[0], 64)
+			s, _ := strconv.ParseFloat(lvl[1], 64)
+			out = append(out, Level{Price: p, Size: s})
+		}
+		return out
+	}
+	var objectLevels []struct {
+		Price string `json:"price"`
+		Size  string `json:"size"`
+	}
+	if err := json.Unmarshal(raw, &objectLevels); err != nil {
+		return nil
+	}
+	out := make([]Level, 0, len(objectLevels))
+	for _, lvl := range objectLevels {
+		p, _ := strconv.ParseFloat(lvl.Price, 64)
+		s, _ := strconv.ParseFloat(lvl.Size, 64)
+		out = append(out, Level{Price: p, Size: s})
+	}
+	return out
+}
+
+func (c *connection) slugForWire(wm wireMessage) string {
+	if slug := c.assetIDToSlug[wm.AssetID]; slug != "" {
+		return slug
+	}
+	if wm.Market != "" {
+		return wm.Market
+	}
+	if len(c.assetIDs) > 0 {
+		if slug := c.assetIDToSlug[c.assetIDs[0]]; slug != "" {
+			return slug
+		}
+	}
+	return ""
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (c *connection) addDropped() {

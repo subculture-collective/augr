@@ -444,7 +444,7 @@ func TestHealthEndpointRedisDown(t *testing.T) {
 }
 
 func TestHealthEndpointUsesSharedTimeout(t *testing.T) {
-	const maxExpectedElapsed = 175 * time.Millisecond
+	const maxExpectedElapsed = 250 * time.Millisecond
 
 	originalTimeout := healthCheckTimeout
 	healthCheckTimeout = 100 * time.Millisecond

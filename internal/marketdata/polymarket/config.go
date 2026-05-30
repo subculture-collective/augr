@@ -13,6 +13,8 @@ type Metrics interface {
 
 type Config struct {
 	WSURL                string
+	AssetIDs             []string
+	AssetIDToSlug        map[string]string
 	ConnectionsPerFeed   int
 	WarmupDuration       time.Duration
 	WarmupMinClean       int
@@ -30,7 +32,8 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		WSURL:                "wss://ws-subscriptions-clob.polymarket.com/ws/",
+		WSURL:                "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+		AssetIDToSlug:        map[string]string{},
 		ConnectionsPerFeed:   100,
 		WarmupDuration:       15 * time.Second,
 		WarmupMinClean:       3,

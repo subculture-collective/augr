@@ -80,7 +80,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case b := <-r.books:
+		case b, ok := <-r.books:
+			if !ok {
+				r.books = nil
+				continue
+			}
 			if b.BestBid > 0 && b.BestAsk > 0 {
 				r.handleMid(b)
 			}
