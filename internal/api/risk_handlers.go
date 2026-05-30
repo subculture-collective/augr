@@ -2,12 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
 func (s *Server) handleRiskStatus(w http.ResponseWriter, r *http.Request) {
@@ -88,4 +91,50 @@ func (s *Server) handleMarketKillSwitch(w http.ResponseWriter, r *http.Request) 
 	default:
 		respondError(w, http.StatusNotFound, "unknown action", ErrCodeNotFound)
 	}
+}
+
+type RiskBreakerResetRequest struct {
+	Scope string `json:"scope"`
+}
+type RiskBreakerResetResponse struct {
+	Scope   string `json:"scope"`
+	Reset   bool   `json:"reset"`
+	Message string `json:"message,omitempty"`
+}
+
+func (s *Server) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		adminKey := os.Getenv("ADMIN_API_KEY")
+		if adminKey == "" {
+			respondError(w, http.StatusServiceUnavailable, "ADMIN_API_KEY not configured", ErrCodeNotImplemented)
+			return
+		}
+		if r.Header.Get("X-Admin-Key") != adminKey {
+			respondError(w, http.StatusUnauthorized, "admin key required", ErrCodeUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) handleRiskBreakerReset(w http.ResponseWriter, r *http.Request) {
+	var req RiskBreakerResetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid_body", ErrCodeBadRequest)
+		return
+	}
+	req.Scope = strings.TrimSpace(req.Scope)
+	if req.Scope == "" {
+		respondError(w, http.StatusBadRequest, "missing_scope", ErrCodeValidation)
+		return
+	}
+	if s.riskBreaker == nil {
+		respondError(w, http.StatusServiceUnavailable, "risk breaker not configured", ErrCodeNotImplemented)
+		return
+	}
+	if err := s.riskBreaker.Reset(r.Context(), req.Scope); err != nil && !errors.Is(err, repository.ErrNotFound) {
+		respondError(w, http.StatusInternalServerError, "reset_failed", ErrCodeInternal)
+		return
+	}
+	respondJSON(w, http.StatusOK, RiskBreakerResetResponse{Scope: req.Scope, Reset: true})
 }

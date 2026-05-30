@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,8 +43,10 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/google"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/ollama"
 	openaiProvider "github.com/PatrickFanella/get-rich-quick/internal/llm/openai"
+	polymarketws "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/notification"
+	"github.com/PatrickFanella/get-rich-quick/internal/recorder"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
@@ -79,6 +82,7 @@ var (
 			db.Close()
 		}
 	}
+	runtimeNewPolymarketFeed = polymarketws.NewFeed
 )
 
 type runtimeSchemaVersionError struct {
@@ -216,6 +220,35 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		PolymarketAccountRepo: polymarketAccountRepo,
 		PolymarketWatchedRepo: polymarketWatchedRepo,
 		PolymarketClient:      nil,
+	}
+	var polymarketFeed *polymarketws.Feed
+	var polymarketRecorder *recorder.Recorder
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_WS_ENABLED")), "true") {
+		pcfg := polymarketws.DefaultConfig()
+		if v := strings.TrimSpace(os.Getenv("POLYMARKET_WS_URL")); v != "" {
+			pcfg.WSURL = v
+		}
+		if v := strings.TrimSpace(os.Getenv("POLYMARKET_WS_CONNECTIONS")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				pcfg.ConnectionsPerFeed = n
+			}
+		}
+		if v := strings.TrimSpace(os.Getenv("POLYMARKET_WS_SLUGS")); v != "" {
+			pcfg.PerMarketSlugs = splitCSV(v)
+		}
+		var err error
+		polymarketFeed, err = runtimeNewPolymarketFeed(pcfg)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if err := polymarketFeed.Start(ctx); err != nil {
+			return nil, nil, nil, err
+		}
+		logger.Info("polymarket ws feed started", slog.Int("connections", pcfg.ConnectionsPerFeed), slog.Int("slug_count", len(pcfg.PerMarketSlugs)))
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_RECORDER_ENABLED")), "true") {
+			polymarketRecorder = recorder.New(polymarketFeed, pgrepo.NewPolymarketMarketDataRepo(db.Pool), recorder.RecorderConfig{BatchSize: 5000, FlushInterval: 500 * time.Millisecond, Slugs: pcfg.PerMarketSlugs}, logger, nil)
+			polymarketRecorder.Start(ctx)
+		}
 	}
 	notificationManager := newNotificationManager(cfg)
 
@@ -546,11 +579,28 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 
 	return server, schedLifecycle, func() {
+		if polymarketRecorder != nil {
+			polymarketRecorder.Close()
+		}
+		if polymarketFeed != nil {
+			polymarketFeed.Close()
+		}
 		staleRunReconcilerCancel()
 		signalShutdown()
 		closeRedis()
 		runtimeCloseDB(db)
 	}, nil
+}
+
+func splitCSV(s string) []string {
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func loadStaleRunTTL(logger *slog.Logger) time.Duration {

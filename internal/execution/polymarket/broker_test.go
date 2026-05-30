@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,7 +12,21 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/google/uuid"
 )
+
+type fakeBreaker struct {
+	allowErr   error
+	allowCalls int
+}
+
+func (f *fakeBreaker) Allow(ctx context.Context, scope string) error {
+	f.allowCalls++
+	return f.allowErr
+}
+func (f *fakeBreaker) Trip(ctx context.Context, scope, reason string) error { return nil }
+func (f *fakeBreaker) Reset(ctx context.Context, scope string) error        { return nil }
 
 func TestBrokerSubmitOrder_MapsLimitOrder(t *testing.T) {
 	t.Parallel()
@@ -488,6 +503,61 @@ func TestBrokerNilClient_ReturnsError(t *testing.T) {
 	_, err = broker.GetAccountBalance(context.Background())
 	if err == nil || err.Error() != "polymarket: broker client is required" {
 		t.Fatalf("GetAccountBalance() error = %v, want client required error", err)
+	}
+}
+
+func TestBrokerSubmitOrder_RespectsBreaker(t *testing.T) {
+	br := &fakeBreaker{allowErr: fmt.Errorf("%w: %s", risk.ErrBreakerTripped, "global (halted)")}
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	client.SetAPIBaseURL("http://127.0.0.1:1")
+	broker := &Broker{client: client, Breaker: br}
+	_, err := broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "btc-100k-2025", Side: domain.OrderSideBuy, PredictionSide: "YES", OrderType: domain.OrderTypeLimit, Quantity: 1, LimitPrice: floatPtr(0.5)})
+	if !errors.Is(err, risk.ErrBreakerTripped) {
+		t.Fatalf("SubmitOrder() err = %v", err)
+	}
+	if br.allowCalls != 1 {
+		t.Fatalf("allowCalls=%d want 1", br.allowCalls)
+	}
+}
+
+func TestBrokerSubmitOrder_NilBreakerNoEffect(t *testing.T) {
+	requests := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"poly-order-3"}`))
+	}))
+	defer server.Close()
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	client.SetAPIBaseURL(server.URL)
+	broker := &Broker{client: client}
+	_, err := broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "btc-100k-2025", Side: domain.OrderSideBuy, PredictionSide: "YES", OrderType: domain.OrderTypeLimit, Quantity: 1, LimitPrice: floatPtr(0.5)})
+	if err != nil {
+		t.Fatalf("SubmitOrder() error = %v", err)
+	}
+	select {
+	case <-requests:
+	default:
+		t.Fatal("expected HTTP call")
+	}
+}
+
+func TestBrokerSubmitOrder_StrategyScopeBreaker(t *testing.T) {
+	strategyID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	br := &fakeBreaker{}
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"poly-order-1"}`))
+	}))
+	defer server.Close()
+	client.SetAPIBaseURL(server.URL)
+	broker := &Broker{client: client, Breaker: br}
+	if _, err := broker.SubmitOrder(context.Background(), &domain.Order{StrategyID: &strategyID, Ticker: "btc-100k-2025", Side: domain.OrderSideBuy, PredictionSide: "YES", OrderType: domain.OrderTypeLimit, Quantity: 1, LimitPrice: floatPtr(0.5)}); err != nil {
+		t.Fatalf("SubmitOrder() error = %v", err)
+	}
+	if br.allowCalls != 2 {
+		t.Fatalf("allowCalls=%d want 2", br.allowCalls)
 	}
 }
 

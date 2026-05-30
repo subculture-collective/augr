@@ -51,6 +51,7 @@ type Server struct {
 	// Backtest
 	backtestConfigs repository.BacktestConfigRepository
 	backtestRuns    repository.BacktestRunRepository
+	divergenceSrc   DivergenceSource
 	dataService     *data.DataService
 
 	// Discovery
@@ -67,9 +68,10 @@ type Server struct {
 	jobRunRepo       *pgrepo.JobRunRepo
 
 	// Risk engine
-	risk     risk.RiskEngine
-	settings SettingsService
-	runner   StrategyRunner
+	risk        risk.RiskEngine
+	riskBreaker risk.Breaker
+	settings    SettingsService
+	runner      StrategyRunner
 
 	auth *AuthManager
 
@@ -183,6 +185,7 @@ type Deps struct {
 	LLMProvider       llm.Provider
 	BacktestConfigs   repository.BacktestConfigRepository
 	BacktestRuns      repository.BacktestRunRepository
+	DivergenceSrc     DivergenceSource
 	DataService       *data.DataService
 	OptionsProvider   data.OptionsDataProvider
 	EventsProvider    data.EventsProvider
@@ -196,6 +199,7 @@ type Deps struct {
 	NewsFeedRepo      *pgrepo.NewsFeedRepo
 	MarketDataHistory repository.HistoricalOHLCVRepository
 	Risk              risk.RiskEngine
+	RiskBreaker       risk.Breaker
 	Settings          SettingsService
 	Runner            StrategyRunner
 	DBHealth          HealthCheck
@@ -298,6 +302,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		events:                deps.Events,
 		backtestConfigs:       deps.BacktestConfigs,
 		backtestRuns:          deps.BacktestRuns,
+		divergenceSrc:         deps.DivergenceSrc,
 		dataService:           deps.DataService,
 		optionsProvider:       deps.OptionsProvider,
 		eventsProvider:        deps.EventsProvider,
@@ -311,6 +316,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		newsFeedRepo:          deps.NewsFeedRepo,
 		marketDataHistory:     deps.MarketDataHistory,
 		risk:                  deps.Risk,
+		riskBreaker:           deps.RiskBreaker,
 		settings:              settingsService,
 		runner:                deps.Runner,
 		auth:                  authManager,
@@ -324,6 +330,10 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		polymarketClient:      deps.PolymarketClient,
 		reportArtifacts:       deps.ReportArtifacts,
 		reportMetrics:         deps.ReportMetrics,
+	}
+	if s.divergenceSrc == nil {
+		// Phase H will wire a real data source; this keeps the route live and harmless for now.
+		s.divergenceSrc = divergenceSourceStub{}
 	}
 
 	// Construct services from the assembled deps.
@@ -444,6 +454,9 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Route("/risk", func(rr chi.Router) {
 			rr.Get("/status", s.handleRiskStatus)
 			rr.Post("/killswitch", s.handleKillSwitchToggle)
+			rr.Post("/breaker/reset", func(w http.ResponseWriter, r *http.Request) {
+				s.requireAdmin(http.HandlerFunc(s.handleRiskBreakerReset)).ServeHTTP(w, r)
+			})
 			rr.Post("/market/{type}/stop", s.handleMarketKillSwitch)
 			rr.Post("/market/{type}/resume", s.handleMarketKillSwitch)
 		})
@@ -484,7 +497,9 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		})
 
 		// Backtests
+		v1.Get("/backtest/divergence", s.handleGetBacktestDivergence)
 		v1.Route("/backtests", func(bt chi.Router) {
+			bt.Get("/divergence", s.handleGetBacktestDivergence)
 			bt.Route("/configs", func(cr chi.Router) {
 				cr.Get("/", s.handleListBacktestConfigs)
 				cr.Post("/", s.handleCreateBacktestConfig)

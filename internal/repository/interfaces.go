@@ -234,6 +234,22 @@ type PolymarketDiscoveryRunRepository interface {
 	ListLatest(ctx context.Context, limit int) ([]domain.PolymarketDiscoveryRun, error)
 }
 
+// PolymarketMarketDataRepository stores Polymarket ticks and book snapshots.
+type PolymarketMarketDataRepository interface {
+	InsertTicks(ctx context.Context, ticks []domain.PolymarketTick) error
+	InsertBookSnapshots(ctx context.Context, snaps []domain.PolymarketBookSnapshot) error
+	QueryTicks(ctx context.Context, slug string, from, to time.Time, limit int) ([]domain.PolymarketTick, error)
+	QueryBookAt(ctx context.Context, slug string, at time.Time) (*domain.PolymarketBookSnapshot, error)
+}
+
+// RiskBreakerRepository stores risk breaker state.
+type RiskBreakerRepository interface {
+	Trip(ctx context.Context, scope, reason string, trippedAt time.Time) error
+	Reset(ctx context.Context, scope string, resetAt time.Time) error
+	Get(ctx context.Context, scope string) (*domain.RiskBreakerState, error)
+	ListTripped(ctx context.Context) ([]domain.RiskBreakerState, error)
+}
+
 // PipelineRunRepository provides access to pipeline runs.
 type PipelineRunRepository interface {
 	Create(ctx context.Context, run *domain.PipelineRun) error

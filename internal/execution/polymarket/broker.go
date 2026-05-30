@@ -2,22 +2,28 @@ package polymarket
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
 
 const defaultTimeInForce = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 
 // Broker implements the execution.Broker interface for Polymarket retail APIs.
 type Broker struct {
-	client *Client
+	client  *Client
+	Breaker risk.Breaker
 }
 
 type amount struct {
@@ -99,6 +105,16 @@ func (b *Broker) SubmitOrder(ctx context.Context, order *domain.Order) (string, 
 	if order == nil {
 		return "", errors.New("polymarket: order is required")
 	}
+	if b.Breaker != nil {
+		if err := b.Breaker.Allow(ctx, domain.RiskBreakerScopeGlobal); err != nil {
+			return "", err
+		}
+		if order.StrategyID != nil && *order.StrategyID != [16]byte{} {
+			if err := b.Breaker.Allow(ctx, domain.RiskBreakerScopeStrategy(order.StrategyID.String())); err != nil {
+				return "", err
+			}
+		}
+	}
 
 	request, err := mapCreateOrderRequest(order)
 	if err != nil {
@@ -120,6 +136,73 @@ func (b *Broker) SubmitOrder(ctx context.Context, order *domain.Order) (string, 
 
 	order.PolymarketIntent = request.Intent
 	return response.ID, nil
+}
+
+// PrepareTemplate builds a reusable order send template from an execution order.
+func (b *Broker) PrepareTemplate(order *domain.Order) (*OrderTemplate, error) {
+	if b == nil || b.client == nil {
+		return nil, errors.New("polymarket: broker client is required")
+	}
+	if order == nil {
+		return nil, errors.New("polymarket: order is required")
+	}
+	request, err := mapCreateOrderRequest(order)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("polymarket: marshal order template: %w", err)
+	}
+	secret, err := base64.StdEncoding.DecodeString(b.client.secretKey)
+	if err != nil {
+		return nil, fmt.Errorf("polymarket: decode secret key: %w", err)
+	}
+	if len(secret) == 64 {
+		secret = secret[:32]
+	}
+	if len(secret) != 32 {
+		return nil, fmt.Errorf("polymarket: secret key must decode to %d or 64 bytes, got %d", 32, len(secret))
+	}
+	fullURL, _, err := b.client.buildURL("/v1/orders", nil, true)
+	if err != nil {
+		return nil, err
+	}
+	return NewOrderTemplate(secret, http.MethodPost, fullURL, body)
+}
+
+// SendTemplate sends a pre-built order template.
+func (b *Broker) SendTemplate(ctx context.Context, tmpl *OrderTemplate) (*createOrderResponse, error) {
+	if b == nil || b.client == nil {
+		return nil, errors.New("polymarket: broker client is required")
+	}
+	if tmpl == nil {
+		return nil, errors.New("polymarket: template is required")
+	}
+	now := time.Now().UnixMilli()
+	sig := tmpl.SignAt(now)
+	req, err := tmpl.newRequest(strconv.FormatInt(now, 10), sig, b.client.keyID)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	resp, err := b.client.getHTTPClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("polymarket: do templated request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("polymarket: read templated response body: %w", err)
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, parseErrorResponse(resp.StatusCode, body)
+	}
+	var out createOrderResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("polymarket: decode templated order response: %w", err)
+	}
+	return &out, nil
 }
 
 // CancelOrder cancels an existing Polymarket order by external ID.
