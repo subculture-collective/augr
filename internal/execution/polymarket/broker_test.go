@@ -28,6 +28,58 @@ func (f *fakeBreaker) Allow(ctx context.Context, scope string) error {
 func (f *fakeBreaker) Trip(ctx context.Context, scope, reason string) error { return nil }
 func (f *fakeBreaker) Reset(ctx context.Context, scope string) error        { return nil }
 
+func TestBrokerSendTemplate_RejectsMissingDryRunQuery(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	broker := NewBroker(client)
+	broker.DryRun = true
+
+	tmpl, err := NewOrderTemplate(mustDecodeSecretBytes(), http.MethodPost, "https://api.polymarket.us/v1/orders", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("NewOrderTemplate() error = %v", err)
+	}
+
+	_, err = broker.SendTemplate(context.Background(), tmpl)
+	if err == nil || err.Error() != "polymarket: dry-run mode active but template URL missing dry=1" {
+		t.Fatalf("SendTemplate() error = %v, want dry-run URL error", err)
+	}
+}
+
+func TestBrokerSendTemplate_UsesBreakerScopes(t *testing.T) {
+	t.Parallel()
+
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"poly-order-1"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	client.SetAPIBaseURL(server.URL)
+	broker := NewBroker(client)
+	breaker := &fakeBreaker{}
+	broker.Breaker = breaker
+
+	tmpl, err := NewOrderTemplate(mustDecodeSecretBytes(), http.MethodPost, server.URL+"/v1/orders?dry=1", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("NewOrderTemplate() error = %v", err)
+	}
+	tmpl.StrategyID = "strategy-1"
+
+	if _, err := broker.SendTemplate(context.Background(), tmpl); err != nil {
+		t.Fatalf("SendTemplate() error = %v", err)
+	}
+	if breaker.allowCalls != 2 {
+		t.Fatalf("breaker allowCalls = %d, want 2", breaker.allowCalls)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1", requests)
+	}
+}
+
 func TestBrokerSubmitOrder_MapsLimitOrder(t *testing.T) {
 	t.Parallel()
 

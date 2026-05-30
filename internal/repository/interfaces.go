@@ -250,6 +250,15 @@ type RiskBreakerRepository interface {
 	ListTripped(ctx context.Context) ([]domain.RiskBreakerState, error)
 }
 
+// CapitalLadderRepository stores promotion state for strategy capital ladders.
+type CapitalLadderRepository interface {
+	Upsert(ctx context.Context, entry domain.CapitalLadderEntry) error
+	Get(ctx context.Context, strategyID string) (*domain.CapitalLadderEntry, error)
+	List(ctx context.Context) ([]domain.CapitalLadderEntry, error)
+	UpdateMetrics(ctx context.Context, strategyID string, fillRate, winRate, drawdownPct float64) error
+	AdvanceStep(ctx context.Context, strategyID string, newStep float64, advancedAt time.Time) error
+}
+
 // PipelineRunRepository provides access to pipeline runs.
 type PipelineRunRepository interface {
 	Create(ctx context.Context, run *domain.PipelineRun) error

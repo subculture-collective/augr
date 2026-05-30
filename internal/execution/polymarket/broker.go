@@ -24,7 +24,35 @@ const defaultTimeInForce = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 type Broker struct {
 	client  *Client
 	Breaker risk.Breaker
+	DryRun  bool
 }
+
+// DryRunObservation captures a rejected dry-run order submission.
+type DryRunObservation struct {
+	Kind       string
+	OrderID    string
+	Slug       string
+	Side       string
+	Price      float64
+	Size       float64
+	RawError   string
+	ObservedAt time.Time
+}
+
+// DryRunRejectedError wraps a rejected dry-run observation.
+type DryRunRejectedError struct {
+	Observation DryRunObservation
+	Err         error
+}
+
+func (e *DryRunRejectedError) Error() string {
+	if e == nil {
+		return "polymarket: dry-run rejected"
+	}
+	return fmt.Sprintf("polymarket: dry-run rejected (%s): %s", e.Observation.Kind, e.Observation.RawError)
+}
+
+func (e *DryRunRejectedError) Unwrap() error { return e.Err }
 
 type amount struct {
 	Value    string `json:"value"`
@@ -121,8 +149,22 @@ func (b *Broker) SubmitOrder(ctx context.Context, order *domain.Order) (string, 
 		return "", err
 	}
 
-	responseBody, err := b.client.Post(ctx, "/v1/orders", request)
+	requestPath := "/v1/orders"
+	if b.DryRun {
+		requestPath = withDryRunQuery(requestPath)
+	}
+	responseBody, err := b.client.Post(ctx, requestPath, request)
 	if err != nil {
+		if b.DryRun {
+			if kind, ok := ClassifyDryRunError(err); ok {
+				obs := DryRunObservation{Kind: kind, Slug: order.Ticker, Side: string(order.Side), RawError: err.Error(), ObservedAt: time.Now()}
+				if order.LimitPrice != nil {
+					obs.Price = *order.LimitPrice
+				}
+				obs.Size = order.Quantity
+				return "", &DryRunRejectedError{Observation: obs, Err: err}
+			}
+		}
 		return "", fmt.Errorf("polymarket: submit order: %w", err)
 	}
 
@@ -164,11 +206,22 @@ func (b *Broker) PrepareTemplate(order *domain.Order) (*OrderTemplate, error) {
 	if len(secret) != 32 {
 		return nil, fmt.Errorf("polymarket: secret key must decode to %d or 64 bytes, got %d", 32, len(secret))
 	}
-	fullURL, _, err := b.client.buildURL("/v1/orders", nil, true)
+	requestPath := "/v1/orders"
+	if b.DryRun {
+		requestPath = withDryRunQuery(requestPath)
+	}
+	fullURL, _, err := b.client.buildURL(requestPath, nil, true)
 	if err != nil {
 		return nil, err
 	}
-	return NewOrderTemplate(secret, http.MethodPost, fullURL, body)
+	tmpl, err := NewOrderTemplate(secret, http.MethodPost, fullURL, body)
+	if err != nil {
+		return nil, err
+	}
+	if order.StrategyID != nil && *order.StrategyID != [16]byte{} {
+		tmpl.StrategyID = order.StrategyID.String()
+	}
+	return tmpl, nil
 }
 
 // SendTemplate sends a pre-built order template.
@@ -178,6 +231,19 @@ func (b *Broker) SendTemplate(ctx context.Context, tmpl *OrderTemplate) (*create
 	}
 	if tmpl == nil {
 		return nil, errors.New("polymarket: template is required")
+	}
+	if b.Breaker != nil {
+		if err := b.Breaker.Allow(ctx, domain.RiskBreakerScopeGlobal); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(tmpl.StrategyID) != "" {
+			if err := b.Breaker.Allow(ctx, domain.RiskBreakerScopeStrategy(tmpl.StrategyID)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if b.DryRun && !strings.Contains(tmpl.URL(), "dry=1") {
+		return nil, errors.New("polymarket: dry-run mode active but template URL missing dry=1")
 	}
 	now := time.Now().UnixMilli()
 	sig := tmpl.SignAt(now)
@@ -196,6 +262,12 @@ func (b *Broker) SendTemplate(ctx context.Context, tmpl *OrderTemplate) (*create
 		return nil, fmt.Errorf("polymarket: read templated response body: %w", err)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		if b.DryRun {
+			if kind, ok := ClassifyDryRunError(parseErrorResponse(resp.StatusCode, body)); ok {
+				parsedErr := parseErrorResponse(resp.StatusCode, body)
+				return nil, &DryRunRejectedError{Observation: DryRunObservation{Kind: kind, RawError: parsedErr.Error(), ObservedAt: time.Now()}, Err: parsedErr}
+			}
+		}
 		return nil, parseErrorResponse(resp.StatusCode, body)
 	}
 	var out createOrderResponse

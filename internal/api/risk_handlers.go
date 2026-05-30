@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,14 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
+
+type riskBreakerListerFunc interface {
+	ListTripped(ctx context.Context) ([]domain.RiskBreakerState, error)
+}
+
+type RiskBreakerLister interface {
+	ListTripped(ctx context.Context) ([]domain.RiskBreakerState, error)
+}
 
 func (s *Server) handleRiskStatus(w http.ResponseWriter, r *http.Request) {
 	status, err := s.risk.GetStatus(r.Context())
@@ -137,4 +146,17 @@ func (s *Server) handleRiskBreakerReset(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	respondJSON(w, http.StatusOK, RiskBreakerResetResponse{Scope: req.Scope, Reset: true})
+}
+
+func (s *Server) handleRiskBreakerList(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.riskBreakerLister == nil {
+		respondError(w, http.StatusServiceUnavailable, "risk breaker lister not configured", ErrCodeNotImplemented)
+		return
+	}
+	items, err := s.riskBreakerLister.ListTripped(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list risk breakers", ErrCodeInternal)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"tripped": items})
 }

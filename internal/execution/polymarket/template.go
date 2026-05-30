@@ -2,29 +2,23 @@ package polymarket
 
 import (
 	"bytes"
-	"crypto/hmac"
-	"crypto/sha256"
+	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"hash"
 	"net/http"
 	neturl "net/url"
-	"strconv"
 	"strings"
-	"sync"
 )
 
 // OrderTemplate caches the immutable pieces of an authenticated order send.
 type OrderTemplate struct {
-	mu      sync.Mutex
-	body    []byte
-	prefix  []byte
-	method  string
-	url     string
-	mac     hash.Hash
-	secret  []byte
-	scratch []byte
+	body       []byte
+	method     string
+	url        string
+	secretKey  []byte
+	path       string
+	StrategyID string
 }
 
 // NewOrderTemplate constructs a reusable signing template.
@@ -54,14 +48,12 @@ func NewOrderTemplate(secret []byte, method, rawURL string, body []byte) (*Order
 	}
 
 	tmpl := &OrderTemplate{
-		body:    append([]byte(nil), body...),
-		prefix:  []byte(strings.ToUpper(strings.TrimSpace(method)) + signingPath + string(body)),
-		method:  strings.ToUpper(strings.TrimSpace(method)),
-		url:     strings.TrimSpace(rawURL),
-		secret:  append([]byte(nil), secret...),
-		scratch: make([]byte, 0, 32),
+		body:      append([]byte(nil), body...),
+		method:    strings.ToUpper(strings.TrimSpace(method)),
+		url:       strings.TrimSpace(rawURL),
+		secretKey: append([]byte(nil), secret...),
+		path:      signingPath,
 	}
-	tmpl.mac = hmac.New(sha256.New, tmpl.secret)
 	return tmpl, nil
 }
 
@@ -70,14 +62,13 @@ func (t *OrderTemplate) Clone() *OrderTemplate {
 		return nil
 	}
 	clone := &OrderTemplate{
-		body:    append([]byte(nil), t.body...),
-		prefix:  append([]byte(nil), t.prefix...),
-		method:  t.method,
-		url:     t.url,
-		secret:  append([]byte(nil), t.secret...),
-		scratch: make([]byte, 0, cap(t.scratch)),
+		body:       append([]byte(nil), t.body...),
+		method:     t.method,
+		url:        t.url,
+		secretKey:  append([]byte(nil), t.secretKey...),
+		path:       t.path,
+		StrategyID: t.StrategyID,
 	}
-	clone.mac = hmac.New(sha256.New, clone.secret)
 	return clone
 }
 
@@ -85,17 +76,17 @@ func (t *OrderTemplate) SignAt(ts int64) string {
 	if t == nil {
 		return ""
 	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.mac.Reset()
-	t.scratch = strconv.AppendInt(t.scratch[:0], ts, 10)
-	t.mac.Write(t.scratch)
-	t.mac.Write(t.prefix)
-	sig := t.mac.Sum(nil)
-	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(sig)))
-	base64.StdEncoding.Encode(encoded, sig)
-	return string(encoded)
+	secret := append([]byte(nil), t.secretKey...)
+	if len(secret) == 64 {
+		secret = secret[:32]
+	}
+	if len(secret) != ed25519.SeedSize {
+		return ""
+	}
+	privateKey := ed25519.NewKeyFromSeed(secret)
+	message := canonicalSigningMessage(fmt.Sprintf("%d", ts), t.method, t.path)
+	sig := ed25519.Sign(privateKey, []byte(message))
+	return base64.StdEncoding.EncodeToString(sig)
 }
 
 func (t *OrderTemplate) BodyLen() int {
@@ -110,6 +101,13 @@ func (t *OrderTemplate) URL() string {
 		return ""
 	}
 	return t.url
+}
+
+func (t *OrderTemplate) SigningPath() string {
+	if t == nil {
+		return ""
+	}
+	return t.path
 }
 
 func (t *OrderTemplate) newRequest(timestamp string, signature string, keyID string) (*http.Request, error) {

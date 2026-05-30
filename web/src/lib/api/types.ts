@@ -193,6 +193,32 @@ export interface PolymarketWatchedMarket {
   note?: string;
 }
 
+export interface PolymarketStatus {
+  enabled: boolean;
+  ws_connections: number;
+  avg_jitter_ms: number;
+  dropped: number;
+  ready_slugs: string[];
+  recorder_lag_seconds: number;
+  updated_at: string;
+}
+
+export interface RiskBreakerState {
+  scope: string;
+  tripped_at: string;
+  reason: string;
+  reset_at: string | null;
+}
+
+export interface DivergenceResponse {
+  strategy_id: string;
+  backtest: { fill_rate: number; win_rate: number; samples: number };
+  live: { fill_rate: number; win_rate: number; samples: number };
+  tolerance: number;
+  max_abs_delta: number;
+  status: string;
+}
+
 export type PolymarketAccountSort = 'volume' | 'win_rate' | 'bayesian_win_rate' | 'consistency_score' | 'resolved_markets' | 'last_active' | 'trades';
 
 export interface PolymarketAccountListParams {

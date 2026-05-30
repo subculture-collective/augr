@@ -24,6 +24,7 @@ type ConsecutiveLossConfig struct {
 type ConsecutiveLossBreaker struct {
 	cfg     ConsecutiveLossConfig
 	breaker Breaker
+	OnTrip  func(scope, reason string)
 	mu      sync.Mutex
 	losses  map[string]int
 	blocked map[string]int
@@ -61,7 +62,14 @@ func (c *ConsecutiveLossBreaker) RecordResult(ctx context.Context, strategyID st
 		return nil
 	}
 	reason := fmt.Sprintf("consecutive_losses=%d threshold=%d blocking %d windows", streak, c.cfg.Threshold, c.cfg.Windows)
-	return c.breaker.Trip(ctx, domain.RiskBreakerScopeStrategy(strategyID), reason)
+	scope := domain.RiskBreakerScopeStrategy(strategyID)
+	if err := c.breaker.Trip(ctx, scope, reason); err != nil {
+		return err
+	}
+	if c.OnTrip != nil {
+		c.OnTrip(scope, reason)
+	}
+	return nil
 }
 
 func (c *ConsecutiveLossBreaker) UnblockExpired(ctx context.Context) error {

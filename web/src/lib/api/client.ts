@@ -68,7 +68,10 @@ import type {
   PolymarketAccountListParams,
   PolymarketAccountTrade,
   PolymarketDiscoveryResult,
+  PolymarketStatus,
   PolymarketWatchedMarket,
+  RiskBreakerState,
+  DivergenceResponse,
   PredictionMarketData,
 } from '@/lib/api/types';
 
@@ -698,6 +701,20 @@ export class ApiClient {
       '/api/v1/polymarket/discovery/run',
       { method: 'POST' },
     );
+  }
+
+  async getPolymarketMarketDataStatus() {
+    return this.request<PolymarketStatus>('/api/v1/marketdata/polymarket/status');
+  }
+
+  async listRiskBreakers() {
+    return this.request<{ tripped: RiskBreakerState[] }>('/api/v1/risk/breakers');
+  }
+
+  async getBacktestDivergence(strategyId: string) {
+    return this.request<DivergenceResponse>('/api/v1/backtest/divergence', {
+      query: { strategy_id: strategyId },
+    });
   }
 }
 

@@ -52,6 +52,14 @@ func TestDrawdownBreaker_AllowAndCheck(t *testing.T) {
 	if repo.tripCalls != 1 {
 		t.Fatalf("tripCalls=%d want 1", repo.tripCalls)
 	}
+	tripCalled := false
+	b.OnTrip = func(scope, reason string) { tripCalled = true }
+	if err := b.CheckDrawdown(context.Background(), -150); err != nil {
+		t.Fatal(err)
+	}
+	if !tripCalled {
+		t.Fatal("OnTrip not called")
+	}
 	if err := b.Allow(context.Background(), domain.RiskBreakerScopeGlobal); !errors.Is(err, ErrBreakerTripped) {
 		t.Fatalf("Allow error = %v", err)
 	}

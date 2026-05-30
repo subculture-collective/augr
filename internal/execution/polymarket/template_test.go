@@ -1,14 +1,14 @@
 package polymarket
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"crypto/ed25519"
 )
 
 func TestOrderTemplate_SignMatchesAdHoc(t *testing.T) {
@@ -24,12 +24,8 @@ func TestOrderTemplate_SignMatchesAdHoc(t *testing.T) {
 
 	got := tmpl.SignAt(ts)
 
-	mac := hmac.New(sha256.New, secret)
-	_, _ = mac.Write([]byte("1712000000123"))
-	_, _ = mac.Write([]byte(strings.ToUpper(http.MethodPost)))
-	_, _ = mac.Write([]byte("/v1/orders"))
-	_, _ = mac.Write(body)
-	want := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	privateKey := ed25519.NewKeyFromSeed(secret)
+	want := base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte("1712000000123"+strings.ToUpper(http.MethodPost)+"/v1/orders")))
 
 	if got != want {
 		t.Fatalf("SignAt() = %q, want %q", got, want)

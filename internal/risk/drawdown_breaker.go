@@ -22,9 +22,10 @@ type Breaker interface {
 type DrawdownBreakerConfig struct{ MaxDailyDD float64 }
 
 type DrawdownBreaker struct {
-	cfg  DrawdownBreakerConfig
-	repo repository.RiskBreakerRepository
-	mu   sync.Mutex
+	cfg    DrawdownBreakerConfig
+	repo   repository.RiskBreakerRepository
+	OnTrip func(scope, reason string)
+	mu     sync.Mutex
 }
 
 func NewDrawdownBreaker(cfg DrawdownBreakerConfig, repo repository.RiskBreakerRepository) *DrawdownBreaker {
@@ -45,7 +46,13 @@ func (b *DrawdownBreaker) Allow(ctx context.Context, scope string) error {
 func (b *DrawdownBreaker) Trip(ctx context.Context, scope, reason string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.repo.Trip(ctx, scope, reason, time.Now().UTC())
+	if err := b.repo.Trip(ctx, scope, reason, time.Now().UTC()); err != nil {
+		return err
+	}
+	if b.OnTrip != nil {
+		b.OnTrip(scope, reason)
+	}
+	return nil
 }
 
 func (b *DrawdownBreaker) Reset(ctx context.Context, scope string) error {

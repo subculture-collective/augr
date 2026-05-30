@@ -290,7 +290,7 @@ func (c *Client) authHeaders(method, signingPath string) (map[string]string, err
 		now = c.now
 	}
 	timestamp := fmt.Sprintf("%d", now().UnixMilli())
-	message := timestamp + strings.ToUpper(method) + signingPath
+	message := canonicalSigningMessage(timestamp, method, signingPath)
 
 	secretKeyBytes, err := base64.StdEncoding.DecodeString(c.secretKey)
 	if err != nil {
@@ -310,6 +310,10 @@ func (c *Client) authHeaders(method, signingPath string) (map[string]string, err
 		"X-PM-Timestamp":  timestamp,
 		"X-PM-Signature":  base64.StdEncoding.EncodeToString(signature),
 	}, nil
+}
+
+func canonicalSigningMessage(timestamp, method, signingPath string) string {
+	return timestamp + strings.ToUpper(method) + signingPath
 }
 
 func (c *Client) buildURL(requestPath string, params url.Values, authenticated bool) (string, string, error) {

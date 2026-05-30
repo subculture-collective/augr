@@ -52,6 +52,7 @@ type Server struct {
 	backtestConfigs repository.BacktestConfigRepository
 	backtestRuns    repository.BacktestRunRepository
 	divergenceSrc   DivergenceSource
+	mdStatusSrc     MarketDataStatusSource
 	dataService     *data.DataService
 
 	// Discovery
@@ -68,10 +69,11 @@ type Server struct {
 	jobRunRepo       *pgrepo.JobRunRepo
 
 	// Risk engine
-	risk        risk.RiskEngine
-	riskBreaker risk.Breaker
-	settings    SettingsService
-	runner      StrategyRunner
+	risk              risk.RiskEngine
+	riskBreaker       risk.Breaker
+	riskBreakerLister RiskBreakerLister
+	settings          SettingsService
+	runner            StrategyRunner
 
 	auth *AuthManager
 
@@ -186,6 +188,7 @@ type Deps struct {
 	BacktestConfigs   repository.BacktestConfigRepository
 	BacktestRuns      repository.BacktestRunRepository
 	DivergenceSrc     DivergenceSource
+	MarketDataStatus  MarketDataStatusSource
 	DataService       *data.DataService
 	OptionsProvider   data.OptionsDataProvider
 	EventsProvider    data.EventsProvider
@@ -200,6 +203,7 @@ type Deps struct {
 	MarketDataHistory repository.HistoricalOHLCVRepository
 	Risk              risk.RiskEngine
 	RiskBreaker       risk.Breaker
+	RiskBreakerLister RiskBreakerLister
 	Settings          SettingsService
 	Runner            StrategyRunner
 	DBHealth          HealthCheck
@@ -303,6 +307,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		backtestConfigs:       deps.BacktestConfigs,
 		backtestRuns:          deps.BacktestRuns,
 		divergenceSrc:         deps.DivergenceSrc,
+		mdStatusSrc:           deps.MarketDataStatus,
 		dataService:           deps.DataService,
 		optionsProvider:       deps.OptionsProvider,
 		eventsProvider:        deps.EventsProvider,
@@ -317,6 +322,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		marketDataHistory:     deps.MarketDataHistory,
 		risk:                  deps.Risk,
 		riskBreaker:           deps.RiskBreaker,
+		riskBreakerLister:     deps.RiskBreakerLister,
 		settings:              settingsService,
 		runner:                deps.Runner,
 		auth:                  authManager,
@@ -418,6 +424,8 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 			pr.Post("/discovery/run", s.handleRunPolymarketDiscovery)
 		})
 
+		v1.Get("/marketdata/polymarket/status", s.handlePolymarketStatus)
+
 		// Pipeline runs
 		v1.Route("/runs", func(rr chi.Router) {
 			rr.Get("/", s.handleListRuns)
@@ -453,6 +461,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		// Risk
 		v1.Route("/risk", func(rr chi.Router) {
 			rr.Get("/status", s.handleRiskStatus)
+			rr.Get("/breakers", s.handleRiskBreakerList)
 			rr.Post("/killswitch", s.handleKillSwitchToggle)
 			rr.Post("/breaker/reset", func(w http.ResponseWriter, r *http.Request) {
 				s.requireAdmin(http.HandlerFunc(s.handleRiskBreakerReset)).ServeHTTP(w, r)

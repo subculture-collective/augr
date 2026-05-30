@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,6 +47,7 @@ import (
 	polymarketws "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/notification"
+	"github.com/PatrickFanella/get-rich-quick/internal/observability"
 	"github.com/PatrickFanella/get-rich-quick/internal/recorder"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
@@ -54,10 +56,33 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/service"
 	"github.com/PatrickFanella/get-rich-quick/internal/signal"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type watchedMarketsLoaderAdapter struct {
 	repo repository.PolymarketWatchedMarketsRepository
+}
+
+type polymarketStatusSource struct {
+	feed    *polymarketws.Feed
+	metrics *observability.SurfersMetrics
+}
+
+func (s polymarketStatusSource) PolymarketStatus(ctx context.Context) (api.PolymarketStatus, error) {
+	_ = ctx
+	if s.feed == nil {
+		return api.PolymarketStatus{Enabled: false}, nil
+	}
+	stats := s.feed.Stats()
+	return api.PolymarketStatus{
+		Enabled:       true,
+		WSConnections: stats.Pool.Members,
+		AvgJitterMS:   stats.Pool.AvgJitterMS,
+		Dropped:       stats.Pool.Dropped,
+		ReadySlugs:    nil,
+		RecorderLagS:  s.metrics.LastRecorderLag(),
+		UpdatedAt:     time.Now().UTC(),
+	}, nil
 }
 
 func (a watchedMarketsLoaderAdapter) ListEnabledSlugs(ctx context.Context) ([]string, error) {
@@ -83,6 +108,8 @@ var (
 		}
 	}
 	runtimeNewPolymarketFeed = polymarketws.NewFeed
+	surfersMetricsOnce       sync.Once
+	surfersMetricsInst       *observability.SurfersMetrics
 )
 
 type runtimeSchemaVersionError struct {
@@ -135,6 +162,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	redisHealth, closeRedis := newRedisHealthCheck(cfg)
 
 	appMetrics := metrics.New()
+	surfersMetricsOnce.Do(func() { surfersMetricsInst = observability.NewSurfersMetrics(prometheus.DefaultRegisterer) })
+	surfersMetrics := surfersMetricsInst
 	sharedLLMBudget := buildLLMBudget(cfg.LLM)
 
 	strategyRepo := pgrepo.NewStrategyRepo(db.Pool)
@@ -237,6 +266,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			pcfg.PerMarketSlugs = splitCSV(v)
 		}
 		var err error
+		pcfg.Metrics = surfersMetrics.FeedMetrics()
 		polymarketFeed, err = runtimeNewPolymarketFeed(pcfg)
 		if err != nil {
 			return nil, nil, nil, err
@@ -246,10 +276,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		}
 		logger.Info("polymarket ws feed started", slog.Int("connections", pcfg.ConnectionsPerFeed), slog.Int("slug_count", len(pcfg.PerMarketSlugs)))
 		if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_RECORDER_ENABLED")), "true") {
-			polymarketRecorder = recorder.New(polymarketFeed, pgrepo.NewPolymarketMarketDataRepo(db.Pool), recorder.RecorderConfig{BatchSize: 5000, FlushInterval: 500 * time.Millisecond, Slugs: pcfg.PerMarketSlugs}, logger, nil)
+			polymarketRecorder = recorder.New(polymarketFeed, pgrepo.NewPolymarketMarketDataRepo(db.Pool), recorder.RecorderConfig{BatchSize: 5000, FlushInterval: 500 * time.Millisecond, Slugs: pcfg.PerMarketSlugs}, logger, surfersMetrics.RecorderMetrics())
 			polymarketRecorder.Start(ctx)
 		}
 	}
+	deps.MarketDataStatus = polymarketStatusSource{feed: polymarketFeed, metrics: surfersMetrics}
 	notificationManager := newNotificationManager(cfg)
 
 	var sched *scheduler.Scheduler

@@ -30,6 +30,7 @@ import { PolymarketPage } from '@/pages/polymarket-page'
 import { PolymarketAccountPage } from '@/pages/polymarket-account-page'
 import { GlossaryPage } from '@/pages/glossary-page'
 import { ReliabilityPage } from '@/pages/reliability-page'
+import { SurfersOpsPage } from '@/pages/surfers-ops-page'
 
 export function AppRoutes() {
   return (
@@ -66,6 +67,7 @@ export function AppRoutes() {
           <Route path="signals" element={<SignalsPage />} />
           <Route path="polymarket" element={<PolymarketPage />} />
           <Route path="polymarket/accounts/:address" element={<PolymarketAccountPage />} />
+          <Route path="surfers/ops" element={<SurfersOpsPage />} />
           <Route path="reliability" element={<ReliabilityPage />} />
         </Route>
       </Route>

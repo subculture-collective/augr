@@ -21,7 +21,9 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/cli/tui"
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	postgresrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 )
 
@@ -269,6 +271,7 @@ func NewRootCommand(ctx context.Context, deps Dependencies) *cobra.Command {
 	rootCmd.AddCommand(state.newRiskCommand())
 	rootCmd.AddCommand(state.newAutomationCommand())
 	rootCmd.AddCommand(state.newMemoriesCommand())
+	rootCmd.AddCommand(state.newCapitalLadderCommand())
 
 	return rootCmd
 }
@@ -640,6 +643,82 @@ func (s *rootState) newMemoriesCommand() *cobra.Command {
 	})
 
 	return commands
+}
+
+func (s *rootState) newCapitalLadderCommand() *cobra.Command {
+	commands := &cobra.Command{
+		Use:   "capital-ladder",
+		Short: "Inspect and promote capital ladder entries",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+	}
+
+	promoteCmd := &cobra.Command{
+		Use:   "promote",
+		Short: "Promote a strategy ladder step",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			strategyID, _ := cmd.Flags().GetString("strategy-id")
+			return withCapitalLadderRepo(cmd.Context(), func(repo *postgresrepo.CapitalLadderRepo) error {
+				ladder := risk.NewCapitalLadder(risk.CapitalLadderConfig{}, repo)
+				entry, err := ladder.Promote(cmd.Context(), strategyID, time.Now().UTC())
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), entry)
+			})
+		},
+	}
+	promoteCmd.Flags().String("strategy-id", "", "Strategy ID")
+	_ = promoteCmd.MarkFlagRequired("strategy-id")
+	commands.AddCommand(promoteCmd)
+
+	statusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show ladder status",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			strategyID, _ := cmd.Flags().GetString("strategy-id")
+			return withCapitalLadderRepo(cmd.Context(), func(repo *postgresrepo.CapitalLadderRepo) error {
+				if strings.TrimSpace(strategyID) != "" {
+					entry, err := repo.Get(cmd.Context(), strategyID)
+					if err != nil {
+						return err
+					}
+					return writeJSON(cmd.OutOrStdout(), entry)
+				}
+				entries, err := repo.List(cmd.Context())
+				if err != nil {
+					return err
+				}
+				return writeJSON(cmd.OutOrStdout(), entries)
+			})
+		},
+	}
+	statusCmd.Flags().String("strategy-id", "", "Strategy ID")
+	commands.AddCommand(statusCmd)
+
+	return commands
+}
+
+func withCapitalLadderRepo(ctx context.Context, fn func(*postgresrepo.CapitalLadderRepo) error) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	pool, err := pgxpool.New(ctx, cfg.Database.URL)
+	if err != nil {
+		return fmt.Errorf("connect db: %w", err)
+	}
+	defer pool.Close()
+	version, err := postgresrepo.CurrentSchemaVersion(ctx, pool)
+	if err != nil {
+		return err
+	}
+	if version < postgresrepo.RequiredSchemaVersion {
+		return fmt.Errorf("database schema version %d is below required %d; run migrations", version, postgresrepo.RequiredSchemaVersion)
+	}
+	return fn(postgresrepo.NewCapitalLadderRepo(pool))
 }
 
 func (s *rootState) client() (*apiClient, error) {

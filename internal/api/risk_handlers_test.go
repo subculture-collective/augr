@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -16,11 +17,49 @@ type fakeRiskBreaker struct {
 	resetCalls []string
 }
 
+type fakeRiskBreakerLister struct{ items []domain.RiskBreakerState }
+
+func (f *fakeRiskBreakerLister) ListTripped(_ context.Context) ([]domain.RiskBreakerState, error) {
+	return f.items, nil
+}
+
 func (f *fakeRiskBreaker) Allow(_ context.Context, _ string) error            { return nil }
 func (f *fakeRiskBreaker) Trip(_ context.Context, scope, reason string) error { return nil }
 func (f *fakeRiskBreaker) Reset(_ context.Context, scope string) error {
 	f.resetCalls = append(f.resetCalls, scope)
 	return f.resetErr
+}
+
+func TestRiskBreakerList(t *testing.T) {
+	tests := []struct {
+		name       string
+		srv        *Server
+		wantStatus int
+		wantCount  int
+	}{
+		{name: "nil lister", srv: &Server{}, wantStatus: http.StatusServiceUnavailable},
+		{name: "empty", srv: &Server{riskBreakerLister: &fakeRiskBreakerLister{}}, wantStatus: http.StatusOK, wantCount: 0},
+		{name: "two tripped", srv: &Server{riskBreakerLister: &fakeRiskBreakerLister{items: []domain.RiskBreakerState{{Scope: "a"}, {Scope: "b"}}}}, wantStatus: http.StatusOK, wantCount: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/risk/breakers", nil)
+			tt.srv.handleRiskBreakerList(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status=%d want=%d", rr.Code, tt.wantStatus)
+			}
+			if tt.wantStatus == http.StatusOK {
+				var body struct {
+					Tripped []domain.RiskBreakerState `json:"tripped"`
+				}
+				_ = json.Unmarshal(rr.Body.Bytes(), &body)
+				if len(body.Tripped) != tt.wantCount {
+					t.Fatalf("count=%d want=%d", len(body.Tripped), tt.wantCount)
+				}
+			}
+		})
+	}
 }
 
 func TestHandleRiskBreakerReset(t *testing.T) {
