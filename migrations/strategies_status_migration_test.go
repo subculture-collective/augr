@@ -47,6 +47,32 @@ func TestStrategiesStatusDownMigrationDropsNewColumns(t *testing.T) {
 	}
 }
 
+func TestStrategyActiveDefaultsMigrationRepairsGeneratedRows(t *testing.T) {
+	upSQL := normalizeSQL(t, readMigrationFile(t, "000033_strategy_active_defaults.up.sql"))
+	downSQL := normalizeSQL(t, readMigrationFile(t, "000033_strategy_active_defaults.down.sql"))
+
+	for _, fragment := range []string{
+		"alter table strategies alter column is_active set default true;",
+		"create or replace function sync_strategy_status_with_is_active() returns trigger as $$",
+		"update strategies set status = 'active', is_active = true where status = 'inactive' and is_active = false and is_paper = true",
+		"name like 'discovery:%'",
+		"name like 'options:%'",
+	} {
+		if !strings.Contains(upSQL, fragment) {
+			t.Fatalf("expected active defaults up migration to contain %q, got:\n%s", fragment, upSQL)
+		}
+	}
+
+	for _, fragment := range []string{
+		"alter table strategies alter column is_active set default false;",
+		"update strategies set status = 'inactive', is_active = false where status = 'active' and is_active = true and is_paper = true",
+	} {
+		if !strings.Contains(downSQL, fragment) {
+			t.Fatalf("expected active defaults down migration to contain %q, got:\n%s", fragment, downSQL)
+		}
+	}
+}
+
 func TestStrategiesStatusMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping migration integration test in short mode")

@@ -30,6 +30,9 @@ const (
 	EventCircuitBreaker  EventType = "circuit_breaker"
 	EventError           EventType = "error"
 	EventPipelineHealth  EventType = "pipeline_health"
+	EventPolymarketWhaleTrade EventType = "polymarket_whale_trade"
+	EventPolymarketPriceMove  EventType = "polymarket_price_move"
+	EventPolymarketAccount    EventType = "polymarket_account_tracked"
 )
 
 // WSMessage is the envelope for every WebSocket event sent to clients.
@@ -39,6 +42,16 @@ type WSMessage struct {
 	RunID      uuid.UUID `json:"run_id,omitempty"`
 	Data       any       `json:"data,omitempty"`
 	Timestamp  time.Time `json:"timestamp"`
+}
+
+// IsPolymarketEvent reports whether msg belongs to the polymarket surface.
+func (m WSMessage) IsPolymarketEvent() bool {
+	switch m.Type {
+	case EventPolymarketWhaleTrade, EventPolymarketPriceMove, EventPolymarketAccount:
+		return true
+	default:
+		return false
+	}
 }
 
 // broadcastMessage carries pre-parsed routing info alongside the raw JSON
@@ -110,7 +123,12 @@ func (h *Hub) Run() {
 		case bm := <-h.broadcast:
 			h.mu.Lock()
 			for client := range h.clients {
-				if client.matchesParsed(bm.strategyID, bm.runID) {
+				if bm.strategyID == uuid.Nil && bm.runID == uuid.Nil {
+					if !client.matchesPolymarket() && !client.matchesParsed(bm.strategyID, bm.runID) {
+						continue
+					}
+				}
+				if client.matchesParsed(bm.strategyID, bm.runID) || (bm.strategyID == uuid.Nil && bm.runID == uuid.Nil && client.matchesPolymarket()) {
 					select {
 					case client.send <- bm.data:
 					default:
@@ -125,6 +143,9 @@ func (h *Hub) Run() {
 		}
 	}
 }
+
+// BroadcastPolymarket broadcasts a polymarket-scoped event.
+func (h *Hub) BroadcastPolymarket(msg WSMessage) { h.Broadcast(msg) }
 
 // Stop shuts down the hub event loop.
 func (h *Hub) Stop() {

@@ -179,6 +179,24 @@ func TestJobOrchestratorStatus_IncludesLastSummary(t *testing.T) {
 	}
 }
 
+func TestJobOrchestratorRegisterAllAddsCurrentDataRefreshBeforeHotScan(t *testing.T) {
+	t.Parallel()
+
+	orch := NewJobOrchestrator(OrchestratorDeps{})
+	orch.RegisterAll()
+
+	if _, ok := orch.jobs["current_data_refresh"]; !ok {
+		t.Fatal("current_data_refresh job not registered")
+	}
+	hotScan, ok := orch.jobs["hot_scan"]
+	if !ok {
+		t.Fatal("hot_scan job not registered")
+	}
+	if len(hotScan.DependsOn) != 1 || hotScan.DependsOn[0] != "current_data_refresh" {
+		t.Fatalf("hot_scan depends_on = %#v, want [current_data_refresh]", hotScan.DependsOn)
+	}
+}
+
 func TestJobOrchestratorAlpacaReconcileRecordsMetricsAndSummary(t *testing.T) {
 	t.Parallel()
 

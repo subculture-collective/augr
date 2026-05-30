@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
@@ -17,6 +18,12 @@ import (
 
 // Schedule specs for market-hours jobs.
 var (
+	currentDataRefreshSpec = scheduler.ScheduleSpec{
+		Type:         scheduler.ScheduleTypeMarketHours,
+		Cron:         "*/15 * * * 1-5",
+		SkipWeekends: true,
+		SkipHolidays: true,
+	}
 	hotScanSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,
 		Cron:         "*/15 * * * 1-5",
@@ -32,8 +39,119 @@ var (
 )
 
 func (o *JobOrchestrator) registerMarketJobs() {
-	o.Register("hot_scan", "Quick scan top 200 tickers by watch score", hotScanSpec, o.hotScan)
+	o.Register("current_data_refresh", "Refresh intraday OHLCV for holdings, active strategies, and top watchlist", currentDataRefreshSpec, o.currentDataRefresh)
+	o.Register("hot_scan", "Quick scan top 200 tickers by watch score", hotScanSpec, o.hotScan, "current_data_refresh")
 	o.Register("deep_scan", "Full universe snapshot and score update", deepScanSpec, o.deepScan, "hot_scan")
+}
+
+// currentDataRefresh refreshes recent intraday OHLCV for the most relevant stock tickers.
+func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
+	summary := map[string]int{
+		"tickers": 0,
+		"batches": 0,
+		"updated": 0,
+		"errors":  0,
+	}
+	defer func() {
+		o.SetLastSummary("current_data_refresh", summary)
+	}()
+
+	tickers := make([]string, 0, 100)
+	seen := make(map[string]struct{}, 100)
+	addTicker := func(raw string) {
+		ticker := strings.ToUpper(strings.TrimSpace(raw))
+		if ticker == "" {
+			return
+		}
+		if _, ok := seen[ticker]; ok {
+			return
+		}
+		seen[ticker] = struct{}{}
+		tickers = append(tickers, ticker)
+	}
+
+	if o.deps.PositionRepo != nil {
+		positions, err := o.deps.PositionRepo.GetOpen(ctx, repository.PositionFilter{}, 100, 0)
+		if err != nil {
+			o.logger.Warn("current_data_refresh: get open positions failed", slog.Any("error", err))
+			summary["errors"]++
+		} else {
+			for _, pos := range positions {
+				addTicker(pos.Ticker)
+			}
+		}
+	}
+
+	if o.deps.StrategyRepo != nil {
+		strategies, err := o.deps.StrategyRepo.List(ctx, repository.StrategyFilter{Status: domain.StrategyStatusActive, MarketType: domain.MarketTypeStock}, 100, 0)
+		if err != nil {
+			o.logger.Warn("current_data_refresh: list active strategies failed", slog.Any("error", err))
+			summary["errors"]++
+		} else {
+			for _, strategy := range strategies {
+				addTicker(strategy.Ticker)
+			}
+		}
+	}
+
+	if o.deps.Universe != nil {
+		watchlist, err := o.deps.Universe.GetWatchlist(ctx, 50)
+		if err != nil {
+			o.logger.Warn("current_data_refresh: get watchlist failed", slog.Any("error", err))
+			summary["errors"]++
+		} else {
+			for _, ticker := range watchlist {
+				addTicker(ticker.Ticker)
+			}
+		}
+	}
+
+	sort.Strings(tickers)
+	summary["tickers"] = len(tickers)
+	if len(tickers) == 0 {
+		o.logger.Info("current_data_refresh: no tickers to refresh")
+		return nil
+	}
+
+	if o.deps.DataService == nil {
+		o.logger.Info("current_data_refresh: data service unavailable, skipping refresh", slog.Int("tickers", len(tickers)))
+		return nil
+	}
+
+	const batchSize = 10
+	now := time.Now().UTC()
+	from := now.Add(-48 * time.Hour)
+	for start := 0; start < len(tickers); start += batchSize {
+		end := start + batchSize
+		if end > len(tickers) {
+			end = len(tickers)
+		}
+		batch := tickers[start:end]
+		summary["batches"]++
+
+		if _, err := o.deps.DataService.DownloadHistoricalOHLCV(ctx, domain.MarketTypeStock, batch, data.Timeframe5m, from, now, false); err != nil {
+			o.logger.Warn("current_data_refresh: batch refresh failed",
+				slog.Int("batch", summary["batches"]),
+				slog.Int("tickers", len(batch)),
+				slog.Any("error", err),
+			)
+			summary["errors"]++
+		} else {
+			summary["updated"] += len(batch)
+		}
+
+		if end < len(tickers) {
+			time.Sleep(150 * time.Millisecond)
+		}
+	}
+
+	o.logger.Info("current_data_refresh: complete",
+		slog.Int("tickers", summary["tickers"]),
+		slog.Int("batches", summary["batches"]),
+		slog.Int("updated", summary["updated"]),
+		slog.Int("errors", summary["errors"]),
+	)
+	return nil
 }
 
 // hotScan scores the top 200 watchlist tickers using locally stored OHLCV data.

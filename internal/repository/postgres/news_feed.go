@@ -112,7 +112,11 @@ func (r *NewsFeedRepo) ListByTicker(ctx context.Context, ticker string, limit in
 	rows, err := r.pool.Query(ctx,
 		`SELECT guid, source, title, description, link, published_at, tickers, category, sentiment, relevance, summary
 		 FROM news_feed
-		 WHERE $1 = ANY(tickers)
+		 WHERE EXISTS (
+		 	SELECT 1
+		 	FROM unnest(COALESCE(tickers, ARRAY[]::text[])) AS t(ticker)
+		 	WHERE upper(ticker) = upper($1)
+		 )
 		 ORDER BY published_at DESC
 		 LIMIT $2`,
 		ticker, limit,
@@ -147,4 +151,36 @@ func (r *NewsFeedRepo) InsertSocialSentiment(ctx context.Context, row *SocialSen
 		return fmt.Errorf("postgres: insert social sentiment: %w", err)
 	}
 	return nil
+}
+
+// ListSocialSentimentByTicker returns recent social sentiment snapshots for a ticker.
+func (r *NewsFeedRepo) ListSocialSentimentByTicker(ctx context.Context, ticker string, limit int) ([]SocialSentimentRow, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT ticker, source, sentiment, bullish, bearish, post_count, trending, measured_at
+		 FROM social_sentiment
+		 WHERE upper(ticker) = upper($1)
+		 ORDER BY measured_at DESC
+		 LIMIT $2`,
+		ticker, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list social sentiment by ticker: %w", err)
+	}
+	defer rows.Close()
+
+	var items []SocialSentimentRow
+	for rows.Next() {
+		var item SocialSentimentRow
+		if err := rows.Scan(&item.Ticker, &item.Source, &item.Sentiment, &item.Bullish, &item.Bearish, &item.PostCount, &item.Trending, &item.MeasuredAt); err != nil {
+			return nil, fmt.Errorf("postgres: scan social sentiment row: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: iterate social sentiment rows: %w", err)
+	}
+	return items, nil
 }

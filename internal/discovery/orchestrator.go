@@ -343,3 +343,37 @@ func RunDiscovery(ctx context.Context, cfg DiscoveryConfig, deps DiscoveryDeps) 
 
 	return result, nil
 }
+
+// CheckpointCandidatesFromScreenResults converts screened candidates into the
+// domain checkpoint shape used by resumable overnight backtest runs.
+func CheckpointCandidatesFromScreenResults(in []ScreenResult) []domain.OvernightBacktestCandidate {
+	out := make([]domain.OvernightBacktestCandidate, 0, len(in))
+	for _, c := range in {
+		out = append(out, domain.OvernightBacktestCandidate{
+			Ticker:     c.Ticker,
+			Bars:       c.Bars,
+			Indicators: c.Indicators,
+			Close:      c.Close,
+			ADV:        c.ADV,
+			ATR:        c.ATR,
+		})
+	}
+	return out
+}
+
+// ScreenResultsFromCheckpointCandidates converts persisted checkpoint
+// candidates back into discovery screen results for later pipeline phases.
+func ScreenResultsFromCheckpointCandidates(in []domain.OvernightBacktestCandidate) []ScreenResult {
+	out := make([]ScreenResult, 0, len(in))
+	for _, c := range in {
+		out = append(out, ScreenResult{
+			Ticker:     c.Ticker,
+			Bars:       c.Bars,
+			Indicators: c.Indicators,
+			Close:      c.Close,
+			ADV:        c.ADV,
+			ATR:        c.ATR,
+		})
+	}
+	return out
+}

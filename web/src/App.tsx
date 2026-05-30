@@ -26,6 +26,8 @@ import { CalendarPage } from '@/pages/calendar-page'
 import { StockDetailPage } from '@/pages/stock-detail-page'
 import { UniversePage } from '@/pages/universe-page'
 import { SignalsPage } from '@/pages/signals-page'
+import { PolymarketPage } from '@/pages/polymarket-page'
+import { PolymarketAccountPage } from '@/pages/polymarket-account-page'
 import { GlossaryPage } from '@/pages/glossary-page'
 import { ReliabilityPage } from '@/pages/reliability-page'
 
@@ -62,6 +64,8 @@ export function AppRoutes() {
           <Route path="risk" element={<RiskPage />} />
           <Route path="realtime" element={<RealtimePage />} />
           <Route path="signals" element={<SignalsPage />} />
+          <Route path="polymarket" element={<PolymarketPage />} />
+          <Route path="polymarket/accounts/:address" element={<PolymarketAccountPage />} />
           <Route path="reliability" element={<ReliabilityPage />} />
         </Route>
       </Route>

@@ -48,9 +48,26 @@ import (
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
+	"github.com/PatrickFanella/get-rich-quick/internal/service"
 	"github.com/PatrickFanella/get-rich-quick/internal/signal"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
+
+type watchedMarketsLoaderAdapter struct {
+	repo repository.PolymarketWatchedMarketsRepository
+}
+
+func (a watchedMarketsLoaderAdapter) ListEnabledSlugs(ctx context.Context) ([]string, error) {
+	items, err := a.repo.List(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	slugs := make([]string, 0, len(items))
+	for _, item := range items {
+		slugs = append(slugs, item.Slug)
+	}
+	return slugs, nil
+}
 
 var (
 	runtimeNewDB                = pgrepo.NewDB
@@ -127,6 +144,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	memoryRepo := pgrepo.NewMemoryRepo(db.Pool)
 	apiKeyRepo := pgrepo.NewAPIKeyRepo(db.Pool)
 	auditLogRepo := pgrepo.NewAuditLogRepo(db.Pool)
+	backtestConfigRepo := pgrepo.NewBacktestConfigRepo(db.Pool)
+	backtestRunRepo := pgrepo.NewBacktestRunRepo(db.Pool)
 	userRepo := pgrepo.NewUserRepo(db.Pool)
 	conversationRepo := pgrepo.NewConversationRepo(db.Pool)
 	marketDataCacheRepo := pgrepo.NewMarketDataCacheRepo(db.Pool)
@@ -134,6 +153,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	optionsScanRepo := pgrepo.NewOptionsScanRepo(db.Pool)
 	newsFeedRepo := pgrepo.NewNewsFeedRepo(db.Pool)
 	polymarketAccountRepo := pgrepo.NewPolymarketAccountRepo(db.Pool)
+	polymarketWatchedRepo := pgrepo.NewPolymarketWatchedMarketsRepo(db.Pool)
+	polymarketResolvedRepo := pgrepo.NewPolymarketResolvedMarketsRepo(db.Pool)
 	reportArtifactRepo := pgrepo.NewReportArtifactRepo(db.Pool)
 	runRegistry := agent.NewRunContextRegistry()
 
@@ -165,31 +186,36 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		WithPersister(ctx, pgrepo.NewSettingsPersister(db.Pool), logger)
 
 	deps := api.Deps{
-		Strategies:       strategyRepo,
-		Runs:             runRepo,
-		Decisions:        decisionRepo,
-		Orders:           orderRepo,
-		Positions:        positionRepo,
-		Trades:           tradeRepo,
-		Memories:         memoryRepo,
-		APIKeys:          apiKeyRepo,
-		Users:            userRepo,
-		Risk:             riskEngine,
-		Settings:         settingsSvc,
-		DBHealth:         api.HealthCheckFunc(db.Pool.Ping),
-		RedisHealth:      redisHealth,
-		Conversations:    conversationRepo,
-		AuditLog:         auditLogRepo,
-		Events:           eventRepo,
-		MetricsHandler:   appMetrics.Handler(),
-		Snapshots:        snapshotRepo,
-		LLMProvider:      buildProviderChain(cfg.LLM, appMetrics, logger, sharedLLMBudget),
-		BacktestConfigs:  pgrepo.NewBacktestConfigRepo(db.Pool),
-		BacktestRuns:     pgrepo.NewBacktestRunRepo(db.Pool),
-		NewsFeedRepo:     newsFeedRepo,
-		DiscoveryRunRepo: pgrepo.NewDiscoveryRunRepo(db.Pool),
-		ReportArtifacts:  reportArtifactRepo,
-		ReportMetrics:    appMetrics,
+		Strategies:            strategyRepo,
+		Runs:                  runRepo,
+		Decisions:             decisionRepo,
+		Orders:                orderRepo,
+		Positions:             positionRepo,
+		Trades:                tradeRepo,
+		Memories:              memoryRepo,
+		APIKeys:               apiKeyRepo,
+		Users:                 userRepo,
+		Risk:                  riskEngine,
+		Settings:              settingsSvc,
+		DBHealth:              api.HealthCheckFunc(db.Pool.Ping),
+		RedisHealth:           redisHealth,
+		Conversations:         conversationRepo,
+		AuditLog:              auditLogRepo,
+		Events:                eventRepo,
+		MetricsHandler:        appMetrics.Handler(),
+		Snapshots:             snapshotRepo,
+		LLMProvider:           buildProviderChain(cfg.LLM, appMetrics, logger, sharedLLMBudget),
+		BacktestConfigs:       backtestConfigRepo,
+		BacktestRuns:          backtestRunRepo,
+		NewsFeedRepo:          newsFeedRepo,
+		MarketDataHistory:     marketDataCacheRepo,
+		DiscoveryRunRepo:      pgrepo.NewDiscoveryRunRepo(db.Pool),
+		JobRunRepo:            jobRunRepo,
+		ReportArtifacts:       reportArtifactRepo,
+		ReportMetrics:         appMetrics,
+		PolymarketAccountRepo: polymarketAccountRepo,
+		PolymarketWatchedRepo: polymarketWatchedRepo,
+		PolymarketClient:      nil,
 	}
 	notificationManager := newNotificationManager(cfg)
 
@@ -316,6 +342,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					return err
 				}),
 			}
+			backtestSvc := service.NewBacktestService(backtestConfigRepo, backtestRunRepo, strategyRepo, auditLogRepo, dataService, deps.LLMProvider, logger)
+			schedOpts = append(schedOpts, scheduler.WithBacktestServiceScheduling(backtestConfigRepo, backtestSvc, "scheduler"))
 
 			if cfg.Features.EnableTickerDiscovery && strings.TrimSpace(cfg.DataProviders.Polygon.APIKey) != "" {
 				polygonClient := polygon.NewClient(cfg.DataProviders.Polygon.APIKey, logger)
@@ -358,27 +386,31 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			if err != nil {
 				logger.Warn("automation: failed to create embedding provider", slog.Any("error", err))
 			} else {
+				overnightBacktestRunRepo := pgrepo.NewOvernightBacktestRunRepo(db.Pool)
 				orch := automation.NewJobOrchestrator(automation.OrchestratorDeps{
-					Universe:              deps.Universe,
-					Polygon:               polygonClientForAuto,
-					DataService:           dataService,
-					AlpacaReconciler:      alpacaReconciler,
-					OptionsProvider:       deps.OptionsProvider,
-					LLMProvider:           deps.LLMProvider,
-					EmbeddingProvider:     embeddingProvider,
-					EventsProvider:        deps.EventsProvider,
-					StrategyRepo:          strategyRepo,
-					RunRepo:               runRepo,
-					JobRunRepo:            jobRunRepo,
-					OptionsScanRepo:       optionsScanRepo,
-					NewsFeedRepo:          newsFeedRepo,
-					PolymarketAccountRepo: polymarketAccountRepo,
-					PolymarketCLOBURL:     cfg.Brokers.Polymarket.CLOBURL,
-					ReportArtifactRepo:    reportArtifactRepo,
-					BacktestConfigRepo:    pgrepo.NewBacktestConfigRepo(db.Pool),
-					BacktestRunRepo:       pgrepo.NewBacktestRunRepo(db.Pool),
-					StrategyTrigger:       sched,
-					Logger:                logger,
+					Universe:               deps.Universe,
+					Polygon:                polygonClientForAuto,
+					DataService:            dataService,
+					AlpacaReconciler:       alpacaReconciler,
+					OptionsProvider:        deps.OptionsProvider,
+					LLMProvider:            deps.LLMProvider,
+					EmbeddingProvider:      embeddingProvider,
+					EventsProvider:         deps.EventsProvider,
+					StrategyRepo:           strategyRepo,
+					RunRepo:                runRepo,
+					JobRunRepo:             jobRunRepo,
+					OptionsScanRepo:        optionsScanRepo,
+					NewsFeedRepo:           newsFeedRepo,
+					PolymarketAccountRepo:  polymarketAccountRepo,
+					PolymarketResolvedRepo: polymarketResolvedRepo,
+					PolymarketWatchedRepo:  polymarketWatchedRepo,
+					PolymarketCLOBURL:      cfg.Brokers.Polymarket.CLOBURL,
+					ReportArtifactRepo:     reportArtifactRepo,
+					BacktestConfigRepo:     backtestConfigRepo,
+					BacktestRunRepo:        backtestRunRepo,
+					OvernightBacktestRuns:  overnightBacktestRunRepo,
+					StrategyTrigger:        sched,
+					Logger:                 logger,
 				})
 				orch.WithJobMetrics(appMetrics)
 				orch.WithReportMetrics(appMetrics)
@@ -404,12 +436,13 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	var signalSources []signal.SignalSource
 	signalSources = append(signalSources,
 		signal.NewRSSSource(signal.DefaultRSSFeeds(), 60*time.Second, logger),
-		signal.NewRedditSource(signal.DefaultSubreddits(), 60*time.Second, logger),
+		signal.NewRedditSource(signal.DefaultSubreddits(), 5*time.Minute, logger),
 		signal.NewPolymarketSource(signal.PolymarketSourceConfig{
 			CLOBURL:               clobURL,
 			Interval:              10 * time.Minute,
 			PriceMoveThreshold:    0.05,
 			VolumeSpikeMultiplier: 3.0,
+			Loader:                watchedMarketsLoaderAdapter{repo: polymarketWatchedRepo},
 		}, logger),
 	)
 	if polymarketAccountRepo != nil {

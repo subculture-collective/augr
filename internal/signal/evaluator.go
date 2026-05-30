@@ -216,10 +216,28 @@ func (e *Evaluator) parseResponse(content string, event RawSignalEvent, strategi
 
 func (e *Evaluator) completeWithTransientRetry(ctx context.Context, request llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	resp, err := e.provider.Complete(ctx, request)
-	if err == nil || !shouldRetrySignalEvalError(err) {
-		return resp, err
+	if err != nil {
+		if !shouldRetrySignalEvalError(err) {
+			return resp, err
+		}
+		return e.provider.Complete(ctx, request)
 	}
-	return e.provider.Complete(ctx, request)
+	// Treat empty content as a transient failure (broker dedup cache hit,
+	// upstream model produced no tokens under JSON-object mode, etc.) and
+	// retry once before falling back.
+	if resp != nil && strings.TrimSpace(resp.Content) == "" {
+		if ctx.Err() != nil {
+			return resp, nil
+		}
+		retryResp, retryErr := e.provider.Complete(ctx, request)
+		if retryErr != nil {
+			// Surface the retry error so the caller logs it instead of
+			// silently using the empty fallback.
+			return retryResp, retryErr
+		}
+		return retryResp, nil
+	}
+	return resp, nil
 }
 
 func shouldRetrySignalEvalError(err error) bool {

@@ -22,6 +22,8 @@ export function OptionsPage() {
   const [expiry, setExpiry] = useState('')
   const [optionType, setOptionType] = useState<OptionTypeFilter>('')
 
+  const urlTicker = searchParams.get('ticker')?.trim().toUpperCase() ?? ''
+
   const { data, isLoading, isError, isFetched, refetch } = useQuery({
     queryKey: ['options-chain', ticker, expiry, optionType],
     queryFn: () =>
@@ -29,7 +31,7 @@ export function OptionsPage() {
         expiry: expiry || undefined,
         type: optionType || undefined,
       }),
-    enabled: false,
+    enabled: Boolean(ticker),
   })
 
   function commitAndLoad(
@@ -45,7 +47,6 @@ export function OptionsPage() {
     setExpiry(expiryValue)
     setDraftType(typeValue)
     setOptionType(typeValue)
-    setTimeout(() => void refetch(), 0)
   }
 
   function loadChain() {
@@ -54,10 +55,14 @@ export function OptionsPage() {
 
   // Seed from URL param: /options?ticker=AAPL
   useEffect(() => {
-    const tickerParam = searchParams.get('ticker')
-    if (tickerParam) commitAndLoad(tickerParam, '', '')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    if (!urlTicker) return
+    setDraftTicker(urlTicker)
+    setTicker(urlTicker)
+    setDraftExpiry('')
+    setExpiry('')
+    setDraftType('')
+    setOptionType('')
+  }, [urlTicker])
 
   return (
     <div className="space-y-4" data-testid="options-page">

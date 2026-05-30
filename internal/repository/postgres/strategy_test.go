@@ -333,6 +333,7 @@ func newStrategyIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 			status        TEXT NOT NULL DEFAULT 'active',
 			skip_next_run BOOLEAN NOT NULL DEFAULT false,
 			is_paper      BOOLEAN NOT NULL DEFAULT true,
+			is_active     BOOLEAN NOT NULL DEFAULT true,
 			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

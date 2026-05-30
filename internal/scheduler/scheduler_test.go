@@ -287,6 +287,48 @@ func (m *mockBacktestRunner) callCount() int {
 	return len(m.calls)
 }
 
+type mockBacktestServiceRunner struct {
+	mu    sync.Mutex
+	calls []struct {
+		configID uuid.UUID
+		actor    string
+	}
+	run  *domain.BacktestRun
+	err  error
+	ctxs []context.Context
+}
+
+func (m *mockBacktestServiceRunner) RunBacktest(ctx context.Context, configID uuid.UUID, actor string) (*domain.BacktestRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, struct {
+		configID uuid.UUID
+		actor    string
+	}{configID: configID, actor: actor})
+	m.ctxs = append(m.ctxs, ctx)
+	if m.run != nil {
+		copied := *m.run
+		return &copied, m.err
+	}
+	return nil, m.err
+}
+
+func (m *mockBacktestServiceRunner) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+func (m *mockBacktestServiceRunner) firstCall() (uuid.UUID, string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.calls) == 0 {
+		return uuid.Nil, "", false
+	}
+	call := m.calls[0]
+	return call.configID, call.actor, true
+}
+
 type mockRiskEngine struct {
 	killSwitchActive bool
 	killSwitchErr    error
@@ -800,6 +842,59 @@ func TestSchedulerStartTriggersScheduledBacktestAndPersistsRun(t *testing.T) {
 	}
 	if len(curve) != 1 || !curve[0].Timestamp.Equal(triggeredAt) {
 		t.Fatalf("equity curve = %+v, want timestamp %s", curve, triggeredAt)
+	}
+}
+
+func TestSchedulerStartRunsServiceBacktests(t *testing.T) {
+	configID := uuid.New()
+	triggeredAt := time.Date(2026, time.March, 25, 2, 0, 0, 0, time.UTC)
+
+	backtestRepo := &mockBacktestConfigRepo{
+		configs: []domain.BacktestConfig{{
+			ID:           configID,
+			StrategyID:   uuid.New(),
+			Name:         "Nightly service backtest",
+			ScheduleCron: "@daily",
+			StartDate:    time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+			EndDate:      time.Date(2024, 12, 31, 0, 0, 0, 0, time.UTC),
+			Simulation:   domain.BacktestSimulationParameters{InitialCapital: 100000},
+		}},
+	}
+	serviceRunner := &mockBacktestServiceRunner{run: &domain.BacktestRun{ID: uuid.New()}}
+	fakeCron := &fakeCronEngine{}
+	s := NewScheduler(
+		&mockStrategyRepo{},
+		&mockPipeline{},
+		&mockRiskEngine{},
+		testLogger(),
+		WithBacktestServiceScheduling(backtestRepo, serviceRunner, "scheduler-actor"),
+	)
+	s.newCron = func() cronEngine { return fakeCron }
+	s.nowFunc = func() time.Time { return triggeredAt }
+
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer s.Stop()
+
+	if got := fakeCron.jobCount(); got != 1 {
+		t.Fatalf("registered jobs = %d, want 1", got)
+	}
+
+	fakeCron.Run(0)
+
+	if got := serviceRunner.callCount(); got != 1 {
+		t.Fatalf("service runner calls = %d, want 1", got)
+	}
+	gotID, gotActor, ok := serviceRunner.firstCall()
+	if !ok {
+		t.Fatal("expected service runner call")
+	}
+	if gotID != configID {
+		t.Fatalf("service runner configID = %s, want %s", gotID, configID)
+	}
+	if gotActor != "scheduler-actor" {
+		t.Fatalf("service runner actor = %q, want %q", gotActor, "scheduler-actor")
 	}
 }
 

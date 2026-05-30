@@ -17,7 +17,7 @@ import (
 func (o *JobOrchestrator) registerOvernightJobs() {
 	o.Register("overnight_backtest", "Heavy 5-year backtests on promising candidates", overnightBacktestSpec, o.overnightBacktest, "history_refresh")
 	o.Register("overnight_sweep", "Parameter optimization on deployed strategies", overnightSweepSpec, o.overnightSweep, "overnight_backtest")
-	o.Register("overnight_generate", "LLM generates new strategy ideas per sector", overnightGenerateSpec, o.overnightGenerate, "overnight_sweep")
+	o.Register("overnight_generate", "LLM generates new strategy ideas per sector", overnightGenerateSpec, o.overnightGenerate, "overnight_sweep", "overnight_backtest")
 	o.Register("history_refresh", "Download latest OHLCV for all universe tickers", historyRefreshSpec, o.historyRefresh)
 	o.Register("options_discovery", "Full options strategy discovery pipeline", optionsDiscoverySpec, o.optionsDiscovery, "overnight_generate")
 }
@@ -25,82 +25,21 @@ func (o *JobOrchestrator) registerOvernightJobs() {
 var optionsDiscoverySpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "30 3 * * 2-6", SkipWeekends: false, SkipHolidays: false}
 
 var (
-	overnightBacktestSpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 1 * * 2-6", SkipWeekends: false, SkipHolidays: false}
+	overnightBacktestSpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "*/30 1-5 * * 2-6", SkipWeekends: false, SkipHolidays: false}
 	overnightSweepSpec    = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 2 * * 2-6", SkipWeekends: false, SkipHolidays: false}
 	overnightGenerateSpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 3 * * 2-6", SkipWeekends: false, SkipHolidays: false}
 	historyRefreshSpec    = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 4 * * 2-6", SkipWeekends: false, SkipHolidays: false}
 )
 
-// overnightBacktest runs the full discovery pipeline on the top 50
-// watchlist tickers with 5 years of history.
+const overnightBacktestWatchlistLimit = 20
+
 func (o *JobOrchestrator) overnightBacktest(ctx context.Context) error {
-	o.logger.Info("overnight_backtest: starting")
-
-	ctx, cancel := context.WithTimeout(ctx, 4*time.Hour)
-	defer cancel()
-
-	if o.deps.Universe == nil {
-		o.logger.Info("overnight_backtest: skipped — Universe not configured")
-		return nil
+	o.logger.Info("overnight_backtest: chunk starting")
+	chunker := newOvernightBacktestChunker(o.deps, o.logger)
+	if err := chunker.RunChunk(ctx); err != nil {
+		return fmt.Errorf("overnight_backtest: chunk failed: %w", err)
 	}
-
-	watchlist, err := o.deps.Universe.GetWatchlist(ctx, 50)
-	if err != nil {
-		return fmt.Errorf("overnight_backtest: get watchlist: %w", err)
-	}
-
-	tickers := make([]string, len(watchlist))
-	for i, t := range watchlist {
-		tickers[i] = t.Ticker
-	}
-
-	// Download 5 years of history for all tickers.
-	now := time.Now()
-	histFrom := now.AddDate(-5, 0, 0)
-	_, err = o.deps.DataService.DownloadHistoricalOHLCV(
-		ctx, domain.MarketTypeStock,
-		tickers, data.Timeframe1d,
-		histFrom, now, true,
-	)
-	if err != nil {
-		o.logger.Warn("overnight_backtest: history download had errors", slog.Any("error", err))
-		// Continue — partial data is fine.
-	}
-
-	// Run full discovery pipeline.
-	cfg := discovery.DiscoveryConfig{
-		Screener: discovery.ScreenerConfig{
-			Tickers:    tickers,
-			MarketType: domain.MarketTypeStock,
-		},
-		MaxWinners: 5,
-	}
-	deps := discovery.DiscoveryDeps{
-		DataService: o.deps.DataService,
-		LLMProvider: o.deps.LLMProvider,
-		Strategies:  o.deps.StrategyRepo,
-		Logger:      o.logger,
-	}
-
-	result, err := discovery.RunDiscovery(ctx, cfg, deps)
-	if err != nil {
-		return fmt.Errorf("overnight_backtest: discovery failed: %w", err)
-	}
-
-	o.logger.Info("overnight_backtest: completed",
-		slog.Int("candidates", result.Candidates),
-		slog.Int("deployed", result.Deployed),
-		slog.Duration("duration", result.Duration),
-	)
-
-	for _, w := range result.Winners {
-		o.logger.Info("overnight_backtest: top scorer",
-			slog.String("ticker", w.Ticker),
-			slog.Float64("score", w.Score),
-			slog.Float64("sharpe", w.InSample.SharpeRatio),
-		)
-	}
-
+	o.logger.Info("overnight_backtest: chunk completed")
 	return nil
 }
 
@@ -362,10 +301,14 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 		return nil
 	}
 
-	// Get top 100 from watchlist as candidates.
-	watchlist, err := o.deps.Universe.GetWatchlist(ctx, 100)
+	// Get tradeable watchlist candidates.
+	watchlist, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.deps.DataService, 500, 100)
 	if err != nil {
 		return fmt.Errorf("options_discovery: get watchlist: %w", err)
+	}
+	if len(watchlist) == 0 {
+		o.logger.Info("options_discovery: no tradeable watchlist tickers, skipping")
+		return nil
 	}
 	tickers := make([]string, len(watchlist))
 	for i, t := range watchlist {
@@ -394,6 +337,17 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 		return fmt.Errorf("options_discovery: %w", err)
 	}
 
+	o.SetLastSummary("options_discovery", map[string]int{
+		"candidates": result.Candidates,
+		"scored":     result.Scored,
+		"generated":  result.Generated,
+		"swept":      result.Swept,
+		"validated":  result.Validated,
+		"deployed":   result.Deployed,
+		"errors":     len(result.Errors),
+		"winners":    len(result.Winners),
+	})
+
 	o.logger.Info("options_discovery: complete",
 		slog.Int("candidates", result.Candidates),
 		slog.Int("scored", result.Scored),
@@ -401,6 +355,7 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 		slog.Int("swept", result.Swept),
 		slog.Int("validated", result.Validated),
 		slog.Int("deployed", result.Deployed),
+		slog.Int("errors", len(result.Errors)),
 		slog.Duration("duration", result.Duration),
 	)
 

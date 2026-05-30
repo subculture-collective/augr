@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -70,7 +71,12 @@ func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 	if mismatchErr.Required != pgrepo.RequiredSchemaVersion {
 		t.Fatalf("mismatchErr.Required = %d, want %d", mismatchErr.Required, pgrepo.RequiredSchemaVersion)
 	}
-	for _, want := range []string{"current version 31", "required version 32", "run migrations, then restart the process", "fresh process restart"} {
+	for _, want := range []string{
+		fmt.Sprintf("current version %d", pgrepo.RequiredSchemaVersion-1),
+		fmt.Sprintf("required version %d", pgrepo.RequiredSchemaVersion),
+		"run migrations, then restart the process",
+		"fresh process restart",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err.Error(), want)
 		}
@@ -124,7 +130,12 @@ func TestNewAPIServerSchemaAheadFailsFast(t *testing.T) {
 	if mismatchErr.Required != pgrepo.RequiredSchemaVersion {
 		t.Fatalf("mismatchErr.Required = %d, want %d", mismatchErr.Required, pgrepo.RequiredSchemaVersion)
 	}
-	for _, want := range []string{"current version 33", "required version 32", "run migrations, then restart the process", "fresh process restart"} {
+	for _, want := range []string{
+		fmt.Sprintf("current version %d", pgrepo.RequiredSchemaVersion+1),
+		fmt.Sprintf("required version %d", pgrepo.RequiredSchemaVersion),
+		"run migrations, then restart the process",
+		"fresh process restart",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q missing %q", err.Error(), want)
 		}

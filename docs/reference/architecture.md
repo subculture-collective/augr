@@ -213,6 +213,14 @@ Protected endpoints are mounted under `/api/v1` with auth middleware.
 
 The scheduler is optional and controlled by feature flags and runtime wiring.
 
+### Chunked overnight backtest
+
+The `overnight_backtest` automation job is resumable. It persists progress in
+`overnight_backtest_runs` and advances through `screen`, `generate`,
+`sweep_validate_deploy`, and `done` phases. The generation phase processes a
+small fixed number of candidates per cron tick so local GPU-backed LLM inference
+is released between chunks.
+
 ## Risk architecture
 
 There are two separate layers of “risk” in the system:

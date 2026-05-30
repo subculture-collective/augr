@@ -10,6 +10,43 @@ export type StrategyLLMProvider =
   | 'xai'
   | 'ollama';
 
+export interface HistoricalOHLCV {
+  ticker: string;
+  provider: string;
+  timeframe: string;
+  timestamp: ISODateString;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface NewsFeedItem {
+  guid: string;
+  source: string;
+  title: string;
+  description?: string;
+  link?: string;
+  published_at: ISODateString;
+  tickers?: string[];
+  category?: string;
+  sentiment?: string;
+  relevance?: number;
+  summary?: string;
+}
+
+export interface SocialSentimentRow {
+  ticker: string;
+  source: string;
+  sentiment: number;
+  bullish: number;
+  bearish: number;
+  post_count: number;
+  trending: boolean;
+  measured_at: ISODateString;
+}
+
 export interface StrategyConfigWire {
   llm_config?: {
     provider?: StrategyLLMProvider;
@@ -67,7 +104,10 @@ export type WebSocketEventType =
   | 'position_update'
   | 'circuit_breaker'
   | 'error'
-  | 'pipeline_health';
+  | 'pipeline_health'
+  | 'polymarket_whale_trade'
+  | 'polymarket_price_move'
+  | 'polymarket_account_tracked';
 
 export interface ErrorResponse {
   error: string;
@@ -105,6 +145,61 @@ export interface PredictionMarketData {
   best_bid_no?: number;
   best_ask_no?: number;
   spread_yes?: number;
+}
+
+export interface PolymarketAccount {
+  address: string;
+  display_name?: string;
+  first_seen: ISODateString;
+  last_active?: ISODateString;
+  total_trades: number;
+  total_volume: number;
+  markets_entered: number;
+  markets_won: number;
+  markets_lost: number;
+  win_rate: number;
+  category_stats?: Record<string, unknown>;
+  avg_position: number;
+  max_position: number;
+  avg_entry_hours_before_resolution?: number;
+  early_entry_rate: number;
+  tags?: string[];
+  tracked: boolean;
+  updated_at: ISODateString;
+}
+
+export interface PolymarketAccountTrade {
+  id: string;
+  account_address: string;
+  market_slug: string;
+  side: 'YES' | 'NO' | 'Up' | 'Down' | 'Over' | 'Under';
+  action: 'buy' | 'sell';
+  price: number;
+  size_usdc: number;
+  timestamp: ISODateString;
+  outcome?: string;
+  pnl?: number;
+  created_at: ISODateString;
+}
+
+export interface PolymarketWatchedMarket {
+  slug: string;
+  enabled: boolean;
+  added_at: ISODateString;
+  added_by?: string;
+  note?: string;
+}
+
+export type PolymarketAccountSort = 'volume' | 'win_rate' | 'last_active' | 'trades';
+
+export interface PolymarketAccountListParams {
+  tracked?: boolean;
+  min_win_rate?: number;
+  min_volume?: number;
+  min_trades?: number;
+  sort?: PolymarketAccountSort;
+  limit?: number;
+  offset?: number;
 }
 
 export interface Strategy {
@@ -409,7 +504,13 @@ export interface LoginResponse {
 }
 export interface WebSocketAck {
   status: 'ok';
-  action: 'subscribe' | 'unsubscribe' | 'subscribe_all' | 'unsubscribe_all';
+  action:
+    | 'subscribe'
+    | 'unsubscribe'
+    | 'subscribe_all'
+    | 'unsubscribe_all'
+    | 'subscribe_polymarket'
+    | 'unsubscribe_polymarket';
 }
 
 export interface WebSocketCommandError {
@@ -420,7 +521,7 @@ export interface WebSocketCommandError {
 export type WebSocketServerMessage = WebSocketMessage | WebSocketAck | WebSocketCommandError;
 
 export interface WebSocketSubscriptionCommand {
-  action: 'subscribe' | 'unsubscribe';
+  action: 'subscribe' | 'unsubscribe' | 'subscribe_polymarket' | 'unsubscribe_polymarket';
   strategy_ids?: UUID[];
   run_ids?: UUID[];
 }
@@ -666,6 +767,30 @@ export interface DiscoveryRunRequest {
   max_winners?: number;
 }
 
+// ---------- Polymarket Discovery ----------
+
+export interface PolymarketDeployedStrategy {
+  strategy_id: UUID;
+  slug: string;
+  template: string;
+  name: string;
+  direction: 'YES' | 'NO';
+  conviction: number;
+  reused: boolean;
+}
+
+export interface PolymarketDiscoveryResult {
+  started_at: string;
+  duration: number;
+  fetched_all: number;
+  screened: number;
+  proposed: number;
+  skipped: number;
+  deployed: PolymarketDeployedStrategy[] | null;
+  errors?: string[];
+  dry_run: boolean;
+}
+
 // ---------- Automation ----------
 
 export interface JobStatus {
@@ -679,6 +804,19 @@ export interface JobStatus {
   error_count: number;
   running: boolean;
   enabled: boolean;
+}
+
+export interface AutomationJobRun {
+  id: UUID;
+  job_name: string;
+  status: string;
+  started_at: ISODateString;
+  completed_at?: ISODateString;
+  duration_ns?: number;
+  error?: string;
+  last_error_at?: ISODateString;
+  consecutive_failures: number;
+  created_at: ISODateString;
 }
 
 // ---------- Universe ----------

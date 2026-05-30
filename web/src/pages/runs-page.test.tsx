@@ -90,13 +90,46 @@ function createRunsResponse(data: (typeof baseRun)[], total = data.length, offse
   };
 }
 
+function createAutomationRunsResponse() {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      data: [
+        {
+          id: '20000000-0000-0000-0000-000000000001',
+          job_name: 'alpaca_reconcile',
+          status: 'ok',
+          started_at: '2025-01-03T10:00:00Z',
+          completed_at: '2025-01-03T10:00:01Z',
+          duration_ns: 1_000_000_000,
+          consecutive_failures: 0,
+          created_at: '2025-01-03T10:00:01Z',
+        },
+      ],
+      total: 1,
+      limit: 10,
+      offset: 0,
+    }),
+  };
+}
+
+function mockRunsPageFetch(runResponses: Array<ReturnType<typeof createRunsResponse>>) {
+  const queue = [...runResponses];
+  const fetchMock = vi.fn((input: RequestInfo | URL) => {
+    const url = new URL(input.toString(), 'http://localhost');
+    if (url.pathname === '/api/v1/strategies') return Promise.resolve(createStrategyResponse());
+    if (url.pathname === '/api/v1/automation/runs') return Promise.resolve(createAutomationRunsResponse());
+    if (url.pathname === '/api/v1/runs') return Promise.resolve(queue.shift() ?? createRunsResponse([]));
+    return Promise.reject(new Error(`Unexpected URL: ${url.pathname}`));
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
 describe('RunsPage', () => {
   it('renders filters and populates the strategy dropdown', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse([baseRun], 1));
-    vi.stubGlobal('fetch', fetchMock);
+    mockRunsPageFetch([createRunsResponse([baseRun], 1)]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
@@ -121,13 +154,11 @@ describe('RunsPage', () => {
       started_at: `2025-01-${String((index % 9) + 1).padStart(2, '0')}T09:00:00Z`,
     }));
 
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse(secondPageRuns, 40))
-      .mockResolvedValueOnce(createRunsResponse([baseRun], 1, 20))
-      .mockResolvedValueOnce(createRunsResponse([baseRun], 1));
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = mockRunsPageFetch([
+      createRunsResponse(secondPageRuns, 40),
+      createRunsResponse([baseRun], 1, 20),
+      createRunsResponse([baseRun], 1),
+    ]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
@@ -150,9 +181,10 @@ describe('RunsPage', () => {
     });
     fireEvent.click(screen.getByTestId('apply-run-filters'));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url.toString().includes('/api/v1/runs')).length).toBe(3));
 
-    const requestUrl = new URL(fetchMock.mock.calls[3][0].toString());
+    const runCalls = fetchMock.mock.calls.filter(([url]) => url.toString().includes('/api/v1/runs'));
+    const requestUrl = new URL(runCalls[2][0].toString());
     expect(requestUrl.pathname).toBe('/api/v1/runs');
     expect(requestUrl.searchParams.get('strategy_id')).toBe(strategies[0].id);
     expect(requestUrl.searchParams.get('status')).toBe('completed');
@@ -163,13 +195,11 @@ describe('RunsPage', () => {
   });
 
   it('clears filters and shows an empty state when nothing matches', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse([baseRun], 1))
-      .mockResolvedValueOnce(createRunsResponse([], 0))
-      .mockResolvedValueOnce(createRunsResponse([baseRun], 1));
-    vi.stubGlobal('fetch', fetchMock);
+    const fetchMock = mockRunsPageFetch([
+      createRunsResponse([baseRun], 1),
+      createRunsResponse([], 0),
+      createRunsResponse([baseRun], 1),
+    ]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
@@ -186,9 +216,10 @@ describe('RunsPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /clear/i }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => url.toString().includes('/api/v1/runs')).length).toBe(3));
 
-    const requestUrl = new URL(fetchMock.mock.calls[3][0].toString());
+    const runCalls = fetchMock.mock.calls.filter(([url]) => url.toString().includes('/api/v1/runs'));
+    const requestUrl = new URL(runCalls[2][0].toString());
     expect(requestUrl.searchParams.get('status')).toBeNull();
     expect(requestUrl.searchParams.get('offset')).toBe('0');
     expect(await screen.findByText('AAPL')).toBeInTheDocument();
@@ -197,11 +228,7 @@ describe('RunsPage', () => {
   it('navigates to the run detail route when a row is clicked', async () => {
     const user = userEvent.setup();
     const runId = baseRun.id;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse([{ ...baseRun, id: runId }], 1));
-    vi.stubGlobal('fetch', fetchMock);
+    mockRunsPageFetch([createRunsResponse([{ ...baseRun, id: runId }], 1)]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
@@ -220,11 +247,7 @@ describe('RunsPage', () => {
   it('navigates to the run detail route when the row link is activated with Enter', async () => {
     const user = userEvent.setup();
     const runId = baseRun.id;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse([{ ...baseRun, id: runId }], 1));
-    vi.stubGlobal('fetch', fetchMock);
+    mockRunsPageFetch([createRunsResponse([{ ...baseRun, id: runId }], 1)]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
@@ -241,11 +264,7 @@ describe('RunsPage', () => {
   it('navigates to the run detail route when the row is activated with Enter', async () => {
     const user = userEvent.setup();
     const runId = baseRun.id;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse([{ ...baseRun, id: runId }], 1));
-    vi.stubGlobal('fetch', fetchMock);
+    mockRunsPageFetch([createRunsResponse([{ ...baseRun, id: runId }], 1)]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
@@ -262,11 +281,7 @@ describe('RunsPage', () => {
   it('navigates to the run detail route when the row is activated with Space', async () => {
     const user = userEvent.setup();
     const runId = baseRun.id;
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse([{ ...baseRun, id: runId }], 1));
-    vi.stubGlobal('fetch', fetchMock);
+    mockRunsPageFetch([createRunsResponse([{ ...baseRun, id: runId }], 1)]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
@@ -281,10 +296,13 @@ describe('RunsPage', () => {
   });
 
   it('shows error state when fetch fails', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockRejectedValueOnce(new Error('Network error'));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = new URL(input.toString(), 'http://localhost');
+      if (url.pathname === '/api/v1/strategies') return Promise.resolve(createStrategyResponse());
+      if (url.pathname === '/api/v1/automation/runs') return Promise.resolve(createAutomationRunsResponse());
+      if (url.pathname === '/api/v1/runs') return Promise.reject(new Error('Network error'));
+      return Promise.reject(new Error(`Unexpected URL: ${url.pathname}`));
+    });
     vi.stubGlobal('fetch', fetchMock);
 
     render(<RunsPage />, { wrapper: Wrapper });
@@ -303,16 +321,12 @@ describe('RunsPage', () => {
       status: 'running' as const,
       completed_at: undefined,
     };
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(createStrategyResponse())
-      .mockResolvedValueOnce(createRunsResponse([baseRun, runningRun], 2));
-    vi.stubGlobal('fetch', fetchMock);
+    mockRunsPageFetch([createRunsResponse([baseRun, runningRun], 2)]);
 
     render(<RunsPage />, { wrapper: Wrapper });
 
     expect(await screen.findByTestId('runs-table')).toBeInTheDocument();
-    expect(screen.getByText('Duration')).toBeInTheDocument();
+    expect(screen.getAllByText('Duration').length).toBeGreaterThan(0);
     expect(screen.getByText('1m 0s')).toBeInTheDocument();
     expect(screen.getByText('Running…')).toBeInTheDocument();
   });

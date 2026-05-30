@@ -64,6 +64,7 @@ type Server struct {
 	// Automation
 	automation       *automation.JobOrchestrator
 	alpacaReconciler AlpacaAutomationReconciler
+	jobRunRepo       *pgrepo.JobRunRepo
 
 	// Risk engine
 	risk     risk.RiskEngine
@@ -77,6 +78,8 @@ type Server struct {
 
 	// News feed
 	newsFeedRepo *pgrepo.NewsFeedRepo
+	// Historical market data
+	marketDataHistory repository.HistoricalOHLCVRepository
 
 	// Calendar / events data
 	eventsProvider data.EventsProvider
@@ -87,8 +90,11 @@ type Server struct {
 	metricsHandler http.Handler
 
 	// Signal intelligence (optional; nil = feature not running).
-	signalStore *signal.EventStore
-	watchIndex  *signal.WatchIndex
+	signalStore           *signal.EventStore
+	watchIndex            *signal.WatchIndex
+	polymarketAccountRepo repository.PolymarketAccountRepository
+	polymarketWatchedRepo repository.PolymarketWatchedMarketsRepository
+	polymarketClient      PolymarketMarketDataFetcher
 
 	// Report artifacts (optional; nil = feature not enabled).
 	reportArtifacts ReportArtifactStore
@@ -161,42 +167,48 @@ func DefaultServerConfig() ServerConfig {
 
 // Deps groups the repository and service dependencies required by the Server.
 type Deps struct {
-	Strategies       repository.StrategyRepository
-	Runs             repository.PipelineRunRepository
-	Decisions        repository.AgentDecisionRepository
-	Orders           repository.OrderRepository
-	Positions        repository.PositionRepository
-	Trades           repository.TradeRepository
-	Memories         repository.MemoryRepository
-	APIKeys          repository.APIKeyRepository
-	Users            repository.UserRepository
-	Conversations    repository.ConversationRepository
-	AuditLog         repository.AuditLogRepository
-	Events           repository.AgentEventRepository
-	Snapshots        repository.PipelineRunSnapshotRepository
-	LLMProvider      llm.Provider
-	BacktestConfigs  repository.BacktestConfigRepository
-	BacktestRuns     repository.BacktestRunRepository
-	DataService      *data.DataService
-	OptionsProvider  data.OptionsDataProvider
-	EventsProvider   data.EventsProvider
-	DiscoveryDeps    *discovery.DiscoveryDeps
-	DiscoveryRunRepo discovery.RunRepository
-	Universe         *universe.Universe
-	UniverseRepo     universe.UniverseRepository
-	Automation       *automation.JobOrchestrator
-	AlpacaReconciler AlpacaAutomationReconciler
-	NewsFeedRepo     *pgrepo.NewsFeedRepo
-	Risk             risk.RiskEngine
-	Settings         SettingsService
-	Runner           StrategyRunner
-	DBHealth         HealthCheck
-	RedisHealth      HealthCheck
-	MetricsHandler   http.Handler
+	Strategies        repository.StrategyRepository
+	Runs              repository.PipelineRunRepository
+	Decisions         repository.AgentDecisionRepository
+	Orders            repository.OrderRepository
+	Positions         repository.PositionRepository
+	Trades            repository.TradeRepository
+	Memories          repository.MemoryRepository
+	APIKeys           repository.APIKeyRepository
+	Users             repository.UserRepository
+	Conversations     repository.ConversationRepository
+	AuditLog          repository.AuditLogRepository
+	Events            repository.AgentEventRepository
+	Snapshots         repository.PipelineRunSnapshotRepository
+	LLMProvider       llm.Provider
+	BacktestConfigs   repository.BacktestConfigRepository
+	BacktestRuns      repository.BacktestRunRepository
+	DataService       *data.DataService
+	OptionsProvider   data.OptionsDataProvider
+	EventsProvider    data.EventsProvider
+	DiscoveryDeps     *discovery.DiscoveryDeps
+	DiscoveryRunRepo  discovery.RunRepository
+	Universe          *universe.Universe
+	UniverseRepo      universe.UniverseRepository
+	Automation        *automation.JobOrchestrator
+	AlpacaReconciler  AlpacaAutomationReconciler
+	JobRunRepo        *pgrepo.JobRunRepo
+	NewsFeedRepo      *pgrepo.NewsFeedRepo
+	MarketDataHistory repository.HistoricalOHLCVRepository
+	Risk              risk.RiskEngine
+	Settings          SettingsService
+	Runner            StrategyRunner
+	DBHealth          HealthCheck
+	RedisHealth       HealthCheck
+	MetricsHandler    http.Handler
 
 	// Signal intelligence (optional; nil = feature not enabled).
-	SignalStore *signal.EventStore
-	WatchIndex  *signal.WatchIndex
+	SignalStore            *signal.EventStore
+	WatchIndex             *signal.WatchIndex
+	PolymarketAccountRepo  repository.PolymarketAccountRepository
+	PolymarketWatchedRepo  repository.PolymarketWatchedMarketsRepository
+	PolymarketResolvedRepo repository.PolymarketResolvedMarketsRepository
+	PolymarketClient       PolymarketMarketDataFetcher
 
 	// Report artifacts (optional; nil = feature not enabled).
 	ReportArtifacts ReportArtifactStore
@@ -268,45 +280,50 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 	}
 
 	s := &Server{
-		logger:           logger,
-		dbHealth:         deps.DBHealth,
-		redisHealth:      deps.RedisHealth,
-		strategies:       deps.Strategies,
-		runs:             deps.Runs,
-		decisions:        deps.Decisions,
-		orders:           deps.Orders,
-		positions:        deps.Positions,
-		trades:           deps.Trades,
-		memories:         deps.Memories,
-		users:            deps.Users,
-		conversations:    deps.Conversations,
-		snapshots:        deps.Snapshots,
-		llmProvider:      deps.LLMProvider,
-		auditLog:         deps.AuditLog,
-		events:           deps.Events,
-		backtestConfigs:  deps.BacktestConfigs,
-		backtestRuns:     deps.BacktestRuns,
-		dataService:      deps.DataService,
-		optionsProvider:  deps.OptionsProvider,
-		eventsProvider:   deps.EventsProvider,
-		discoveryDeps:    deps.DiscoveryDeps,
-		discoveryRunRepo: deps.DiscoveryRunRepo,
-		universe:         deps.Universe,
-		universeRepo:     deps.UniverseRepo,
-		automation:       deps.Automation,
-		alpacaReconciler: deps.AlpacaReconciler,
-		newsFeedRepo:     deps.NewsFeedRepo,
-		risk:             deps.Risk,
-		settings:         settingsService,
-		runner:           deps.Runner,
-		auth:             authManager,
-		hub:              hub,
-		wsUpgrader:       newUpgrader(cfg.CORSConfig.AllowedOrigins),
-		metricsHandler:   deps.MetricsHandler,
-		signalStore:      deps.SignalStore,
-		watchIndex:       deps.WatchIndex,
-		reportArtifacts:  deps.ReportArtifacts,
-		reportMetrics:    deps.ReportMetrics,
+		logger:                logger,
+		dbHealth:              deps.DBHealth,
+		redisHealth:           deps.RedisHealth,
+		strategies:            deps.Strategies,
+		runs:                  deps.Runs,
+		decisions:             deps.Decisions,
+		orders:                deps.Orders,
+		positions:             deps.Positions,
+		trades:                deps.Trades,
+		memories:              deps.Memories,
+		users:                 deps.Users,
+		conversations:         deps.Conversations,
+		snapshots:             deps.Snapshots,
+		llmProvider:           deps.LLMProvider,
+		auditLog:              deps.AuditLog,
+		events:                deps.Events,
+		backtestConfigs:       deps.BacktestConfigs,
+		backtestRuns:          deps.BacktestRuns,
+		dataService:           deps.DataService,
+		optionsProvider:       deps.OptionsProvider,
+		eventsProvider:        deps.EventsProvider,
+		discoveryDeps:         deps.DiscoveryDeps,
+		discoveryRunRepo:      deps.DiscoveryRunRepo,
+		universe:              deps.Universe,
+		universeRepo:          deps.UniverseRepo,
+		automation:            deps.Automation,
+		alpacaReconciler:      deps.AlpacaReconciler,
+		jobRunRepo:            deps.JobRunRepo,
+		newsFeedRepo:          deps.NewsFeedRepo,
+		marketDataHistory:     deps.MarketDataHistory,
+		risk:                  deps.Risk,
+		settings:              settingsService,
+		runner:                deps.Runner,
+		auth:                  authManager,
+		hub:                   hub,
+		wsUpgrader:            newUpgrader(cfg.CORSConfig.AllowedOrigins),
+		metricsHandler:        deps.MetricsHandler,
+		signalStore:           deps.SignalStore,
+		watchIndex:            deps.WatchIndex,
+		polymarketAccountRepo: deps.PolymarketAccountRepo,
+		polymarketWatchedRepo: deps.PolymarketWatchedRepo,
+		polymarketClient:      deps.PolymarketClient,
+		reportArtifacts:       deps.ReportArtifacts,
+		reportMetrics:         deps.ReportMetrics,
 	}
 
 	// Construct services from the assembled deps.
@@ -372,6 +389,23 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 			// Report artifacts (nested under strategy)
 			sr.Get("/{id}/reports/latest", s.handleGetLatestReport)
 			sr.Get("/{id}/reports", s.handleListReports)
+		})
+
+		v1.Route("/polymarket", func(pr chi.Router) {
+			pr.Get("/accounts", s.handleListPolymarketAccounts)
+			pr.Get("/accounts/{address}", s.handleGetPolymarketAccount)
+			pr.Get("/accounts/{address}/trades", s.handleListPolymarketAccountTrades)
+			pr.Patch("/accounts/{address}/tracked", s.handlePatchPolymarketAccountTracked)
+			pr.Get("/trades/recent", s.handleListPolymarketRecentTrades)
+			pr.Get("/signals/recent", s.handleListPolymarketRecentSignals)
+			pr.Get("/markets/{slug}", s.handleGetPolymarketMarket)
+			pr.Get("/watched", s.handleListPolymarketWatched)
+			pr.Post("/watched", s.handleAddPolymarketWatched)
+			pr.Delete("/watched/{slug}", s.handleDeletePolymarketWatched)
+			pr.Patch("/watched/{slug}", s.handlePatchPolymarketWatched)
+			pr.Get("/jobs/status", s.handleGetPolymarketJobsStatus)
+			pr.Get("/discovery/last", s.handleGetPolymarketDiscoveryLast)
+			pr.Post("/discovery/run", s.handleRunPolymarketDiscovery)
 		})
 
 		// Pipeline runs
@@ -483,6 +517,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Route("/automation", func(ar chi.Router) {
 			ar.Get("/status", s.handleGetAutomationStatus)
 			ar.Get("/health", s.handleGetAutomationHealth)
+			ar.Get("/runs", s.handleListAutomationRuns)
 			ar.Get("/alpaca/verify", s.handleVerifyAlpacaReconcile)
 			ar.Post("/alpaca/reconcile", s.handleRunAlpacaReconcile)
 			ar.Post("/jobs/{name}/run", s.handleRunAutomationJob)
@@ -500,6 +535,8 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 			ak.Delete("/{id}", s.handleRevokeAPIKey)
 		})
 
+		v1.Get("/market/ohlcv/{ticker}", s.handleGetHistoricalOHLCV)
+		v1.Get("/social/sentiment/{ticker}", s.handleGetSocialSentiment)
 		v1.Get("/news", s.handleListNews)
 
 		// Signal intelligence
@@ -709,6 +746,8 @@ func isGuestObservationRequest(r *http.Request) bool {
 
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	if path == "/api/v1/news" ||
+		strings.HasPrefix(path, "/api/v1/market/ohlcv") ||
+		strings.HasPrefix(path, "/api/v1/social/sentiment") ||
 		path == "/api/v1/calendar/earnings" ||
 		path == "/api/v1/calendar/economic" ||
 		path == "/api/v1/calendar/filings" ||

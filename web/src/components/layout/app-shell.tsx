@@ -17,13 +17,18 @@ import {
   Sparkles,
   TrendingUp,
 } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
 import { Badge } from '@/components/ui/badge';
 import { isAuthenticated } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 
-const navigationItems = [
+type FlatNavItem = { to: string; label: string; icon: LucideIcon; authRequired?: boolean };
+type NavGroup = { label: string; items: FlatNavItem[] };
+type NavItem = FlatNavItem | NavGroup;
+
+const navigationItems: NavItem[] = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, authRequired: true },
   { to: '/strategies', label: 'Strategies', icon: BriefcaseBusiness, authRequired: true },
   { to: '/runs', label: 'Runs', icon: Activity, authRequired: true },
@@ -36,6 +41,10 @@ const navigationItems = [
   { to: '/universe', label: 'Universe', icon: Globe },
   { to: '/automation', label: 'Automation', icon: Zap, authRequired: true },
   { to: '/signals', label: 'Signals', icon: Signal, authRequired: true },
+  {
+    label: 'Prediction Markets',
+    items: [{ to: '/polymarket', label: 'Polymarket', icon: TrendingUp, authRequired: true }],
+  },
   { to: '/reliability', label: 'Reliability', icon: ShieldCheck, authRequired: true },
   { to: '/memories', label: 'Memories', icon: Brain, authRequired: true },
   { to: '/glossary', label: 'Glossary', icon: BookOpen },
@@ -47,7 +56,28 @@ const navigationItems = [
 export function AppShell() {
   const location = useLocation();
   const authenticated = isAuthenticated();
-  const visibleNavigationItems = navigationItems.filter((item) => authenticated || !item.authRequired);
+  const visibleNavigationItems = navigationItems
+    .map((item) => ('items' in item ? { ...item, items: item.items.filter((nav) => authenticated || !nav.authRequired) } : item))
+    .filter((item) => ('items' in item ? item.items.length > 0 : authenticated || !item.authRequired));
+
+  const renderNavItem = ({ to, label, icon: Icon }: FlatNavItem, mobile = false) => (
+    <NavLink
+      key={to}
+      to={to}
+      end={to === '/'}
+      className={({ isActive }) =>
+        cn(
+          mobile
+            ? 'inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors'
+            : 'inline-flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
+          isActive ? 'bg-primary/14 text-foreground' : 'text-muted-foreground hover:bg-accent/70 hover:text-foreground',
+        )
+      }
+    >
+      <Icon className={mobile ? 'size-3.5' : 'size-4'} />
+      <span>{label}</span>
+    </NavLink>
+  );
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-396 gap-3 px-3 py-3 sm:px-4 lg:px-6">
@@ -60,24 +90,16 @@ export function AppShell() {
           </div>
 
           <nav aria-label="Primary" className="mt-3 flex flex-1 flex-col gap-1">
-            {visibleNavigationItems.map(({ to, label, icon: Icon }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={to === '/'}
-                className={({ isActive }) =>
-                  cn(
-                    'inline-flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
-                    isActive
-                      ? 'bg-primary/14 text-foreground'
-                      : 'text-muted-foreground hover:bg-accent/70 hover:text-foreground',
-                  )
-                }
-              >
-                <Icon className="size-4" />
-                <span>{label}</span>
-              </NavLink>
-            ))}
+            {visibleNavigationItems.map((item) =>
+              'items' in item ? (
+                <div key={item.label} className="space-y-1 pt-2">
+                  <div className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                    {item.label}
+                  </div>
+                  {item.items.map((nav) => renderNavItem(nav))}
+                </div>
+              ) : renderNavItem(item),
+            )}
           </nav>
         </div>
       </aside>
@@ -107,24 +129,7 @@ export function AppShell() {
             aria-label="Primary mobile"
             className="flex gap-1.5 overflow-x-auto scrollbar-none lg:hidden"
           >
-            {visibleNavigationItems.map(({ to, label, icon: Icon }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={to === '/'}
-                className={({ isActive }) =>
-                  cn(
-                    'inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors',
-                    isActive
-                      ? 'bg-primary/14 text-foreground'
-                      : 'text-muted-foreground hover:bg-accent/70 hover:text-foreground',
-                  )
-                }
-              >
-                <Icon className="size-3.5" />
-                {label}
-              </NavLink>
-            ))}
+            {visibleNavigationItems.flatMap((item) => ('items' in item ? item.items : [item])).map((nav) => renderNavItem(nav, true))}
           </nav>
         </header>
 

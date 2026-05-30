@@ -67,29 +67,29 @@ func (t *ssePreambleTransport) RoundTrip(req *http.Request) (*http.Response, err
 				stripped := llamabroker.StripSSEPreambleReadCloser(resp.Body)
 				// llama-line now signals errors as SSE status events, handled by
 				// StripSSEPreamble. PeekBrokerError handles older bare-JSON errors.
-			errMsg, remaining := llamabroker.PeekBrokerError(stripped)
-			if errMsg != "" {
-				resp.StatusCode = http.StatusBadGateway
-				resp.Status = "502 Bad Gateway"
-				body := `{"error":{"message":"` + errMsg + `","type":"broker_error","code":"broker_error"}}`
-				resp.Body = io.NopCloser(strings.NewReader(body))
-				return resp, nil
-			}
-			// Guard against empty body (e.g. connection dropped mid-stream before
-			// a final payload or error event was sent).
-			payload, readErr := io.ReadAll(remaining)
-			if readErr != nil || len(bytes.TrimSpace(payload)) == 0 {
-				resp.StatusCode = http.StatusBadGateway
-				resp.Status = "502 Bad Gateway"
-				msg := "broker connection closed before response was received"
-				if readErr != nil {
-					msg = readErr.Error()
+				errMsg, remaining := llamabroker.PeekBrokerError(stripped)
+				if errMsg != "" {
+					resp.StatusCode = http.StatusBadGateway
+					resp.Status = "502 Bad Gateway"
+					body := `{"error":{"message":"` + errMsg + `","type":"broker_error","code":"broker_error"}}`
+					resp.Body = io.NopCloser(strings.NewReader(body))
+					return resp, nil
 				}
-				body := `{"error":{"message":"` + msg + `","type":"broker_error","code":"broker_error"}}`
-				resp.Body = io.NopCloser(strings.NewReader(body))
-				return resp, nil
-			}
-			resp.Body = io.NopCloser(bytes.NewReader(payload))
+				// Guard against empty body (e.g. connection dropped mid-stream before
+				// a final payload or error event was sent).
+				payload, readErr := io.ReadAll(remaining)
+				if readErr != nil || len(bytes.TrimSpace(payload)) == 0 {
+					resp.StatusCode = http.StatusBadGateway
+					resp.Status = "502 Bad Gateway"
+					msg := "broker connection closed before response was received"
+					if readErr != nil {
+						msg = readErr.Error()
+					}
+					body := `{"error":{"message":"` + msg + `","type":"broker_error","code":"broker_error"}}`
+					resp.Body = io.NopCloser(strings.NewReader(body))
+					return resp, nil
+				}
+				resp.Body = io.NopCloser(bytes.NewReader(payload))
 			}
 		}
 	}

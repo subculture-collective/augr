@@ -73,8 +73,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
     networks:
-      - frontend
-      - backend
+      frontend:
+      backend:
+      monitoring:
+        aliases:
+          - augr-api
 
   web:
     build:
@@ -97,3 +100,6 @@ networks:
   frontend:
   backend:
     internal: true
+  monitoring:
+    name: monitoring
+    external: true

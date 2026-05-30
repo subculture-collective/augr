@@ -24,10 +24,15 @@ type PolymarketSource struct {
 	priceMoveThreshold    float64 // emit if |ΔpYES| >= this (e.g. 0.05 = 5pp)
 	volumeSpikeMultiplier float64 // emit if vol > multiplier * rolling avg
 	logger                *slog.Logger
+	loader                WatchedMarketsLoader
 
 	mu      sync.Mutex
 	markets []string // watched market slugs
 	state   map[string]*marketState
+}
+
+type WatchedMarketsLoader interface {
+	ListEnabledSlugs(ctx context.Context) ([]string, error)
 }
 
 type marketState struct {
@@ -41,6 +46,7 @@ type PolymarketSourceConfig struct {
 	Interval              time.Duration
 	PriceMoveThreshold    float64 // default 0.05
 	VolumeSpikeMultiplier float64 // default 3.0
+	Loader                WatchedMarketsLoader
 }
 
 // NewPolymarketSource creates a PolymarketSource. The watched market list is
@@ -68,6 +74,7 @@ func NewPolymarketSource(cfg PolymarketSourceConfig, logger *slog.Logger) *Polym
 		priceMoveThreshold:    cfg.PriceMoveThreshold,
 		volumeSpikeMultiplier: cfg.VolumeSpikeMultiplier,
 		logger:                logger,
+		loader:                cfg.Loader,
 		state:                 make(map[string]*marketState),
 	}
 }
@@ -89,6 +96,26 @@ func (p *PolymarketSource) Start(ctx context.Context) (<-chan RawSignalEvent, er
 	ch := make(chan RawSignalEvent, 64)
 	go func() {
 		defer close(ch)
+		if p.loader != nil {
+			if slugs, err := p.loader.ListEnabledSlugs(ctx); err == nil {
+				p.SetWatchedMarkets(slugs)
+			}
+			go func() {
+				ticker := time.NewTicker(60 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						slugs, err := p.loader.ListEnabledSlugs(ctx)
+						if err == nil {
+							p.SetWatchedMarkets(slugs)
+						}
+					}
+				}
+			}()
+		}
 		ticker := time.NewTicker(p.interval)
 		defer ticker.Stop()
 		for {

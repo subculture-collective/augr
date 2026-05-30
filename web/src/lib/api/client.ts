@@ -8,12 +8,14 @@ import type {
   AnalyzeFilingRequest,
   AuditLogEntry,
   AutomationHealthResponse,
+  AutomationJobRun,
   EarningsEvent,
   EconomicEvent,
   EngineStatus,
   ErrorResponse,
   FilingAnalysis,
   HealthStatus,
+  HistoricalOHLCV,
   IPOEvent,
   LoginRequest,
   LoginResponse,
@@ -31,9 +33,11 @@ import type {
   PortfolioSummary,
   RunListParams,
   ScoredTicker,
+  NewsFeedItem,
   SECFiling,
   Settings,
   SettingsUpdateRequest,
+  SocialSentimentRow,
   StoredSignal,
   StoredTrigger,
   Strategy,
@@ -60,6 +64,12 @@ import type {
   DiscoveryRunRequest,
   DiscoveryResult,
   JobStatus,
+  PolymarketAccount,
+  PolymarketAccountListParams,
+  PolymarketAccountTrade,
+  PolymarketDiscoveryResult,
+  PolymarketWatchedMarket,
+  PredictionMarketData,
 } from '@/lib/api/types';
 
 interface ApiClientConfig {
@@ -510,6 +520,12 @@ export class ApiClient {
     return this.request<AutomationHealthResponse>('/api/v1/automation/health');
   }
 
+  async listAutomationRuns(params: PaginationParams = {}) {
+    return this.requestList<AutomationJobRun>('/api/v1/automation/runs', {
+      query: toQueryParams(params),
+    });
+  }
+
   async runAutomationJob(name: string) {
     return this.requestNoContent(`/api/v1/automation/jobs/${name}/run`, { method: 'POST' });
   }
@@ -526,6 +542,26 @@ export class ApiClient {
     return this.request<EarningsEvent[]>('/api/v1/calendar/earnings', {
       query: toQueryParams(params),
     });
+  }
+
+  async getHistoricalOHLCV(
+    ticker: string,
+    params: { timeframe?: string; from?: string; to?: string; provider?: string } = {},
+  ) {
+    return this.request<HistoricalOHLCV[]>(`/api/v1/market/ohlcv/${encodeURIComponent(ticker)}`, {
+      query: toQueryParams(params),
+    });
+  }
+
+  async listNews(params: { ticker?: string; limit?: number } = {}) {
+    return this.request<NewsFeedItem[]>('/api/v1/news', { query: toQueryParams(params) });
+  }
+
+  async getSocialSentiment(ticker: string, params: { limit?: number } = {}) {
+    return this.request<SocialSentimentRow[]>(
+      `/api/v1/social/sentiment/${encodeURIComponent(ticker)}`,
+      { query: toQueryParams(params) },
+    );
   }
 
   async getEconomicCalendar() {
@@ -577,6 +613,91 @@ export class ApiClient {
     return this.requestNoContent(`/api/v1/signals/watchlist/${encodeURIComponent(term)}`, {
       method: 'DELETE',
     });
+  }
+
+  // Polymarket
+  async listPolymarketAccounts(params: PolymarketAccountListParams = {}) {
+    return this.requestList<PolymarketAccount>('/api/v1/polymarket/accounts', {
+      query: toQueryParams(params),
+    });
+  }
+
+  async getPolymarketAccount(address: string) {
+    return this.request<PolymarketAccount>(`/api/v1/polymarket/accounts/${encodeURIComponent(address)}`);
+  }
+
+  async listPolymarketAccountTrades(
+    address: string,
+    params: { from?: string; to?: string; limit?: number } = {},
+  ) {
+    return this.requestList<PolymarketAccountTrade>(
+      `/api/v1/polymarket/accounts/${encodeURIComponent(address)}/trades`,
+      { query: toQueryParams(params) },
+    );
+  }
+
+  async setPolymarketAccountTracked(address: string, tracked: boolean) {
+    return this.request<PolymarketAccount>(
+      `/api/v1/polymarket/accounts/${encodeURIComponent(address)}/tracked`,
+      { method: 'PATCH', body: { tracked } },
+    );
+  }
+
+  async listPolymarketRecentTrades(limit?: number) {
+    return this.requestList<PolymarketAccountTrade>('/api/v1/polymarket/trades/recent', {
+      query: toQueryParams({ limit }),
+    });
+  }
+
+  async listPolymarketRecentSignals(params: { limit?: number; min_urgency?: number } = {}) {
+    return this.request<{ data: StoredSignal[]; total: number }>('/api/v1/polymarket/signals/recent', {
+      query: toQueryParams(params),
+    });
+  }
+
+  async getPolymarketMarket(slug: string) {
+    return this.request<PredictionMarketData>(`/api/v1/polymarket/markets/${encodeURIComponent(slug)}`);
+  }
+
+  async listPolymarketWatched() {
+    return this.requestList<PolymarketWatchedMarket>('/api/v1/polymarket/watched');
+  }
+
+  async addPolymarketWatched(slug: string, note?: string) {
+    return this.request<PolymarketWatchedMarket>('/api/v1/polymarket/watched', {
+      method: 'POST',
+      body: { slug, note },
+    });
+  }
+
+  async removePolymarketWatched(slug: string) {
+    return this.requestNoContent(`/api/v1/polymarket/watched/${encodeURIComponent(slug)}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async setPolymarketWatchedEnabled(slug: string, enabled: boolean) {
+    return this.request<PolymarketWatchedMarket>(
+      `/api/v1/polymarket/watched/${encodeURIComponent(slug)}`,
+      { method: 'PATCH', body: { enabled } },
+    );
+  }
+
+  async getPolymarketJobsStatus() {
+    return this.request<JobStatus[]>('/api/v1/polymarket/jobs/status');
+  }
+
+  async getPolymarketDiscoveryLast() {
+    return this.request<{ last: PolymarketDiscoveryResult | null }>(
+      '/api/v1/polymarket/discovery/last',
+    );
+  }
+
+  async runPolymarketDiscovery() {
+    return this.request<{ status: string; message: string }>(
+      '/api/v1/polymarket/discovery/run',
+      { method: 'POST' },
+    );
   }
 }
 

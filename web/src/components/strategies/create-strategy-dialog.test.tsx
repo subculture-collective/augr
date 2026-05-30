@@ -11,8 +11,7 @@ describe('CreateStrategyDialog', () => {
   it('renders structured config fields and keeps advanced collapsed by default', () => {
     render(<CreateStrategyDialog open onOpenChange={vi.fn()} onSubmit={vi.fn()} />)
 
-    expect(screen.getByLabelText('Research Debate Rounds')).toBeInTheDocument()
-    expect(screen.getByLabelText('Risk Debate Rounds')).toBeInTheDocument()
+    expect(screen.getByLabelText('Debate Rounds')).toBeInTheDocument()
     expect(screen.getByLabelText('Analysis Timeout (seconds)')).toBeInTheDocument()
     expect(screen.getByLabelText('Debate Timeout (seconds)')).toBeInTheDocument()
     expect(screen.getByLabelText('Max Position Size %')).toBeInTheDocument()
@@ -20,10 +19,11 @@ describe('CreateStrategyDialog', () => {
     expect(screen.getByLabelText('Take Profit ATR Multiplier')).toBeInTheDocument()
     expect(screen.getByLabelText('Min Confidence Threshold')).toBeInTheDocument()
 
-    expect(screen.getByLabelText('Market Analyst')).toBeChecked()
-    expect(screen.getByLabelText('Fundamentals Analyst')).toBeChecked()
-    expect(screen.getByLabelText('News Analyst')).toBeChecked()
-    expect(screen.getByLabelText('Social Media Analyst')).toBeChecked()
+    expect(screen.getByTestId('strategy-active-checkbox')).toBeChecked()
+    expect(screen.getByLabelText('market analyst')).toBeChecked()
+    expect(screen.getByLabelText('fundamentals analyst')).toBeChecked()
+    expect(screen.getByLabelText('news analyst')).toBeChecked()
+    expect(screen.getByLabelText('social media analyst')).toBeChecked()
 
     expect(screen.queryByLabelText('Prompt Overrides (JSON)')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Show' }))
@@ -40,8 +40,7 @@ describe('CreateStrategyDialog', () => {
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Breakout strategy' } })
     fireEvent.change(screen.getByLabelText('Schedule (cron)'), { target: { value: '0 9 * * 1-5' } })
 
-    fireEvent.change(screen.getByLabelText('Research Debate Rounds'), { target: { value: '4' } })
-    fireEvent.change(screen.getByLabelText('Risk Debate Rounds'), { target: { value: '3' } })
+    fireEvent.change(screen.getByLabelText('Debate Rounds'), { target: { value: '4' } })
     fireEvent.change(screen.getByLabelText('Analysis Timeout (seconds)'), { target: { value: '120' } })
     fireEvent.change(screen.getByLabelText('Debate Timeout (seconds)'), { target: { value: '600' } })
     fireEvent.change(screen.getByLabelText('Max Position Size %'), { target: { value: '0.25' } })
@@ -49,7 +48,7 @@ describe('CreateStrategyDialog', () => {
     fireEvent.change(screen.getByLabelText('Take Profit ATR Multiplier'), { target: { value: '2.5' } })
     fireEvent.change(screen.getByLabelText('Min Confidence Threshold'), { target: { value: '0.7' } })
 
-    fireEvent.click(screen.getByLabelText('Fundamentals Analyst'))
+    fireEvent.click(screen.getByLabelText('fundamentals analyst'))
     fireEvent.click(screen.getByRole('button', { name: 'Show' }))
     fireEvent.change(screen.getByLabelText('Prompt Overrides (JSON)'), {
       target: { value: '{\n  "trader": "Use concise prompts"\n}' },
@@ -64,7 +63,7 @@ describe('CreateStrategyDialog', () => {
       ticker: 'AAPL',
       market_type: 'stock',
       schedule_cron: '0 9 * * 1-5',
-      status: 'inactive',
+      status: 'active',
       is_paper: true,
       config: {
         pipeline_config: {
@@ -93,10 +92,10 @@ describe('CreateStrategyDialog', () => {
 
     fireEvent.change(screen.getByTestId('strategy-name-input'), { target: { value: 'Momentum' } })
     fireEvent.change(screen.getByTestId('strategy-ticker-input'), { target: { value: 'AAPL' } })
-    fireEvent.click(screen.getByLabelText('Market Analyst'))
-    fireEvent.click(screen.getByLabelText('Fundamentals Analyst'))
-    fireEvent.click(screen.getByLabelText('News Analyst'))
-    fireEvent.click(screen.getByLabelText('Social Media Analyst'))
+    fireEvent.click(screen.getByLabelText('market analyst'))
+    fireEvent.click(screen.getByLabelText('fundamentals analyst'))
+    fireEvent.click(screen.getByLabelText('news analyst'))
+    fireEvent.click(screen.getByLabelText('social media analyst'))
 
     fireEvent.submit(screen.getByRole('button', { name: 'Create strategy' }).closest('form')!)
 
@@ -111,14 +110,14 @@ describe('CreateStrategyDialog', () => {
 
     fireEvent.change(screen.getByTestId('strategy-name-input'), { target: { value: 'Momentum' } })
     fireEvent.change(screen.getByTestId('strategy-ticker-input'), { target: { value: 'AAPL' } })
-    fireEvent.change(screen.getByLabelText('Research Debate Rounds'), { target: { value: '11' } })
+    fireEvent.change(screen.getByLabelText('Debate Rounds'), { target: { value: '11' } })
 
     fireEvent.submit(screen.getByRole('button', { name: 'Create strategy' }).closest('form')!)
 
     expect(onSubmit).not.toHaveBeenCalled()
     expect(screen.getByText('Debate rounds must be between 1 and 10')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByLabelText('Research Debate Rounds'), { target: { value: '4' } })
+    fireEvent.change(screen.getByLabelText('Debate Rounds'), { target: { value: '4' } })
     fireEvent.click(screen.getByRole('button', { name: 'Show' }))
     fireEvent.change(screen.getByLabelText('Prompt Overrides (JSON)'), { target: { value: '{invalid' } })
     fireEvent.submit(screen.getByRole('button', { name: 'Create strategy' }).closest('form')!)

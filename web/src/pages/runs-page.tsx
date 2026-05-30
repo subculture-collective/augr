@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { apiClient } from '@/lib/api/client'
-import type { PipelineRun, PipelineSignal, PipelineStatus, Strategy, UUID } from '@/lib/api/types'
+import type { AutomationJobRun, PipelineRun, PipelineSignal, PipelineStatus, Strategy, UUID } from '@/lib/api/types'
 
 const PAGE_SIZE = 20
 const PAGE_REQUEST_SIZE = PAGE_SIZE + 1
@@ -85,6 +85,10 @@ function RunSignalBadge({ signal }: { signal: PipelineSignal }) {
   return <Badge variant={SIGNAL_VARIANTS[signal]}>{signal}</Badge>
 }
 
+function automationStatusVariant(status: string): 'success' | 'destructive' | 'secondary' {
+  return status === 'ok' ? 'success' : status === 'error' ? 'destructive' : 'secondary'
+}
+
 export function RunsPage() {
   const navigate = useNavigate()
   const [draftStrategyId, setDraftStrategyId] = useState<UUID | ''>('')
@@ -115,6 +119,12 @@ export function RunsPage() {
       }),
     refetchInterval: 15_000,
     refetchIntervalInBackground: false,
+  })
+
+  const { data: automationRunsData } = useQuery({
+    queryKey: ['automation-runs', 'runs-page'],
+    queryFn: () => apiClient.listAutomationRuns({ limit: 10 }),
+    refetchInterval: 30_000,
   })
 
   const strategies = useMemo(() => strategiesData?.data ?? [], [strategiesData?.data])
@@ -361,6 +371,45 @@ export function RunsPage() {
                       </tr>
                     )
                   })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Automation history</CardTitle>
+          <CardDescription>Recent scheduled job executions across the system.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {(automationRunsData?.data ?? []).length === 0 ? (
+            <p className="text-sm text-muted-foreground" data-testid="automation-runs-empty">
+              No automation history yet.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm" data-testid="automation-runs-table">
+                <thead>
+                  <tr className="border-b border-border text-left font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                    <th className="pb-2 font-medium">Job</th>
+                    <th className="pb-2 font-medium">Status</th>
+                    <th className="pb-2 font-medium">Started</th>
+                    <th className="pb-2 font-medium">Duration</th>
+                    <th className="pb-2 font-medium">Error</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(automationRunsData?.data ?? []).map((run: AutomationJobRun) => (
+                    <tr key={run.id} className="border-b border-border last:border-0">
+                      <td className="py-3 font-mono text-[13px] font-medium">{run.job_name}</td>
+                      <td className="py-3"><Badge variant={automationStatusVariant(run.status)}>{run.status}</Badge></td>
+                      <td className="py-3 font-mono text-[13px] text-muted-foreground">{formatRunDate(run.started_at)}</td>
+                      <td className="py-3 font-mono text-[13px]">{formatDuration(run.started_at, run.completed_at)}</td>
+                      <td className="py-3 text-muted-foreground">{run.error || '—'}</td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>

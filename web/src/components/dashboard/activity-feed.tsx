@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useWebSocketClient } from '@/hooks/use-websocket-client';
 import { apiClient } from '@/lib/api/client';
-import type { AgentEvent, WebSocketMessage, WebSocketServerMessage } from '@/lib/api/types';
+import type { AgentEvent, JobStatus, WebSocketMessage, WebSocketServerMessage } from '@/lib/api/types';
 
 const MAX_FEED_ITEMS = 50;
 
@@ -109,6 +109,20 @@ function toLiveFeedItem(msg: WebSocketMessage): FeedItem {
   };
 }
 
+function toAutomationFeedItem(job: JobStatus): FeedItem | null {
+  if (!job.last_run && !job.running) return null;
+
+  const timestamp = job.last_run ?? new Date().toISOString();
+  const status = job.running ? 'running' : job.last_error ? 'error' : 'completed';
+  return {
+    id: `automation-${job.name}-${timestamp}-${status}`,
+    type: job.last_error ? 'error' : job.running ? 'pipeline_health' : 'automation_job',
+    title: job.running ? `Automation running: ${job.name}` : `Automation completed: ${job.name}`,
+    detail: job.last_error || job.last_result || job.description,
+    timestamp,
+  };
+}
+
 function isWebSocketMessage(msg: WebSocketServerMessage): msg is WebSocketMessage {
   return 'type' in msg && !('status' in msg);
 }
@@ -119,6 +133,11 @@ export function ActivityFeed() {
   const { data } = useQuery({
     queryKey: ['events', 'dashboard-activity-feed'],
     queryFn: () => apiClient.listEvents({ limit: 20 }),
+    refetchInterval: 30_000,
+  });
+  const { data: automationJobs } = useQuery({
+    queryKey: ['automation', 'dashboard-activity-feed'],
+    queryFn: () => apiClient.getAutomationStatus(),
     refetchInterval: 30_000,
   });
 
@@ -152,7 +171,10 @@ export function ActivityFeed() {
 
   const items = useMemo(() => {
     const historicalItems = (data?.data ?? []).map(toHistoricalFeedItem);
-    const merged = [...liveItems, ...historicalItems];
+    const automationItems = (Array.isArray(automationJobs) ? automationJobs : [])
+      .map(toAutomationFeedItem)
+      .filter((item): item is FeedItem => item != null);
+    const merged = [...liveItems, ...historicalItems, ...automationItems];
     const byId = new Map<string, FeedItem>();
     for (const item of merged) {
       if (!byId.has(item.id)) {
@@ -163,7 +185,7 @@ export function ActivityFeed() {
     return Array.from(byId.values())
       .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
       .slice(0, MAX_FEED_ITEMS);
-  }, [data?.data, liveItems]);
+  }, [automationJobs, data?.data, liveItems]);
 
   return (
     <Card data-testid="activity-feed">
