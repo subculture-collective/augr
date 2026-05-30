@@ -1,11 +1,14 @@
 package data
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,6 +211,39 @@ func TestDataServiceGetOHLCVCacheMissCallsChainAndCachesResult(t *testing.T) {
 				t.Fatalf("cached data = %#v, want %#v", cached, want)
 			}
 		})
+	}
+}
+
+func TestDataServiceGetOHLCVCacheNotFoundDoesNotWarn(t *testing.T) {
+	now := time.Date(2026, 3, 22, 17, 0, 0, 0, time.UTC)
+	from := now.Add(-time.Hour)
+	to := now
+	want := []domain.OHLCV{{Timestamp: from, Open: 200, High: 210, Low: 190, Close: 205, Volume: 2500}}
+
+	var logs bytes.Buffer
+	provider := &serviceStubProvider{ohlcv: want}
+	cacheRepo := &fakeMarketDataCacheRepo{
+		getErr: fmt.Errorf("postgres: get market data cache AAPL/stock-chain/ohlcv: %w", repository.ErrNotFound),
+	}
+	service := &DataService{
+		stockChain: provider,
+		cacheRepo:  cacheRepo,
+		logger:     slog.New(slog.NewTextHandler(&logs, nil)),
+		now:        func() time.Time { return now },
+	}
+
+	got, err := service.GetOHLCV(context.Background(), domain.MarketTypeStock, "AAPL", Timeframe1d, from, to)
+	if err != nil {
+		t.Fatalf("GetOHLCV() error = %v", err)
+	}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("GetOHLCV() = %#v, want %#v", got, want)
+	}
+	if provider.ohlcvCalls != 1 {
+		t.Fatalf("provider GetOHLCV calls = %d, want 1", provider.ohlcvCalls)
+	}
+	if strings.Contains(logs.String(), "failed to load market data from cache") {
+		t.Fatalf("expected cache miss not to emit warning log, got %q", logs.String())
 	}
 }
 

@@ -36,8 +36,13 @@ export function AppRoutes() {
         <Route path="login" element={<LoginPage />} />
       </Route>
 
-      <Route element={<ProtectedRoute />}>
-        <Route element={<AppShell />}>
+      <Route element={<AppShell />}>
+        <Route path="options" element={<OptionsPage />} />
+        <Route path="calendar" element={<CalendarPage />} />
+        <Route path="universe" element={<UniversePage />} />
+        <Route path="glossary" element={<GlossaryPage />} />
+
+        <Route element={<ProtectedRoute />}>
           <Route index element={<DashboardPage />} />
           <Route path="strategies" element={<StrategiesPage />} />
           <Route path="strategies/:id" element={<StrategyDetailPage />} />
@@ -48,10 +53,7 @@ export function AppRoutes() {
           <Route path="stocks/:ticker" element={<StockDetailPage />} />
           <Route path="orders" element={<OrdersPage />} />
           <Route path="orders/:id" element={<OrderDetailPage />} />
-          <Route path="options" element={<OptionsPage />} />
           <Route path="discovery" element={<DiscoveryPage />} />
-          <Route path="calendar" element={<CalendarPage />} />
-          <Route path="universe" element={<UniversePage />} />
           <Route path="automation" element={<AutomationPage />} />
           <Route path="automation/:name" element={<AutomationDetailPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
@@ -61,7 +63,6 @@ export function AppRoutes() {
           <Route path="realtime" element={<RealtimePage />} />
           <Route path="signals" element={<SignalsPage />} />
           <Route path="reliability" element={<ReliabilityPage />} />
-          <Route path="glossary" element={<GlossaryPage />} />
         </Route>
       </Route>
     </Routes>

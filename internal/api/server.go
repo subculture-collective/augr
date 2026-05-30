@@ -681,6 +681,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if isGuestObservationRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		result, err := s.auth.AuthenticateRequest(r)
 		if err != nil {
@@ -696,4 +700,32 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), authPrincipalContextKey, result.Principal)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func isGuestObservationRequest(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	if path == "/api/v1/news" ||
+		path == "/api/v1/calendar/earnings" ||
+		path == "/api/v1/calendar/economic" ||
+		path == "/api/v1/calendar/filings" ||
+		path == "/api/v1/calendar/ipo" ||
+		path == "/api/v1/universe" ||
+		path == "/api/v1/universe/watchlist" {
+		return true
+	}
+
+	for _, prefix := range []string{
+		"/api/v1/options/chain",
+		"/api/v1/options/contracts",
+	} {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+
+	return false
 }

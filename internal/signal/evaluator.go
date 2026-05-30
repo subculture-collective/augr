@@ -3,6 +3,7 @@ package signal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -116,7 +117,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, event RawSignalEvent, strategi
 	userMsg := fmt.Sprintf("Signal:\nSource: %s\nTitle: %s\nBody: %s\n\nActive strategies:\n%s",
 		event.Source, event.Title, event.Body, string(stratJSON))
 
-	resp, err := e.provider.Complete(ctx, llm.CompletionRequest{
+	resp, err := e.completeWithTransientRetry(ctx, llm.CompletionRequest{
 		Model: e.model,
 		Messages: []llm.Message{
 			{Role: "system", Content: evaluatorSystemPrompt},
@@ -138,7 +139,19 @@ func (e *Evaluator) Evaluate(ctx context.Context, event RawSignalEvent, strategi
 		return e.fallback(event, strategies), nil
 	}
 
-	return e.parseResponse(strings.TrimSpace(resp.Content), event, strategies)
+	content := strings.TrimSpace(resp.Content)
+	if content == "" {
+		e.logger.Warn("signal evaluator: LLM returned empty response, using fallback",
+			slog.String("source", event.Source),
+			slog.String("title", event.Title),
+		)
+		if e.metrics != nil {
+			e.metrics.RecordSignalParseFailure()
+		}
+		return e.fallback(event, strategies), nil
+	}
+
+	return e.parseResponse(content, event, strategies)
 }
 
 type evaluatorOutput struct {
@@ -199,6 +212,29 @@ func (e *Evaluator) parseResponse(content string, event RawSignalEvent, strategi
 		Summary:            out.Summary,
 		RecommendedAction:  action,
 	}, nil
+}
+
+func (e *Evaluator) completeWithTransientRetry(ctx context.Context, request llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	resp, err := e.provider.Complete(ctx, request)
+	if err == nil || !shouldRetrySignalEvalError(err) {
+		return resp, err
+	}
+	return e.provider.Complete(ctx, request)
+}
+
+func shouldRetrySignalEvalError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	errText := strings.ToLower(err.Error())
+	return strings.Contains(errText, "context deadline exceeded") ||
+		strings.Contains(errText, "broker connection closed before response was received")
 }
 
 func (e *Evaluator) fallback(event RawSignalEvent, strategies []StrategyContext) *EvaluatedSignal {

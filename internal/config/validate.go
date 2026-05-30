@@ -28,7 +28,7 @@ func Validate(cfg Config) error {
 	}
 
 	if !hasLLMProvider(cfg.LLM.Providers) {
-		errs = append(errs, "at least one LLM provider must be configured (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, or OLLAMA_BASE_URL)")
+		errs = append(errs, "at least one LLM provider must be configured (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, or OLLAMA_BASE_URL + OLLAMA_API_KEY)")
 	}
 
 	if strings.TrimSpace(cfg.DataProviders.AlphaVantage.APIKey) != "" && cfg.DataProviders.AlphaVantage.RateLimitPerMinute <= 0 {
@@ -150,7 +150,7 @@ func hasLLMProvider(providers LLMProviderConfigs) bool {
 		strings.TrimSpace(providers.Google.APIKey) != "" ||
 		strings.TrimSpace(providers.OpenRouter.APIKey) != "" ||
 		strings.TrimSpace(providers.XAI.APIKey) != "" ||
-		strings.TrimSpace(providers.Ollama.BaseURL) != ""
+		(strings.TrimSpace(providers.Ollama.BaseURL) != "" && strings.TrimSpace(providers.Ollama.APIKey) != "")
 }
 
 func validateSelectedProvider(llmCfg LLMConfig) string {
@@ -200,7 +200,12 @@ func validateLLMProviderSelection(rawProvider, envName string, llmCfg LLMConfig)
 			return fmt.Sprintf("%s is xai but XAI_API_KEY is not set", envName)
 		}
 	case "ollama":
-		// Ollama doesn't require an API key.
+		if strings.TrimSpace(llmCfg.Providers.Ollama.BaseURL) == "" {
+			return fmt.Sprintf("%s is ollama but OLLAMA_BASE_URL is not set", envName)
+		}
+		if strings.TrimSpace(llmCfg.Providers.Ollama.APIKey) == "" {
+			return fmt.Sprintf("%s is ollama but OLLAMA_API_KEY is not set", envName)
+		}
 	default:
 		return fmt.Sprintf("LLM_DEFAULT_PROVIDER %q is not a known provider", llmCfg.DefaultProvider)
 	}

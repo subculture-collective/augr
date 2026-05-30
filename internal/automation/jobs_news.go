@@ -16,7 +16,7 @@ import (
 var (
 	newsScanSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,
-		Cron:         "*/5 * * * 1-5", // every 5 minutes during market hours
+		Cron:         "7-59/30 * * * 1-5", // every 30 minutes during market hours, staggered off shared minute boundaries
 		SkipWeekends: true,
 		SkipHolidays: true,
 	}

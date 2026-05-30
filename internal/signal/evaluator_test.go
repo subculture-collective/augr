@@ -21,6 +21,32 @@ func (s stubEvaluatorProvider) Complete(context.Context, llm.CompletionRequest) 
 	return s.response, nil
 }
 
+type scriptedEvaluatorResult struct {
+	response *llm.CompletionResponse
+	err      error
+}
+
+type scriptedEvaluatorProvider struct {
+	results []scriptedEvaluatorResult
+	calls   int
+}
+
+func (s *scriptedEvaluatorProvider) Complete(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	s.calls++
+	if len(s.results) == 0 {
+		return nil, errors.New("no scripted evaluator results")
+	}
+	idx := s.calls - 1
+	if idx >= len(s.results) {
+		idx = len(s.results) - 1
+	}
+	result := s.results[idx]
+	if result.err != nil {
+		return nil, result.err
+	}
+	return result.response, nil
+}
+
 // stubMetrics counts RecordSignalParseFailure calls.
 type stubMetrics struct {
 	parseFailures int
@@ -189,6 +215,67 @@ func TestEvaluatorFallback_NilMetrics_NoPanic(t *testing.T) {
 	}
 	if got == nil {
 		t.Fatal("Evaluate() = nil")
+	}
+}
+
+func TestEvaluatorEvaluate_RetriesOnceOnBrokerConnectionClosed(t *testing.T) {
+	t.Parallel()
+
+	strategyID := uuid.New()
+	validJSON := `{"affected_strategy_ids":["` + strategyID.String() + `"],"urgency":4,"summary":"material update","recommended_action":"re-evaluate"}`
+	provider := &scriptedEvaluatorProvider{results: []scriptedEvaluatorResult{
+		{err: errors.New(`ollama: complete request: POST "http://host.docker.internal:11434/v1/chat/completions": 502 Bad Gateway {"message":"broker connection closed before response was received","type":"broker_error","code":"broker_error"}`)},
+		{response: &llm.CompletionResponse{Content: validJSON}},
+	}}
+	evaluator := NewEvaluator(provider, "quick", nil)
+
+	got, err := evaluator.Evaluate(context.Background(), RawSignalEvent{Source: "rss", Title: "headline"}, []StrategyContext{{ID: strategyID}})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Evaluate() = nil")
+	}
+	if provider.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2", provider.calls)
+	}
+	if got.Urgency != 4 {
+		t.Fatalf("Urgency = %d, want 4", got.Urgency)
+	}
+	if got.RecommendedAction != "re-evaluate" {
+		t.Fatalf("RecommendedAction = %q, want re-evaluate", got.RecommendedAction)
+	}
+	if len(got.AffectedStrategies) != 1 || got.AffectedStrategies[0] != strategyID {
+		t.Fatalf("AffectedStrategies = %v, want [%s]", got.AffectedStrategies, strategyID)
+	}
+}
+
+func TestEvaluatorEvaluate_RetriesOnceOnMessageDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	strategyID := uuid.New()
+	validJSON := `{"affected_strategy_ids":["` + strategyID.String() + `"],"urgency":2,"summary":"watch closely","recommended_action":"monitor"}`
+	provider := &scriptedEvaluatorProvider{results: []scriptedEvaluatorResult{
+		{err: errors.New("ollama: complete request: context deadline exceeded")},
+		{response: &llm.CompletionResponse{Content: validJSON}},
+	}}
+	evaluator := NewEvaluator(provider, "quick", nil)
+
+	got, err := evaluator.Evaluate(context.Background(), RawSignalEvent{Source: "rss", Title: "headline"}, []StrategyContext{{ID: strategyID}})
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Evaluate() = nil")
+	}
+	if provider.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2", provider.calls)
+	}
+	if got.Urgency != 2 {
+		t.Fatalf("Urgency = %d, want 2", got.Urgency)
+	}
+	if got.RecommendedAction != "monitor" {
+		t.Fatalf("RecommendedAction = %q, want monitor", got.RecommendedAction)
 	}
 }
 

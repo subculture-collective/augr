@@ -1,16 +1,19 @@
 package ollama
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
+	"github.com/PatrickFanella/get-rich-quick/internal/llm/llamabroker"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/parse"
 	openaisdk "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -26,11 +29,6 @@ const (
 	ModelLlama3 = "llama3.2"
 	// ModelMistral is the Mistral model available on Ollama.
 	ModelMistral = "mistral"
-
-	// ollamaAPIKey is a placeholder key used to satisfy the OpenAI-compatible API
-	// client, which requires a non-empty API key even though Ollama does not
-	// authenticate requests.
-	ollamaAPIKey = "ollama"
 )
 
 // Config contains the settings required to create an Ollama provider.
@@ -38,8 +36,80 @@ type Config struct {
 	// BaseURL is the address of the locally running Ollama server.
 	// Defaults to DefaultBaseURL if empty.
 	BaseURL    string
+	APIKey     string
 	Model      string
 	HTTPClient *http.Client
+}
+
+type ssePreambleTransport struct {
+	base http.RoundTripper
+}
+
+func (t *ssePreambleTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Detect streaming before the body is consumed by the upstream call.
+	isStreaming := requestIsStreaming(req)
+
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	if resp.StatusCode == http.StatusOK && strings.Contains(req.URL.Path, "/chat/completions") {
+		ct := resp.Header.Get("Content-Type")
+		if strings.Contains(ct, "text/event-stream") {
+			if isStreaming {
+				// Streaming: strip only broker heartbeats, keep SSE format intact
+				// so the openai-go SDK can parse the chunk stream.
+				resp.Body = llamabroker.StripBrokerHeartbeatsReadCloser(resp.Body)
+				// Content-Type stays text/event-stream — SDK needs it.
+			} else {
+				// Non-streaming: strip SSE preamble, unwrap the single JSON body.
+				resp.Header.Set("Content-Type", "application/json")
+				stripped := llamabroker.StripSSEPreambleReadCloser(resp.Body)
+				// llama-line now signals errors as SSE status events, handled by
+				// StripSSEPreamble. PeekBrokerError handles older bare-JSON errors.
+			errMsg, remaining := llamabroker.PeekBrokerError(stripped)
+			if errMsg != "" {
+				resp.StatusCode = http.StatusBadGateway
+				resp.Status = "502 Bad Gateway"
+				body := `{"error":{"message":"` + errMsg + `","type":"broker_error","code":"broker_error"}}`
+				resp.Body = io.NopCloser(strings.NewReader(body))
+				return resp, nil
+			}
+			// Guard against empty body (e.g. connection dropped mid-stream before
+			// a final payload or error event was sent).
+			payload, readErr := io.ReadAll(remaining)
+			if readErr != nil || len(bytes.TrimSpace(payload)) == 0 {
+				resp.StatusCode = http.StatusBadGateway
+				resp.Status = "502 Bad Gateway"
+				msg := "broker connection closed before response was received"
+				if readErr != nil {
+					msg = readErr.Error()
+				}
+				body := `{"error":{"message":"` + msg + `","type":"broker_error","code":"broker_error"}}`
+				resp.Body = io.NopCloser(strings.NewReader(body))
+				return resp, nil
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(payload))
+			}
+		}
+	}
+	return resp, nil
+}
+
+// requestIsStreaming reports whether the request body contains "stream":true.
+// It peeks up to 512 bytes and restores the body so the upstream can read it.
+func requestIsStreaming(req *http.Request) bool {
+	if req.Body == nil || req.GetBody == nil {
+		return false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return false
+	}
+	buf := make([]byte, 512)
+	n, _ := body.Read(buf)
+	body.Close()
+	return bytes.Contains(buf[:n], []byte(`"stream":true`))
 }
 
 // Provider implements llm.Provider using Ollama's OpenAI-compatible HTTP API.
@@ -64,14 +134,27 @@ func NewProvider(cfg Config) (*Provider, error) {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
+	apiKey := strings.TrimSpace(cfg.APIKey)
+	if apiKey == "" {
+		return nil, errors.New("ollama: api key is required (set OLLAMA_API_KEY for llama-line broker)")
+	}
+
+	baseTransport := http.DefaultTransport
+	client := &http.Client{Transport: &ssePreambleTransport{base: baseTransport}}
+	if cfg.HTTPClient != nil {
+		cloned := *cfg.HTTPClient
+		if cloned.Transport != nil {
+			baseTransport = cloned.Transport
+		}
+		cloned.Transport = &ssePreambleTransport{base: baseTransport}
+		client = &cloned
+	}
 
 	opts := []option.RequestOption{
-		option.WithAPIKey(ollamaAPIKey),
+		option.WithAPIKey(apiKey),
 		option.WithBaseURL(baseURL),
 		option.WithMaxRetries(0),
-	}
-	if cfg.HTTPClient != nil {
-		opts = append(opts, option.WithHTTPClient(cfg.HTTPClient))
+		option.WithHTTPClient(client),
 	}
 
 	return &Provider{
@@ -123,29 +206,112 @@ func (p *Provider) Complete(ctx context.Context, request llm.CompletionRequest) 
 	}
 
 	startedAt := time.Now()
-	completion, err := p.client.Chat.Completions.New(ctx, params,
-		// Disable qwen3 thinking mode so the model returns content directly
-		// instead of consuming all tokens on internal chain-of-thought reasoning.
-		option.WithJSONSet("think", false),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("ollama: complete request: %w", err)
-	}
-	if len(completion.Choices) == 0 {
-		return nil, errors.New("ollama: completion response did not include any choices")
+	retryBudget := completeRetryBudget{}
+	for attempt := 1; attempt <= retryBudget.maxAttempts(); attempt++ {
+		completion, err := p.client.Chat.Completions.New(ctx, params,
+			// Disable qwen3 thinking mode so the model returns content directly
+			// instead of consuming all tokens on internal chain-of-thought reasoning.
+			option.WithJSONSet("think", false),
+		)
+		if err != nil {
+			wrapped := fmt.Errorf("ollama: complete request: %w", err)
+			if retryBudget.consume(wrapped) {
+				continue
+			}
+			return nil, wrapped
+		}
+		if len(completion.Choices) == 0 {
+			err := errors.New("ollama: completion response did not include any choices")
+			if retryBudget.consume(err) {
+				continue
+			}
+			return nil, err
+		}
+
+		content := extractContent(completion.Choices[0].Message)
+
+		return &llm.CompletionResponse{
+			Content: parse.ExtractContent(content),
+			Usage: llm.CompletionUsage{
+				PromptTokens:     int(completion.Usage.PromptTokens),
+				CompletionTokens: int(completion.Usage.CompletionTokens),
+			},
+			Model:     completion.Model,
+			LatencyMS: int(time.Since(startedAt).Milliseconds()),
+		}, nil
 	}
 
-	content := extractContent(completion.Choices[0].Message)
+	return nil, errors.New("ollama: exhausted completion attempts")
+}
 
-	return &llm.CompletionResponse{
-		Content: parse.StripThinkingTags(content),
-		Usage: llm.CompletionUsage{
-			PromptTokens:     int(completion.Usage.PromptTokens),
-			CompletionTokens: int(completion.Usage.CompletionTokens),
-		},
-		Model:     completion.Model,
-		LatencyMS: int(time.Since(startedAt).Milliseconds()),
-	}, nil
+type completeRetryKind int
+
+const (
+	completeRetryNone completeRetryKind = iota
+	completeRetryNoChoices
+	completeRetryBrokerClosed
+	completeRetryTimeout
+)
+
+type completeRetryBudget struct {
+	noChoicesCount   int
+	brokerClosedUsed bool
+	timeoutUsed      bool
+}
+
+func (b *completeRetryBudget) maxAttempts() int {
+	if b == nil {
+		return 1
+	}
+	return 3 // initial attempt + bounded retries for one timeout/broker-close or up to two repeated no-choice transients
+}
+
+func (b *completeRetryBudget) consume(err error) bool {
+	if b == nil {
+		return false
+	}
+	switch classifyCompleteRetryKind(err) {
+	case completeRetryNoChoices:
+		if b.noChoicesCount >= 2 {
+			return false
+		}
+		b.noChoicesCount++
+		return true
+	case completeRetryBrokerClosed:
+		if b.brokerClosedUsed {
+			return false
+		}
+		b.brokerClosedUsed = true
+		return true
+	case completeRetryTimeout:
+		if b.timeoutUsed {
+			return false
+		}
+		b.timeoutUsed = true
+		return true
+	default:
+		return false
+	}
+}
+
+func classifyCompleteRetryKind(err error) completeRetryKind {
+	if err == nil {
+		return completeRetryNone
+	}
+	if errors.Is(err, context.Canceled) {
+		return completeRetryNone
+	}
+	errText := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(errText, "completion response did not include any choices"):
+		return completeRetryNoChoices
+	case strings.Contains(errText, "broker connection closed before response was received"):
+		return completeRetryBrokerClosed
+	case errors.Is(err, context.DeadlineExceeded), strings.Contains(errText, "context deadline exceeded"):
+		return completeRetryTimeout
+	default:
+		return completeRetryNone
+	}
 }
 
 // extractContent returns the usable text from a chat completion message.

@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,7 +123,7 @@ type clobMarketResp struct {
 		Slug        string  `json:"market_slug"`
 		Question    string  `json:"question"`
 		ConditionID string  `json:"condition_id"`
-		Volume24h   float64 `json:"volume_24hr"`
+		Volume24h   jsonFloat `json:"volume_24hr"`
 	} `json:"data"`
 }
 
@@ -223,6 +224,38 @@ type clobMarketSummary struct {
 	volume24h   float64
 }
 
+type jsonFloat float64
+
+func (f *jsonFloat) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" || trimmed == "" {
+		*f = 0
+		return nil
+	}
+	var n float64
+	if err := json.Unmarshal(data, &n); err == nil {
+		*f = jsonFloat(n)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		if s == "" {
+			*f = 0
+			return nil
+		}
+		var parsed float64
+		if err := json.Unmarshal([]byte(s), &parsed); err == nil {
+			*f = jsonFloat(parsed)
+			return nil
+		}
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+			*f = jsonFloat(parsed)
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid float %q", trimmed)
+}
+
 func (p *PolymarketSource) fetchMarket(ctx context.Context, slug string) (clobMarketSummary, error) {
 	u, err := url.Parse(p.clobURL + "/markets")
 	if err != nil {
@@ -256,7 +289,7 @@ func (p *PolymarketSource) fetchMarket(ctx context.Context, slug string) (clobMa
 	return clobMarketSummary{
 		conditionID: m.ConditionID,
 		question:    m.Question,
-		volume24h:   m.Volume24h,
+		volume24h:   float64(m.Volume24h),
 	}, nil
 }
 

@@ -127,6 +127,38 @@ func TestProviderGetOHLCV(t *testing.T) {
 	}
 }
 
+func TestProviderGetOHLCVNormalizesDotShareTickersForChartPath(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"chart":{"result":[],"error":null}}`))
+	}))
+	defer server.Close()
+
+	provider := NewProvider(discardLogger())
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+
+	from := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2024, time.January, 2, 0, 0, 0, 0, time.UTC)
+
+	if _, err := provider.GetOHLCV(context.Background(), "BRK.A", data.Timeframe1d, from, to); err != nil {
+		t.Fatalf("GetOHLCV() error = %v", err)
+	}
+
+	select {
+	case path := <-requests:
+		if path != "/v8/finance/chart/BRK-A" {
+			t.Fatalf("request path = %s, want %s", path, "/v8/finance/chart/BRK-A")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("request path was not captured")
+	}
+}
+
 func TestProviderGetOHLCVEmptyResults(t *testing.T) {
 	t.Parallel()
 

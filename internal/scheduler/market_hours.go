@@ -42,7 +42,7 @@ func isUSEquityMarketOpen(t time.Time) bool {
 	return !et.Before(open) && et.Before(marketClose)
 }
 
-// IsPreMarket returns true during the 30-minute window before market open (9:00-9:30 ET).
+// IsPreMarket returns true during the pre-market automation window (4:00-9:30 ET).
 // Returns false on weekends and NYSE holidays.
 func IsPreMarket(t time.Time) bool {
 	et := t.In(newYorkLocation)
@@ -53,7 +53,7 @@ func IsPreMarket(t time.Time) bool {
 		return false
 	}
 
-	start := time.Date(et.Year(), et.Month(), et.Day(), 9, 0, 0, 0, newYorkLocation)
+	start := time.Date(et.Year(), et.Month(), et.Day(), 4, 0, 0, 0, newYorkLocation)
 	end := time.Date(et.Year(), et.Month(), et.Day(), 9, 30, 0, 0, newYorkLocation)
 
 	return !et.Before(start) && et.Before(end)
@@ -76,7 +76,7 @@ func IsNearMarketClose(t time.Time) bool {
 	return !et.Before(start) && et.Before(end)
 }
 
-// IsAfterHours returns true during extended hours after close (16:00-20:00 ET).
+// IsAfterHours returns true during the after-hours automation window (16:00-23:59:59 ET).
 // Returns false on weekends and NYSE holidays.
 func IsAfterHours(t time.Time) bool {
 	et := t.In(newYorkLocation)
@@ -88,7 +88,7 @@ func IsAfterHours(t time.Time) bool {
 	}
 
 	start := time.Date(et.Year(), et.Month(), et.Day(), 16, 0, 0, 0, newYorkLocation)
-	end := time.Date(et.Year(), et.Month(), et.Day(), 20, 0, 0, 0, newYorkLocation)
+	end := time.Date(et.Year(), et.Month(), et.Day()+1, 0, 0, 0, 0, newYorkLocation)
 
 	return !et.Before(start) && et.Before(end)
 }

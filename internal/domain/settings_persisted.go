@@ -26,6 +26,7 @@ type ProviderPersisted struct {
 }
 
 // OllamaSettings contains local model settings.
+// API keys are not persisted.
 type OllamaSettings struct {
 	BaseURL string `json:"base_url,omitempty"`
 	Model   string `json:"model"`

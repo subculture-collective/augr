@@ -13,7 +13,7 @@ import (
 
 var (
 	earningsScannerSpec = scheduler.ScheduleSpec{
-		Type:         scheduler.ScheduleTypePreMarket,
+		Type:         scheduler.ScheduleTypeMarketHours,
 		Cron:         "0 10 * * 1-5",
 		SkipWeekends: true,
 		SkipHolidays: true,

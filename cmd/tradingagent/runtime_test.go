@@ -294,7 +294,7 @@ func TestNewAPIServerWiresAlpacaReconcileAutomationJob(t *testing.T) {
 			Alpaca: config.BrokerConfig{APIKey: "alpaca-key", APISecret: "alpaca-secret", PaperMode: true},
 		},
 		Embedding: config.EmbeddingConfig{Model: "nomic-embed-text", Timeout: time.Second},
-		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434"}}},
+		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434", APIKey: "test-key"}}},
 	}
 
 	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())

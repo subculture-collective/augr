@@ -53,14 +53,14 @@ func TestShouldFire(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "pre_market Monday 9:15 AM ET",
+			name: "pre_market Monday 8:00 AM ET",
 			spec: ScheduleSpec{
 				Type:         ScheduleTypePreMarket,
 				MarketType:   "stock",
 				SkipWeekends: true,
 				SkipHolidays: true,
 			},
-			now:  time.Date(2024, time.January, 8, 9, 15, 0, 0, et),
+			now:  time.Date(2024, time.January, 8, 8, 0, 0, 0, et),
 			want: true,
 		},
 		{
@@ -97,6 +97,17 @@ func TestShouldFire(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "after_hours Monday 20:30 ET",
+			spec: ScheduleSpec{
+				Type:         ScheduleTypeAfterHours,
+				MarketType:   "stock",
+				SkipWeekends: true,
+				SkipHolidays: true,
+			},
+			now:  time.Date(2024, time.January, 8, 20, 30, 0, 0, et),
+			want: true,
+		},
+		{
 			name: "after_hours Monday 17:00 ET",
 			spec: ScheduleSpec{
 				Type:         ScheduleTypeAfterHours,
@@ -108,7 +119,7 @@ func TestShouldFire(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "after_hours Monday 21:00 ET too late",
+			name: "after_hours Monday 21:00 ET",
 			spec: ScheduleSpec{
 				Type:         ScheduleTypeAfterHours,
 				MarketType:   "stock",
@@ -116,6 +127,28 @@ func TestShouldFire(t *testing.T) {
 				SkipHolidays: true,
 			},
 			now:  time.Date(2024, time.January, 8, 21, 0, 0, 0, et),
+			want: true,
+		},
+		{
+			name: "after_hours Monday 22:00 ET",
+			spec: ScheduleSpec{
+				Type:         ScheduleTypeAfterHours,
+				MarketType:   "stock",
+				SkipWeekends: true,
+				SkipHolidays: true,
+			},
+			now:  time.Date(2024, time.January, 8, 22, 0, 0, 0, et),
+			want: true,
+		},
+		{
+			name: "after_hours next day 00:30 ET too late",
+			spec: ScheduleSpec{
+				Type:         ScheduleTypeAfterHours,
+				MarketType:   "stock",
+				SkipWeekends: true,
+				SkipHolidays: true,
+			},
+			now:  time.Date(2024, time.January, 9, 0, 30, 0, 0, et),
 			want: false,
 		},
 		{

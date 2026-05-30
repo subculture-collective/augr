@@ -557,6 +557,9 @@ func (s *DataService) loadCached(ctx context.Context, key repository.MarketDataC
 
 	entry, err := s.cacheRepo.Get(ctx, key)
 	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return false
+		}
 		s.logger.Warn("failed to load market data from cache",
 			slog.String("ticker", key.Ticker),
 			slog.String("provider", key.Provider),

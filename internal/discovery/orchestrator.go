@@ -31,10 +31,11 @@ type DiscoveryConfig struct {
 
 // DiscoveryDeps bundles external dependencies required by the discovery pipeline.
 type DiscoveryDeps struct {
-	DataService *data.DataService
-	LLMProvider llm.Provider
-	Strategies  repository.StrategyRepository
-	Logger      *slog.Logger
+	DataService     *data.DataService
+	LLMProvider     llm.Provider
+	Strategies      repository.StrategyRepository
+	BacktestConfigs repository.BacktestConfigRepository // optional; auto-creates BacktestConfig on deploy
+	Logger          *slog.Logger
 }
 
 // DeployedStrategy records a strategy that was created in the repository.
@@ -286,6 +287,27 @@ func RunDiscovery(ctx context.Context, cfg DiscoveryConfig, deps DiscoveryDeps) 
 					slog.String("ticker", strategy.Ticker),
 					slog.String("name", strategy.Name),
 				)
+			} else if deps.BacktestConfigs != nil && len(v.bars) >= 2 {
+				initialCash := cfg.Sweep.InitialCash
+				if initialCash == 0 {
+					initialCash = 100_000
+				}
+				btCfg := domain.BacktestConfig{
+					ID:         uuid.New(),
+					StrategyID: strategy.ID,
+					Name:       strategyName + " (discovery)",
+					StartDate:  v.bars[0].Timestamp,
+					EndDate:    v.bars[len(v.bars)-1].Timestamp,
+					Simulation: domain.BacktestSimulationParameters{
+						InitialCapital: initialCash,
+					},
+				}
+				if btErr := deps.BacktestConfigs.Create(ctx, &btCfg); btErr != nil {
+					logger.Warn("discovery: failed to create backtest config",
+						slog.String("strategy_id", strategy.ID.String()),
+						slog.Any("error", btErr),
+					)
+				}
 			}
 		}
 

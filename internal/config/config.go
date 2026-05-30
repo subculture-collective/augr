@@ -88,10 +88,11 @@ type LLMProviderConfig struct {
 	Model   string
 }
 
-// OllamaConfig contains local model settings.
+// OllamaConfig contains llama-line broker / Ollama-compatible settings.
 type OllamaConfig struct {
 	BaseURL string
 	Model   string
+	APIKey  string
 }
 
 // EmbeddingConfig contains settings for the embedding provider.
@@ -532,6 +533,7 @@ func loadFromEnvironment() (Config, error) {
 				Ollama: OllamaConfig{
 					BaseURL: getEnvString("OLLAMA_BASE_URL", "http://localhost:11434"),
 					Model:   getEnvString("OLLAMA_MODEL", "llama3.2"),
+					APIKey:  os.Getenv("OLLAMA_API_KEY"),
 				},
 			},
 			FallbackProvider:     getEnvString("LLM_FALLBACK_PROVIDER", ""),

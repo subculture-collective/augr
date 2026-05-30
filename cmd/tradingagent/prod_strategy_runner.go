@@ -426,13 +426,24 @@ func buildRunnerDefinition(provider llm.Provider, providerName string, resolved 
 }
 
 func effectiveDebateCallTimeout(llmTimeout time.Duration, resolved agent.ResolvedConfig) time.Duration {
-	if resolved.PipelineConfig.DebateTimeoutSeconds > 0 {
-		return time.Duration(resolved.PipelineConfig.DebateTimeoutSeconds) * time.Second
-	}
+	callTimeout := llmTimeout
 	if timeout := globalDebateCallTimeout(); timeout > 0 {
-		return timeout
+		callTimeout = timeout
 	}
-	return llmTimeout
+
+	roundTimeout := time.Duration(resolved.PipelineConfig.DebateTimeoutSeconds) * time.Second
+	if roundTimeout <= 0 {
+		return callTimeout
+	}
+
+	cap := roundTimeout / 2
+	if cap <= 0 {
+		return callTimeout
+	}
+	if callTimeout <= 0 || callTimeout > cap {
+		return cap
+	}
+	return callTimeout
 }
 
 func globalDebateCallTimeout() time.Duration {

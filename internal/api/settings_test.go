@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,7 +39,8 @@ func TestGetSettings(t *testing.T) {
 				XAI: providerState{
 					Model: "grok-3-mini",
 				},
-				Ollama: domain.OllamaSettings{
+				Ollama: providerState{
+					APIKey:  "sk-ollama-4321",
 					BaseURL: "http://localhost:11434",
 					Model:   "llama3.2",
 				},
@@ -84,6 +86,15 @@ func TestGetSettings(t *testing.T) {
 	if body.LLM.Providers.OpenAI.APIKeyLast4 != "1234" {
 		t.Fatalf("openai key last4 = %q, want %q", body.LLM.Providers.OpenAI.APIKeyLast4, "1234")
 	}
+	if !body.LLM.Providers.Ollama.APIKeyConfigured {
+		t.Fatal("expected ollama key to be marked configured")
+	}
+	if body.LLM.Providers.Ollama.APIKeyLast4 != "4321" {
+		t.Fatalf("ollama key last4 = %q, want %q", body.LLM.Providers.Ollama.APIKeyLast4, "4321")
+	}
+	if strings.Contains(rr.Body.String(), "sk-ollama-4321") {
+		t.Fatal("ollama api key leaked in response body")
+	}
 	if body.System.Version != "v1.2.3" {
 		t.Fatalf("version = %q, want %q", body.System.Version, "v1.2.3")
 	}
@@ -123,7 +134,8 @@ func TestUpdateSettings(t *testing.T) {
 					Model: "openai/gpt-4.1-mini",
 				},
 				XAI: providerState{Model: "grok-3-mini"},
-				Ollama: domain.OllamaSettings{
+				Ollama: providerState{
+					APIKey:  "sk-ollama-old-9999",
 					BaseURL: "http://localhost:11434",
 					Model:   "llama3.2",
 				},
@@ -168,7 +180,7 @@ func TestUpdateSettings(t *testing.T) {
 					BaseURL: "https://api.x.ai/v1",
 					Model:   "grok-3-beta",
 				},
-				Ollama: domain.OllamaSettings{
+				Ollama: OllamaProviderUpdateRequest{
 					BaseURL: "http://ollama.internal:11434",
 					Model:   "llama3.3",
 				},
@@ -204,6 +216,89 @@ func TestUpdateSettings(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsPreservesOllamaAPIKeyWhenNil(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Settings = NewMemorySettingsService(SettingsBootstrap{
+		LLM: llmSettingsState{
+			DefaultProvider: "openai",
+			DeepThinkModel:  "gpt-5.2",
+			QuickThinkModel: "gpt-5-mini",
+			Providers: llmProvidersState{
+				OpenAI:     providerState{Model: "gpt-5-mini"},
+				Anthropic:  providerState{Model: "claude-3-7-sonnet-latest"},
+				Google:     providerState{Model: "gemini-2.5-flash"},
+				OpenRouter: providerState{Model: "openai/gpt-4.1-mini"},
+				XAI:        providerState{Model: "grok-3-mini"},
+				Ollama: providerState{
+					APIKey:  "sk-keep-5555",
+					BaseURL: "http://localhost:11434",
+					Model:   "llama3.2",
+				},
+			},
+		},
+		Risk: domain.RiskSettings{
+			MaxPositionSizePct:         10,
+			MaxDailyLossPct:            2,
+			MaxDrawdownPct:             10,
+			MaxOpenPositions:           8,
+			MaxTotalExposurePct:        90,
+			MaxPerMarketExposurePct:    40,
+			CircuitBreakerThresholdPct: 5,
+			CircuitBreakerCooldownMin:  15,
+		},
+		CurrentSchemaVersion:  29,
+		RequiredSchemaVersion: 29,
+		SchemaStatus:          "ok",
+	})
+
+	srv := newTestServerWithDeps(t, deps)
+
+	payload := SettingsUpdateRequest{
+		LLM: LLMSettingsUpdateRequest{
+			DefaultProvider: "openai",
+			DeepThinkModel:  "claude-4-sonnet",
+			QuickThinkModel: "claude-3-7-sonnet-latest",
+			Providers: LLMProvidersUpdateRequest{
+				OpenAI:     LLMProviderUpdateRequest{Model: "gpt-5-mini"},
+				Anthropic:  LLMProviderUpdateRequest{Model: "claude-4-sonnet"},
+				Google:     LLMProviderUpdateRequest{Model: "gemini-2.5-pro"},
+				OpenRouter: LLMProviderUpdateRequest{Model: "openai/gpt-4.1"},
+				XAI:        LLMProviderUpdateRequest{Model: "grok-3-beta"},
+				Ollama: OllamaProviderUpdateRequest{
+					BaseURL: "http://ollama.internal:11434",
+					Model:   "llama3.3",
+				},
+			},
+		},
+		Risk: domain.RiskSettings{
+			MaxPositionSizePct:         12.5,
+			MaxDailyLossPct:            3,
+			MaxDrawdownPct:             11,
+			MaxOpenPositions:           12,
+			MaxTotalExposurePct:        95,
+			MaxPerMarketExposurePct:    45,
+			CircuitBreakerThresholdPct: 6,
+			CircuitBreakerCooldownMin:  20,
+		},
+	}
+
+	rr := doRequest(t, srv, http.MethodPut, "/api/v1/settings", payload)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	body := decodeJSON[SettingsResponse](t, rr)
+	if !body.LLM.Providers.Ollama.APIKeyConfigured {
+		t.Fatal("expected ollama key to remain configured")
+	}
+	if body.LLM.Providers.Ollama.APIKeyLast4 != "5555" {
+		t.Fatalf("ollama key last4 = %q, want %q", body.LLM.Providers.Ollama.APIKeyLast4, "5555")
+	}
+}
+
 func TestUpdateSettingsValidatesPayload(t *testing.T) {
 	t.Parallel()
 
@@ -220,7 +315,7 @@ func TestUpdateSettingsValidatesPayload(t *testing.T) {
 				Google:     LLMProviderUpdateRequest{Model: "gemini-2.5-flash"},
 				OpenRouter: LLMProviderUpdateRequest{Model: "openai/gpt-4.1-mini"},
 				XAI:        LLMProviderUpdateRequest{Model: "grok-3-mini"},
-				Ollama:     domain.OllamaSettings{Model: "llama3.2"},
+				Ollama:     OllamaProviderUpdateRequest{Model: "llama3.2"},
 			},
 		},
 		Risk: domain.RiskSettings{
@@ -258,7 +353,7 @@ func TestUpdateSettingsRejectsUnknownDefaultProvider(t *testing.T) {
 				Google:     LLMProviderUpdateRequest{Model: "gemini-2.5-flash"},
 				OpenRouter: LLMProviderUpdateRequest{Model: "openai/gpt-4.1-mini"},
 				XAI:        LLMProviderUpdateRequest{Model: "grok-3-mini"},
-				Ollama:     domain.OllamaSettings{Model: "llama3.2"},
+				Ollama:     OllamaProviderUpdateRequest{Model: "llama3.2"},
 			},
 		},
 		Risk: domain.RiskSettings{

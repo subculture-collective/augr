@@ -1,7 +1,9 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -67,6 +69,31 @@ func TestGenerateStrategy_ReturnsErrorAfterRepeatedEmptyResponses(t *testing.T) 
 	}
 	if provider.calls != 2 {
 		t.Fatalf("provider calls = %d, want 2", provider.calls)
+	}
+}
+
+func TestGenerateStrategy_OnlyLogsRetryWhenAnotherAttemptRemains(t *testing.T) {
+	t.Parallel()
+
+	provider := &stubCompletionProvider{responses: []*llm.CompletionResponse{
+		{Content: ""},
+		{Content: ""},
+	}}
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	got, err := GenerateStrategy(context.Background(), GeneratorConfig{
+		Provider:   provider,
+		MaxRetries: 1,
+	}, ScreenResult{Ticker: "MIMI"}, logger)
+	if err == nil {
+		t.Fatal("GenerateStrategy() error = nil, want non-nil")
+	}
+	if got != nil {
+		t.Fatalf("GenerateStrategy() = %#v, want nil", got)
+	}
+	if count := strings.Count(logs.String(), "discovery/generator: parse/validation failed, retrying"); count != 1 {
+		t.Fatalf("retry warn count = %d, want 1\nlogs:\n%s", count, logs.String())
 	}
 }
 

@@ -349,42 +349,47 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			if embeddingBaseURL == "" {
 				embeddingBaseURL = cfg.LLM.Providers.Ollama.BaseURL
 			}
-			embeddingProvider := embedding.NewOllamaProvider(embedding.OllamaConfig{
+			embeddingProvider, err := embedding.NewOllamaProvider(embedding.OllamaConfig{
 				BaseURL: embeddingBaseURL,
 				Model:   cfg.Embedding.Model,
 				Timeout: cfg.Embedding.Timeout,
+				APIKey:  cfg.LLM.Providers.Ollama.APIKey,
 			})
-			orch := automation.NewJobOrchestrator(automation.OrchestratorDeps{
-				Universe:              deps.Universe,
-				Polygon:               polygonClientForAuto,
-				DataService:           dataService,
-				AlpacaReconciler:      alpacaReconciler,
-				OptionsProvider:       deps.OptionsProvider,
-				LLMProvider:           deps.LLMProvider,
-				EmbeddingProvider:     embeddingProvider,
-				EventsProvider:        deps.EventsProvider,
-				StrategyRepo:          strategyRepo,
-				RunRepo:               runRepo,
-				JobRunRepo:            jobRunRepo,
-				OptionsScanRepo:       optionsScanRepo,
-				NewsFeedRepo:          newsFeedRepo,
-				PolymarketAccountRepo: polymarketAccountRepo,
-				PolymarketCLOBURL:     cfg.Brokers.Polymarket.CLOBURL,
-				ReportArtifactRepo:    reportArtifactRepo,
-				BacktestConfigRepo:    pgrepo.NewBacktestConfigRepo(db.Pool),
-				BacktestRunRepo:       pgrepo.NewBacktestRunRepo(db.Pool),
-				StrategyTrigger:       sched,
-				Logger:                logger,
-			})
-			orch.WithJobMetrics(appMetrics)
-			orch.WithReportMetrics(appMetrics)
-			orch.RegisterAll()
-			if err := orch.Start(); err != nil {
-				logger.Warn("automation: failed to start job orchestrator", slog.Any("error", err))
+			if err != nil {
+				logger.Warn("automation: failed to create embedding provider", slog.Any("error", err))
 			} else {
-				logger.Info("automation: job orchestrator started", slog.Int("jobs", len(orch.Status())))
+				orch := automation.NewJobOrchestrator(automation.OrchestratorDeps{
+					Universe:              deps.Universe,
+					Polygon:               polygonClientForAuto,
+					DataService:           dataService,
+					AlpacaReconciler:      alpacaReconciler,
+					OptionsProvider:       deps.OptionsProvider,
+					LLMProvider:           deps.LLMProvider,
+					EmbeddingProvider:     embeddingProvider,
+					EventsProvider:        deps.EventsProvider,
+					StrategyRepo:          strategyRepo,
+					RunRepo:               runRepo,
+					JobRunRepo:            jobRunRepo,
+					OptionsScanRepo:       optionsScanRepo,
+					NewsFeedRepo:          newsFeedRepo,
+					PolymarketAccountRepo: polymarketAccountRepo,
+					PolymarketCLOBURL:     cfg.Brokers.Polymarket.CLOBURL,
+					ReportArtifactRepo:    reportArtifactRepo,
+					BacktestConfigRepo:    pgrepo.NewBacktestConfigRepo(db.Pool),
+					BacktestRunRepo:       pgrepo.NewBacktestRunRepo(db.Pool),
+					StrategyTrigger:       sched,
+					Logger:                logger,
+				})
+				orch.WithJobMetrics(appMetrics)
+				orch.WithReportMetrics(appMetrics)
+				orch.RegisterAll()
+				if err := orch.Start(); err != nil {
+					logger.Warn("automation: failed to start job orchestrator", slog.Any("error", err))
+				} else {
+					logger.Info("automation: job orchestrator started", slog.Int("jobs", len(orch.Status())))
+				}
+				deps.Automation = orch
 			}
-			deps.Automation = orch
 		}
 	}
 
@@ -715,10 +720,15 @@ func newLLMProviderForSelection(cfg config.LLMConfig, providerName, model string
 			Model:   resolveModel(cfg.Providers.XAI.Model),
 		})
 	case "ollama":
-		return ollama.NewProvider(ollama.Config{
+		provider, err := ollama.NewProvider(ollama.Config{
 			BaseURL: cfg.Providers.Ollama.BaseURL,
+			APIKey:  cfg.Providers.Ollama.APIKey,
 			Model:   resolveModel(cfg.Providers.Ollama.Model),
 		})
+		if err != nil {
+			return nil, err
+		}
+		return provider, nil
 	default:
 		if providerName == "" {
 			return nil, errors.New("llm provider name is required")

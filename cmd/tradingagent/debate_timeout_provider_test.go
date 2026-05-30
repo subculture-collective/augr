@@ -90,8 +90,8 @@ func TestBuildRunnerDefinition_UsesEnvBoundedDebateTimeoutFallback(t *testing.T)
 		},
 	}
 
-	if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 10*time.Second {
-		t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 10*time.Second)
+	if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 5*time.Second {
+		t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 5*time.Second)
 	}
 
 	definition, err := buildRunnerDefinition(captureProvider{}, "openai", resolved, 30*time.Second, nil, slogDiscardLogger())
@@ -117,14 +117,14 @@ func TestEffectiveDebateCallTimeout(t *testing.T) {
 		}
 	})
 
-	t.Run("uses strategy override when present", func(t *testing.T) {
+	t.Run("uses env override when below cap", func(t *testing.T) {
 		t.Setenv("LLM_DEBATE_TIMEOUT", "45s")
 
 		resolved := agent.ResolvedConfig{
-			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 10},
+			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 120},
 		}
-		if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 10*time.Second {
-			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 10*time.Second)
+		if got := effectiveDebateCallTimeout(90*time.Second, resolved); got != 45*time.Second {
+			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 45*time.Second)
 		}
 	})
 
@@ -134,6 +134,37 @@ func TestEffectiveDebateCallTimeout(t *testing.T) {
 		resolved := agent.ResolvedConfig{}
 		if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 45*time.Second {
 			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 45*time.Second)
+		}
+	})
+
+	t.Run("env override beats llm timeout when below cap", func(t *testing.T) {
+		t.Setenv("LLM_DEBATE_TIMEOUT", "45s")
+
+		resolved := agent.ResolvedConfig{
+			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 600},
+		}
+		if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 45*time.Second {
+			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 45*time.Second)
+		}
+	})
+
+	t.Run("caps timeout to half round timeout when above cap", func(t *testing.T) {
+		t.Setenv("LLM_DEBATE_TIMEOUT", "120s")
+
+		resolved := agent.ResolvedConfig{
+			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 120},
+		}
+		if got := effectiveDebateCallTimeout(90*time.Second, resolved); got != 60*time.Second {
+			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 60*time.Second)
+		}
+	})
+
+	t.Run("uses llm timeout when below cap", func(t *testing.T) {
+		resolved := agent.ResolvedConfig{
+			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 600},
+		}
+		if got := effectiveDebateCallTimeout(300*time.Second, resolved); got != 300*time.Second {
+			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 300*time.Second)
 		}
 	})
 }

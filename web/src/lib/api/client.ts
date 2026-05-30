@@ -112,7 +112,7 @@ export class ApiClient {
   }
 
   async health() {
-    return this.request<HealthStatus>('/health');
+    return this.request<HealthStatus>('/healthz');
   }
 
   async login(data: LoginRequest) {

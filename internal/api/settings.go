@@ -48,16 +48,24 @@ type LLMSettingsResponse struct {
 
 // LLMProvidersResponse groups provider-specific settings.
 type LLMProvidersResponse struct {
-	OpenAI     LLMProviderResponse   `json:"openai"`
-	Anthropic  LLMProviderResponse   `json:"anthropic"`
-	Google     LLMProviderResponse   `json:"google"`
-	OpenRouter LLMProviderResponse   `json:"openrouter"`
-	XAI        LLMProviderResponse   `json:"xai"`
-	Ollama     domain.OllamaSettings `json:"ollama"`
+	OpenAI     LLMProviderResponse    `json:"openai"`
+	Anthropic  LLMProviderResponse    `json:"anthropic"`
+	Google     LLMProviderResponse    `json:"google"`
+	OpenRouter LLMProviderResponse    `json:"openrouter"`
+	XAI        LLMProviderResponse    `json:"xai"`
+	Ollama     OllamaProviderResponse `json:"ollama"`
 }
 
 // LLMProviderResponse represents a provider without exposing the raw secret.
 type LLMProviderResponse struct {
+	APIKeyConfigured bool   `json:"api_key_configured"`
+	APIKeyLast4      string `json:"api_key_last4,omitempty"`
+	BaseURL          string `json:"base_url,omitempty"`
+	Model            string `json:"model"`
+}
+
+// OllamaProviderResponse mirrors provider redaction while keeping secrets out of the API.
+type OllamaProviderResponse struct {
 	APIKeyConfigured bool   `json:"api_key_configured"`
 	APIKeyLast4      string `json:"api_key_last4,omitempty"`
 	BaseURL          string `json:"base_url,omitempty"`
@@ -98,16 +106,23 @@ type LLMSettingsUpdateRequest struct {
 
 // LLMProvidersUpdateRequest groups per-provider updates.
 type LLMProvidersUpdateRequest struct {
-	OpenAI     LLMProviderUpdateRequest `json:"openai"`
-	Anthropic  LLMProviderUpdateRequest `json:"anthropic"`
-	Google     LLMProviderUpdateRequest `json:"google"`
-	OpenRouter LLMProviderUpdateRequest `json:"openrouter"`
-	XAI        LLMProviderUpdateRequest `json:"xai"`
-	Ollama     domain.OllamaSettings    `json:"ollama"`
+	OpenAI     LLMProviderUpdateRequest    `json:"openai"`
+	Anthropic  LLMProviderUpdateRequest    `json:"anthropic"`
+	Google     LLMProviderUpdateRequest    `json:"google"`
+	OpenRouter LLMProviderUpdateRequest    `json:"openrouter"`
+	XAI        LLMProviderUpdateRequest    `json:"xai"`
+	Ollama     OllamaProviderUpdateRequest `json:"ollama"`
 }
 
 // LLMProviderUpdateRequest captures editable fields for API-backed providers.
 type LLMProviderUpdateRequest struct {
+	APIKey  *string `json:"api_key,omitempty"`
+	BaseURL string  `json:"base_url,omitempty"`
+	Model   string  `json:"model"`
+}
+
+// OllamaProviderUpdateRequest matches provider-style updates while keeping API key optional.
+type OllamaProviderUpdateRequest struct {
 	APIKey  *string `json:"api_key,omitempty"`
 	BaseURL string  `json:"base_url,omitempty"`
 	Model   string  `json:"model"`
@@ -139,7 +154,7 @@ type llmProvidersState struct {
 	Google     providerState
 	OpenRouter providerState
 	XAI        providerState
-	Ollama     domain.OllamaSettings
+	Ollama     providerState
 }
 
 type providerState struct {
@@ -225,10 +240,7 @@ func (s *MemorySettingsService) WithPersister(ctx context.Context, p SettingsPer
 	applyPersistedProvider(&s.llm.Providers.Google, llmP.Providers.Google)
 	applyPersistedProvider(&s.llm.Providers.OpenRouter, llmP.Providers.OpenRouter)
 	applyPersistedProvider(&s.llm.Providers.XAI, llmP.Providers.XAI)
-
-	if llmP.Providers.Ollama.Model != "" {
-		s.llm.Providers.Ollama = llmP.Providers.Ollama
-	}
+	applyPersistedOllama(&s.llm.Providers.Ollama, llmP.Providers.Ollama)
 	if risk.MaxPositionSizePct > 0 {
 		s.risk = risk
 	}
@@ -237,6 +249,16 @@ func (s *MemorySettingsService) WithPersister(ctx context.Context, p SettingsPer
 }
 
 func applyPersistedProvider(target *providerState, p domain.ProviderPersisted) {
+	if p.BaseURL != "" {
+		target.BaseURL = p.BaseURL
+	}
+	if p.Model != "" {
+		target.Model = p.Model
+	}
+	// API key is deliberately not restored from DB.
+}
+
+func applyPersistedOllama(target *providerState, p domain.OllamaSettings) {
 	if p.BaseURL != "" {
 		target.BaseURL = p.BaseURL
 	}
@@ -277,7 +299,8 @@ func NewMemorySettingsServiceFromConfig(cfg config.Config, currentSchemaVersion,
 					BaseURL: cfg.LLM.Providers.XAI.BaseURL,
 					Model:   cfg.LLM.Providers.XAI.Model,
 				},
-				Ollama: domain.OllamaSettings{
+				Ollama: providerState{
+					APIKey:  cfg.LLM.Providers.Ollama.APIKey,
 					BaseURL: cfg.LLM.Providers.Ollama.BaseURL,
 					Model:   cfg.LLM.Providers.Ollama.Model,
 				},
@@ -334,7 +357,7 @@ func (s *MemorySettingsService) getLocked() SettingsResponse {
 				Google:     redactProvider(s.llm.Providers.Google),
 				OpenRouter: redactProvider(s.llm.Providers.OpenRouter),
 				XAI:        redactProvider(s.llm.Providers.XAI),
-				Ollama:     s.llm.Providers.Ollama,
+				Ollama:     redactOllamaProvider(s.llm.Providers.Ollama),
 			},
 		},
 		Risk: s.risk,
@@ -367,10 +390,7 @@ func (s *MemorySettingsService) Update(ctx context.Context, req SettingsUpdateRe
 	applyProviderUpdate(&s.llm.Providers.Google, req.LLM.Providers.Google)
 	applyProviderUpdate(&s.llm.Providers.OpenRouter, req.LLM.Providers.OpenRouter)
 	applyProviderUpdate(&s.llm.Providers.XAI, req.LLM.Providers.XAI)
-	s.llm.Providers.Ollama = domain.OllamaSettings{
-		BaseURL: strings.TrimSpace(req.LLM.Providers.Ollama.BaseURL),
-		Model:   strings.TrimSpace(req.LLM.Providers.Ollama.Model),
-	}
+	applyOllamaUpdate(&s.llm.Providers.Ollama, req.LLM.Providers.Ollama)
 	s.risk = req.Risk
 	response := s.getLocked()
 
@@ -385,7 +405,7 @@ func (s *MemorySettingsService) Update(ctx context.Context, req SettingsUpdateRe
 			Google:     domain.ProviderPersisted{Model: s.llm.Providers.Google.Model},
 			OpenRouter: domain.ProviderPersisted{BaseURL: s.llm.Providers.OpenRouter.BaseURL, Model: s.llm.Providers.OpenRouter.Model},
 			XAI:        domain.ProviderPersisted{BaseURL: s.llm.Providers.XAI.BaseURL, Model: s.llm.Providers.XAI.Model},
-			Ollama:     s.llm.Providers.Ollama,
+			Ollama:     domain.OllamaSettings{BaseURL: s.llm.Providers.Ollama.BaseURL, Model: s.llm.Providers.Ollama.Model},
 		},
 	}
 	risk := s.risk
@@ -412,8 +432,25 @@ func applyProviderUpdate(target *providerState, update LLMProviderUpdateRequest)
 	}
 }
 
+func applyOllamaUpdate(target *providerState, update OllamaProviderUpdateRequest) {
+	target.BaseURL = strings.TrimSpace(update.BaseURL)
+	target.Model = strings.TrimSpace(update.Model)
+	if update.APIKey != nil {
+		target.APIKey = strings.TrimSpace(*update.APIKey)
+	}
+}
+
 func redactProvider(provider providerState) LLMProviderResponse {
 	return LLMProviderResponse{
+		APIKeyConfigured: strings.TrimSpace(provider.APIKey) != "",
+		APIKeyLast4:      last4(provider.APIKey),
+		BaseURL:          provider.BaseURL,
+		Model:            provider.Model,
+	}
+}
+
+func redactOllamaProvider(provider providerState) OllamaProviderResponse {
+	return OllamaProviderResponse{
 		APIKeyConfigured: strings.TrimSpace(provider.APIKey) != "",
 		APIKeyLast4:      last4(provider.APIKey),
 		BaseURL:          provider.BaseURL,

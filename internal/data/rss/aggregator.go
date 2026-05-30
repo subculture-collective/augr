@@ -21,8 +21,8 @@ type Feed struct {
 // DefaultFeeds returns the set of verified financial news RSS feeds.
 func DefaultFeeds() []Feed {
 	return []Feed{
-		{Name: "MarketWatch", URL: "https://feeds.marketwatch.com/marketwatch/topstories/"},
-		{Name: "MarketWatch Pulse", URL: "https://feeds.marketwatch.com/marketwatch/marketpulse/"},
+		{Name: "WSJ Markets", URL: "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"},
+		{Name: "WSJ Business", URL: "https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml"},
 		{Name: "CNBC Top News", URL: "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"},
 		{Name: "SeekingAlpha", URL: "https://seekingalpha.com/market_currents.xml"},
 		{Name: "Investing.com", URL: "https://www.investing.com/rss/news.rss"},

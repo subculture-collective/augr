@@ -134,21 +134,23 @@ func GenerateStrategy(ctx context.Context, cfg GeneratorConfig, candidate Screen
 		}
 
 		lastErr = parseErr
-		logger.Warn("discovery/generator: parse/validation failed, retrying",
-			slog.String("ticker", candidate.Ticker),
-			slog.Int("attempt", attempt+1),
-			slog.Any("error", parseErr),
-		)
-		parseErrText := parseErr.Error()
+		if attempt < maxRetries {
+			logger.Warn("discovery/generator: parse/validation failed, retrying",
+				slog.String("ticker", candidate.Ticker),
+				slog.Int("attempt", attempt+1),
+				slog.Any("error", parseErr),
+			)
+			parseErrText := parseErr.Error()
 
-		// Append correction prompt for the next attempt.
-		messages = append(messages,
-			llm.Message{Role: "assistant", Content: resp.Content},
-			llm.Message{Role: "user", Content: fmt.Sprintf(
-				"The JSON you produced failed validation with this error:\n%s\n\nPlease fix the issue and return corrected JSON only.",
-				parseErrText,
-			)},
-		)
+			// Append correction prompt for the next attempt.
+			messages = append(messages,
+				llm.Message{Role: "assistant", Content: resp.Content},
+				llm.Message{Role: "user", Content: fmt.Sprintf(
+					"The JSON you produced failed validation with this error:\n%s\n\nPlease fix the issue and return corrected JSON only.",
+					parseErrText,
+				)},
+			)
+		}
 	}
 
 	return nil, fmt.Errorf("discovery/generator: failed after %d retries: %w", maxRetries+1, lastErr)
