@@ -519,6 +519,15 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			MinWinRate:   0.65,
 		}, polymarketAccountRepo, logger))
 	}
+	if cfg.Polygon.RPCURL != "" && cfg.Polygon.WSURL != "" {
+		logger.Info("polygon mempool source enabled", slog.String("ws_url", cfg.Polygon.WSURL))
+		signalSources = append(signalSources, signal.NewPolygonMempoolSource(signal.PolygonMempoolSourceConfig{
+			RPCURL:         cfg.Polygon.RPCURL,
+			WSURL:          cfg.Polygon.WSURL,
+			WatchAddresses: signal.DefaultPolymarketContracts(),
+			MaxSeenTxs:     4096,
+		}, logger))
+	}
 
 	var sigEvaluator *signal.Evaluator
 	if deps.LLMProvider != nil {

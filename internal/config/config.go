@@ -20,6 +20,7 @@ type Config struct {
 	Embedding       EmbeddingConfig
 	DataProviders   DataProviderConfigs
 	Brokers         BrokerConfigs
+	Polygon         PolygonConnectionConfig
 	Risk            RiskConfig
 	Notifications   NotificationConfig
 	Features        FeatureFlags
@@ -129,6 +130,11 @@ type BrokerConfigs struct {
 	Alpaca     BrokerConfig
 	Binance    BrokerConfig
 	Polymarket PolymarketConfig
+}
+
+type PolygonConnectionConfig struct {
+	RPCURL string `env:"POLYGON_RPC_URL"`
+	WSURL  string `env:"POLYGON_WS_URL"`
 }
 
 // PolymarketConfig contains credentials and endpoint settings for Polymarket.
@@ -572,6 +578,10 @@ func loadFromEnvironment() (Config, error) {
 				APIKey:  os.Getenv("TRADIER_API_KEY"),
 				Sandbox: tradierSandbox,
 			},
+		},
+		Polygon: PolygonConnectionConfig{
+			RPCURL: os.Getenv("POLYGON_RPC_URL"),
+			WSURL:  os.Getenv("POLYGON_WS_URL"),
 		},
 		Brokers: BrokerConfigs{
 			Alpaca: BrokerConfig{
