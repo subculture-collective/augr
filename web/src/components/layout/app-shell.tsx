@@ -7,14 +7,14 @@ import {
   FlaskConical,
   Globe,
   LayoutDashboard,
-  Receipt,
   FileText,
+  Receipt,
   ShieldCheck,
   Signal,
   Zap,
-  RadioTower,
   Settings2,
   ShieldAlert,
+  RadioTower,
   Sparkles,
   TrendingUp,
 } from 'lucide-react';
@@ -30,29 +30,56 @@ type NavGroup = { label: string; items: FlatNavItem[] };
 type NavItem = FlatNavItem | NavGroup;
 
 const navigationItems: NavItem[] = [
-  { to: '/', label: 'Overview', icon: LayoutDashboard, authRequired: true },
-  { to: '/strategies', label: 'Strategies', icon: BriefcaseBusiness, authRequired: true },
-  { to: '/runs', label: 'Runs', icon: Activity, authRequired: true },
-  { to: '/portfolio', label: 'Portfolio', icon: BriefcaseBusiness, authRequired: true },
-  { to: '/orders', label: 'Orders', icon: Receipt, authRequired: true },
-  { to: '/options', label: 'Options', icon: TrendingUp },
-  { to: '/backtests', label: 'Backtests', icon: FlaskConical, authRequired: true },
-  { to: '/discovery', label: 'Discovery', icon: Sparkles, authRequired: true },
-  { to: '/calendar', label: 'Calendar', icon: CalendarDays },
-  { to: '/universe', label: 'Universe', icon: Globe },
-  { to: '/automation', label: 'Automation', icon: Zap, authRequired: true },
-  { to: '/signals', label: 'Signals', icon: Signal, authRequired: true },
   {
-    label: 'Prediction Markets',
-    items: [{ to: '/polymarket', label: 'Polymarket', icon: TrendingUp, authRequired: true }],
+    label: 'Control',
+    items: [
+      { to: '/', label: 'Overview', icon: LayoutDashboard, authRequired: true },
+      { to: '/settings', label: 'Settings', icon: Settings2, authRequired: true },
+      { to: '/risk', label: 'Risk', icon: ShieldAlert, authRequired: true },
+      { to: '/realtime', label: 'Realtime', icon: RadioTower, authRequired: true },
+      { to: '/reliability', label: 'Reliability', icon: ShieldCheck, authRequired: true },
+    ],
   },
-  { to: '/reliability', label: 'Reliability', icon: ShieldCheck, authRequired: true },
-  { to: '/memories', label: 'Memories', icon: Brain, authRequired: true },
-  { to: '/prompts', label: 'Prompts', icon: FileText, authRequired: true },
-  { to: '/glossary', label: 'Glossary', icon: BookOpen },
-  { to: '/settings', label: 'Settings', icon: Settings2, authRequired: true },
-  { to: '/risk', label: 'Risk', icon: ShieldAlert, authRequired: true },
-  { to: '/realtime', label: 'Realtime', icon: RadioTower, authRequired: true },
+  {
+    label: 'Trading',
+    items: [
+      { to: '/strategies', label: 'Strategies', icon: BriefcaseBusiness, authRequired: true },
+      { to: '/runs', label: 'Runs', icon: Activity, authRequired: true },
+      { to: '/orders', label: 'Orders', icon: Receipt, authRequired: true },
+      { to: '/backtests', label: 'Backtests', icon: FlaskConical, authRequired: true },
+      { to: '/portfolio', label: 'Portfolio', icon: BriefcaseBusiness, authRequired: true },
+      { to: '/signals', label: 'Signals', icon: Signal, authRequired: true },
+      { to: '/polymarket', label: 'Polymarket', icon: TrendingUp, authRequired: true },
+    ],
+  },
+  {
+    label: 'Research',
+    items: [
+      { to: '/discovery', label: 'Discovery', icon: Sparkles, authRequired: true },
+      { to: '/options', label: 'Options', icon: TrendingUp },
+      { to: '/calendar', label: 'Calendar', icon: CalendarDays },
+      { to: '/universe', label: 'Universe', icon: Globe },
+    ],
+  },
+  {
+    label: 'Automation',
+    items: [{ to: '/automation', label: 'Automation', icon: Zap, authRequired: true }],
+  },
+  {
+    label: 'Operations',
+    items: [{ to: '/surfers/ops', label: 'Surfers Ops', icon: ShieldCheck, authRequired: true }],
+  },
+  {
+    label: 'Intelligence',
+    items: [
+      { to: '/memories', label: 'Memories', icon: Brain, authRequired: true },
+      { to: '/prompts', label: 'Prompts', icon: FileText, authRequired: true },
+    ],
+  },
+  {
+    label: 'System / Knowledge',
+    items: [{ to: '/glossary', label: 'Glossary', icon: BookOpen }],
+  },
 ];
 
 export function AppShell() {
@@ -61,6 +88,7 @@ export function AppShell() {
   const visibleNavigationItems = navigationItems
     .map((item) => ('items' in item ? { ...item, items: item.items.filter((nav) => authenticated || !nav.authRequired) } : item))
     .filter((item) => ('items' in item ? item.items.length > 0 : authenticated || !item.authRequired));
+  const flattenedNavigationItems = visibleNavigationItems.flatMap((item) => ('items' in item ? item.items : [item]));
 
   const renderNavItem = ({ to, label, icon: Icon }: FlatNavItem, mobile = false) => (
     <NavLink
@@ -127,13 +155,11 @@ export function AppShell() {
             )}
           </div>
 
-          <nav
-            aria-label="Primary mobile"
-            className="flex gap-1.5 overflow-x-auto scrollbar-none lg:hidden"
-          >
-            {visibleNavigationItems.flatMap((item) => ('items' in item ? item.items : [item])).map((nav) => renderNavItem(nav, true))}
-          </nav>
         </header>
+
+        <nav aria-label="Primary mobile" className="flex flex-wrap gap-1.5 rounded-lg border border-border bg-card px-3 py-2.5 lg:hidden">
+          {flattenedNavigationItems.map((nav) => renderNavItem(nav, true))}
+        </nav>
 
         <main className="flex-1 pb-4">
           <Outlet />
