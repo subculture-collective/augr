@@ -88,7 +88,6 @@ export function AppShell() {
   const visibleNavigationItems = navigationItems
     .map((item) => ('items' in item ? { ...item, items: item.items.filter((nav) => authenticated || !nav.authRequired) } : item))
     .filter((item) => ('items' in item ? item.items.length > 0 : authenticated || !item.authRequired));
-  const flattenedNavigationItems = visibleNavigationItems.flatMap((item) => ('items' in item ? item.items : [item]));
 
   const renderNavItem = ({ to, label, icon: Icon }: FlatNavItem, mobile = false) => (
     <NavLink
@@ -119,11 +118,11 @@ export function AppShell() {
             </p>
           </div>
 
-          <nav aria-label="Primary" className="mt-3 flex flex-1 flex-col gap-1">
+          <nav aria-label="Primary" className="mt-3 flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
             {visibleNavigationItems.map((item) =>
               'items' in item ? (
-                <div key={item.label} className="space-y-1 pt-2">
-                  <div className="px-2.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                <div key={item.label} className="space-y-1.5 border-t border-border/70 pt-3 first:border-t-0 first:pt-0">
+                  <div className="px-2.5 text-[11px] font-bold uppercase tracking-[0.22em] text-foreground/80">
                     {item.label}
                   </div>
                   {item.items.map((nav) => renderNavItem(nav))}
@@ -157,8 +156,21 @@ export function AppShell() {
 
         </header>
 
-        <nav aria-label="Primary mobile" className="flex flex-wrap gap-1.5 rounded-lg border border-border bg-card px-3 py-2.5 lg:hidden">
-          {flattenedNavigationItems.map((nav) => renderNavItem(nav, true))}
+        <nav aria-label="Primary mobile" className="space-y-3 rounded-lg border border-border bg-card px-3 py-2.5 lg:hidden">
+          {visibleNavigationItems.map((item) =>
+            'items' in item ? (
+              <div key={item.label} className="space-y-1.5 border-t border-border/70 pt-3 first:border-t-0 first:pt-0">
+                <div className="px-1 text-[11px] font-bold uppercase tracking-[0.22em] text-foreground/80">
+                  {item.label}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {item.items.map((nav) => renderNavItem(nav, true))}
+                </div>
+              </div>
+            ) : (
+              renderNavItem(item, true)
+            ),
+          )}
         </nav>
 
         <main className="flex-1 pb-4">
