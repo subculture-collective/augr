@@ -208,7 +208,7 @@ export function MemoriesPage() {
             >
               <Brain className="size-8 text-muted-foreground" />
               <p className="text-sm text-muted-foreground">
-                No memories matched the current search.
+                No memories matched the current search. Memories are generated after a position is closed and reflected on by the agent.
               </p>
             </div>
           ) : (

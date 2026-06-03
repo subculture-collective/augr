@@ -79,3 +79,46 @@ func (s *SettingsPersister) Save(ctx context.Context, llm domain.LLMPersisted, r
 	}
 	return nil
 }
+
+// LoadPromptOverrides retrieves persisted system-wide prompt overrides.
+func (s *SettingsPersister) LoadPromptOverrides(ctx context.Context) (map[domain.AgentRole]string, error) {
+	var raw []byte
+	err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(prompt_overrides, '{}'::jsonb) FROM app_settings WHERE id = 1`,
+	).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("postgres: load prompt overrides: %w", err)
+	}
+
+	var overrides map[domain.AgentRole]string
+	if len(raw) > 2 {
+		if err := json.Unmarshal(raw, &overrides); err != nil {
+			return nil, fmt.Errorf("postgres: unmarshal prompt overrides: %w", err)
+		}
+	}
+	return overrides, nil
+}
+
+// SavePromptOverrides persists system-wide prompt overrides.
+func (s *SettingsPersister) SavePromptOverrides(ctx context.Context, overrides map[domain.AgentRole]string) error {
+	raw, err := json.Marshal(overrides)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal prompt overrides: %w", err)
+	}
+
+	_, err = s.pool.Exec(ctx,
+		`INSERT INTO app_settings (id, prompt_overrides, updated_at)
+		 VALUES (1, $1, NOW())
+		 ON CONFLICT (id) DO UPDATE
+		   SET prompt_overrides = EXCLUDED.prompt_overrides,
+		       updated_at = EXCLUDED.updated_at`,
+		raw,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: save prompt overrides: %w", err)
+	}
+	return nil
+}

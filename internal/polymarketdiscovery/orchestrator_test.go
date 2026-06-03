@@ -93,6 +93,46 @@ func TestValidateProposal(t *testing.T) {
 	}
 }
 
+func TestValidateProposalMatchesMarketRejectsOffTopicProposal(t *testing.T) {
+	proposal := &Proposal{
+		Template:      TemplateNewsCatalyst,
+		Name:          "Trump legal case resolution edge trade",
+		Summary:       "Court filings could move this legal market toward acquittal.",
+		Direction:     "YES",
+		Conviction:    0.75,
+		TimeHorizon:   "days",
+		EntryPriceMax: 0.62,
+		WatchTerms:    []string{"Donald Trump", "legal ruling"},
+	}
+	mc := MarketContext{Market: GammaMarket{
+		Slug:     "will-the-new-york-knicks-win-the-2026-nba-finals",
+		Question: "Will the New York Knicks win the 2026 NBA Finals?",
+	}}
+	if err := validateProposalMatchesMarket(proposal, mc); err == nil {
+		t.Fatal("expected off-topic proposal to be rejected")
+	}
+}
+
+func TestValidateProposalMatchesMarketAcceptsReferencedSubject(t *testing.T) {
+	proposal := &Proposal{
+		Template:      TemplateNewsCatalyst,
+		Name:          "Knicks injury catalyst trade",
+		Summary:       "New York Knicks roster news could move NBA Finals pricing.",
+		Direction:     "YES",
+		Conviction:    0.75,
+		TimeHorizon:   "days",
+		EntryPriceMax: 0.62,
+		WatchTerms:    []string{"Knicks", "Jalen Brunson"},
+	}
+	mc := MarketContext{Market: GammaMarket{
+		Slug:     "will-the-new-york-knicks-win-the-2026-nba-finals",
+		Question: "Will the New York Knicks win the 2026 NBA Finals?",
+	}}
+	if err := validateProposalMatchesMarket(proposal, mc); err != nil {
+		t.Fatalf("expected matching proposal to pass: %v", err)
+	}
+}
+
 func TestScreenMarkets_FiltersByLiquidityAndVolume(t *testing.T) {
 	now := time.Now()
 	in := []GammaMarket{
@@ -127,7 +167,7 @@ func TestRun_HappyPath(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		markets := []GammaMarket{{
 			Slug:            "test-market",
-			Question:        "Will X happen?",
+			Question:        "Will Example happen?",
 			AcceptingOrders: true,
 			Outcomes:        gammaString(`["Yes","No"]`),
 			Volume24Hr:      gammaString("50000"),
@@ -140,14 +180,14 @@ func TestRun_HappyPath(t *testing.T) {
 
 	prop := Proposal{
 		Template:      TemplateConvergence,
-		Name:          "Convergence on X",
-		Summary:       "Strong convergence setup.",
+		Name:          "Convergence on Example",
+		Summary:       "Strong Example convergence setup.",
 		Direction:     "YES",
 		Conviction:    0.75,
 		TimeHorizon:   "days",
 		EntryPriceMax: 0.95,
-		WatchTerms:    []string{"X resolution", "X ruling"},
-		InvalidateIf:  []string{"X is overturned"},
+		WatchTerms:    []string{"Example resolution", "Example ruling"},
+		InvalidateIf:  []string{"Example is overturned"},
 	}
 	propJSON, _ := json.Marshal(prop)
 
@@ -190,7 +230,7 @@ func TestRun_SkipBelowConviction(t *testing.T) {
 	now := time.Now()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		markets := []GammaMarket{{
-			Slug: "mkt", Question: "Q",
+			Slug: "mkt", Question: "Will Widget happen?",
 			AcceptingOrders: true,
 			Outcomes:        gammaString(`["Yes","No"]`),
 			Volume24Hr:      gammaString("50000"), Liquidity: gammaString("20000"),
@@ -201,9 +241,9 @@ func TestRun_SkipBelowConviction(t *testing.T) {
 	defer srv.Close()
 
 	prop := Proposal{
-		Template: TemplateConvergence, Name: "Low conv", Summary: "weak",
+		Template: TemplateConvergence, Name: "Low Widget conviction", Summary: "Widget edge is weak",
 		Direction: "YES", Conviction: 0.2, TimeHorizon: "days",
-		EntryPriceMax: 0.5, WatchTerms: []string{"x"},
+		EntryPriceMax: 0.5, WatchTerms: []string{"Widget"},
 	}
 	propJSON, _ := json.Marshal(prop)
 

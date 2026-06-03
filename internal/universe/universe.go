@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data/polygon"
 )
@@ -40,16 +41,12 @@ func (u *Universe) RefreshConstituents(ctx context.Context) (int, error) {
 
 	u.logger.Info("universe: fetched tickers from Polygon", slog.Int("count", len(tickers)))
 
-	tracked := make([]TrackedTicker, 0, len(tickers))
-	for _, t := range tickers {
-		group := exchangeToGroup(t.PrimaryExchange)
-		tracked = append(tracked, TrackedTicker{
-			Ticker:     t.Ticker,
-			Name:       t.Name,
-			Exchange:   t.PrimaryExchange,
-			IndexGroup: group,
-			Active:     true,
-		})
+	tracked, duplicateCount := trackedTickersFromPolygon(tickers)
+	if duplicateCount > 0 {
+		u.logger.Warn("universe: dropped duplicate Polygon tickers",
+			slog.Int("duplicates", duplicateCount),
+			slog.Int("unique", len(tracked)),
+		)
 	}
 
 	if err := u.repo.UpsertBatch(ctx, tracked); err != nil {
@@ -58,6 +55,35 @@ func (u *Universe) RefreshConstituents(ctx context.Context) (int, error) {
 
 	u.logger.Info("universe: refresh complete", slog.Int("upserted", len(tracked)))
 	return len(tracked), nil
+}
+
+func trackedTickersFromPolygon(tickers []polygon.TickerInfo) ([]TrackedTicker, int) {
+	tracked := make([]TrackedTicker, 0, len(tickers))
+	seen := make(map[string]struct{}, len(tickers))
+	duplicateCount := 0
+
+	for _, t := range tickers {
+		symbol := strings.ToUpper(strings.TrimSpace(t.Ticker))
+		if symbol == "" {
+			continue
+		}
+		if _, ok := seen[symbol]; ok {
+			duplicateCount++
+			continue
+		}
+		seen[symbol] = struct{}{}
+
+		group := exchangeToGroup(t.PrimaryExchange)
+		tracked = append(tracked, TrackedTicker{
+			Ticker:     symbol,
+			Name:       t.Name,
+			Exchange:   t.PrimaryExchange,
+			IndexGroup: group,
+			Active:     true,
+		})
+	}
+
+	return tracked, duplicateCount
 }
 
 // GetWatchlist returns the top N tickers by watch_score.

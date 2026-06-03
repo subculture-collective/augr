@@ -20,6 +20,9 @@ import (
 const (
 	overnightBacktestGeneratePerChunk     = 2
 	overnightBacktestChunkTimeout         = 20 * time.Minute
+	overnightBacktestGenerateTimeout      = 8 * time.Minute
+	overnightBacktestProgressTimeout      = 30 * time.Second
+	overnightBacktestProgressReserve      = 30 * time.Second
 	overnightBacktestMaxRunAge            = 18 * time.Hour
 	overnightBacktestGenerationMaxRetries = 1
 )
@@ -29,6 +32,8 @@ type overnightBacktestChunker struct {
 	progress         repository.OvernightBacktestRunRepository
 	logger           *slog.Logger
 	generatePerChunk int
+	generateTimeout  time.Duration
+	progressTimeout  time.Duration
 }
 
 func newOvernightBacktestChunker(deps OrchestratorDeps, logger *slog.Logger) overnightBacktestChunker {
@@ -84,7 +89,7 @@ func (c overnightBacktestChunker) RunChunk(ctx context.Context) error {
 		now := time.Now()
 		run.CompletedAt = &now
 		run.UpdatedAt = now
-		return c.progress.Update(ctx, run)
+		return c.updateProgress(run)
 	}
 	chunkCtx, cancel := context.WithTimeout(ctx, overnightBacktestChunkTimeout)
 	defer cancel()
@@ -107,7 +112,7 @@ func (c overnightBacktestChunker) runScreen(ctx context.Context, run *domain.Ove
 		now := time.Now()
 		run.CompletedAt = &now
 		run.UpdatedAt = now
-		return c.progress.Update(ctx, run)
+		return c.updateProgress(run)
 	}
 	if c.deps.DataService == nil {
 		return fmt.Errorf("overnight_backtest: data service not configured")
@@ -130,7 +135,7 @@ func (c overnightBacktestChunker) runScreen(ctx context.Context, run *domain.Ove
 	run.CandidateIndex = 0
 	run.Phase = domain.OvernightBacktestPhaseGenerate
 	run.UpdatedAt = time.Now()
-	return c.progress.Update(ctx, run)
+	return c.updateProgress(run)
 }
 
 func (c overnightBacktestChunker) runGenerateChunk(ctx context.Context, run *domain.OvernightBacktestRun) error {
@@ -145,25 +150,28 @@ func (c overnightBacktestChunker) runGenerateChunk(ctx context.Context, run *dom
 		}
 		candidate := run.Candidates[i]
 		screen := discovery.ScreenResultsFromCheckpointCandidates([]domain.OvernightBacktestCandidate{candidate})[0]
-		generated, err := discovery.GenerateStrategy(ctx, discovery.GeneratorConfig{Provider: c.deps.LLMProvider, MaxRetries: overnightBacktestGenerationMaxRetries}, screen, c.logger)
+		generateCtx, cancel := c.generationContext(ctx)
+		generated, err := discovery.GenerateStrategy(generateCtx, discovery.GeneratorConfig{Provider: c.deps.LLMProvider, MaxRetries: overnightBacktestGenerationMaxRetries}, screen, c.logger)
+		cancel()
 		if err != nil {
-			if cerr := ctx.Err(); cerr != nil {
-				return cerr
-			}
 			run.Errors = append(run.Errors, err.Error())
-			continue
+		} else {
+			cfgJSON, err := encodeOvernightGeneratedConfig(*generated)
+			if err != nil {
+				run.Errors = append(run.Errors, err.Error())
+			} else {
+				run.Generated = append(run.Generated, domain.OvernightBacktestGenerated{Ticker: candidate.Ticker, Config: json.RawMessage(cfgJSON)})
+				run.Summary.Generated++
+			}
 		}
-		cfgJSON, err := encodeOvernightGeneratedConfig(*generated)
-		if err != nil {
-			return err
+		run.CandidateIndex = i + 1
+		c.advanceAfterGenerate(run)
+		run.UpdatedAt = time.Now()
+		if updateErr := c.updateProgress(run); updateErr != nil {
+			return updateErr
 		}
-		run.Generated = append(run.Generated, domain.OvernightBacktestGenerated{Ticker: candidate.Ticker, Config: json.RawMessage(cfgJSON)})
-		run.Summary.Generated++
 	}
-	run.CandidateIndex = end
-	c.advanceAfterGenerate(run)
-	run.UpdatedAt = time.Now()
-	return c.progress.Update(ctx, run)
+	return nil
 }
 
 func (c overnightBacktestChunker) runSweepValidateDeploy(ctx context.Context, run *domain.OvernightBacktestRun) error {
@@ -272,7 +280,41 @@ func (c overnightBacktestChunker) runSweepValidateDeploy(ctx context.Context, ru
 	now := time.Now()
 	run.CompletedAt = &now
 	run.UpdatedAt = now
+	return c.updateProgress(run)
+}
+
+func (c overnightBacktestChunker) updateProgress(run *domain.OvernightBacktestRun) error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.progressTimeoutOrDefault())
+	defer cancel()
 	return c.progress.Update(ctx, run)
+}
+
+func (c overnightBacktestChunker) generationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := c.generateTimeoutOrDefault()
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline) - overnightBacktestProgressReserve
+		if remaining <= 0 {
+			remaining = time.Second
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func (c overnightBacktestChunker) generateTimeoutOrDefault() time.Duration {
+	if c.generateTimeout > 0 {
+		return c.generateTimeout
+	}
+	return overnightBacktestGenerateTimeout
+}
+
+func (c overnightBacktestChunker) progressTimeoutOrDefault() time.Duration {
+	if c.progressTimeout > 0 {
+		return c.progressTimeout
+	}
+	return overnightBacktestProgressTimeout
 }
 
 func encodeOvernightGeneratedConfig(cfg rules.RulesEngineConfig) (json.RawMessage, error) {

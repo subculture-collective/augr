@@ -73,6 +73,8 @@ import type {
   RiskBreakerState,
   DivergenceResponse,
   PredictionMarketData,
+  PromptSettings,
+  PromptSettingsUpdateRequest,
 } from '@/lib/api/types';
 
 interface ApiClientConfig {
@@ -286,6 +288,17 @@ export class ApiClient {
 
   async updateSettings(payload: SettingsUpdateRequest) {
     return this.request<Settings>('/api/v1/settings', {
+      method: 'PUT',
+      body: payload,
+    });
+  }
+
+  async getPrompts() {
+    return this.request<PromptSettings>('/api/v1/prompts');
+  }
+
+  async updatePrompts(payload: PromptSettingsUpdateRequest) {
+    return this.request<PromptSettings>('/api/v1/prompts', {
       method: 'PUT',
       body: payload,
     });

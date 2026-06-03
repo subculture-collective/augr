@@ -59,14 +59,19 @@ func (r *UniverseRepo) UpsertBatch(ctx context.Context, tickers []universe.Track
 		return nil
 	}
 
-	const batchSize = 500
-	for i := 0; i < len(tickers); i += batchSize {
-		end := i + batchSize
-		if end > len(tickers) {
-			end = len(tickers)
+	seen := make(map[string]struct{}, len(tickers))
+	for i := range tickers {
+		t := tickers[i]
+		t.Ticker = strings.ToUpper(strings.TrimSpace(t.Ticker))
+		if t.Ticker == "" {
+			continue
 		}
-		if err := r.upsertChunk(ctx, tickers[i:end]); err != nil {
-			return err
+		if _, ok := seen[t.Ticker]; ok {
+			continue
+		}
+		seen[t.Ticker] = struct{}{}
+		if err := r.Upsert(ctx, &t); err != nil {
+			return fmt.Errorf("postgres: upsert universe batch: %w", err)
 		}
 	}
 	return nil
@@ -74,22 +79,30 @@ func (r *UniverseRepo) UpsertBatch(ctx context.Context, tickers []universe.Track
 
 func (r *UniverseRepo) upsertChunk(ctx context.Context, tickers []universe.TrackedTicker) error {
 	var b strings.Builder
-	args := make([]any, 0, len(tickers)*7)
+	args := make([]any, 0, len(tickers)*8)
 	argIdx := 0
 
-	b.WriteString(`INSERT INTO universe_tickers (ticker, name, exchange, index_group, watch_score, last_scanned, active) VALUES `)
+	b.WriteString(`WITH input (ticker, name, exchange, index_group, watch_score, last_scanned, active, ord) AS (VALUES `)
 
 	for i, t := range tickers {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d, $%d)",
-			argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7)
-		args = append(args, t.Ticker, t.Name, t.Exchange, t.IndexGroup, t.WatchScore, t.LastScanned, t.Active)
-		argIdx += 7
+		fmt.Fprintf(&b, "($%d::text, $%d::text, $%d::text, $%d::text, $%d::numeric, $%d::timestamptz, $%d::boolean, $%d::int)",
+			argIdx+1, argIdx+2, argIdx+3, argIdx+4, argIdx+5, argIdx+6, argIdx+7, argIdx+8)
+		args = append(args, strings.ToUpper(strings.TrimSpace(t.Ticker)), t.Name, t.Exchange, t.IndexGroup, t.WatchScore, t.LastScanned, t.Active, i)
+		argIdx += 8
 	}
 
-	b.WriteString(` ON CONFLICT (ticker) DO UPDATE SET
+	b.WriteString(`), dedup AS (
+		SELECT DISTINCT ON (ticker) ticker, name, exchange, index_group, watch_score, last_scanned, active
+		FROM input
+		WHERE ticker <> ''
+		ORDER BY ticker, ord DESC
+	)
+	INSERT INTO universe_tickers (ticker, name, exchange, index_group, watch_score, last_scanned, active)
+	SELECT ticker, name, exchange, index_group, watch_score::numeric, last_scanned::timestamptz, active::boolean FROM dedup
+	ON CONFLICT (ticker) DO UPDATE SET
 		name         = EXCLUDED.name,
 		exchange     = EXCLUDED.exchange,
 		index_group  = EXCLUDED.index_group,

@@ -220,6 +220,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 	settingsSvc := api.NewMemorySettingsServiceFromConfig(cfg, currentSchemaVersion, requiredSchemaVersion, schemaStatus).
 		WithPersister(ctx, pgrepo.NewSettingsPersister(db.Pool), logger)
+	promptSettingsSvc := api.NewPromptSettingsService().WithPersister(ctx, pgrepo.NewSettingsPersister(db.Pool))
 
 	deps := api.Deps{
 		Strategies:            strategyRepo,
@@ -235,6 +236,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		RiskBreaker:           riskBreaker,
 		RiskBreakerLister:     riskBreakerRepo,
 		Settings:              settingsSvc,
+		Prompts:               promptSettingsSvc,
 		DBHealth:              api.HealthCheckFunc(db.Pool.Ping),
 		RedisHealth:           redisHealth,
 		Conversations:         conversationRepo,
@@ -406,6 +408,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			notificationManager,
 			runRegistry,
 			sharedLLMBudget,
+			promptSettingsSvc,
 			logger,
 		)
 		deps.Runner = strategyRunner
@@ -1088,6 +1091,15 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	}
 
 	signal := result.Signal
+	state := agent.PipelineStateFromView(result.State)
+	planTicker := state.TradingPlan.Ticker
+	if planTicker == "" {
+		planTicker = strategy.Ticker
+	}
+	signal, err = normalizeUnownedSellSignal(ctx, r.positionRepo, strategy, planTicker, signal, r.logger)
+	if err != nil {
+		return nil, err
+	}
 	update := repository.PipelineRunStatusUpdate{
 		Status:       run.Status,
 		Signal:       &signal,
@@ -1098,8 +1110,6 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 		return nil, err
 	}
 	run.Signal = signal
-
-	state := agent.PipelineStateFromView(result.State)
 
 	if err := r.orderManager.ProcessSignal(
 		ctx,

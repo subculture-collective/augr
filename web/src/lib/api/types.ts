@@ -508,6 +508,25 @@ export interface SettingsUpdateRequest {
   risk: Settings['risk'];
 }
 
+export interface PromptDefinition {
+  key: string;
+  label: string;
+  description: string;
+  category: string;
+  default_text: string;
+  override_text: string;
+  effective_text: string;
+  overridden: boolean;
+}
+
+export interface PromptSettings {
+  prompts: PromptDefinition[];
+}
+
+export interface PromptSettingsUpdateRequest {
+  overrides: Record<string, string>;
+}
+
 export interface WebSocketMessage<TData = unknown> {
   type: WebSocketEventType;
   strategy_id?: UUID;

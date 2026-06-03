@@ -55,6 +55,10 @@ type marketDataService interface {
 	GetSocialSentiment(ctx context.Context, marketType domain.MarketType, ticker string, from, to time.Time) ([]data.SocialSentiment, error)
 }
 
+type promptOverrideSource interface {
+	Overrides() map[agent.AgentRole]string
+}
+
 type realStrategyRunner struct {
 	cfg                 config.Config
 	globals             agent.GlobalSettings
@@ -72,6 +76,7 @@ type realStrategyRunner struct {
 	notificationManager *notification.Manager
 	runRegistry         *agent.RunContextRegistry
 	llmBudget           *llm.Budget
+	promptOverrides     promptOverrideSource
 	logger              *slog.Logger
 	localPaperMu        sync.Mutex
 	localPaperBroker    *paper.PaperBroker
@@ -95,6 +100,7 @@ func newRealStrategyRunner(
 	notificationManager *notification.Manager,
 	runRegistry *agent.RunContextRegistry,
 	llmBudget *llm.Budget,
+	promptOverrides promptOverrideSource,
 	logger *slog.Logger,
 ) *realStrategyRunner {
 	if logger == nil {
@@ -118,9 +124,11 @@ func newRealStrategyRunner(
 		notificationManager: notificationManager,
 		runRegistry:         runRegistry,
 		llmBudget:           llmBudget,
+		promptOverrides:     promptOverrides,
 		logger:              logger,
 		localPaperBroker:    paper.NewPaperBroker(localPaperBuyingPower, 0, 0),
 	}
+	runner.setRiskPortfolioSnapshotSource(runner.localPaperBroker)
 
 	// Wire Polymarket client if credentials are configured.
 	pm := cfg.Brokers.Polymarket
@@ -168,6 +176,15 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 
 	agent.ApplyStrategyRiskOverridesToResult(result, strategyConfig)
 	signal := result.Signal
+	state := agent.PipelineStateFromView(result.State)
+	planTicker := result.State.TradingPlan.Ticker
+	if planTicker == "" {
+		planTicker = strategy.Ticker
+	}
+	signal, err = normalizeUnownedSellSignal(ctx, r.positionRepo, strategy, planTicker, signal, r.logger)
+	if err != nil {
+		return nil, err
+	}
 
 	update := repository.PipelineRunStatusUpdate{
 		Status:       run.Status,
@@ -180,14 +197,11 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	}
 	run.Signal = signal
 
-	state := agent.PipelineStateFromView(result.State)
-
 	orderManager, err := r.newOrderManager(strategy, prepared.Config)
 	if err != nil {
 		return nil, err
 	}
 
-	planTicker := result.State.TradingPlan.Ticker
 	if strategy.MarketType.Normalize() == domain.MarketTypePolymarket {
 		normalizedSide, err := normalizePolymarketStrategySide(result.State.TradingPlan.Side)
 		if err != nil {
@@ -274,7 +288,11 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 		return nil, agent.PreparedRun{}, nil, nil, err
 	}
 
-	resolved := agent.ResolveConfig(strategyConfig, r.globals)
+	globals := r.globals
+	if r.promptOverrides != nil {
+		globals.PromptOverrides = mergePromptOverrides(globals.PromptOverrides, r.promptOverrides.Overrides())
+	}
+	resolved := agent.ResolveConfig(strategyConfig, globals)
 	provider, err := newLLMProviderForSelection(r.cfg.LLM, resolved.LLMConfig.Provider, resolved.LLMConfig.QuickThinkModel, r.logger)
 	if err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, fmt.Errorf("build llm provider for strategy %s: %w", strategy.Name, err)
@@ -461,6 +479,24 @@ func promptOverride(overrides map[agent.AgentRole]string, role agent.AgentRole, 
 		return fallback
 	}
 	return prompt
+}
+
+func mergePromptOverrides(base, overrides map[agent.AgentRole]string) map[agent.AgentRole]string {
+	if len(base) == 0 && len(overrides) == 0 {
+		return nil
+	}
+	merged := make(map[agent.AgentRole]string, len(base)+len(overrides))
+	for role, prompt := range base {
+		if strings.TrimSpace(prompt) != "" {
+			merged[role] = prompt
+		}
+	}
+	for role, prompt := range overrides {
+		if strings.TrimSpace(prompt) != "" {
+			merged[role] = prompt
+		}
+	}
+	return merged
 }
 
 func buildAnalysisAgents(provider llm.Provider, providerName string, resolved agent.ResolvedConfig, appMetrics *metrics.Metrics, logger *slog.Logger) ([]agent.AnalysisAgent, error) {

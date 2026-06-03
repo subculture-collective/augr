@@ -685,6 +685,58 @@ func (m metricPositionRepo) CountOpen(context.Context, repository.PositionFilter
 	return m.count, nil
 }
 
+type ownershipPositionRepo struct {
+	stubPositionRepo
+	positions []domain.Position
+	filter    repository.PositionFilter
+}
+
+func (r *ownershipPositionRepo) GetByStrategy(_ context.Context, _ uuid.UUID, filter repository.PositionFilter, _, _ int) ([]domain.Position, error) {
+	r.filter = filter
+	return r.positions, nil
+}
+
+func TestNormalizeUnownedSellSignal_StockSellWithoutOpenLongBecomesHold(t *testing.T) {
+	t.Parallel()
+
+	repo := &ownershipPositionRepo{}
+	strategy := domain.Strategy{ID: uuid.New(), Ticker: "TSLA", MarketType: domain.MarketTypeStock}
+
+	signal, err := normalizeUnownedSellSignal(context.Background(), repo, strategy, "TSLA", domain.PipelineSignalSell, nil)
+	if err != nil {
+		t.Fatalf("normalizeUnownedSellSignal() error = %v", err)
+	}
+	if signal != domain.PipelineSignalHold {
+		t.Fatalf("signal = %q, want %q", signal, domain.PipelineSignalHold)
+	}
+	if repo.filter.Ticker != "TSLA" || repo.filter.Side != domain.PositionSideLong {
+		t.Fatalf("filter = %+v, want TSLA long", repo.filter)
+	}
+}
+
+func TestNormalizeUnownedSellSignal_StockSellWithOpenLongStaysSell(t *testing.T) {
+	t.Parallel()
+
+	strategyID := uuid.New()
+	repo := &ownershipPositionRepo{positions: []domain.Position{{
+		ID:       uuid.New(),
+		Ticker:   "TSLA",
+		Side:     domain.PositionSideLong,
+		Quantity: 10,
+		AvgEntry: 190,
+		OpenedAt: time.Now(),
+	}}}
+	strategy := domain.Strategy{ID: strategyID, Ticker: "TSLA", MarketType: domain.MarketTypeStock}
+
+	signal, err := normalizeUnownedSellSignal(context.Background(), repo, strategy, "TSLA", domain.PipelineSignalSell, nil)
+	if err != nil {
+		t.Fatalf("normalizeUnownedSellSignal() error = %v", err)
+	}
+	if signal != domain.PipelineSignalSell {
+		t.Fatalf("signal = %q, want %q", signal, domain.PipelineSignalSell)
+	}
+}
+
 func TestSelectedAnalysisRoles_RejectsNonAnalysisRoles(t *testing.T) {
 	t.Parallel()
 

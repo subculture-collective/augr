@@ -73,6 +73,7 @@ type Server struct {
 	riskBreaker       risk.Breaker
 	riskBreakerLister RiskBreakerLister
 	settings          SettingsService
+	prompts           *PromptSettingsService
 	runner            StrategyRunner
 
 	auth *AuthManager
@@ -205,6 +206,7 @@ type Deps struct {
 	RiskBreaker       risk.Breaker
 	RiskBreakerLister RiskBreakerLister
 	Settings          SettingsService
+	Prompts           *PromptSettingsService
 	Runner            StrategyRunner
 	DBHealth          HealthCheck
 	RedisHealth       HealthCheck
@@ -286,6 +288,10 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 	if settingsService == nil {
 		settingsService = NewMemorySettingsService(SettingsBootstrap{})
 	}
+	promptService := deps.Prompts
+	if promptService == nil {
+		promptService = NewPromptSettingsService()
+	}
 
 	s := &Server{
 		logger:                logger,
@@ -324,6 +330,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		riskBreaker:           deps.RiskBreaker,
 		riskBreakerLister:     deps.RiskBreakerLister,
 		settings:              settingsService,
+		prompts:               promptService,
 		runner:                deps.Runner,
 		auth:                  authManager,
 		hub:                   hub,
@@ -474,6 +481,12 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Route("/settings", func(sr chi.Router) {
 			sr.Get("/", s.handleGetSettings)
 			sr.Put("/", s.handleUpdateSettings)
+		})
+
+		// Prompts
+		v1.Route("/prompts", func(pr chi.Router) {
+			pr.Get("/", s.handleGetPrompts)
+			pr.Put("/", s.handleUpdatePrompts)
 		})
 
 		// Events

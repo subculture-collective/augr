@@ -19,7 +19,9 @@ import (
 )
 
 type inMemoryPolymarketDiscoveryRunRepo struct {
-	run *domain.PolymarketDiscoveryRun
+	run                      *domain.PolymarketDiscoveryRun
+	updated                  []*domain.PolymarketDiscoveryRun
+	failOnCancelledUpdateCtx bool
 }
 
 func (r *inMemoryPolymarketDiscoveryRunRepo) clone(run *domain.PolymarketDiscoveryRun) *domain.PolymarketDiscoveryRun {
@@ -50,6 +52,12 @@ func (r *inMemoryPolymarketDiscoveryRunRepo) GetActive(ctx context.Context) (*do
 	return r.clone(r.run), nil
 }
 func (r *inMemoryPolymarketDiscoveryRunRepo) Update(ctx context.Context, run *domain.PolymarketDiscoveryRun) error {
+	if r.failOnCancelledUpdateCtx {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	r.updated = append(r.updated, r.clone(run))
 	r.run = r.clone(run)
 	return nil
 }
@@ -72,6 +80,32 @@ func TestPolymarketDiscoveryChunkerProposeBudget(t *testing.T) {
 	}
 	if repo.run.CandidateIndex != 2 || len(repo.run.Accepted) != 2 || repo.run.Phase != domain.PolymarketDiscoveryPhasePropose {
 		t.Fatalf("unexpected run: %+v", repo.run)
+	}
+}
+
+func TestPolymarketDiscoveryChunkerReplacesStaleRun(t *testing.T) {
+	defer restoreDiscoverySeams()
+	staleID := uuid.New()
+	repo := &inMemoryPolymarketDiscoveryRunRepo{run: &domain.PolymarketDiscoveryRun{ID: staleID, Status: domain.PolymarketDiscoveryStatusRunning, Phase: domain.PolymarketDiscoveryPhasePropose, StartedAt: time.Now().Add(-polymarketDiscoveryMaxRunAge - time.Hour), Candidates: makeCandidates(1)}}
+	polymarketDiscoveryFetchOpenMarkets = func(ctx context.Context, baseURL string, limit int) ([]polymarketdiscovery.GammaMarket, error) {
+		return []polymarketdiscovery.GammaMarket{{Slug: "fresh", Question: "Will fresh happen?", Active: true, AcceptingOrders: true}}, nil
+	}
+	polymarketDiscoveryScreenMarkets = func(markets []polymarketdiscovery.GammaMarket, cfg polymarketdiscovery.ScreenerConfig) []polymarketdiscovery.GammaMarket {
+		return markets
+	}
+
+	c := polymarketDiscoveryChunker{progress: repo, deps: OrchestratorDeps{}, logger: slog.Default()}
+	if err := c.RunChunk(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if repo.run.ID == staleID {
+		t.Fatalf("expected replacement run, still have stale id %s", staleID)
+	}
+	if repo.run.Status != domain.PolymarketDiscoveryStatusRunning || repo.run.Phase != domain.PolymarketDiscoveryPhasePropose {
+		t.Fatalf("replacement run not screened: %+v", repo.run)
+	}
+	if repo.run.Summary.FetchedAll != 1 || repo.run.Summary.Screened != 1 {
+		t.Fatalf("replacement summary = %+v", repo.run.Summary)
 	}
 }
 
@@ -182,6 +216,42 @@ func TestPolymarketDiscoveryChunkerPersistsCandidateErrorsPerAttempt(t *testing.
 	}
 }
 
+func TestPolymarketDiscoveryChunkerPersistsProgressAfterProposalTimeout(t *testing.T) {
+	defer restoreDiscoverySeams()
+	repo := &inMemoryPolymarketDiscoveryRunRepo{
+		run: &domain.PolymarketDiscoveryRun{
+			ID:         uuid.New(),
+			Status:     domain.PolymarketDiscoveryStatusRunning,
+			Phase:      domain.PolymarketDiscoveryPhasePropose,
+			Candidates: []domain.PolymarketDiscoveryCandidate{{Slug: "slow", Question: "q"}},
+		},
+		failOnCancelledUpdateCtx: true,
+	}
+	polymarketDiscoveryGenerateProposal = func(ctx context.Context, cfg polymarketdiscovery.GeneratorConfig, mc polymarketdiscovery.MarketContext, logger *slog.Logger) (*polymarketdiscovery.Proposal, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	c := polymarketDiscoveryChunker{
+		progress:        repo,
+		deps:            OrchestratorDeps{LLMProvider: llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) { return nil, nil })},
+		proposePerChunk: 1,
+		proposalTimeout: 5 * time.Millisecond,
+		progressTimeout: time.Second,
+	}
+	if err := c.runPropose(context.Background(), repo.run); err != nil {
+		t.Fatal(err)
+	}
+	if repo.run.CandidateIndex != 1 {
+		t.Fatalf("candidate index = %d, want 1", repo.run.CandidateIndex)
+	}
+	if len(repo.run.Errors) != 1 || !contains(repo.run.Errors, "context deadline exceeded") {
+		t.Fatalf("errors = %#v", repo.run.Errors)
+	}
+	if repo.run.Phase != domain.PolymarketDiscoveryPhaseDeploy {
+		t.Fatalf("phase = %s, want deploy", repo.run.Phase)
+	}
+}
+
 func TestPolymarketDiscoveryChunkerDeploySkipsAlreadyDeployed(t *testing.T) {
 	defer restoreDiscoverySeams()
 	repo := &inMemoryPolymarketDiscoveryRunRepo{run: &domain.PolymarketDiscoveryRun{ID: uuid.New(), Status: domain.PolymarketDiscoveryStatusRunning, Phase: domain.PolymarketDiscoveryPhaseDeploy, StartedAt: time.Now().Add(-time.Minute), Accepted: []domain.PolymarketDiscoveryAccepted{{Candidate: domain.PolymarketDiscoveryCandidate{Slug: "aaa"}, Proposal: json.RawMessage(`{"conviction":0.9,"name":"aaa"}`)}}, Deployed: []domain.PolymarketDiscoveryDeployed{{StrategyID: uuid.NewString(), Slug: "aaa"}}, Summary: domain.PolymarketDiscoverySummary{Deployed: 1}}}
@@ -199,16 +269,26 @@ func TestPolymarketDiscoveryChunkerDeploySkipsAlreadyDeployed(t *testing.T) {
 	}
 }
 
-func TestPolymarketDiscoveryChunkerMaxAgeFailsRun(t *testing.T) {
+func TestPolymarketDiscoveryChunkerMaxAgeFailsRunAndStartsReplacement(t *testing.T) {
 	defer restoreDiscoverySeams()
 	started := time.Now().Add(-(polymarketDiscoveryMaxRunAge + time.Minute))
-	repo := &inMemoryPolymarketDiscoveryRunRepo{run: &domain.PolymarketDiscoveryRun{ID: uuid.New(), Status: domain.PolymarketDiscoveryStatusRunning, Phase: domain.PolymarketDiscoveryPhasePropose, StartedAt: started}}
-	c := polymarketDiscoveryChunker{progress: repo, deps: OrchestratorDeps{LLMProvider: llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) { return nil, nil })}, logger: slog.Default()}
-	if err := c.RunChunk(context.Background()); err == nil {
-		t.Fatal("expected error")
+	staleID := uuid.New()
+	repo := &inMemoryPolymarketDiscoveryRunRepo{run: &domain.PolymarketDiscoveryRun{ID: staleID, Status: domain.PolymarketDiscoveryStatusRunning, Phase: domain.PolymarketDiscoveryPhasePropose, StartedAt: started}}
+	polymarketDiscoveryFetchOpenMarkets = func(ctx context.Context, baseURL string, limit int) ([]polymarketdiscovery.GammaMarket, error) {
+		return []polymarketdiscovery.GammaMarket{{Slug: "fresh", Question: "Will fresh happen?", Active: true, AcceptingOrders: true}}, nil
 	}
-	if repo.run.Status != domain.PolymarketDiscoveryStatusFailed || repo.run.Phase != domain.PolymarketDiscoveryPhaseDone {
-		t.Fatalf("run not failed: %+v", repo.run)
+	polymarketDiscoveryScreenMarkets = func(markets []polymarketdiscovery.GammaMarket, cfg polymarketdiscovery.ScreenerConfig) []polymarketdiscovery.GammaMarket {
+		return markets
+	}
+	c := polymarketDiscoveryChunker{progress: repo, deps: OrchestratorDeps{LLMProvider: llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) { return nil, nil })}, logger: slog.Default()}
+	if err := c.RunChunk(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.updated) == 0 || repo.updated[0].ID != staleID || repo.updated[0].Status != domain.PolymarketDiscoveryStatusFailed || repo.updated[0].Phase != domain.PolymarketDiscoveryPhaseDone {
+		t.Fatalf("stale run not failed: updated=%+v", repo.updated)
+	}
+	if repo.run.ID == staleID || repo.run.Status != domain.PolymarketDiscoveryStatusRunning || repo.run.Phase != domain.PolymarketDiscoveryPhasePropose {
+		t.Fatalf("replacement run not started: %+v", repo.run)
 	}
 }
 

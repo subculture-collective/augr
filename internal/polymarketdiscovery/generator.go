@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"unicode"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 )
@@ -20,17 +21,17 @@ type GeneratorConfig struct {
 
 // Proposal is the LLM's strategy proposal for a single market.
 type Proposal struct {
-	Template     StrategyTemplate `json:"template"`
-	Skip         bool             `json:"skip,omitempty"`
-	SkipReason   string           `json:"skip_reason,omitempty"`
-	Name         string           `json:"name"`
-	Summary      string           `json:"summary"`
-	Direction    string           `json:"direction"`   // "YES" or "NO"
-	Conviction   float64          `json:"conviction"`  // 0..1
-	TimeHorizon  string           `json:"time_horizon"` // "hours"|"days"|"weeks"
-	EntryPriceMax float64         `json:"entry_price_max,omitempty"` // YES price ceiling for buys
-	WatchTerms   []string         `json:"watch_terms"`
-	InvalidateIf []string         `json:"invalidate_if"`
+	Template      StrategyTemplate `json:"template"`
+	Skip          bool             `json:"skip,omitempty"`
+	SkipReason    string           `json:"skip_reason,omitempty"`
+	Name          string           `json:"name"`
+	Summary       string           `json:"summary"`
+	Direction     string           `json:"direction"`                 // "YES" or "NO"
+	Conviction    float64          `json:"conviction"`                // 0..1
+	TimeHorizon   string           `json:"time_horizon"`              // "hours"|"days"|"weeks"
+	EntryPriceMax float64          `json:"entry_price_max,omitempty"` // YES price ceiling for buys
+	WatchTerms    []string         `json:"watch_terms"`
+	InvalidateIf  []string         `json:"invalidate_if"`
 }
 
 const generatorSystemPrompt = `You are a senior prediction-market trading strategist. Given a single Polymarket market and supporting evidence, decide whether there is a credible edge to trade and, if so, produce a structured proposal.
@@ -94,6 +95,8 @@ func GenerateProposal(ctx context.Context, cfg GeneratorConfig, mc MarketContext
 			lastErr = fmt.Errorf("decode proposal: %w", err)
 		} else if vErr := validateProposal(&p); vErr != nil {
 			lastErr = vErr
+		} else if vErr := validateProposalMatchesMarket(&p, mc); vErr != nil {
+			lastErr = vErr
 		} else {
 			logger.Info("polymarketdiscovery: proposal generated",
 				slog.String("slug", mc.Market.Slug),
@@ -156,6 +159,74 @@ func validateProposal(p *Proposal) error {
 		return errors.New("watch_terms must not be empty")
 	}
 	return nil
+}
+
+func validateProposalMatchesMarket(p *Proposal, mc MarketContext) error {
+	if p == nil || p.Skip {
+		return nil
+	}
+	terms := significantMarketTerms(mc.Market)
+	if len(terms) == 0 {
+		return nil
+	}
+
+	text := strings.ToLower(strings.Join([]string{
+		p.Name,
+		p.Summary,
+		strings.Join(p.WatchTerms, " "),
+		strings.Join(p.InvalidateIf, " "),
+	}, " "))
+	for _, term := range terms {
+		if strings.Contains(text, term) {
+			return nil
+		}
+	}
+	return fmt.Errorf("proposal does not reference market subject %q; include one of: %s", mc.Market.Question, strings.Join(terms, ", "))
+}
+
+func significantMarketTerms(m GammaMarket) []string {
+	seen := map[string]struct{}{}
+	terms := make([]string, 0, 8)
+	add := func(raw string) {
+		for _, token := range tokenizeMarketText(raw) {
+			if _, ok := seen[token]; ok {
+				continue
+			}
+			seen[token] = struct{}{}
+			terms = append(terms, token)
+		}
+	}
+	add(m.Question)
+	if len(terms) < 2 {
+		add(strings.ReplaceAll(m.Slug, "-", " "))
+	}
+	if len(terms) > 8 {
+		terms = terms[:8]
+	}
+	return terms
+}
+
+func tokenizeMarketText(s string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	stop := map[string]struct{}{
+		"a": {}, "an": {}, "and": {}, "are": {}, "be": {}, "by": {}, "for": {}, "if": {}, "in": {}, "is": {}, "it": {}, "of": {}, "on": {}, "or": {}, "the": {}, "to": {}, "will": {}, "with": {},
+		"yes": {}, "no": {}, "win": {}, "wins": {}, "won": {}, "happen": {}, "happens": {}, "market": {}, "resolve": {}, "resolution": {},
+		"2024": {}, "2025": {}, "2026": {}, "2027": {}, "fifa": {}, "world": {}, "cup": {}, "nba": {}, "finals": {},
+	}
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if len(f) < 3 {
+			continue
+		}
+		if _, ok := stop[f]; ok {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 func stripJSONFences(s string) string {

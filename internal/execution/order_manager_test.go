@@ -915,6 +915,75 @@ func TestProcessSignal_SellSignal(t *testing.T) {
 	broker := &mockBroker{}
 	riskEng := &mockRiskEngine{}
 	orderRepo := &mockOrderRepo{}
+	strategyID := uuid.New()
+	positionRepo := &mockPositionRepo{
+		getByStrategyFn: func(ctx context.Context, gotStrategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+			if gotStrategyID != strategyID {
+				t.Fatalf("strategyID = %s, want %s", gotStrategyID, strategyID)
+			}
+			if filter.Ticker != "TSLA" || filter.Side != domain.PositionSideLong {
+				t.Fatalf("filter = %+v, want TSLA long", filter)
+			}
+			return []domain.Position{{
+				ID:         uuid.New(),
+				StrategyID: &strategyID,
+				Ticker:     "TSLA",
+				Side:       domain.PositionSideLong,
+				Quantity:   10,
+				AvgEntry:   190,
+				OpenedAt:   time.Now(),
+			}}, nil
+		},
+	}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
+
+	err := mgr.ProcessSignal(
+		context.Background(),
+		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
+		execution.TradingPlan{
+			Action:     domain.PipelineSignalSell,
+			Ticker:     "TSLA",
+			EntryType:  "market",
+			EntryPrice: 200.0,
+			StopLoss:   210.0,
+			TakeProfit: 180.0,
+		},
+		strategyID,
+		uuid.New(),
+	)
+	if err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("expected 1 order, got %d", len(orderRepo.orders))
+	}
+
+	if orderRepo.orders[0].Side != domain.OrderSideSell {
+		t.Errorf("expected sell side, got %s", orderRepo.orders[0].Side)
+	}
+
+	if len(positionRepo.positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(positionRepo.positions))
+	}
+
+	if positionRepo.positions[0].Side != domain.PositionSideShort {
+		t.Errorf("expected short position, got %s", positionRepo.positions[0].Side)
+	}
+}
+
+func TestProcessSignal_SellSignalWithoutOpenLongPositionSkipped(t *testing.T) {
+	broker := &mockBroker{
+		submitOrderFn: func(ctx context.Context, order *domain.Order) (string, error) {
+			t.Fatal("SubmitOrder should not be called for unowned sell signal")
+			return "", nil
+		},
+	}
+	riskEng := &mockRiskEngine{}
+	orderRepo := &mockOrderRepo{}
 	positionRepo := &mockPositionRepo{}
 	tradeRepo := &mockTradeRepo{}
 	auditRepo := &mockAuditLogRepo{}
@@ -939,20 +1008,14 @@ func TestProcessSignal_SellSignal(t *testing.T) {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 
-	if len(orderRepo.orders) != 1 {
-		t.Fatalf("expected 1 order, got %d", len(orderRepo.orders))
+	if len(orderRepo.orders) != 0 {
+		t.Fatalf("expected 0 orders, got %d", len(orderRepo.orders))
 	}
-
-	if orderRepo.orders[0].Side != domain.OrderSideSell {
-		t.Errorf("expected sell side, got %s", orderRepo.orders[0].Side)
+	if len(tradeRepo.trades) != 0 {
+		t.Fatalf("expected 0 trades, got %d", len(tradeRepo.trades))
 	}
-
-	if len(positionRepo.positions) != 1 {
-		t.Fatalf("expected 1 position, got %d", len(positionRepo.positions))
-	}
-
-	if positionRepo.positions[0].Side != domain.PositionSideShort {
-		t.Errorf("expected short position, got %s", positionRepo.positions[0].Side)
+	if len(positionRepo.positions) != 0 {
+		t.Fatalf("expected 0 positions, got %d", len(positionRepo.positions))
 	}
 }
 

@@ -15,11 +15,12 @@ import (
 )
 
 type fakeOvernightBacktestRunRepo struct {
-	run        *domain.OvernightBacktestRun
-	getActive  error
-	created    bool
-	updated    bool
-	updateSeen *domain.OvernightBacktestRun
+	run                      *domain.OvernightBacktestRun
+	getActive                error
+	created                  bool
+	updated                  bool
+	updateSeen               *domain.OvernightBacktestRun
+	failOnCancelledUpdateCtx bool
 }
 
 func (f *fakeOvernightBacktestRunRepo) Create(ctx context.Context, run *domain.OvernightBacktestRun) error {
@@ -37,10 +38,22 @@ func (f *fakeOvernightBacktestRunRepo) GetActive(ctx context.Context) (*domain.O
 	return f.run, nil
 }
 func (f *fakeOvernightBacktestRunRepo) Update(ctx context.Context, run *domain.OvernightBacktestRun) error {
+	if f.failOnCancelledUpdateCtx {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	f.run = run
 	f.updated = true
 	f.updateSeen = run
 	return nil
+}
+
+type blockingOvernightBacktestLLMProvider struct{}
+
+func (blockingOvernightBacktestLLMProvider) Complete(ctx context.Context, request llm.CompletionRequest) (*llm.CompletionResponse, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 func (f *fakeOvernightBacktestRunRepo) ListLatest(ctx context.Context, limit int) ([]domain.OvernightBacktestRun, error) {
 	return nil, nil
@@ -204,6 +217,36 @@ func TestOvernightBacktestChunkerRunGenerateChunkProcessesChunkAndPersists(t *te
 		if decoded.Name == "" {
 			t.Fatalf("generated[%d] decoded name empty", i)
 		}
+	}
+}
+
+func TestOvernightBacktestChunkerPersistsProgressAfterGenerateTimeout(t *testing.T) {
+	repo := &fakeOvernightBacktestRunRepo{run: &domain.OvernightBacktestRun{ID: uuid.New()}, failOnCancelledUpdateCtx: true}
+	run := &domain.OvernightBacktestRun{
+		Candidates: []domain.OvernightBacktestCandidate{{Ticker: "AAA"}},
+		Phase:      domain.OvernightBacktestPhaseGenerate,
+	}
+	c := overnightBacktestChunker{
+		progress:         repo,
+		deps:             OrchestratorDeps{LLMProvider: blockingOvernightBacktestLLMProvider{}},
+		generatePerChunk: 1,
+		generateTimeout:  5 * time.Millisecond,
+		progressTimeout:  100 * time.Millisecond,
+	}
+	if err := c.runGenerateChunk(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if run.CandidateIndex != 1 {
+		t.Fatalf("candidate index = %d, want 1", run.CandidateIndex)
+	}
+	if run.Phase != domain.OvernightBacktestPhaseSweepValidateDeploy {
+		t.Fatalf("phase = %s, want %s", run.Phase, domain.OvernightBacktestPhaseSweepValidateDeploy)
+	}
+	if len(run.Errors) == 0 || !strings.Contains(strings.Join(run.Errors, " "), "deadline") {
+		t.Fatalf("errors = %#v, want deadline", run.Errors)
+	}
+	if !repo.updated {
+		t.Fatal("expected progress update")
 	}
 }
 

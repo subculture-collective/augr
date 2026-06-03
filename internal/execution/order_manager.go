@@ -163,6 +163,30 @@ func (m *OrderManager) ProcessSignal(
 		return nil
 	}
 
+	// A SELL signal only makes sense as an exit for a position this strategy
+	// already owns. Do not turn discovery sell signals for unowned symbols into
+	// broker orders; Alpaca will reject them and they are not actionable trades.
+	if signal.Signal == domain.PipelineSignalSell {
+		owned, err := m.hasOpenLongPosition(ctx, strategyID, plan.Ticker)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			m.logger.InfoContext(ctx, "sell signal has no open long position, skipping order", "ticker", plan.Ticker, "strategy_id", strategyID)
+
+			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
+				"ticker":      plan.Ticker,
+				"strategy_id": strategyID,
+				"run_id":      runID,
+				"signal":      signal.Signal,
+			}); auditErr != nil {
+				m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
+			}
+
+			return nil
+		}
+	}
+
 	// 1. Check kill switch via risk engine.
 	active, err := m.riskEngine.IsKillSwitchActive(ctx)
 	if err != nil {
@@ -390,6 +414,24 @@ func (m *OrderManager) ProcessSignal(
 
 		return nil
 	}
+}
+
+func (m *OrderManager) hasOpenLongPosition(ctx context.Context, strategyID uuid.UUID, ticker string) (bool, error) {
+	positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{
+		Ticker: ticker,
+		Side:   domain.PositionSideLong,
+	}, riskSnapshotPositionLimit, 0)
+	if err != nil {
+		return false, fmt.Errorf("order_manager: get open long position for %s: %w", ticker, err)
+	}
+
+	for _, position := range positions {
+		if position.ClosedAt == nil && position.Quantity > 0 {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // handleFill creates a Trade and creates or updates the Position.

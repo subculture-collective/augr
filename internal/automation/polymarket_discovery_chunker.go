@@ -16,8 +16,11 @@ import (
 )
 
 const (
-	polymarketDiscoveryProposePerChunk = 2
+	polymarketDiscoveryProposePerChunk = 1
 	polymarketDiscoveryChunkTimeout    = 10 * time.Minute
+	polymarketDiscoveryProposalTimeout = 8 * time.Minute
+	polymarketDiscoveryProgressTimeout = 30 * time.Second
+	polymarketDiscoveryProgressReserve = 30 * time.Second
 	polymarketDiscoveryMaxRunAge       = 24 * time.Hour
 )
 
@@ -27,6 +30,8 @@ type polymarketDiscoveryChunker struct {
 	logger          *slog.Logger
 	proposePerChunk int
 	gammaBaseURL    string
+	proposalTimeout time.Duration
+	progressTimeout time.Duration
 }
 
 var (
@@ -58,11 +63,7 @@ func (c polymarketDiscoveryChunker) RunChunk(ctx context.Context) error {
 		}
 	}
 	if run == nil {
-		now := time.Now()
-		run = &domain.PolymarketDiscoveryRun{ID: uuid.New(), Status: domain.PolymarketDiscoveryStatusRunning, Phase: domain.PolymarketDiscoveryPhaseScreen, StartedAt: now, UpdatedAt: now}
-		if err := c.progress.Create(ctx, run); err != nil {
-			return err
-		}
+		return c.startNewRun(ctx)
 	} else if time.Since(run.StartedAt) > polymarketDiscoveryMaxRunAge {
 		now := time.Now()
 		run.Status = domain.PolymarketDiscoveryStatusFailed
@@ -70,11 +71,28 @@ func (c polymarketDiscoveryChunker) RunChunk(ctx context.Context) error {
 		run.CompletedAt = &now
 		run.UpdatedAt = now
 		run.Errors = append(run.Errors, fmt.Sprintf("run exceeded max age of %s", polymarketDiscoveryMaxRunAge))
-		if updateErr := c.progress.Update(ctx, run); updateErr != nil {
+		if updateErr := c.updateProgress(run); updateErr != nil {
 			return updateErr
 		}
-		return fmt.Errorf("polymarket_discovery: run exceeded max age of %s", polymarketDiscoveryMaxRunAge)
+		c.logger.Warn("polymarket_discovery: stale run failed; starting replacement",
+			slog.String("run_id", run.ID.String()),
+			slog.String("max_age", polymarketDiscoveryMaxRunAge.String()),
+		)
+		return c.startNewRun(ctx)
 	}
+	return c.runExisting(ctx, run)
+}
+
+func (c polymarketDiscoveryChunker) startNewRun(ctx context.Context) error {
+	now := time.Now()
+	run := &domain.PolymarketDiscoveryRun{ID: uuid.New(), Status: domain.PolymarketDiscoveryStatusRunning, Phase: domain.PolymarketDiscoveryPhaseScreen, StartedAt: now, UpdatedAt: now}
+	if err := c.progress.Create(ctx, run); err != nil {
+		return err
+	}
+	return c.runExisting(ctx, run)
+}
+
+func (c polymarketDiscoveryChunker) runExisting(ctx context.Context, run *domain.PolymarketDiscoveryRun) error {
 	chunkCtx, cancel := context.WithTimeout(ctx, polymarketDiscoveryChunkTimeout)
 	defer cancel()
 	switch run.Phase {
@@ -103,7 +121,7 @@ func (c polymarketDiscoveryChunker) runScreen(ctx context.Context, run *domain.P
 	run.CandidateIndex = 0
 	run.Phase = domain.PolymarketDiscoveryPhasePropose
 	run.UpdatedAt = time.Now()
-	return c.progress.Update(ctx, run)
+	return c.updateProgress(run)
 }
 
 func (c polymarketDiscoveryChunker) runPropose(ctx context.Context, run *domain.PolymarketDiscoveryRun) error {
@@ -130,7 +148,9 @@ func (c polymarketDiscoveryChunker) runPropose(ctx context.Context, run *domain.
 			if err != nil {
 				run.Errors = append(run.Errors, fmt.Sprintf("context %s: %v", cand.Slug, err))
 			} else {
-				prop, err := polymarketDiscoveryGenerateProposal(ctx, cfg.Generator, mc, c.logger)
+				proposalCtx, cancel := c.proposalContext(ctx)
+				prop, err := polymarketDiscoveryGenerateProposal(proposalCtx, cfg.Generator, mc, c.logger)
+				cancel()
 				if err != nil {
 					run.Errors = append(run.Errors, fmt.Sprintf("propose %s: %v", cand.Slug, err))
 				} else {
@@ -154,7 +174,7 @@ func (c polymarketDiscoveryChunker) runPropose(ctx context.Context, run *domain.
 		}
 		run.CandidateIndex = i + 1
 		run.UpdatedAt = time.Now()
-		if err := c.progress.Update(ctx, run); err != nil {
+		if err := c.updateProgress(run); err != nil {
 			return err
 		}
 		if acceptedCount >= cfg.MaxDeployments {
@@ -164,7 +184,7 @@ func (c polymarketDiscoveryChunker) runPropose(ctx context.Context, run *domain.
 	if acceptedCount >= cfg.MaxDeployments || run.CandidateIndex >= len(run.Candidates) {
 		run.Phase = domain.PolymarketDiscoveryPhaseDeploy
 		run.UpdatedAt = time.Now()
-		if err := c.progress.Update(ctx, run); err != nil {
+		if err := c.updateProgress(run); err != nil {
 			return err
 		}
 		return nil
@@ -190,7 +210,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 		if err := json.Unmarshal(accepted.Proposal, &prop); err != nil {
 			run.Errors = append(run.Errors, fmt.Sprintf("deploy %s: %v", accepted.Candidate.Slug, err))
 			run.UpdatedAt = time.Now()
-			if err := c.progress.Update(ctx, run); err != nil {
+			if err := c.updateProgress(run); err != nil {
 				return err
 			}
 			continue
@@ -199,7 +219,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 		if err != nil {
 			run.Errors = append(run.Errors, fmt.Sprintf("deploy %s: %v", accepted.Candidate.Slug, err))
 			run.UpdatedAt = time.Now()
-			if err := c.progress.Update(ctx, run); err != nil {
+			if err := c.updateProgress(run); err != nil {
 				return err
 			}
 			continue
@@ -208,7 +228,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 		if err != nil {
 			run.Errors = append(run.Errors, fmt.Sprintf("deploy %s: %v", accepted.Candidate.Slug, err))
 			run.UpdatedAt = time.Now()
-			if err := c.progress.Update(ctx, run); err != nil {
+			if err := c.updateProgress(run); err != nil {
 				return err
 			}
 			continue
@@ -217,7 +237,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 		if err != nil {
 			run.Errors = append(run.Errors, fmt.Sprintf("deploy %s: %v", accepted.Candidate.Slug, err))
 			run.UpdatedAt = time.Now()
-			if err := c.progress.Update(ctx, run); err != nil {
+			if err := c.updateProgress(run); err != nil {
 				return err
 			}
 			continue
@@ -226,7 +246,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 		run.Summary.Deployed++
 		deployed[dep.Slug] = struct{}{}
 		run.UpdatedAt = time.Now()
-		if err := c.progress.Update(ctx, run); err != nil {
+		if err := c.updateProgress(run); err != nil {
 			return err
 		}
 	}
@@ -235,7 +255,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 	now := time.Now()
 	run.CompletedAt = &now
 	run.UpdatedAt = now
-	if err := c.progress.Update(ctx, run); err != nil {
+	if err := c.updateProgress(run); err != nil {
 		return err
 	}
 	result := &polymarketdiscovery.Result{StartedAt: run.StartedAt, Duration: now.Sub(run.StartedAt), FetchedAll: run.Summary.FetchedAll, Screened: run.Summary.Screened, Proposed: run.Summary.Proposed, Skipped: run.Summary.Skipped, Errors: append([]string(nil), run.Errors...), Deployed: make([]polymarketdiscovery.DeployedStrategy, 0, len(run.Deployed))}
@@ -244,6 +264,40 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 	}
 	polymarketDiscoveryStoreLastResult(result)
 	return nil
+}
+
+func (c polymarketDiscoveryChunker) updateProgress(run *domain.PolymarketDiscoveryRun) error {
+	ctx, cancel := context.WithTimeout(context.Background(), c.progressTimeoutOrDefault())
+	defer cancel()
+	return c.progress.Update(ctx, run)
+}
+
+func (c polymarketDiscoveryChunker) proposalContext(parent context.Context) (context.Context, context.CancelFunc) {
+	timeout := c.proposalTimeoutOrDefault()
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline) - polymarketDiscoveryProgressReserve
+		if remaining <= 0 {
+			remaining = time.Second
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
+func (c polymarketDiscoveryChunker) proposalTimeoutOrDefault() time.Duration {
+	if c.proposalTimeout > 0 {
+		return c.proposalTimeout
+	}
+	return polymarketDiscoveryProposalTimeout
+}
+
+func (c polymarketDiscoveryChunker) progressTimeoutOrDefault() time.Duration {
+	if c.progressTimeout > 0 {
+		return c.progressTimeout
+	}
+	return polymarketDiscoveryProgressTimeout
 }
 
 func discoveryCandidateToMarketContext(cand domain.PolymarketDiscoveryCandidate) (polymarketdiscovery.MarketContext, error) {

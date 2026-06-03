@@ -28,6 +28,7 @@ import { UniversePage } from '@/pages/universe-page'
 import { SignalsPage } from '@/pages/signals-page'
 import { PolymarketPage } from '@/pages/polymarket-page'
 import { PolymarketAccountPage } from '@/pages/polymarket-account-page'
+import { PromptsPage } from '@/pages/prompts-page'
 import { GlossaryPage } from '@/pages/glossary-page'
 import { ReliabilityPage } from '@/pages/reliability-page'
 import { SurfersOpsPage } from '@/pages/surfers-ops-page'
@@ -61,6 +62,7 @@ export function AppRoutes() {
           <Route path="automation/:name" element={<AutomationDetailPage />} />
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="memories" element={<MemoriesPage />} />
+          <Route path="prompts" element={<PromptsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="risk" element={<RiskPage />} />
           <Route path="realtime" element={<RealtimePage />} />
