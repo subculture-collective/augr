@@ -369,6 +369,9 @@ func TestProviderGetFundamentals(t *testing.T) {
 	if got.FreeCashFlow != 0 {
 		t.Fatalf("FreeCashFlow = %v, want 0", got.FreeCashFlow)
 	}
+	if !data.IsFundamentalFieldMissing(got, data.FundamentalFieldFreeCashFlow) {
+		t.Fatalf("FreeCashFlow should be marked missing, got MissingFields=%v", got.MissingFields)
+	}
 	if got.FetchedAt.Before(start) || got.FetchedAt.After(end) {
 		t.Fatalf("FetchedAt = %v, want between %v and %v", got.FetchedAt, start, end)
 	}
@@ -479,7 +482,18 @@ func TestProviderGetFundamentalsMissingFieldsGracefully(t *testing.T) {
 	}
 
 	want := data.Fundamentals{
-		Ticker:    "MSFT",
+		Ticker: "MSFT",
+		MissingFields: data.MissingFundamentalFields(
+			data.FundamentalFieldMarketCap,
+			data.FundamentalFieldPERatio,
+			data.FundamentalFieldEPS,
+			data.FundamentalFieldDividendYield,
+			data.FundamentalFieldRevenue,
+			data.FundamentalFieldGrossMargin,
+			data.FundamentalFieldRevenueGrowthYoY,
+			data.FundamentalFieldDebtToEquity,
+			data.FundamentalFieldFreeCashFlow,
+		),
 		FetchedAt: got.FetchedAt,
 	}
 	if !reflect.DeepEqual(got, want) {

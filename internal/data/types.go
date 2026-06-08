@@ -35,6 +35,7 @@ type Fundamentals struct {
 	DebtToEquity     float64   `json:"debt_to_equity"`
 	FreeCashFlow     float64   `json:"free_cash_flow"`
 	DividendYield    float64   `json:"dividend_yield"`
+	MissingFields    []string  `json:"missing_fields,omitempty"`
 	FetchedAt        time.Time `json:"fetched_at"`
 }
 

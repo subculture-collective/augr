@@ -39,16 +39,16 @@ type metricResponse struct {
 }
 
 type metricFields struct {
-	PEBasicExclExtraTTM      float64 `json:"peBasicExclExtraTTM"`
-	EPSBasicExclExtraTTM     float64 `json:"epsBasicExclExtraTTM"`
-	RevenuePerShareTTM       float64 `json:"revenuePerShareTTM"`
-	DividendYieldIndicatedAn float64 `json:"dividendYieldIndicatedAnnual"`
-	MarketCapitalization     float64 `json:"marketCapitalization"`
-	TotalDebtEquityAnnual    float64 `json:"totalDebt/totalEquityAnnual"`
-	RevenueGrowthTTMYoY      float64 `json:"revenueGrowthTTMYoy"`
-	GrossMarginTTM           float64 `json:"grossMarginTTM"`
-	FreeCashFlowTTM          float64 `json:"freeCashFlowTTM"`
-	RevenueTTM               float64 `json:"revenueTTM"`
+	PEBasicExclExtraTTM      *float64 `json:"peBasicExclExtraTTM"`
+	EPSBasicExclExtraTTM     *float64 `json:"epsBasicExclExtraTTM"`
+	RevenuePerShareTTM       *float64 `json:"revenuePerShareTTM"`
+	DividendYieldIndicatedAn *float64 `json:"dividendYieldIndicatedAnnual"`
+	MarketCapitalization     *float64 `json:"marketCapitalization"`
+	TotalDebtEquityAnnual    *float64 `json:"totalDebt/totalEquityAnnual"`
+	RevenueGrowthTTMYoY      *float64 `json:"revenueGrowthTTMYoy"`
+	GrossMarginTTM           *float64 `json:"grossMarginTTM"`
+	FreeCashFlowTTM          *float64 `json:"freeCashFlowTTM"`
+	RevenueTTM               *float64 `json:"revenueTTM"`
 }
 
 type newsItem struct {
@@ -164,19 +164,55 @@ func (p *Provider) GetFundamentals(ctx context.Context, ticker string) (data.Fun
 	}
 
 	m := response.Metric
-	return data.Fundamentals{
-		Ticker:           ticker,
-		MarketCap:        m.MarketCapitalization * 1e6, // Finnhub reports in millions
-		PERatio:          m.PEBasicExclExtraTTM,
-		EPS:              m.EPSBasicExclExtraTTM,
-		Revenue:          m.RevenueTTM,
-		RevenueGrowthYoY: m.RevenueGrowthTTMYoY / 100, // convert percentage to ratio
-		GrossMargin:      m.GrossMarginTTM / 100,      // convert percentage to ratio
-		DebtToEquity:     m.TotalDebtEquityAnnual,
-		FreeCashFlow:     m.FreeCashFlowTTM,
-		DividendYield:    m.DividendYieldIndicatedAn / 100, // convert percentage to ratio
-		FetchedAt:        time.Now().UTC(),
-	}, nil
+	fundamentals := data.Fundamentals{Ticker: ticker, FetchedAt: time.Now().UTC()}
+	missing := make([]string, 0, 9)
+	if m.MarketCapitalization != nil {
+		fundamentals.MarketCap = *m.MarketCapitalization * 1e6 // Finnhub reports in millions
+	} else {
+		missing = append(missing, data.FundamentalFieldMarketCap)
+	}
+	if m.PEBasicExclExtraTTM != nil {
+		fundamentals.PERatio = *m.PEBasicExclExtraTTM
+	} else {
+		missing = append(missing, data.FundamentalFieldPERatio)
+	}
+	if m.EPSBasicExclExtraTTM != nil {
+		fundamentals.EPS = *m.EPSBasicExclExtraTTM
+	} else {
+		missing = append(missing, data.FundamentalFieldEPS)
+	}
+	if m.RevenueTTM != nil {
+		fundamentals.Revenue = *m.RevenueTTM
+	} else {
+		missing = append(missing, data.FundamentalFieldRevenue)
+	}
+	if m.RevenueGrowthTTMYoY != nil {
+		fundamentals.RevenueGrowthYoY = *m.RevenueGrowthTTMYoY / 100 // convert percentage to ratio
+	} else {
+		missing = append(missing, data.FundamentalFieldRevenueGrowthYoY)
+	}
+	if m.GrossMarginTTM != nil {
+		fundamentals.GrossMargin = *m.GrossMarginTTM / 100 // convert percentage to ratio
+	} else {
+		missing = append(missing, data.FundamentalFieldGrossMargin)
+	}
+	if m.TotalDebtEquityAnnual != nil {
+		fundamentals.DebtToEquity = *m.TotalDebtEquityAnnual
+	} else {
+		missing = append(missing, data.FundamentalFieldDebtToEquity)
+	}
+	if m.FreeCashFlowTTM != nil {
+		fundamentals.FreeCashFlow = *m.FreeCashFlowTTM
+	} else {
+		missing = append(missing, data.FundamentalFieldFreeCashFlow)
+	}
+	if m.DividendYieldIndicatedAn != nil {
+		fundamentals.DividendYield = *m.DividendYieldIndicatedAn / 100 // convert percentage to ratio
+	} else {
+		missing = append(missing, data.FundamentalFieldDividendYield)
+	}
+	fundamentals.MissingFields = data.MissingFundamentalFields(missing...)
+	return fundamentals, nil
 }
 
 // GetNews returns news articles from Finnhub's company-news endpoint.

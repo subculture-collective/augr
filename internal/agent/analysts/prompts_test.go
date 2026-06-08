@@ -339,6 +339,27 @@ func TestFormatFundamentalsAnalystUserPromptZeroValues(t *testing.T) {
 	}
 }
 
+func TestFormatFundamentalsAnalystUserPromptMissingValues(t *testing.T) {
+	f := &data.Fundamentals{
+		Ticker:        "AAPL",
+		PERatio:       80.1,
+		FetchedAt:     time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC),
+		MissingFields: data.MissingFundamentalFields(data.FundamentalFieldEPS, data.FundamentalFieldFreeCashFlow),
+	}
+
+	result := FormatFundamentalsAnalystUserPrompt("AAPL", f)
+
+	if !strings.Contains(result, "| P/E Ratio | 80.10 |") {
+		t.Error("user prompt should contain populated P/E ratio")
+	}
+	if !strings.Contains(result, "| EPS | N/A (not returned by data providers) |") {
+		t.Error("user prompt should mark missing EPS as N/A")
+	}
+	if !strings.Contains(result, "Do not treat them as zero") {
+		t.Error("user prompt should instruct analyst not to treat missing metrics as zero")
+	}
+}
+
 func TestFormatFundamentalsAnalystUserPromptSanitizesTicker(t *testing.T) {
 	result := FormatFundamentalsAnalystUserPrompt("BAD|TICK\nER", nil)
 

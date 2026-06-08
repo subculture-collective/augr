@@ -175,40 +175,73 @@ func (p *Provider) GetFundamentals(ctx context.Context, ticker string) (data.Fun
 		return data.Fundamentals{}, fmt.Errorf("alphavantage: GetFundamentals: %w", err)
 	}
 
-	fundamentals := data.Fundamentals{
-		Ticker:        ticker,
-		MarketCap:     parseOptionalFloat64(overview.MarketCapitalization),
-		PERatio:       parseOptionalFloat64(overview.PERatio),
-		EPS:           parseOptionalFloat64(overview.EPS),
-		DividendYield: parseOptionalFloat64(overview.DividendYield),
-		FetchedAt:     time.Now().UTC(),
+	fundamentals := data.Fundamentals{Ticker: ticker, FetchedAt: time.Now().UTC()}
+	missing := make([]string, 0, 9)
+	if value, ok := parseOptionalFloat64Present(overview.MarketCapitalization); ok {
+		fundamentals.MarketCap = value
+	} else {
+		missing = append(missing, data.FundamentalFieldMarketCap)
+	}
+	if value, ok := parseOptionalFloat64Present(overview.PERatio); ok {
+		fundamentals.PERatio = value
+	} else {
+		missing = append(missing, data.FundamentalFieldPERatio)
+	}
+	if value, ok := parseOptionalFloat64Present(overview.EPS); ok {
+		fundamentals.EPS = value
+	} else {
+		missing = append(missing, data.FundamentalFieldEPS)
+	}
+	if value, ok := parseOptionalFloat64Present(overview.DividendYield); ok {
+		fundamentals.DividendYield = value
+	} else {
+		missing = append(missing, data.FundamentalFieldDividendYield)
 	}
 
 	incomeReports := annualOrQuarterlyIncomeReports(incomeStatement)
 	if len(incomeReports) > 0 {
 		latestIncomeReport := incomeReports[0]
-		fundamentals.Revenue = parseOptionalFloat64(latestIncomeReport.TotalRevenue)
+		latestRevenue, latestRevenueOK := parseOptionalFloat64Present(latestIncomeReport.TotalRevenue)
+		if latestRevenueOK {
+			fundamentals.Revenue = latestRevenue
+		} else {
+			missing = append(missing, data.FundamentalFieldRevenue)
+		}
 
-		grossProfit := parseOptionalFloat64(latestIncomeReport.GrossProfit)
-		if fundamentals.Revenue != 0 {
+		grossProfit, grossProfitOK := parseOptionalFloat64Present(latestIncomeReport.GrossProfit)
+		if latestRevenueOK && latestRevenue != 0 && grossProfitOK {
 			fundamentals.GrossMargin = grossProfit / fundamentals.Revenue
+		} else {
+			missing = append(missing, data.FundamentalFieldGrossMargin)
 		}
 
 		if len(incomeReports) > 1 {
-			previousRevenue := parseOptionalFloat64(incomeReports[1].TotalRevenue)
-			if fundamentals.Revenue != 0 && previousRevenue != 0 {
-				fundamentals.RevenueGrowthYoY = (fundamentals.Revenue - previousRevenue) / previousRevenue
+			previousRevenue, previousRevenueOK := parseOptionalFloat64Present(incomeReports[1].TotalRevenue)
+			if latestRevenueOK && previousRevenueOK && previousRevenue != 0 {
+				fundamentals.RevenueGrowthYoY = (latestRevenue - previousRevenue) / previousRevenue
+			} else {
+				missing = append(missing, data.FundamentalFieldRevenueGrowthYoY)
 			}
+		} else {
+			missing = append(missing, data.FundamentalFieldRevenueGrowthYoY)
 		}
+	} else {
+		missing = append(missing, data.FundamentalFieldRevenue, data.FundamentalFieldGrossMargin, data.FundamentalFieldRevenueGrowthYoY)
 	}
 
 	if latest, ok := latestBalanceSheetReport(balanceSheet); ok {
-		totalLiabilities := parseOptionalFloat64(latest.TotalLiabilities)
-		totalEquity := parseOptionalFloat64(latest.TotalShareholderEquity)
-		if totalEquity != 0 {
+		totalLiabilities, liabilitiesOK := parseOptionalFloat64Present(latest.TotalLiabilities)
+		totalEquity, equityOK := parseOptionalFloat64Present(latest.TotalShareholderEquity)
+		if liabilitiesOK && equityOK && totalEquity != 0 {
 			fundamentals.DebtToEquity = totalLiabilities / totalEquity
+		} else {
+			missing = append(missing, data.FundamentalFieldDebtToEquity)
 		}
+	} else {
+		missing = append(missing, data.FundamentalFieldDebtToEquity)
 	}
+	missing = append(missing, data.FundamentalFieldFreeCashFlow)
+	fundamentals.MissingFields = data.MissingFundamentalFields(missing...)
 
 	return fundamentals, nil
 }
@@ -519,22 +552,27 @@ func latestBalanceSheetReport(response balanceSheetResponse) (balanceSheetReport
 }
 
 func parseOptionalFloat64(value string) float64 {
+	parsed, _ := parseOptionalFloat64Present(value)
+	return parsed
+}
+
+func parseOptionalFloat64Present(value string) (float64, bool) {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
-		return 0
+		return 0, false
 	}
 
 	switch strings.ToUpper(trimmed) {
 	case "N/A", "NA", "NONE", "NULL", "-":
-		return 0
+		return 0, false
 	}
 
 	parsed, err := strconv.ParseFloat(trimmed, 64)
 	if err != nil {
-		return 0
+		return 0, false
 	}
 
-	return parsed
+	return parsed, true
 }
 
 func formatNewsTimestamp(t time.Time) string {

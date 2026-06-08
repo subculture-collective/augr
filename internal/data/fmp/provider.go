@@ -36,14 +36,14 @@ type historicalBar struct {
 }
 
 type profileEntry struct {
-	MktCap        float64 `json:"mktCap"`
-	PE            float64 `json:"pe"`
-	EPS           float64 `json:"eps"`
-	DividendYield float64 `json:"lastDiv"`
-	Revenue       float64 `json:"revenue"`
-	GrossMargin   float64 `json:"grossMargin"`
-	DebtToEquity  float64 `json:"debtToEquity"`
-	FreeCashFlow  float64 `json:"freeCashFlow"`
+	MktCap        *float64 `json:"mktCap"`
+	PE            *float64 `json:"pe"`
+	EPS           *float64 `json:"eps"`
+	DividendYield *float64 `json:"lastDiv"`
+	Revenue       *float64 `json:"revenue"`
+	GrossMargin   *float64 `json:"grossMargin"`
+	DebtToEquity  *float64 `json:"debtToEquity"`
+	FreeCashFlow  *float64 `json:"freeCashFlow"`
 }
 
 type fmpNewsItem struct {
@@ -155,18 +155,51 @@ func (p *Provider) GetFundamentals(ctx context.Context, ticker string) (data.Fun
 	}
 
 	profile := profiles[0]
-	return data.Fundamentals{
-		Ticker:        ticker,
-		MarketCap:     profile.MktCap,
-		PERatio:       profile.PE,
-		EPS:           profile.EPS,
-		Revenue:       profile.Revenue,
-		GrossMargin:   profile.GrossMargin,
-		DebtToEquity:  profile.DebtToEquity,
-		FreeCashFlow:  profile.FreeCashFlow,
-		DividendYield: profile.DividendYield,
-		FetchedAt:     time.Now().UTC(),
-	}, nil
+	fundamentals := data.Fundamentals{Ticker: ticker, FetchedAt: time.Now().UTC()}
+	missing := make([]string, 0, 9)
+	if profile.MktCap != nil {
+		fundamentals.MarketCap = *profile.MktCap
+	} else {
+		missing = append(missing, data.FundamentalFieldMarketCap)
+	}
+	if profile.PE != nil {
+		fundamentals.PERatio = *profile.PE
+	} else {
+		missing = append(missing, data.FundamentalFieldPERatio)
+	}
+	if profile.EPS != nil {
+		fundamentals.EPS = *profile.EPS
+	} else {
+		missing = append(missing, data.FundamentalFieldEPS)
+	}
+	if profile.Revenue != nil {
+		fundamentals.Revenue = *profile.Revenue
+	} else {
+		missing = append(missing, data.FundamentalFieldRevenue)
+	}
+	if profile.GrossMargin != nil {
+		fundamentals.GrossMargin = *profile.GrossMargin
+	} else {
+		missing = append(missing, data.FundamentalFieldGrossMargin)
+	}
+	if profile.DebtToEquity != nil {
+		fundamentals.DebtToEquity = *profile.DebtToEquity
+	} else {
+		missing = append(missing, data.FundamentalFieldDebtToEquity)
+	}
+	if profile.FreeCashFlow != nil {
+		fundamentals.FreeCashFlow = *profile.FreeCashFlow
+	} else {
+		missing = append(missing, data.FundamentalFieldFreeCashFlow)
+	}
+	if profile.DividendYield != nil {
+		fundamentals.DividendYield = *profile.DividendYield
+	} else {
+		missing = append(missing, data.FundamentalFieldDividendYield)
+	}
+	missing = append(missing, data.FundamentalFieldRevenueGrowthYoY)
+	fundamentals.MissingFields = data.MissingFundamentalFields(missing...)
+	return fundamentals, nil
 }
 
 // GetNews returns news articles from FMP's stock_news endpoint.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -275,7 +276,7 @@ func TestDataServiceGetFundamentalsCacheHitReturnsCachedData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetFundamentals() error = %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GetFundamentals() = %#v, want %#v", got, want)
 	}
 	if provider.fundamentalsCalls != 0 {
@@ -307,7 +308,7 @@ func TestDataServiceGetFundamentalsCacheMissCallsChainAndCachesResult(t *testing
 	if err != nil {
 		t.Fatalf("GetFundamentals() error = %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GetFundamentals() = %#v, want %#v", got, want)
 	}
 	if provider.fundamentalsCalls != 1 {

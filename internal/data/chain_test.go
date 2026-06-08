@@ -120,6 +120,40 @@ func TestProviderChainGetFundamentalsFallback(t *testing.T) {
 	}
 }
 
+func TestProviderChainGetFundamentalsBackfillsMissingFields(t *testing.T) {
+	first := data.Fundamentals{
+		Ticker:        "AAPL",
+		PERatio:       80.1,
+		DividendYield: 0,
+		MissingFields: data.MissingFundamentalFields(data.FundamentalFieldEPS, data.FundamentalFieldFreeCashFlow),
+	}
+	second := data.Fundamentals{
+		Ticker:        "AAPL",
+		EPS:           6.12,
+		FreeCashFlow:  100,
+		MissingFields: data.MissingFundamentalFields(data.FundamentalFieldDividendYield),
+	}
+	chain := data.NewProviderChain(
+		discardLogger(),
+		&stubProvider{fund: first},
+		&stubProvider{fund: second},
+	)
+
+	got, err := chain.GetFundamentals(context.Background(), "AAPL")
+	if err != nil {
+		t.Fatalf("GetFundamentals() error = %v", err)
+	}
+	if got.PERatio != 80.1 || got.EPS != 6.12 || got.FreeCashFlow != 100 {
+		t.Fatalf("GetFundamentals() = %#v, want P/E from first and EPS/FCF from second", got)
+	}
+	if got.DividendYield != 0 {
+		t.Fatalf("DividendYield = %v, want real zero from first provider preserved", got.DividendYield)
+	}
+	if len(got.MissingFields) != 0 {
+		t.Fatalf("MissingFields = %v, want none", got.MissingFields)
+	}
+}
+
 func TestProviderChainGetFundamentalsNoProviders(t *testing.T) {
 	chain := data.NewProviderChain(discardLogger())
 

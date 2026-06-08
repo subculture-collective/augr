@@ -64,11 +64,88 @@ func (c *ProviderChain) GetOHLCV(ctx context.Context, ticker string, timeframe T
 	})
 }
 
-// GetFundamentals iterates providers and returns the first successful Fundamentals result.
+// GetFundamentals iterates providers and returns fundamentals. If a provider
+// succeeds but marks fields as missing, later providers are still queried to
+// backfill those fields before returning.
 func (c *ProviderChain) GetFundamentals(ctx context.Context, ticker string) (Fundamentals, error) {
-	return tryChain(c, "GetFundamentals", ticker, func(p DataProvider) (Fundamentals, error) {
-		return p.GetFundamentals(ctx, ticker)
-	})
+	if len(c.providers) == 0 {
+		return Fundamentals{}, ErrNoProviders
+	}
+
+	var out Fundamentals
+	var haveResult bool
+	var lastErr error
+	for _, p := range c.providers {
+		result, err := p.GetFundamentals(ctx, ticker)
+		if err != nil {
+			c.logger.Warn("data provider failed, trying next",
+				slog.String("method", "GetFundamentals"),
+				slog.String("ticker", ticker),
+				slog.Any("error", err),
+			)
+			lastErr = err
+			continue
+		}
+
+		if !haveResult {
+			out = result
+			haveResult = true
+		} else {
+			out = mergeFundamentals(out, result)
+		}
+
+		if len(out.MissingFields) == 0 {
+			return out, nil
+		}
+	}
+
+	if haveResult {
+		return out, nil
+	}
+	return Fundamentals{}, lastErr
+}
+
+func mergeFundamentals(base, fill Fundamentals) Fundamentals {
+	if base.Ticker == "" {
+		base.Ticker = fill.Ticker
+	}
+	if base.FetchedAt.IsZero() || (!fill.FetchedAt.IsZero() && fill.FetchedAt.After(base.FetchedAt)) {
+		base.FetchedAt = fill.FetchedAt
+	}
+
+	remaining := make([]string, 0, len(base.MissingFields))
+	for _, field := range base.MissingFields {
+		if IsFundamentalFieldMissing(fill, field) {
+			remaining = append(remaining, field)
+			continue
+		}
+
+		switch field {
+		case FundamentalFieldMarketCap:
+			base.MarketCap = fill.MarketCap
+		case FundamentalFieldPERatio:
+			base.PERatio = fill.PERatio
+		case FundamentalFieldEPS:
+			base.EPS = fill.EPS
+		case FundamentalFieldRevenue:
+			base.Revenue = fill.Revenue
+		case FundamentalFieldRevenueGrowthYoY:
+			base.RevenueGrowthYoY = fill.RevenueGrowthYoY
+		case FundamentalFieldGrossMargin:
+			base.GrossMargin = fill.GrossMargin
+		case FundamentalFieldDebtToEquity:
+			base.DebtToEquity = fill.DebtToEquity
+		case FundamentalFieldFreeCashFlow:
+			base.FreeCashFlow = fill.FreeCashFlow
+		case FundamentalFieldDividendYield:
+			base.DividendYield = fill.DividendYield
+		default:
+			remaining = append(remaining, field)
+		}
+	}
+
+	base.MissingFields = remaining
+	return base
 }
 
 // GetNews iterates providers and returns the first successful news result.

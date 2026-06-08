@@ -185,20 +185,30 @@ func FormatFundamentalsAnalystUserPrompt(ticker string, f *data.Fundamentals) st
 	b.WriteString("\n## Fundamental Data\n\n")
 	b.WriteString("| Metric | Value |\n")
 	b.WriteString("|--------|-------|\n")
-	fmt.Fprintf(&b, "| Market Cap | %.2f |\n", f.MarketCap)
-	fmt.Fprintf(&b, "| P/E Ratio | %.2f |\n", f.PERatio)
-	fmt.Fprintf(&b, "| EPS | %.2f |\n", f.EPS)
-	fmt.Fprintf(&b, "| Revenue | %.2f |\n", f.Revenue)
-	fmt.Fprintf(&b, "| Revenue Growth YoY | %.2f%% |\n", f.RevenueGrowthYoY*100)
-	fmt.Fprintf(&b, "| Gross Margin | %.2f%% |\n", f.GrossMargin*100)
-	fmt.Fprintf(&b, "| Debt-to-Equity | %.2f |\n", f.DebtToEquity)
-	fmt.Fprintf(&b, "| Free Cash Flow | %.2f |\n", f.FreeCashFlow)
-	fmt.Fprintf(&b, "| Dividend Yield | %.2f%% |\n", f.DividendYield*100)
+	fmt.Fprintf(&b, "| Market Cap | %s |\n", formatFundamentalValue(f, data.FundamentalFieldMarketCap, "%.2f", f.MarketCap))
+	fmt.Fprintf(&b, "| P/E Ratio | %s |\n", formatFundamentalValue(f, data.FundamentalFieldPERatio, "%.2f", f.PERatio))
+	fmt.Fprintf(&b, "| EPS | %s |\n", formatFundamentalValue(f, data.FundamentalFieldEPS, "%.2f", f.EPS))
+	fmt.Fprintf(&b, "| Revenue | %s |\n", formatFundamentalValue(f, data.FundamentalFieldRevenue, "%.2f", f.Revenue))
+	fmt.Fprintf(&b, "| Revenue Growth YoY | %s |\n", formatFundamentalValue(f, data.FundamentalFieldRevenueGrowthYoY, "%.2f%%", f.RevenueGrowthYoY*100))
+	fmt.Fprintf(&b, "| Gross Margin | %s |\n", formatFundamentalValue(f, data.FundamentalFieldGrossMargin, "%.2f%%", f.GrossMargin*100))
+	fmt.Fprintf(&b, "| Debt-to-Equity | %s |\n", formatFundamentalValue(f, data.FundamentalFieldDebtToEquity, "%.2f", f.DebtToEquity))
+	fmt.Fprintf(&b, "| Free Cash Flow | %s |\n", formatFundamentalValue(f, data.FundamentalFieldFreeCashFlow, "%.2f", f.FreeCashFlow))
+	fmt.Fprintf(&b, "| Dividend Yield | %s |\n", formatFundamentalValue(f, data.FundamentalFieldDividendYield, "%.2f%%", f.DividendYield*100))
 	fmt.Fprintf(&b, "| Data Fetched At | %s |\n", f.FetchedAt.Format(time.DateOnly))
+	if len(f.MissingFields) > 0 {
+		b.WriteString("\nMetrics marked N/A were not returned by any configured fundamental data provider after fallback attempts. Do not treat them as zero.\n")
+	}
 
 	b.WriteString("\nProvide your structured fundamental analysis report.\n")
 
 	return b.String()
+}
+
+func formatFundamentalValue(f *data.Fundamentals, field, format string, value float64) string {
+	if f != nil && data.IsFundamentalFieldMissing(*f, field) {
+		return "N/A (not returned by data providers)"
+	}
+	return fmt.Sprintf(format, value)
 }
 
 // SocialAnalystSystemPrompt is the system prompt that instructs the LLM to
