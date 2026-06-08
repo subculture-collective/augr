@@ -370,7 +370,7 @@ export function StockDetailPage() {
 
   // ---- derived data ----
 
-  const strategies = strategiesData?.data ?? []
+  const strategies = useMemo(() => strategiesData?.data ?? [], [strategiesData?.data])
   const orders = ordersData?.data ?? []
   const trades = tradesData?.data ?? []
   const positions = (positionsData?.data ?? []).filter((p) => !p.closed_at)

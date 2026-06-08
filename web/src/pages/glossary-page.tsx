@@ -14,6 +14,8 @@ export interface GlossaryTerm {
   definition: string
 }
 
+// Exported for glossary coverage tests.
+// eslint-disable-next-line react-refresh/only-export-components
 export const GLOSSARY_TERMS: GlossaryTerm[] = [
   {
     term: 'AMC',

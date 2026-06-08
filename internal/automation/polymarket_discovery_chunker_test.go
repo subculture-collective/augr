@@ -74,11 +74,16 @@ func TestPolymarketDiscoveryChunkerProposeBudget(t *testing.T) {
 	polymarketDiscoveryGenerateProposal = func(ctx context.Context, cfg polymarketdiscovery.GeneratorConfig, mc polymarketdiscovery.MarketContext, logger *slog.Logger) (*polymarketdiscovery.Proposal, error) {
 		return &polymarketdiscovery.Proposal{Conviction: 0.9, Name: mc.Market.Slug}, nil
 	}
+	deployed := 0
+	polymarketDiscoveryDeployStrategy = func(ctx context.Context, cfg polymarketdiscovery.Config, deps polymarketdiscovery.Deps, mc polymarketdiscovery.MarketContext, prop polymarketdiscovery.Proposal) (polymarketdiscovery.DeployedStrategy, error) {
+		deployed++
+		return polymarketdiscovery.DeployedStrategy{StrategyID: uuid.New(), Slug: mc.Market.Slug, Name: prop.Name, Direction: prop.Direction, Conviction: prop.Conviction}, nil
+	}
 	c := polymarketDiscoveryChunker{progress: repo, deps: OrchestratorDeps{LLMProvider: llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) { return nil, nil })}, proposePerChunk: 2}
 	if err := c.runPropose(context.Background(), repo.run); err != nil {
 		t.Fatal(err)
 	}
-	if repo.run.CandidateIndex != 2 || len(repo.run.Accepted) != 2 || repo.run.Phase != domain.PolymarketDiscoveryPhasePropose {
+	if deployed != 2 || repo.run.CandidateIndex != 2 || len(repo.run.Accepted) != 2 || len(repo.run.Deployed) != 2 || repo.run.Phase != domain.PolymarketDiscoveryPhasePropose {
 		t.Fatalf("unexpected run: %+v", repo.run)
 	}
 }
@@ -115,12 +120,52 @@ func TestPolymarketDiscoveryChunkerStopsAtMaxDeployments(t *testing.T) {
 	polymarketDiscoveryGenerateProposal = func(ctx context.Context, cfg polymarketdiscovery.GeneratorConfig, mc polymarketdiscovery.MarketContext, logger *slog.Logger) (*polymarketdiscovery.Proposal, error) {
 		return &polymarketdiscovery.Proposal{Conviction: 0.9, Name: mc.Market.Slug}, nil
 	}
+	polymarketDiscoveryDeployStrategy = func(ctx context.Context, cfg polymarketdiscovery.Config, deps polymarketdiscovery.Deps, mc polymarketdiscovery.MarketContext, prop polymarketdiscovery.Proposal) (polymarketdiscovery.DeployedStrategy, error) {
+		return polymarketdiscovery.DeployedStrategy{StrategyID: uuid.New(), Slug: mc.Market.Slug, Name: prop.Name, Direction: prop.Direction, Conviction: prop.Conviction}, nil
+	}
 	c := polymarketDiscoveryChunker{progress: repo, deps: OrchestratorDeps{LLMProvider: llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) { return nil, nil })}, proposePerChunk: 5}
 	if err := c.runPropose(context.Background(), repo.run); err != nil {
 		t.Fatal(err)
 	}
-	if len(repo.run.Accepted) != 3 || repo.run.Phase != domain.PolymarketDiscoveryPhaseDeploy || repo.run.CandidateIndex != 3 {
+	if len(repo.run.Accepted) != 3 || len(repo.run.Deployed) != 3 || repo.run.Phase != domain.PolymarketDiscoveryPhaseDone || repo.run.Status != domain.PolymarketDiscoveryStatusCompleted || repo.run.CandidateIndex != 3 {
 		t.Fatalf("unexpected run: %+v", repo.run)
+	}
+}
+
+func TestPolymarketDiscoveryChunkerUsesFiveProposalChunks(t *testing.T) {
+	defer restoreDiscoverySeams()
+	chunker := newPolymarketDiscoveryChunker(OrchestratorDeps{}, nil)
+	if chunker.proposePerChunk != 5 {
+		t.Fatalf("proposePerChunk = %d, want 5", chunker.proposePerChunk)
+	}
+}
+
+func TestPolymarketDiscoveryChunkerDeploysAcceptedProposalImmediately(t *testing.T) {
+	defer restoreDiscoverySeams()
+	repo := &inMemoryPolymarketDiscoveryRunRepo{run: &domain.PolymarketDiscoveryRun{ID: uuid.New(), Status: domain.PolymarketDiscoveryStatusRunning, Phase: domain.PolymarketDiscoveryPhasePropose, Candidates: makeCandidates(1)}}
+	polymarketDiscoveryBuildContext = func(ctx context.Context, m polymarketdiscovery.GammaMarket, repo repository.PolymarketAccountRepository) (polymarketdiscovery.MarketContext, error) {
+		return polymarketdiscovery.MarketContext{Market: m}, nil
+	}
+	polymarketDiscoveryGenerateProposal = func(ctx context.Context, cfg polymarketdiscovery.GeneratorConfig, mc polymarketdiscovery.MarketContext, logger *slog.Logger) (*polymarketdiscovery.Proposal, error) {
+		return &polymarketdiscovery.Proposal{Conviction: 0.9, Name: mc.Market.Slug}, nil
+	}
+	deployed := 0
+	polymarketDiscoveryDeployStrategy = func(ctx context.Context, cfg polymarketdiscovery.Config, deps polymarketdiscovery.Deps, mc polymarketdiscovery.MarketContext, prop polymarketdiscovery.Proposal) (polymarketdiscovery.DeployedStrategy, error) {
+		deployed++
+		return polymarketdiscovery.DeployedStrategy{StrategyID: uuid.New(), Slug: mc.Market.Slug, Name: prop.Name, Direction: prop.Direction, Conviction: prop.Conviction}, nil
+	}
+	c := polymarketDiscoveryChunker{progress: repo, deps: OrchestratorDeps{LLMProvider: llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) { return nil, nil })}, proposePerChunk: 5, logger: slog.Default()}
+	if err := c.runPropose(context.Background(), repo.run); err != nil {
+		t.Fatal(err)
+	}
+	if deployed != 1 {
+		t.Fatalf("deployed = %d, want 1", deployed)
+	}
+	if repo.run.Phase != domain.PolymarketDiscoveryPhaseDone || repo.run.Status != domain.PolymarketDiscoveryStatusCompleted {
+		t.Fatalf("run not completed immediately: %+v", repo.run)
+	}
+	if len(repo.run.Accepted) != 1 || len(repo.run.Deployed) != 1 {
+		t.Fatalf("run not deployed immediately: %+v", repo.run)
 	}
 }
 
@@ -137,6 +182,9 @@ func TestPolymarketDiscoveryChunkerAdvancesOnErrorsAndSkips(t *testing.T) {
 			return &polymarketdiscovery.Proposal{Conviction: 0.9, Name: mc.Market.Slug}, nil
 		}
 	}
+	polymarketDiscoveryDeployStrategy = func(ctx context.Context, cfg polymarketdiscovery.Config, deps polymarketdiscovery.Deps, mc polymarketdiscovery.MarketContext, prop polymarketdiscovery.Proposal) (polymarketdiscovery.DeployedStrategy, error) {
+		return polymarketdiscovery.DeployedStrategy{StrategyID: uuid.New(), Slug: mc.Market.Slug, Name: prop.Name, Direction: prop.Direction, Conviction: prop.Conviction}, nil
+	}
 	polymarketDiscoveryBuildContext = func(ctx context.Context, m polymarketdiscovery.GammaMarket, repo repository.PolymarketAccountRepository) (polymarketdiscovery.MarketContext, error) {
 		if m.Slug == "bad-context" {
 			return polymarketdiscovery.MarketContext{}, errors.New("boom")
@@ -149,6 +197,9 @@ func TestPolymarketDiscoveryChunkerAdvancesOnErrorsAndSkips(t *testing.T) {
 	}
 	if repo.run.CandidateIndex != 4 {
 		t.Fatalf("candidate index = %d", repo.run.CandidateIndex)
+	}
+	if len(repo.run.Accepted) != 1 || len(repo.run.Deployed) != 1 || repo.run.Phase != domain.PolymarketDiscoveryPhaseDone || repo.run.Status != domain.PolymarketDiscoveryStatusCompleted {
+		t.Fatalf("run not completed as expected: %+v", repo.run)
 	}
 	if len(repo.run.Errors) == 0 || fmt.Sprint(repo.run.Errors) == "" || !contains(repo.run.Errors, "bad-context") {
 		t.Fatalf("errors = %#v", repo.run.Errors)
@@ -247,8 +298,8 @@ func TestPolymarketDiscoveryChunkerPersistsProgressAfterProposalTimeout(t *testi
 	if len(repo.run.Errors) != 1 || !contains(repo.run.Errors, "context deadline exceeded") {
 		t.Fatalf("errors = %#v", repo.run.Errors)
 	}
-	if repo.run.Phase != domain.PolymarketDiscoveryPhaseDeploy {
-		t.Fatalf("phase = %s, want deploy", repo.run.Phase)
+	if repo.run.Phase != domain.PolymarketDiscoveryPhaseDone || repo.run.Status != domain.PolymarketDiscoveryStatusCompleted {
+		t.Fatalf("run not completed: %+v", repo.run)
 	}
 }
 

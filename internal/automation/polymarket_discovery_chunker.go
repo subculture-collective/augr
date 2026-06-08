@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	polymarketDiscoveryProposePerChunk = 1
+	polymarketDiscoveryProposePerChunk = 5
 	polymarketDiscoveryChunkTimeout    = 10 * time.Minute
 	polymarketDiscoveryProposalTimeout = 8 * time.Minute
 	polymarketDiscoveryProgressTimeout = 30 * time.Second
@@ -128,7 +128,7 @@ func (c polymarketDiscoveryChunker) runPropose(ctx context.Context, run *domain.
 	if c.deps.LLMProvider == nil {
 		return fmt.Errorf("polymarket_discovery: LLM provider not configured")
 	}
-	cfg := polymarketdiscovery.Config{Screener: polymarketdiscovery.DefaultScreenerConfig(), Generator: polymarketdiscovery.GeneratorConfig{Provider: c.deps.LLMProvider}, MaxDeployments: 3, MinConviction: 0.45, ScheduleCron: "0 */6 * * *", AutoWatchSlug: true}
+	cfg := c.discoveryConfig()
 	start := run.CandidateIndex
 	end := start + c.proposePerChunk
 	if end > len(run.Candidates) {
@@ -167,6 +167,9 @@ func (c polymarketDiscoveryChunker) runPropose(ctx context.Context, run *domain.
 							run.Accepted = append(run.Accepted, domain.PolymarketDiscoveryAccepted{Candidate: cand, Proposal: raw})
 							run.Summary.Accepted++
 							acceptedCount++
+							if err := c.deployAcceptedProposal(ctx, run, cand, mc, *prop); err != nil {
+								run.Errors = append(run.Errors, fmt.Sprintf("deploy %s: %v", cand.Slug, err))
+							}
 						}
 					}
 				}
@@ -181,20 +184,18 @@ func (c polymarketDiscoveryChunker) runPropose(ctx context.Context, run *domain.
 			break
 		}
 	}
-	if acceptedCount >= cfg.MaxDeployments || run.CandidateIndex >= len(run.Candidates) {
+	if len(run.Deployed) >= cfg.MaxDeployments || run.CandidateIndex >= len(run.Candidates) {
 		run.Phase = domain.PolymarketDiscoveryPhaseDeploy
 		run.UpdatedAt = time.Now()
 		if err := c.updateProgress(run); err != nil {
 			return err
 		}
-		return nil
+		return c.runDeploy(ctx, run)
 	}
 	return nil
 }
 
 func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.PolymarketDiscoveryRun) error {
-	cfg := polymarketdiscovery.Config{Screener: polymarketdiscovery.DefaultScreenerConfig(), Generator: polymarketdiscovery.GeneratorConfig{Provider: c.deps.LLMProvider}, MaxDeployments: 3, MinConviction: 0.45, ScheduleCron: "0 */6 * * *", AutoWatchSlug: true}
-	deps := polymarketdiscovery.Deps{LLMProvider: c.deps.LLMProvider, Strategies: c.deps.StrategyRepo, PolymarketAccountRepo: c.deps.PolymarketAccountRepo, PolymarketWatchedRepo: c.deps.PolymarketWatchedRepo, Logger: c.logger}
 	deployed := make(map[string]struct{}, len(run.Deployed))
 	for _, dep := range run.Deployed {
 		deployed[dep.Slug] = struct{}{}
@@ -233,8 +234,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 			}
 			continue
 		}
-		dep, err := polymarketDiscoveryDeployStrategy(ctx, cfg, deps, mc, prop)
-		if err != nil {
+		if err := c.deployAcceptedProposal(ctx, run, accepted.Candidate, mc, prop); err != nil {
 			run.Errors = append(run.Errors, fmt.Sprintf("deploy %s: %v", accepted.Candidate.Slug, err))
 			run.UpdatedAt = time.Now()
 			if err := c.updateProgress(run); err != nil {
@@ -242,9 +242,7 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 			}
 			continue
 		}
-		run.Deployed = append(run.Deployed, domain.PolymarketDiscoveryDeployed{StrategyID: dep.StrategyID.String(), Slug: dep.Slug, Template: string(dep.Template), Name: dep.Name, Direction: dep.Direction, Conviction: dep.Conviction, Reused: dep.Reused})
-		run.Summary.Deployed++
-		deployed[dep.Slug] = struct{}{}
+		deployed[accepted.Candidate.Slug] = struct{}{}
 		run.UpdatedAt = time.Now()
 		if err := c.updateProgress(run); err != nil {
 			return err
@@ -264,6 +262,29 @@ func (c polymarketDiscoveryChunker) runDeploy(ctx context.Context, run *domain.P
 	}
 	polymarketDiscoveryStoreLastResult(result)
 	return nil
+}
+
+func (c polymarketDiscoveryChunker) deployAcceptedProposal(ctx context.Context, run *domain.PolymarketDiscoveryRun, cand domain.PolymarketDiscoveryCandidate, mc polymarketdiscovery.MarketContext, prop polymarketdiscovery.Proposal) error {
+	for _, dep := range run.Deployed {
+		if dep.Slug == cand.Slug {
+			return nil
+		}
+	}
+	dep, err := polymarketDiscoveryDeployStrategy(ctx, c.discoveryConfig(), c.discoveryDeps(), mc, prop)
+	if err != nil {
+		return err
+	}
+	run.Deployed = append(run.Deployed, domain.PolymarketDiscoveryDeployed{StrategyID: dep.StrategyID.String(), Slug: dep.Slug, Template: string(dep.Template), Name: dep.Name, Direction: dep.Direction, Conviction: dep.Conviction, Reused: dep.Reused})
+	run.Summary.Deployed++
+	return nil
+}
+
+func (c polymarketDiscoveryChunker) discoveryConfig() polymarketdiscovery.Config {
+	return polymarketdiscovery.Config{Screener: polymarketdiscovery.DefaultScreenerConfig(), Generator: polymarketdiscovery.GeneratorConfig{Provider: c.deps.LLMProvider}, MaxDeployments: 3, MinConviction: 0.45, ScheduleCron: "0 * * * *", AutoWatchSlug: true}
+}
+
+func (c polymarketDiscoveryChunker) discoveryDeps() polymarketdiscovery.Deps {
+	return polymarketdiscovery.Deps{LLMProvider: c.deps.LLMProvider, Strategies: c.deps.StrategyRepo, PolymarketAccountRepo: c.deps.PolymarketAccountRepo, PolymarketWatchedRepo: c.deps.PolymarketWatchedRepo, Logger: c.logger}
 }
 
 func (c polymarketDiscoveryChunker) updateProgress(run *domain.PolymarketDiscoveryRun) error {

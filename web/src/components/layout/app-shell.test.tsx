@@ -1,11 +1,18 @@
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import { AppShell } from '@/components/layout/app-shell'
+import { clearTokens, setTokens } from '@/lib/auth'
+
+afterEach(() => {
+  clearTokens()
+})
 
 describe('AppShell', () => {
   it('renders the navigation and nested route content', () => {
+    setTokens('access-token', 'refresh-token', Date.now() + 60_000)
+
     render(
       <MemoryRouter initialEntries={['/portfolio']}>
         <Routes>

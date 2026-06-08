@@ -90,12 +90,10 @@ describe('StrategyConfigEditor', () => {
       />,
     )
 
-    const deepProviderSelect = screen.getByLabelText('Deep Think Provider') as HTMLSelectElement
-    const quickProviderSelect = screen.getByLabelText('Quick Think Provider') as HTMLSelectElement
+    const providerSelect = screen.getByLabelText('Provider') as HTMLSelectElement
 
-    expect(deepProviderSelect).toBeInTheDocument()
-    expect(quickProviderSelect).toBeInTheDocument()
-    expect(deepProviderSelect.querySelectorAll('option')).toHaveLength(7)
+    expect(providerSelect).toBeInTheDocument()
+    expect(providerSelect.querySelectorAll('option')).toHaveLength(7)
   })
 
   it('pre-populates pipeline and risk fields from strategy config', () => {
@@ -107,8 +105,10 @@ describe('StrategyConfigEditor', () => {
       />,
     )
 
-    expect(screen.getByLabelText('Research Debate Rounds')).toHaveValue(4)
-    expect(screen.getByLabelText('Risk Debate Rounds')).toHaveValue(null)
+    expect(screen.getByLabelText('Provider')).toHaveValue('anthropic')
+    expect(screen.getByLabelText('Deep Think Model')).toHaveValue('claude-3-opus')
+    expect(screen.getByLabelText('Quick Think Model')).toHaveValue('gpt-4o-mini')
+    expect(screen.getByLabelText('Debate Rounds')).toHaveValue(4)
     expect(screen.getByLabelText('Analysis Timeout (seconds)')).toHaveValue(120)
     expect(screen.getByLabelText('Debate Timeout (seconds)')).toHaveValue(600)
     expect(screen.getByLabelText('Max Position Size %')).toHaveValue(0.2)
@@ -126,10 +126,10 @@ describe('StrategyConfigEditor', () => {
       />,
     )
 
-    expect(screen.getByLabelText('Market Analyst')).toBeChecked()
-    expect(screen.getByLabelText('Fundamentals Analyst')).toBeChecked()
-    expect(screen.getByLabelText('News Analyst')).toBeChecked()
-    expect(screen.getByLabelText('Social Media Analyst')).toBeChecked()
+    expect(screen.getByLabelText('market analyst')).toBeChecked()
+    expect(screen.getByLabelText('fundamentals analyst')).toBeChecked()
+    expect(screen.getByLabelText('news analyst')).toBeChecked()
+    expect(screen.getByLabelText('social media analyst')).toBeChecked()
   })
 
   it('keeps advanced section collapsed by default and expands on click', () => {
@@ -157,12 +157,10 @@ describe('StrategyConfigEditor', () => {
       />,
     )
 
-    fireEvent.change(screen.getByLabelText('Deep Think Provider'), { target: { value: 'anthropic' } })
+    fireEvent.change(screen.getByLabelText('Provider'), { target: { value: 'anthropic' } })
     fireEvent.change(screen.getByLabelText('Deep Think Model'), { target: { value: 'claude-4' } })
-    fireEvent.change(screen.getByLabelText('Quick Think Provider'), { target: { value: 'openai' } })
     fireEvent.change(screen.getByLabelText('Quick Think Model'), { target: { value: 'gpt-5' } })
-    fireEvent.change(screen.getByLabelText('Research Debate Rounds'), { target: { value: '3' } })
-    fireEvent.change(screen.getByLabelText('Risk Debate Rounds'), { target: { value: '2' } })
+    fireEvent.change(screen.getByLabelText('Debate Rounds'), { target: { value: '3' } })
     fireEvent.change(screen.getByLabelText('Analysis Timeout (seconds)'), { target: { value: '90' } })
     fireEvent.change(screen.getByLabelText('Debate Timeout (seconds)'), { target: { value: '900' } })
     fireEvent.change(screen.getByLabelText('Max Position Size %'), { target: { value: '0.25' } })
@@ -170,8 +168,8 @@ describe('StrategyConfigEditor', () => {
     fireEvent.change(screen.getByLabelText('Take Profit ATR Multiplier'), { target: { value: '2.8' } })
     fireEvent.change(screen.getByLabelText('Min Confidence Threshold'), { target: { value: '0.75' } })
 
-    fireEvent.click(screen.getByLabelText('Fundamentals Analyst'))
-    fireEvent.click(screen.getByLabelText('Social Media Analyst'))
+    fireEvent.click(screen.getByLabelText('fundamentals analyst'))
+    fireEvent.click(screen.getByLabelText('social media analyst'))
 
     fireEvent.click(screen.getByRole('button', { name: 'Show' }))
     fireEvent.change(screen.getByLabelText('Prompt Overrides (JSON)'), {
@@ -226,10 +224,10 @@ describe('StrategyConfigEditor', () => {
       />,
     )
 
-    fireEvent.click(screen.getByLabelText('Market Analyst'))
-    fireEvent.click(screen.getByLabelText('Fundamentals Analyst'))
-    fireEvent.click(screen.getByLabelText('News Analyst'))
-    fireEvent.click(screen.getByLabelText('Social Media Analyst'))
+    fireEvent.click(screen.getByLabelText('market analyst'))
+    fireEvent.click(screen.getByLabelText('fundamentals analyst'))
+    fireEvent.click(screen.getByLabelText('news analyst'))
+    fireEvent.click(screen.getByLabelText('social media analyst'))
     fireEvent.submit(screen.getByTestId('strategy-config-editor').querySelector('form')!)
 
     expect(onSave).not.toHaveBeenCalled()

@@ -41,7 +41,7 @@ describe('RiskStatusBar', () => {
     expect(screen.getByText('Circuit breaker')).toBeInTheDocument()
     expect(screen.getByText('Open')).toBeInTheDocument()
     expect(screen.getByText('Kill switch')).toBeInTheDocument()
-    expect(screen.getByText('Activate')).toBeInTheDocument()
+    expect(screen.getByText('Stop All')).toBeInTheDocument()
     expect(screen.getByText('Position limits')).toBeInTheDocument()
     expect(screen.getByText('10%')).toBeInTheDocument()
   })
@@ -63,7 +63,7 @@ describe('RiskStatusBar', () => {
     render(<RiskStatusBar />, { wrapper: Wrapper })
 
     expect(await screen.findByText('Warning')).toBeInTheDocument()
-    expect(screen.getByText('Deactivate')).toBeInTheDocument()
+    expect(screen.getByText('Resume All')).toBeInTheDocument()
     expect(screen.getByText('Manual stop')).toBeInTheDocument()
   })
 

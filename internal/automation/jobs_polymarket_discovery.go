@@ -10,7 +10,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
-var polymarketDiscoverySpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 */6 * * *"}
+var polymarketDiscoverySpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 * * * *"}
 
 func (o *JobOrchestrator) registerPolymarketDiscoveryJob() {
 	if o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil || o.deps.PolymarketDiscoveryRuns == nil {

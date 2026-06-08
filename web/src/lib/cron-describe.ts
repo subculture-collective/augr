@@ -32,7 +32,7 @@ function describeDow(dow: string): string {
 /**
  * Convert a cron expression to human-readable English.
  *
- * "0 *​/4 * * 1-5" -> "Every 4 hours, Mon-Fri"
+ * Cron expression for every 4 hours on weekdays -> "Every 4 hours, Mon-Fri"
  * "30 10 * * 1-5" -> "Daily at 10:30 AM, Mon-Fri"
  * "" -> "Manual only"
  */

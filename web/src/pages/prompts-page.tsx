@@ -72,7 +72,7 @@ export function PromptsPage() {
     queryFn: () => apiClient.getPrompts(),
   });
 
-  const prompts = promptsQuery.data?.prompts ?? [];
+  const prompts = useMemo(() => promptsQuery.data?.prompts ?? [], [promptsQuery.data?.prompts]);
 
   const categories = useMemo(
     () => Array.from(new Set(prompts.map((prompt) => prompt.category))).sort((left, right) => left.localeCompare(right)),

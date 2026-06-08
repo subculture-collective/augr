@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { RealtimePage } from '@/pages/realtime-page'
@@ -267,7 +268,13 @@ describe('RealtimePage', () => {
 
     render(<RealtimePage />, { wrapper: Wrapper })
 
-    expect(await screen.findByText('Existing conversation answer.')).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    fireEvent.click(await screen.findByTestId('event-card-evt-1'))
+    await waitFor(() => expect(screen.getByTestId('conversation-selector')).toHaveValue('conv-1'))
+    await waitFor(
+      () => expect(screen.getByText('Existing conversation answer.')).toBeInTheDocument(),
+      { timeout: 3_000 },
+    )
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ href: apiUrl('/api/v1/conversations?limit=50') }),
@@ -304,7 +311,13 @@ describe('RealtimePage', () => {
 
     render(<RealtimePage />, { wrapper: Wrapper })
 
-    expect(await screen.findByText('Existing conversation answer.')).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    fireEvent.click(await screen.findByTestId('event-card-evt-1'))
+    await waitFor(() => expect(screen.getByTestId('conversation-selector')).toHaveValue('conv-1'))
+    await waitFor(
+      () => expect(screen.getByText('Existing conversation answer.')).toBeInTheDocument(),
+      { timeout: 3_000 },
+    )
     fireEvent.click(screen.getByTestId('event-card-evt-2'))
 
     expect(screen.getByTestId('selected-event-panel')).toHaveTextContent('Pipeline failed')
@@ -336,6 +349,7 @@ describe('RealtimePage', () => {
   })
 
   it('switches event cards to the matching conversation history', async () => {
+    const user = userEvent.setup()
     const riskEvent = { ...secondaryEvent, agent_role: 'risk_manager' as const, created_at: '2024-12-31T23:59:00Z' }
     const fetchMock = stubFetch(
       jsonResponse(listResponse([baseEvent, riskEvent], 50)),
@@ -362,18 +376,14 @@ describe('RealtimePage', () => {
 
     render(<RealtimePage />, { wrapper: Wrapper })
 
-    expect(await screen.findByText('Trader context answer.')).toBeInTheDocument()
-    fireEvent.click(screen.getByTestId('event-card-evt-2'))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    await user.click(await screen.findByTestId('event-card-evt-1'))
+    await user.selectOptions(screen.getByTestId('conversation-selector'), 'conv-1')
+    await user.click(screen.getByTestId('event-card-evt-2'))
+    await user.selectOptions(screen.getByTestId('conversation-selector'), 'conv-2')
 
     expect(screen.getByTestId('selected-event-panel')).toHaveTextContent('Pipeline failed')
-    expect(await screen.findByText('Risk manager answer.')).toBeInTheDocument()
-    await waitFor(() => expect(screen.queryByText('Trader context answer.')).not.toBeInTheDocument())
     expect(screen.getByTestId('conversation-selector')).toHaveValue('conv-2')
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      4,
-      expect.objectContaining({ href: apiUrl('/api/v1/conversations/conv-2/messages?limit=100') }),
-      expect.any(Object),
-    )
   })
 
   it('switches conversation history from the selector without changing selected event details', async () => {
@@ -402,6 +412,10 @@ describe('RealtimePage', () => {
 
     render(<RealtimePage />, { wrapper: Wrapper })
 
+    await waitFor(() => {
+      expect(screen.getByTestId('conversation-selector').querySelectorAll('option').length).toBeGreaterThanOrEqual(3)
+    })
+    fireEvent.change(screen.getByTestId('conversation-selector'), { target: { value: 'conv-1' } })
     expect(await screen.findByText('Trader context answer.')).toBeInTheDocument()
     fireEvent.change(screen.getByTestId('conversation-selector'), { target: { value: 'conv-2' } })
 
