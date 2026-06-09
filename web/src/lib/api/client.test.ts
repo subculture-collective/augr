@@ -95,6 +95,31 @@ describe('ApiClient', () => {
     )
   })
 
+  it('fetches the risk cockpit summary from the authenticated endpoint', async () => {
+    const payload = {
+      generated_at: '2026-06-09T12:00:00Z',
+      kill_switch_active: false,
+      circuit_breaker: true,
+      exposures: [],
+      warnings: ['Cross-flow limits approaching'],
+    }
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => payload,
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new ApiClient({ baseUrl: 'http://localhost:8080', token: 'jwt-token' })
+
+    await expect(client.getRiskCockpit()).resolves.toEqual(payload)
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [requestUrl, requestInit] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(requestUrl.toString()).toBe('http://localhost:8080/api/v1/risk/cockpit')
+    expect(new Headers(requestInit.headers).get('Authorization')).toBe('Bearer jwt-token')
+  })
+
   it('normalizes null list data to an empty array', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

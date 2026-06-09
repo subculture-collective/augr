@@ -74,6 +74,7 @@ import type {
   PolymarketOpportunityListParams,
   PolymarketStatus,
   PolymarketWatchedMarket,
+  RiskCockpitSummary,
   RiskBreakerState,
   DivergenceResponse,
   PredictionMarketData,
@@ -283,6 +284,10 @@ export class ApiClient {
 
   async getRiskStatus() {
     return this.request<EngineStatus>('/api/v1/risk/status');
+  }
+
+  async getRiskCockpit() {
+    return this.request<RiskCockpitSummary>('/api/v1/risk/cockpit');
   }
 
   async toggleKillSwitch(payload: KillSwitchToggleRequest) {

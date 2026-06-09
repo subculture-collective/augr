@@ -488,6 +488,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		// Risk
 		v1.Route("/risk", func(rr chi.Router) {
 			rr.Get("/status", s.handleRiskStatus)
+			rr.Get("/cockpit", s.handleRiskCockpit)
 			rr.Get("/breakers", s.handleRiskBreakerList)
 			rr.Post("/killswitch", s.handleKillSwitchToggle)
 			rr.Post("/breaker/reset", func(w http.ResponseWriter, r *http.Request) {

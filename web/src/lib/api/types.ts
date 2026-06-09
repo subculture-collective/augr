@@ -501,6 +501,23 @@ export interface EngineStatus {
   updated_at: ISODateString;
 }
 
+export interface RiskCockpitExposure {
+  market_type: MarketType;
+  open_positions: number;
+  approved_decisions: number;
+  rejected_decisions: number;
+  gross_exposure: number;
+  net_expected_value: number;
+}
+
+export interface RiskCockpitSummary {
+  generated_at: ISODateString;
+  kill_switch_active: boolean;
+  circuit_breaker: boolean;
+  exposures: RiskCockpitExposure[];
+  warnings: string[];
+}
+
 export interface KillSwitchToggleRequest {
   active: boolean;
   reason?: string;
