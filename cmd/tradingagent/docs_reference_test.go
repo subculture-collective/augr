@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,17 +9,7 @@ import (
 	"testing"
 )
 
-func TestDocsReferenceContainsNoStalePythonReferences(t *testing.T) {
-	docsPath := docsReferencePath(t)
-
-	info, err := os.Stat(docsPath)
-	if err != nil {
-		t.Fatalf("Stat() error = %v", err)
-	}
-	if !info.IsDir() {
-		t.Fatalf("%s is not a directory", docsPath)
-	}
-
+func TestCanonicalDocsContainNoStalePythonReferences(t *testing.T) {
 	forbidden := []string{
 		"tradingagents",
 		"langgraph",
@@ -35,42 +24,64 @@ func TestDocsReferenceContainsNoStalePythonReferences(t *testing.T) {
 	}
 	pythonSourcePathPattern := regexp.MustCompile(`\.py\b`)
 
-	if err := filepath.WalkDir(docsPath, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		if d.IsDir() || (ext != ".md" && ext != ".markdown") {
-			return nil
-		}
-
-		contents, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-
-		lowerContents := strings.ToLower(string(contents))
-		relativePath, err := filepath.Rel(docsPath, path)
-		if err != nil {
-			return err
-		}
-
+	for _, rel := range canonicalDocPaths() {
+		body := strings.ToLower(readRepoFile(t, rel))
 		for _, unwanted := range forbidden {
-			if strings.Contains(lowerContents, unwanted) {
-				t.Fatalf("%s unexpectedly contains stale Python-era reference %q", relativePath, unwanted)
+			if strings.Contains(body, unwanted) {
+				t.Fatalf("%s unexpectedly contains stale Python-era reference %q", rel, unwanted)
 			}
 		}
-		if pythonSourcePathPattern.MatchString(lowerContents) {
-			t.Fatalf("%s unexpectedly contains stale Python-era reference matching %q", relativePath, pythonSourcePathPattern.String())
+		if pythonSourcePathPattern.MatchString(body) {
+			t.Fatalf("%s unexpectedly contains stale Python-era reference matching %q", rel, pythonSourcePathPattern.String())
 		}
-
-		return nil
-	}); err != nil {
-		t.Fatalf("WalkDir() error = %v", err)
 	}
 }
 
-func docsReferencePath(t *testing.T) string {
+func TestCanonicalDocsDoNotLinkDeletedReferenceOrResearchDocs(t *testing.T) {
+	forbiddenLinks := []string{
+		"docs/reference",
+		"reference/README.md",
+		"reference/api.md",
+		"reference/web-ui.md",
+		"reference/configuration.md",
+		"docs/research",
+		"research/index.md",
+	}
+
+	for _, rel := range canonicalDocPaths() {
+		body := readRepoFile(t, rel)
+		for _, forbidden := range forbiddenLinks {
+			if strings.Contains(body, forbidden) {
+				t.Fatalf("%s links deleted documentation path %q", rel, forbidden)
+			}
+		}
+	}
+}
+
+func canonicalDocPaths() []string {
+	return []string{
+		"README.md",
+		"docs/README.md",
+		"docs/getting-started.md",
+		"docs/development-setup.md",
+		"docs/known-issues.md",
+		"docs/roadmap.md",
+		"docs/AUGR_ARCHITECTURE_AUDIT.md",
+	}
+}
+
+func readRepoFile(t *testing.T, rel string) string {
+	t.Helper()
+
+	path := filepath.Join(repoRootPath(t), rel)
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+	return string(content)
+}
+
+func repoRootPath(t *testing.T) string {
 	t.Helper()
 
 	_, filename, _, ok := runtime.Caller(0)
@@ -78,5 +89,5 @@ func docsReferencePath(t *testing.T) string {
 		t.Fatal("failed to determine test file path")
 	}
 
-	return filepath.Join(filepath.Dir(filename), "..", "..", "docs", "reference")
+	return filepath.Join(filepath.Dir(filename), "..", "..")
 }

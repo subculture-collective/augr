@@ -16,7 +16,7 @@ This directory now has a single job: explain the application as it exists today,
 | --- | --- |
 | [Getting Started](getting-started.md) | Fastest path from clone to a working local stack, first login, first strategy, and first run |
 | [Development Setup](development-setup.md) | Full local development workflow, migrations, testing, frontend setup, and day-to-day commands |
-| [Reference](reference/README.md) | Source-of-truth technical reference for API, CLI, architecture, runtime agents, config, UI, and integrations |
+| [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md) | Current architecture, safety baseline, and trading-research platform foundation status |
 | [Runbooks](runbooks/README.md) | Operational procedures for incidents, safety controls, and routine interventions |
 | [Known Issues](known-issues.md) | Current gaps, rough edges, and repo-health problems that affect operators and contributors |
 | [Roadmap](roadmap.md) | Proposed next steps and the major product/engineering themes that follow from the current codebase |
@@ -77,7 +77,7 @@ The pages below are the current source of truth for how the app actually behaves
 
 - [Getting Started](getting-started.md)
 - [Development Setup](development-setup.md)
-- [Reference](reference/README.md)
+- [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md)
 - [Runbooks](runbooks/README.md)
 - [Known Issues](known-issues.md)
 - [Roadmap](roadmap.md)
@@ -85,7 +85,7 @@ The pages below are the current source of truth for how the app actually behaves
 The rest of `docs/` is still valuable, but it should be read with context:
 
 - [ADRs](adr/README.md) record major decisions and their rationale.
-- [Research](research/index.md) captures strategy, execution, and LLM research that informed the product.
+- [Augr Trading Research](Augr%20Trading%20Research/README.md) captures strategy, execution, and risk research that informed the trading platform foundation.
 - `docs/design/` contains design/spec material. Some pages still describe intended architecture rather than the exact runtime wiring that exists today.
 - Historical planning documents such as `phase-*-execution-paths.md`, `implementation-board.md`, and audit notes remain as archive material.
 
@@ -95,17 +95,17 @@ If you are new to the project:
 
 1. Read [Getting Started](getting-started.md).
 2. Read [Development Setup](development-setup.md) if you plan to contribute.
-3. Read [Reference](reference/README.md) to understand the real implementation surface.
+3. Read the [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md) to understand the real implementation surface.
 4. Read [Known Issues](known-issues.md) before assuming every described feature is production-ready.
 
 If you are operating the system:
 
 1. Read [Runbooks](runbooks/README.md).
-2. Review [Reference: API](reference/api.md), [Reference: Web UI](reference/web-ui.md), and [Reference: Configuration](reference/configuration.md).
+2. Review [Development Setup](development-setup.md), [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md), and the live API router in `internal/api/server.go`.
 3. Keep [Known Issues](known-issues.md) open when debugging surprising behavior.
 
 If you are planning future work:
 
 1. Read [Roadmap](roadmap.md).
 2. Review the [ADRs](adr/README.md).
-3. Use [Research](research/index.md) for background, not for implementation truth.
+3. Use [Augr Trading Research](Augr%20Trading%20Research/README.md) for background, not for implementation truth.

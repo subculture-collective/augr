@@ -55,7 +55,7 @@ The production strategy runner now handles `market_type: polymarket` strategies 
 - Falls back to local paper broker when `is_paper: true` (Polymarket has no native paper mode)
 - Enforces per-market exposure, liquidity, spread, and resolution-timeline risk limits
 
-Configure with `POLYMARKET_KEY_ID`, `POLYMARKET_SECRET_KEY`, optional `POLYMARKET_API_BASE_URL`/`POLYMARKET_GATEWAY_BASE_URL`, and the `POLYMARKET_*` risk limit variables. Legacy data and signal jobs may still read `POLYMARKET_CLOB_URL` during the migration. See `docs/reference/configuration.md`.
+Configure with `POLYMARKET_KEY_ID`, `POLYMARKET_SECRET_KEY`, optional `POLYMARKET_API_BASE_URL`/`POLYMARKET_GATEWAY_BASE_URL`, and the `POLYMARKET_*` risk limit variables. Legacy data and signal jobs may still read `POLYMARKET_CLOB_URL` during the migration. See `.env.example` and `internal/config/config.go` for the current configuration surface.
 
 ### Social and news coverage are uneven
 
@@ -134,7 +134,7 @@ Entries are queryable via `GET /api/v1/audit-log`.
 
 Impact:
 
-- prefer [Reference](reference/README.md) for implementation truth
+- prefer [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md), `internal/api/server.go`, and runtime code for implementation truth
 - use design docs for rationale and direction
 
 ## Practical advice

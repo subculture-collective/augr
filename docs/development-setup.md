@@ -238,7 +238,7 @@ Examples:
 ./bin/tradingagent memories search earnings
 ```
 
-Full command reference: [Reference: CLI](reference/cli.md)
+For CLI entry points, see the command summary in the repository [README](../README.md#cli) and run `./bin/tradingagent --help` after building.
 
 ## Frontend workflow
 
@@ -256,7 +256,7 @@ The web app lives in `web/` and exposes these routes:
 - `/risk`
 - `/realtime`
 
-Web UI reference: [Reference: Web UI](reference/web-ui.md)
+For the mounted route list, see `web/src/App.tsx`.
 
 ## Operational development notes
 
@@ -296,8 +296,7 @@ The big ones today:
 ## Suggested contributor reading order
 
 1. [Getting Started](getting-started.md)
-2. [Reference: Architecture](reference/architecture.md)
-3. [Reference: API](reference/api.md)
-4. [Reference: Agents and Runtime](reference/agents.md)
-5. [Reference: Strategy Config](reference/strategy-config.md)
-6. [Known Issues](known-issues.md)
+2. [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md)
+3. [Roadmap](roadmap.md)
+4. [ADRs](adr/README.md)
+5. [Known Issues](known-issues.md)

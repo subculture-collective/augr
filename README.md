@@ -222,7 +222,7 @@ The REST API is served under `/api/v1`. Public HTTP endpoints are `GET /healthz`
 
 All other `/api/v1/*` routes require either `Authorization: Bearer <jwt>` or `X-API-Key: <api_key>`. Implemented route groups include strategies, runs, portfolio, orders, trades, memories, risk, settings, events, conversations, audit log, and automation health/status.
 
-For the canonical route list, request/response examples, and WebSocket command format, see [`docs/reference/api.md`](docs/reference/api.md).
+For the current route surface, see [`internal/api/server.go`](internal/api/server.go) and the development workflow in [`docs/development-setup.md`](docs/development-setup.md).
 
 ## CLI
 
@@ -268,12 +268,12 @@ docs/                   Architecture docs, ADRs, research
 - **[Documentation Hub](docs/README.md)** — Canonical entry point for all app documentation
 - **[Getting Started](docs/getting-started.md)** — Fastest path from clone to first login, first strategy, and first run
 - **[Development Setup](docs/development-setup.md)** — Full contributor workflow, migrations, testing, and smoke mode
-- **[Reference](docs/reference/README.md)** — Source-of-truth API, CLI, architecture, runtime, config, and UI docs
+- **[Architecture Audit](docs/AUGR_ARCHITECTURE_AUDIT.md)** — Current architecture, safety baseline, and trading-research foundation status
 - **[Runbooks](docs/runbooks/README.md)** — Incident and operator procedures
 - **[Known Issues](docs/known-issues.md)** — Current gaps and repo-health caveats
 - **[Roadmap](docs/roadmap.md)** — Proposed future work and product direction
 - **[ADRs](docs/adr/README.md)** — Architecture Decision Records
-- **[Research Archive](docs/research/index.md)** — Background research that informed the system
+- **[Augr Trading Research](docs/Augr%20Trading%20Research/README.md)** — Trading-platform research package and implementation source material
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — Branch strategy, commit conventions, and definition of done
 
 ## Contributing

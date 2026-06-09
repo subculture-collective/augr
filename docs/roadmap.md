@@ -95,5 +95,5 @@ Even though the repository contains code, docs, or type surfaces for these areas
 ## How to use this roadmap
 
 - If you are contributing code, pair this page with [Known Issues](known-issues.md).
-- If you are planning a feature, validate it against [Reference](reference/README.md) first.
+- If you are planning a feature, validate it against [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md), [Known Issues](known-issues.md), and current runtime code first.
 - If you are looking for historical rationale, use [ADRs](adr/README.md) and `docs/design/`.
