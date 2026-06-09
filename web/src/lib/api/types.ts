@@ -412,6 +412,12 @@ export interface TradeDecision {
   updated_at: ISODateString;
 }
 
+export interface ResearchOpportunity {
+  decision: TradeDecision;
+  reasons?: string[];
+  accepted?: boolean;
+}
+
 export interface AgentMemory {
   id: UUID;
   agent_role: AgentRole;
@@ -793,6 +799,26 @@ export interface BacktestConfigListParams {
 
 export interface BacktestRunListParams {
   backtest_config_id?: UUID;
+}
+
+export interface OptionsOpportunityListParams {
+  limit?: number;
+  strategy_id?: UUID;
+  expiry?: ISODateString;
+  type?: 'call' | 'put';
+}
+
+export interface PolymarketOpportunityListParams {
+  limit?: number;
+  strategy_id?: UUID;
+  slug?: string;
+  token_id?: string;
+  outcome?: string;
+  best_bid?: number;
+  best_ask?: number;
+  probability?: number;
+  ask_depth_usd?: number;
+  ask_size?: number;
 }
 
 // ---------- Options ----------

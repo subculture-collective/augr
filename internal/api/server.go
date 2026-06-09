@@ -112,6 +112,7 @@ type Server struct {
 	backtestSvc     *service.BacktestService
 	conversationSvc *service.ConversationService
 	runSvc          *service.RunService
+	researchSvc     service.ResearchScannerService
 }
 
 // StrategyRunResult captures the persisted artifacts created by a manual run.
@@ -210,6 +211,7 @@ type Deps struct {
 	Settings          SettingsService
 	Prompts           *PromptSettingsService
 	Runner            StrategyRunner
+	ResearchScanner   service.ResearchScannerService
 	DBHealth          HealthCheck
 	RedisHealth       HealthCheck
 	MetricsHandler    http.Handler
@@ -337,6 +339,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		runner:                deps.Runner,
 		auth:                  authManager,
 		hub:                   hub,
+		researchSvc:           deps.ResearchScanner,
 		wsUpgrader:            newUpgrader(cfg.CORSConfig.AllowedOrigins),
 		metricsHandler:        deps.MetricsHandler,
 		signalStore:           deps.SignalStore,
@@ -516,6 +519,12 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Route("/options", func(or chi.Router) {
 			or.Get("/chain/{underlying}", s.handleGetOptionsChain)
 			or.Get("/contracts/{symbol}/bars", s.handleGetOptionsContractBars)
+		})
+
+		// Research scanners
+		v1.Route("/research", func(rr chi.Router) {
+			rr.Get("/options/opportunities/{underlying}", s.handleGetResearchOptionsOpportunities)
+			rr.Get("/polymarket/opportunities", s.handleGetResearchPolymarketOpportunities)
 		})
 
 		// Calendar

@@ -63,6 +63,7 @@ import type {
   BacktestRun,
   BacktestRunListParams,
   OptionSnapshot,
+  OptionsOpportunityListParams,
   DiscoveryRunRequest,
   DiscoveryResult,
   JobStatus,
@@ -70,11 +71,13 @@ import type {
   PolymarketAccountListParams,
   PolymarketAccountTrade,
   PolymarketDiscoveryResult,
+  PolymarketOpportunityListParams,
   PolymarketStatus,
   PolymarketWatchedMarket,
   RiskBreakerState,
   DivergenceResponse,
   PredictionMarketData,
+  ResearchOpportunity,
   PromptSettings,
   PromptSettingsUpdateRequest,
 } from '@/lib/api/types';
@@ -512,6 +515,12 @@ export class ApiClient {
     });
   }
 
+  async listOptionsOpportunities(underlying: string, query: OptionsOpportunityListParams = {}) {
+    return this.requestList<ResearchOpportunity>(`/api/v1/research/options/opportunities/${encodeURIComponent(underlying)}`, {
+      query: toQueryParams(query),
+    });
+  }
+
   // Discovery
   async runDiscovery(data: DiscoveryRunRequest) {
     return this.request<DiscoveryResult>('/api/v1/discovery/run', {
@@ -680,6 +689,12 @@ export class ApiClient {
   async listPolymarketRecentSignals(params: { limit?: number; min_urgency?: number } = {}) {
     return this.request<{ data: StoredSignal[]; total: number }>('/api/v1/polymarket/signals/recent', {
       query: toQueryParams(params),
+    });
+  }
+
+  async listPolymarketOpportunities(query: PolymarketOpportunityListParams = {}) {
+    return this.requestList<ResearchOpportunity>('/api/v1/research/polymarket/opportunities', {
+      query: toQueryParams(query),
     });
   }
 

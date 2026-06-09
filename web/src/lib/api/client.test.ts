@@ -26,6 +26,60 @@ describe('ApiClient', () => {
     expect(new Headers(requestInit.headers).get('Authorization')).toBe('Bearer jwt-token')
   })
 
+  it('supports research scanner endpoints with query params', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [], limit: 10, offset: 0 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [], limit: 25, offset: 0 }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new ApiClient({ baseUrl: 'http://localhost:8080' })
+
+    await expect(
+      client.listOptionsOpportunities('AAPL', {
+        limit: 10,
+        strategy_id: 'strategy-1',
+        expiry: '2026-07-17',
+        type: 'call',
+      }),
+    ).resolves.toEqual({ data: [], limit: 10, offset: 0 })
+
+    await expect(
+      client.listPolymarketOpportunities({
+        limit: 25,
+        strategy_id: 'strategy-1',
+        slug: 'election-2028',
+        token_id: 'token-123',
+        outcome: 'YES',
+        best_bid: 0.41,
+        best_ask: 0.43,
+        probability: 0.38,
+        ask_depth_usd: 1200,
+        ask_size: 3,
+      }),
+    ).resolves.toEqual({ data: [], limit: 25, offset: 0 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    const [optionsUrl] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(optionsUrl.toString()).toBe(
+      'http://localhost:8080/api/v1/research/options/opportunities/AAPL?limit=10&strategy_id=strategy-1&expiry=2026-07-17&type=call',
+    )
+
+    const [polymarketUrl] = fetchMock.mock.calls[1] as [URL, RequestInit]
+    expect(polymarketUrl.toString()).toBe(
+      'http://localhost:8080/api/v1/research/polymarket/opportunities?limit=25&strategy_id=strategy-1&slug=election-2028&token_id=token-123&outcome=YES&best_bid=0.41&best_ask=0.43&probability=0.38&ask_depth_usd=1200&ask_size=3',
+    )
+  })
+
   it('surfaces backend error envelopes', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

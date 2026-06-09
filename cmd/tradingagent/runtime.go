@@ -384,6 +384,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			optProviders = append(optProviders, polygon.NewOptionsProvider(polygon.NewClient(cfg.DataProviders.Polygon.APIKey, logger)))
 		}
 		deps.OptionsProvider = data.NewOptionsProviderChain(logger, optProviders...)
+		deps.ResearchScanner = service.NewResearchScannerService(deps.OptionsProvider, deps.PolymarketClient, logger)
 		// Events provider: Finnhub provides earnings, filings, economic, IPO calendars.
 		if strings.TrimSpace(cfg.DataProviders.Finnhub.APIKey) != "" {
 			eventsClient := finnhub.NewClient(cfg.DataProviders.Finnhub.APIKey, logger)
@@ -511,6 +512,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			}
 		}
 	}
+	deps.ResearchScanner = service.NewResearchScannerService(deps.OptionsProvider, deps.PolymarketClient, logger)
 
 	// Wire signal intelligence: EventStore, WatchIndex, SignalHub, TriggerHandler.
 	// Pass the scheduler as the trigger runner (it satisfies signal.StrategyTriggerer).
