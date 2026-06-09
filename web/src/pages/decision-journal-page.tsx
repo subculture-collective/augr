@@ -158,6 +158,12 @@ function DecisionRow({ decision }: { decision: TradeDecision }) {
             <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Live</div>
             <OrderReference id={decision.live_order_id} />
           </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Replay</div>
+            <Link to={`/replay/decisions/${decision.id}`} className="text-xs text-primary hover:underline">
+              View replay
+            </Link>
+          </div>
         </div>
       </td>
     </tr>
@@ -216,6 +222,13 @@ function DecisionCard({ decision }: { decision: TradeDecision }) {
               <OrderReference id={decision.live_order_id} />
             </div>
           </div>
+        </div>
+
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Replay</div>
+          <Link to={`/replay/decisions/${decision.id}`} className="mt-1 inline-flex text-primary hover:underline">
+            View replay workbench
+          </Link>
         </div>
       </div>
     </article>

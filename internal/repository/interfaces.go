@@ -360,6 +360,12 @@ type TradeDecisionJournalRepository interface {
 	AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error
 }
 
+// ReplayEventRepository provides access to persisted replay events.
+type ReplayEventRepository interface {
+	CreateReplayEvent(ctx context.Context, event *domain.ReplayEvent) error
+	ListReplayEvents(ctx context.Context, tradeDecisionID uuid.UUID) ([]domain.ReplayEvent, error)
+}
+
 // MemoryRepository provides storage and retrieval for agent memories.
 type MemoryRepository interface {
 	Create(ctx context.Context, memory *domain.AgentMemory) error

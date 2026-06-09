@@ -86,6 +86,14 @@ const navigationItems: NavItem[] = [
 export function AppShell() {
   const location = useLocation();
   const authenticated = isAuthenticated();
+  const locationLabel = (() => {
+    if (location.pathname === '/') return 'overview';
+
+    const segments = location.pathname.split('/').filter(Boolean);
+    if (segments[0] === 'replay' && segments[1] === 'decisions') return 'replay / decision';
+
+    return segments.join(' / ');
+  })();
   const visibleNavigationItems = navigationItems
     .map((item) => ('items' in item ? { ...item, items: item.items.filter((nav) => authenticated || !nav.authRequired) } : item))
     .filter((item) => ('items' in item ? item.items.length > 0 : authenticated || !item.authRequired));
@@ -139,7 +147,7 @@ export function AppShell() {
           <div className="flex items-center gap-2 text-sm">
             <span className="font-semibold text-foreground">Augr</span>
             <span className="text-muted-foreground">/</span>
-            <span className="text-muted-foreground">{location.pathname === '/' ? 'overview' : location.pathname.slice(1)}</span>
+            <span className="text-muted-foreground">{locationLabel}</span>
           </div>
 
           <div className="flex items-center gap-2">

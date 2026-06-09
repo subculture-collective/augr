@@ -263,6 +263,91 @@ describe('ApiClient', () => {
     expect(detailUrl.toString()).toBe('http://localhost:8080/api/v1/journal/decisions/decision-1')
   })
 
+  it('supports replay workbench endpoint', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        source: {
+          id: 'decision-1',
+          market_type: 'polymarket',
+          instrument_key: 'pm:market-123:YES',
+          side: 'buy',
+          fair_value: 0.52,
+          executable_price: 0.51,
+          spread: 0.01,
+          depth: 100,
+          gross_ev: 0.12,
+          net_ev: 0.08,
+          kelly_fraction: 0.25,
+          proposed_size: 50,
+          approved_size: 25,
+          risk_status: 'approved',
+          risk_reasons: [],
+          regime_tags: ['momentum'],
+          status: 'paper_ordered',
+          created_at: '2026-06-08T12:00:00Z',
+          updated_at: '2026-06-08T12:01:00Z',
+        },
+        events: [],
+        summary: {
+          event_count: 0,
+          has_paper_order: false,
+          has_live_order: false,
+          has_fill: false,
+          has_outcome: false,
+          latest_status: 'candidate',
+          total_approved_size: 0,
+          total_net_ev: 0,
+          rejection_count: 0,
+        },
+      }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new ApiClient({ baseUrl: 'http://localhost:8080' })
+
+    await expect(client.getDecisionReplay('decision-1')).resolves.toEqual({
+      source: {
+        id: 'decision-1',
+        market_type: 'polymarket',
+        instrument_key: 'pm:market-123:YES',
+        side: 'buy',
+        fair_value: 0.52,
+        executable_price: 0.51,
+        spread: 0.01,
+        depth: 100,
+        gross_ev: 0.12,
+        net_ev: 0.08,
+        kelly_fraction: 0.25,
+        proposed_size: 50,
+        approved_size: 25,
+        risk_status: 'approved',
+        risk_reasons: [],
+        regime_tags: ['momentum'],
+        status: 'paper_ordered',
+        created_at: '2026-06-08T12:00:00Z',
+        updated_at: '2026-06-08T12:01:00Z',
+      },
+      events: [],
+      summary: {
+        event_count: 0,
+        has_paper_order: false,
+        has_live_order: false,
+        has_fill: false,
+        has_outcome: false,
+        latest_status: 'candidate',
+        total_approved_size: 0,
+        total_net_ev: 0,
+        rejection_count: 0,
+      },
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [detailUrl] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(detailUrl.toString()).toBe('http://localhost:8080/api/v1/replay/decisions/decision-1')
+  })
+
   it('supports conversation list/create/message endpoints', async () => {
     const fetchMock = vi
       .fn()

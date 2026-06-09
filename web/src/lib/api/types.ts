@@ -412,6 +412,46 @@ export interface TradeDecision {
   updated_at: ISODateString;
 }
 
+export type ReplayEventType =
+  | 'decision_created'
+  | 'risk_reviewed'
+  | 'paper_ordered'
+  | 'live_ordered'
+  | 'fill_observed'
+  | 'position_updated'
+  | 'outcome_resolved';
+
+export interface ReplayEvent {
+  id: UUID;
+  trade_decision_id: UUID;
+  event_type: ReplayEventType;
+  source: string;
+  payload: unknown;
+  occurred_at: ISODateString;
+  created_at: ISODateString;
+}
+
+export interface ReplayWorkbenchSummary {
+  event_count: number;
+  first_event_at?: ISODateString;
+  last_event_at?: ISODateString;
+  has_paper_order: boolean;
+  has_live_order: boolean;
+  has_fill: boolean;
+  has_outcome: boolean;
+  latest_status: string;
+  total_approved_size: number;
+  total_net_ev: number;
+  rejection_count: number;
+  rejection_reasons?: string[];
+}
+
+export interface ReplayDecisionResponse {
+  source: TradeDecision;
+  events: ReplayEvent[];
+  summary: ReplayWorkbenchSummary;
+}
+
 export interface ResearchOpportunity {
   decision: TradeDecision;
   reasons?: string[];

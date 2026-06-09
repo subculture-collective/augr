@@ -176,6 +176,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	positionRepo := pgrepo.NewPositionRepo(db.Pool)
 	tradeRepo := pgrepo.NewTradeRepo(db.Pool)
 	tradeDecisionRepo := pgrepo.NewTradeDecisionJournalRepo(db.Pool)
+	replayEventRepo := pgrepo.NewReplayEventRepo(db.Pool)
 	tradeDecisionRecorder := execution.NewTradeDecisionJournalRecorder(tradeDecisionRepo)
 	memoryRepo := pgrepo.NewMemoryRepo(db.Pool)
 	apiKeyRepo := pgrepo.NewAPIKeyRepo(db.Pool)
@@ -232,6 +233,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		Positions:             positionRepo,
 		Trades:                tradeRepo,
 		TradeDecisions:        tradeDecisionRepo,
+		ReplayEvents:          replayEventRepo,
 		Memories:              memoryRepo,
 		APIKeys:               apiKeyRepo,
 		Users:                 userRepo,

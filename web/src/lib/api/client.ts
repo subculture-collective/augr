@@ -77,6 +77,7 @@ import type {
   RiskBreakerState,
   DivergenceResponse,
   PredictionMarketData,
+  ReplayDecisionResponse,
   ResearchOpportunity,
   PromptSettings,
   PromptSettingsUpdateRequest,
@@ -229,6 +230,10 @@ export class ApiClient {
 
   async getTradeDecision(id: UUID) {
     return this.request<TradeDecision>(`/api/v1/journal/decisions/${id}`);
+  }
+
+  async getDecisionReplay(id: UUID) {
+    return this.request<ReplayDecisionResponse>(`/api/v1/replay/decisions/${encodeURIComponent(id)}`);
   }
 
   async listEvents(params: PaginationParams & { run_id?: UUID; event_kind?: string } = {}) {

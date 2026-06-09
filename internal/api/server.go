@@ -41,6 +41,7 @@ type Server struct {
 	positions      repository.PositionRepository
 	trades         repository.TradeRepository
 	tradeDecisions repository.TradeDecisionJournalRepository
+	replayEvents   repository.ReplayEventRepository
 	memories       repository.MemoryRepository
 	users          repository.UserRepository
 	auditLog       repository.AuditLogRepository
@@ -181,6 +182,7 @@ type Deps struct {
 	Positions         repository.PositionRepository
 	Trades            repository.TradeRepository
 	TradeDecisions    repository.TradeDecisionJournalRepository
+	ReplayEvents      repository.ReplayEventRepository
 	Memories          repository.MemoryRepository
 	APIKeys           repository.APIKeyRepository
 	Users             repository.UserRepository
@@ -308,6 +310,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		positions:             deps.Positions,
 		trades:                deps.Trades,
 		tradeDecisions:        deps.TradeDecisions,
+		replayEvents:          deps.ReplayEvents,
 		memories:              deps.Memories,
 		users:                 deps.Users,
 		conversations:         deps.Conversations,
@@ -465,6 +468,11 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Route("/journal", func(jr chi.Router) {
 			jr.Get("/decisions", s.handleListTradeDecisions)
 			jr.Get("/decisions/{id}", s.handleGetTradeDecision)
+		})
+
+		// Replay workbench
+		v1.Route("/replay", func(rr chi.Router) {
+			rr.Get("/decisions/{id}", s.handleGetReplayDecision)
 		})
 
 		// Trades
