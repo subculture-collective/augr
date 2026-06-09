@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	polymarketdata "github.com/PatrickFanella/get-rich-quick/internal/data/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
@@ -22,9 +23,10 @@ const defaultTimeInForce = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 
 // Broker implements the execution.Broker interface for Polymarket retail APIs.
 type Broker struct {
-	client  *Client
-	Breaker risk.Breaker
-	DryRun  bool
+	client             *Client
+	OfficialCLOBClient polymarketdata.CLOBClient
+	Breaker            risk.Breaker
+	DryRun             bool
 }
 
 // DryRunObservation captures a rejected dry-run order submission.
@@ -123,6 +125,14 @@ type userPosition struct {
 // NewBroker constructs a Polymarket broker adapter.
 func NewBroker(client *Client) *Broker {
 	return &Broker{client: client}
+}
+
+// SetOfficialCLOBClient wires an optional read-only official Polymarket CLOB client.
+func (b *Broker) SetOfficialCLOBClient(client polymarketdata.CLOBClient) {
+	if b == nil {
+		return
+	}
+	b.OfficialCLOBClient = client
 }
 
 // SubmitOrder sends an order to Polymarket retail APIs and returns the external order ID.
@@ -242,7 +252,7 @@ func (b *Broker) SendTemplate(ctx context.Context, tmpl *OrderTemplate) (*create
 			}
 		}
 	}
-	if b.DryRun && !strings.Contains(tmpl.URL(), "dry=1") {
+	if b.DryRun && !hasDryRunQuery(tmpl.URL()) {
 		return nil, errors.New("polymarket: dry-run mode active but template URL missing dry=1")
 	}
 	now := time.Now().UnixMilli()
@@ -378,6 +388,17 @@ func (b *Broker) GetAccountBalance(ctx context.Context) (execution.Balance, erro
 		BuyingPower: balance.BuyingPower,
 		Equity:      balance.CurrentBalance + balance.AssetNotional,
 	}, nil
+}
+
+// GetOrderBook fetches a read-only official CLOB snapshot when configured.
+func (b *Broker) GetOrderBook(ctx context.Context, tokenID string) (domain.PolymarketBookSnapshot, error) {
+	if b == nil {
+		return domain.PolymarketBookSnapshot{}, errors.New("polymarket: broker is nil")
+	}
+	if b.OfficialCLOBClient == nil {
+		return domain.PolymarketBookSnapshot{}, errors.New("polymarket: official clob client is not configured")
+	}
+	return b.OfficialCLOBClient.GetOrderBook(ctx, tokenID)
 }
 
 func mapCreateOrderRequest(order *domain.Order) (createOrderRequest, error) {
@@ -527,6 +548,14 @@ func mapPosition(slug string, response userPosition) (domain.Position, error) {
 
 func formatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func hasDryRunQuery(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return parsed.Query().Get(dryRunParamName) == "1"
 }
 
 func parseRequiredFloat(fieldName, value string) (float64, error) {

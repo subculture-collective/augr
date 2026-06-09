@@ -28,6 +28,17 @@ func (f *fakeBreaker) Allow(ctx context.Context, scope string) error {
 func (f *fakeBreaker) Trip(ctx context.Context, scope, reason string) error { return nil }
 func (f *fakeBreaker) Reset(ctx context.Context, scope string) error        { return nil }
 
+type fakeOfficialCLOBClient struct {
+	calls    int
+	snapshot domain.PolymarketBookSnapshot
+	err      error
+}
+
+func (f *fakeOfficialCLOBClient) GetOrderBook(ctx context.Context, tokenID string) (domain.PolymarketBookSnapshot, error) {
+	f.calls++
+	return f.snapshot, f.err
+}
+
 func TestBrokerSendTemplate_RejectsMissingDryRunQuery(t *testing.T) {
 	t.Parallel()
 
@@ -43,6 +54,77 @@ func TestBrokerSendTemplate_RejectsMissingDryRunQuery(t *testing.T) {
 	_, err = broker.SendTemplate(context.Background(), tmpl)
 	if err == nil || err.Error() != "polymarket: dry-run mode active but template URL missing dry=1" {
 		t.Fatalf("SendTemplate() error = %v, want dry-run URL error", err)
+	}
+}
+
+func TestBrokerSendTemplate_RejectsDryRunSubstringWithoutQuery(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	broker := NewBroker(client)
+	broker.DryRun = true
+
+	tmpl, err := NewOrderTemplate(mustDecodeSecretBytes(), http.MethodPost, "https://api.polymarket.us/v1/orders?notdry=1", []byte(`{}`))
+	if err != nil {
+		t.Fatalf("NewOrderTemplate() error = %v", err)
+	}
+
+	_, err = broker.SendTemplate(context.Background(), tmpl)
+	if err == nil || err.Error() != "polymarket: dry-run mode active but template URL missing dry=1" {
+		t.Fatalf("SendTemplate() error = %v, want dry-run URL error", err)
+	}
+}
+
+func TestBrokerSubmitOrder_DryRunDoesNotUseOfficialCLOBClient(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("dry") != "1" {
+			t.Fatalf("request query = %s, want dry=1", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"poly-order-dry"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	client.SetAPIBaseURL(server.URL)
+	broker := NewBroker(client)
+	broker.DryRun = true
+	official := &fakeOfficialCLOBClient{}
+	broker.SetOfficialCLOBClient(official)
+
+	orderID, err := broker.SubmitOrder(context.Background(), &domain.Order{
+		Ticker:         "btc-100k-2025",
+		Side:           domain.OrderSideBuy,
+		PredictionSide: "YES",
+		OrderType:      domain.OrderTypeLimit,
+		Quantity:       1,
+		LimitPrice:     floatPtr(0.5),
+	})
+	if err != nil {
+		t.Fatalf("SubmitOrder() error = %v", err)
+	}
+	if orderID != "poly-order-dry" {
+		t.Fatalf("SubmitOrder() externalID = %q, want poly-order-dry", orderID)
+	}
+	if official.calls != 0 {
+		t.Fatalf("official CLOB calls = %d, want 0", official.calls)
+	}
+}
+
+func TestBrokerGetOrderBook_UsesOfficialCLOBClient(t *testing.T) {
+	t.Parallel()
+
+	broker := NewBroker(nil)
+	broker.SetOfficialCLOBClient(&fakeOfficialCLOBClient{snapshot: domain.PolymarketBookSnapshot{TokenID: "token-1", BestBid: 0.5, BestAsk: 0.55}})
+
+	snapshot, err := broker.GetOrderBook(context.Background(), "token-1")
+	if err != nil {
+		t.Fatalf("GetOrderBook() error = %v", err)
+	}
+	if snapshot.TokenID != "token-1" || snapshot.BestBid != 0.5 || snapshot.BestAsk != 0.55 {
+		t.Fatalf("snapshot = %+v", snapshot)
 	}
 }
 

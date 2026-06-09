@@ -2,7 +2,7 @@
 title: "Known Issues"
 description: "Current implementation gaps, repo-health problems, and behavioral caveats for get-rich-quick."
 status: "canonical"
-updated: "2026-04-08T16:00:00Z"
+updated: "2026-06-09T00:00:00Z"
 tags: [known-issues, limitations]
 ---
 
@@ -56,6 +56,8 @@ The production strategy runner now handles `market_type: polymarket` strategies 
 - Enforces per-market exposure, liquidity, spread, and resolution-timeline risk limits
 
 Configure with `POLYMARKET_KEY_ID`, `POLYMARKET_SECRET_KEY`, optional `POLYMARKET_API_BASE_URL`/`POLYMARKET_GATEWAY_BASE_URL`, and the `POLYMARKET_*` risk limit variables. Legacy data and signal jobs may still read `POLYMARKET_CLOB_URL` during the migration. See `.env.example` and `internal/config/config.go` for the current configuration surface.
+
+Official read-only Gamma/CLOB clients now exist in `internal/data/polymarket`, but live Polymarket order signing remains disabled by default and stays behind the existing live gate, dry-run checks, and allowlist hardening.
 
 ### Social and news coverage are uneven
 

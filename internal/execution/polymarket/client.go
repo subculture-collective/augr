@@ -325,8 +325,16 @@ func (c *Client) buildURL(requestPath string, params url.Values, authenticated b
 	if err != nil {
 		return "", "", fmt.Errorf("polymarket: parse base url: %w", err)
 	}
+	parsedRequestPath, err := url.Parse(strings.TrimSpace(requestPath))
+	if err != nil {
+		return "", "", fmt.Errorf("polymarket: parse request path: %w", err)
+	}
+	path := parsedRequestPath.Path
+	if path == "" {
+		path = requestPath
+	}
 
-	baseURL.Path = joinPath(baseURL.Path, requestPath)
+	baseURL.Path = joinPath(baseURL.Path, path)
 	baseURL.RawPath = ""
 	if unescapedPath, err := url.PathUnescape(baseURL.Path); err == nil && unescapedPath != baseURL.Path {
 		baseURL.RawPath = baseURL.Path
@@ -334,6 +342,11 @@ func (c *Client) buildURL(requestPath string, params url.Values, authenticated b
 	}
 
 	query := baseURL.Query()
+	for key, values := range parsedRequestPath.Query() {
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
 	for key, values := range params {
 		for _, value := range values {
 			query.Add(key, value)
