@@ -6,7 +6,7 @@ function Card({ className, ...props }: ComponentProps<'div'>) {
   return (
     <div
       className={cn(
-        'rounded-lg border border-border bg-card text-card-foreground',
+        'hud-panel rounded-none text-card-foreground',
         className,
       )}
       {...props}
@@ -15,11 +15,11 @@ function Card({ className, ...props }: ComponentProps<'div'>) {
 }
 
 function CardHeader({ className, ...props }: ComponentProps<'div'>) {
-  return <div className={cn('flex flex-col gap-1.5 border-b border-border p-4', className)} {...props} />
+  return <div className={cn('flex flex-col gap-1.5 border-b border-border-faint p-4', className)} {...props} />
 }
 
 function CardTitle({ className, ...props }: ComponentProps<'h2'>) {
-  return <h2 className={cn('text-base font-semibold tracking-tight', className)} {...props} />
+  return <h2 className={cn('text-base font-semibold uppercase tracking-[0.1em]', className)} {...props} />
 }
 
 function CardDescription({ className, ...props }: ComponentProps<'p'>) {

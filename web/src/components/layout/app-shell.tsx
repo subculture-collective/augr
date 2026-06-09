@@ -21,7 +21,7 @@ import {
 import type { LucideIcon } from 'lucide-react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
-import { Badge } from '@/components/ui/badge';
+import { HudBadge, StatusLed } from '@/components/ui/hud';
 import { isAuthenticated } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 
@@ -105,10 +105,11 @@ export function AppShell() {
       end={to === '/'}
       className={({ isActive }) =>
         cn(
-          mobile
-            ? 'inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors'
-            : 'inline-flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm font-medium transition-colors',
-          isActive ? 'bg-primary/14 text-foreground' : 'text-muted-foreground hover:bg-accent/70 hover:text-foreground',
+          'inline-flex items-center gap-2 border px-3 py-2 text-hud font-medium uppercase tracking-[0.1em] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-pulse focus-visible:ring-offset-0',
+          mobile ? 'w-full justify-start' : 'w-full justify-start',
+          isActive
+            ? 'border-pulse bg-panel-raised text-ink shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)]'
+            : 'border-border bg-panel text-ink-dim hover:border-border-strong hover:bg-panel-raised hover:text-ink',
         )
       }
     >
@@ -118,20 +119,24 @@ export function AppShell() {
   );
 
   return (
-    <div className="mx-auto flex min-h-screen w-full max-w-396 gap-3 px-3 py-3 sm:px-4 lg:px-6">
+    <div className="relative mx-auto flex min-h-screen w-full max-w-396 gap-3 bg-void px-3 py-3 text-ink sm:px-4 lg:px-6 hud-scan">
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,hsl(var(--panel))_0%,transparent_45%),linear-gradient(to_bottom,hsl(var(--void-900)_/_0.45),transparent_28%)] opacity-75" />
       <aside className="hidden w-56 shrink-0 lg:block">
-        <div className="sticky top-3 flex h-[calc(100vh-1.5rem)] flex-col rounded-lg border border-border bg-card p-3">
-          <div className="border-b border-border pb-3">
-            <p className="font-mono text-[11px] font-medium uppercase tracking-[0.18em] text-primary">
-              Augr
-            </p>
+        <div className="hud-panel sticky top-3 flex h-[calc(100vh-1.5rem)] flex-col rounded-none p-3">
+          <div className="border-b border-border-faint pb-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-signal">
+                Augr
+              </p>
+              <HudBadge tone={authenticated ? 'confirm' : 'caution'}>{authenticated ? 'secured' : 'guest'}</HudBadge>
+            </div>
           </div>
 
           <nav aria-label="Primary" className="mt-3 flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
             {visibleNavigationItems.map((item) =>
               'items' in item ? (
-                <div key={item.label} className="space-y-1.5 border-t border-border/70 pt-3 first:border-t-0 first:pt-0">
-                  <div className="px-2.5 text-[11px] font-bold uppercase tracking-[0.22em] text-foreground/80">
+                <div key={item.label} className="space-y-1.5 border-t border-border-faint pt-3 first:border-t-0 first:pt-0">
+                  <div className="px-1 text-[11px] font-bold uppercase tracking-[0.24em] text-ink-dim">
                     {item.label}
                   </div>
                   {item.items.map((nav) => renderNavItem(nav))}
@@ -143,20 +148,24 @@ export function AppShell() {
       </aside>
 
       <div className="flex min-h-screen min-w-0 flex-1 flex-col gap-3">
-        <header className="sticky top-3 z-20 flex items-center justify-between rounded-lg border border-border bg-card px-4 py-2.5">
-          <div className="flex items-center gap-2 text-sm">
-            <span className="font-semibold text-foreground">Augr</span>
-            <span className="text-muted-foreground">/</span>
-            <span className="text-muted-foreground">{locationLabel}</span>
+        <header className="hud-statusbar sticky top-3 z-20 justify-between rounded-none">
+          <div className="flex min-w-0 items-center gap-2 text-sm">
+            <span className="font-semibold text-ink">Augr</span>
+            <span className="text-ink-dim">/</span>
+            <span className="truncate text-ink-dim">{locationLabel}</span>
           </div>
 
           <div className="flex items-center gap-2">
             {authenticated ? (
-              <Badge variant="success">Signed in</Badge>
+              <>
+                <StatusLed state="ok" label="Signed in" />
+                <HudBadge tone="confirm">Auth</HudBadge>
+              </>
             ) : (
               <>
-                <Badge variant="secondary">Guest mode</Badge>
-                <NavLink className="text-sm font-medium text-primary hover:underline" to="/login">
+                <StatusLed state="warn" label="Guest" />
+                <HudBadge tone="caution">Guest mode</HudBadge>
+                <NavLink className="text-sm font-medium uppercase tracking-[0.1em] text-signal hover:underline" to="/login">
                   Sign in
                 </NavLink>
               </>
@@ -165,11 +174,11 @@ export function AppShell() {
 
         </header>
 
-        <nav aria-label="Primary mobile" className="space-y-3 rounded-lg border border-border bg-card px-3 py-2.5 lg:hidden">
+        <nav aria-label="Primary mobile" className="hud-panel space-y-3 rounded-none px-3 py-2.5 lg:hidden">
           {visibleNavigationItems.map((item) =>
             'items' in item ? (
-              <div key={item.label} className="space-y-1.5 border-t border-border/70 pt-3 first:border-t-0 first:pt-0">
-                <div className="px-1 text-[11px] font-bold uppercase tracking-[0.22em] text-foreground/80">
+              <div key={item.label} className="space-y-1.5 border-t border-border-faint pt-3 first:border-t-0 first:pt-0">
+                <div className="px-1 text-[11px] font-bold uppercase tracking-[0.24em] text-ink-dim">
                   {item.label}
                 </div>
                 <div className="flex flex-wrap gap-1.5">

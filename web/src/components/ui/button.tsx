@@ -6,25 +6,23 @@ import { type ComponentProps } from 'react'
 import { cn } from '@/lib/utils'
 
 const buttonVariants = cva(
-  'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md border border-transparent text-sm font-medium tracking-[0.02em] transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+  'inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-none border text-hud font-medium uppercase tracking-[0.12em] transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 outline-none focus-visible:ring-1 focus-visible:ring-pulse focus-visible:ring-offset-0',
   {
     variants: {
       variant: {
-        default:
-          'bg-primary text-primary-foreground hover:brightness-110',
-        secondary:
-          'border-border bg-secondary text-secondary-foreground hover:bg-secondary/85',
-        outline:
-          'border-input bg-background text-foreground hover:border-primary/35 hover:bg-accent hover:text-accent-foreground',
-        ghost: 'text-muted-foreground hover:bg-accent/80 hover:text-accent-foreground',
-        destructive:
-          'bg-destructive text-destructive-foreground hover:brightness-110',
+        default: 'border-signal bg-signal text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-signal-bright',
+        secondary: 'border-border bg-panel text-ink shadow-[6px_6px_0_0_rgb(0_0_0_/_0.82)] hover:border-border-strong hover:bg-panel-raised',
+        outline: 'border-border bg-void text-ink-dim hover:border-pulse hover:bg-panel hover:text-ink',
+        ghost: 'border-transparent bg-transparent text-ink-dim hover:border-border-faint hover:bg-panel/60 hover:text-ink',
+        destructive: 'border-alert bg-alert text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-red-500',
+        success: 'border-confirm bg-confirm text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-emerald-400',
+        warning: 'border-caution bg-caution text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-amber-400',
       },
       size: {
         default: 'h-9 px-3.5 py-2',
-        sm: 'h-8 rounded-md px-3 text-xs',
-        lg: 'h-10 rounded-md px-5',
-        dense: 'h-8 rounded-md px-2.5 text-xs font-medium',
+        sm: 'h-8 px-3 text-[11px]',
+        lg: 'h-10 px-5',
+        dense: 'h-8 px-2.5 text-[11px]',
       },
     },
     defaultVariants: {

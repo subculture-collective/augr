@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 
+import { HudBadge } from '@/components/ui/hud'
 import { cn } from '@/lib/utils'
 
 interface PageHeaderProps {
@@ -11,23 +12,24 @@ interface PageHeaderProps {
   className?: string
 }
 
-export function PageHeader({ title, description, meta, actions, className }: PageHeaderProps) {
+export function PageHeader({ eyebrow, title, description, meta, actions, className }: PageHeaderProps) {
   return (
     <section
       className={cn(
-        'rounded-lg border border-border bg-card px-4 py-3',
+        'hud-panel rounded-none px-4 py-4',
         className,
       )}
     >
-      <div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-between">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <h1 className="text-lg font-semibold tracking-tight text-foreground">
-            {title}
-          </h1>
-          {meta}
-          {description ? (
-            <span className="text-sm text-muted-foreground">{description}</span>
-          ) : null}
+      <div className="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+        <div className="min-w-0 space-y-2">
+          {eyebrow ? <HudBadge tone="ink">{eyebrow}</HudBadge> : null}
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="text-lg font-semibold uppercase tracking-[0.08em] text-ink">
+              {title}
+            </h1>
+            {meta}
+          </div>
+          {description ? <p className="max-w-3xl text-sm text-ink-dim">{description}</p> : null}
         </div>
         {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </div>

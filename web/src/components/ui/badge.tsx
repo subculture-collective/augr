@@ -5,16 +5,16 @@ import { type ComponentProps } from 'react'
 import { cn } from '@/lib/utils'
 
 const badgeVariants = cva(
-  'inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-[11px] font-medium uppercase tracking-[0.18em] transition-colors',
+  'inline-flex items-center gap-1 rounded-none border px-2 py-0.5 font-mono text-[10px] font-bold uppercase tracking-[0.16em] transition-colors',
   {
     variants: {
       variant: {
-        default: 'border-primary/25 bg-primary/15 text-primary',
-        secondary: 'border-border bg-secondary text-secondary-foreground',
-        outline: 'border-border bg-transparent text-foreground',
-        destructive: 'border-destructive/30 bg-destructive/12 text-destructive',
-        success: 'border-emerald-500/30 bg-emerald-500/12 text-emerald-400',
-        warning: 'border-amber-500/30 bg-amber-500/12 text-amber-300',
+        default: 'border-signal bg-signal/12 text-signal',
+        secondary: 'border-border bg-panel text-ink',
+        outline: 'border-border bg-void text-ink-dim',
+        destructive: 'border-alert bg-alert/12 text-alert',
+        success: 'border-confirm bg-confirm/12 text-confirm',
+        warning: 'border-caution bg-caution/12 text-caution',
       },
     },
     defaultVariants: {

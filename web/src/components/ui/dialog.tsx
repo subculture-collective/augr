@@ -52,9 +52,9 @@ export function Dialog({ open, onOpenChange, children }: DialogProps) {
 
   return (
     <DialogContext.Provider value={{ titleId, descriptionId }}>
-      <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-void/90 hud-scan">
         <div
-          className="fixed inset-0 bg-slate-950/80"
+          className="fixed inset-0 bg-void/85"
           onClick={() => onOpenChange(false)}
           data-testid="dialog-overlay"
         />
@@ -64,7 +64,7 @@ export function Dialog({ open, onOpenChange, children }: DialogProps) {
           aria-modal="true"
           aria-labelledby={titleId}
           aria-describedby={descriptionId}
-          className="relative z-50 w-full max-w-lg"
+          className="relative z-50 w-full max-w-lg px-4 overlay-safe sm:px-0"
         >
           {children}
         </div>
@@ -87,7 +87,7 @@ const DialogContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>
       <div
         ref={ref}
         className={cn(
-          'mx-4 rounded-lg border border-border bg-card p-5 sm:mx-0',
+          'hud-panel rounded-none p-5',
           className,
         )}
         onClick={handleClick}
@@ -100,21 +100,21 @@ const DialogContent = forwardRef<HTMLDivElement, HTMLAttributes<HTMLDivElement>>
 DialogContent.displayName = 'DialogContent'
 
 function DialogHeader({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('mb-4 space-y-1.5', className)} {...props} />
+  return <div className={cn('mb-4 space-y-2 border-b border-border-faint pb-4', className)} {...props} />
 }
 
 function DialogTitle({ className, ...props }: HTMLAttributes<HTMLHeadingElement>) {
   const ctx = useContext(DialogContext)
-  return <h2 id={ctx?.titleId} className={cn('text-lg font-semibold leading-none tracking-tight', className)} {...props} />
+  return <h2 id={ctx?.titleId} className={cn('text-lg font-semibold uppercase leading-none tracking-[0.08em]', className)} {...props} />
 }
 
 function DialogDescription({ className, ...props }: HTMLAttributes<HTMLParagraphElement>) {
   const ctx = useContext(DialogContext)
-  return <p id={ctx?.descriptionId} className={cn('text-sm text-muted-foreground', className)} {...props} />
+  return <p id={ctx?.descriptionId} className={cn('text-sm text-ink-dim', className)} {...props} />
 }
 
 function DialogFooter({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('mt-6 flex justify-end gap-2', className)} {...props} />
+  return <div className={cn('mt-6 flex justify-end gap-2 border-t border-border-faint pt-4', className)} {...props} />
 }
 
 export { DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter }
