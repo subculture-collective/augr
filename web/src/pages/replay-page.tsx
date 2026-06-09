@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConsolePanel, HudSection, StatusLed } from '@/components/ui/hud'
 import { ApiClientError, apiClient } from '@/lib/api/client'
 import type {
   ReplayDecisionResponse,
@@ -132,7 +133,7 @@ function sortReplayEvents(events: ReplayEvent[]) {
 
 function DecisionField({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="rounded-lg border border-border bg-background p-3">
+    <div className="border border-border bg-panel p-3">
       <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">{label}</dt>
       <dd className="mt-1 text-sm font-medium text-foreground">{children}</dd>
     </div>
@@ -141,7 +142,7 @@ function DecisionField({ label, children }: { label: string; children: ReactNode
 
 function SummaryTile({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
-    <div className="rounded-lg border border-border bg-background p-3">
+    <div className="border border-border bg-panel p-3">
       <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">{label}</div>
       <div className="mt-1 text-sm font-semibold text-foreground">{value}</div>
       {detail ? <div className="mt-1 text-xs text-muted-foreground">{detail}</div> : null}
@@ -152,7 +153,7 @@ function SummaryTile({ label, value, detail }: { label: string; value: string; d
 function EventTimelineItem({ event }: { event: ReplayEvent }) {
   return (
     <li className="relative">
-      <span className="absolute -left-[1.3rem] top-4 size-2 rounded-full border border-border bg-background" />
+      <span className="absolute -left-[1.3rem] top-4 size-2 rounded-none border border-border bg-panel" />
       <Card className="border-border/80 bg-card/80">
         <CardContent className="space-y-3 p-4">
           <div className="flex flex-wrap items-start justify-between gap-3">
@@ -180,7 +181,7 @@ function EventTimelineItem({ event }: { event: ReplayEvent }) {
 
           <div>
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Payload preview</div>
-            <pre className="mt-2 max-h-64 overflow-x-auto rounded-md border border-border bg-background p-3 font-mono text-[12px] leading-5 text-muted-foreground whitespace-pre-wrap break-words">
+            <pre className="mt-2 max-h-64 overflow-x-auto rounded-none border border-border bg-panel p-3 font-mono text-[12px] leading-5 text-muted-foreground whitespace-pre-wrap break-words">
               {safePayloadPreview(event.payload)}
             </pre>
           </div>
@@ -195,13 +196,13 @@ function ReplayLoadingState() {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <div className="h-4 w-40 animate-pulse rounded bg-muted" />
-          <div className="h-3 w-72 animate-pulse rounded bg-muted/70" />
+          <div className="h-4 w-40 animate-pulse rounded-none border border-border bg-muted/40" />
+          <div className="h-3 w-72 animate-pulse rounded-none border border-border bg-muted/30" />
         </CardHeader>
         <CardContent>
           <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
             {Array.from({ length: 6 }).map((_, index) => (
-              <div key={index} className="h-20 animate-pulse rounded-lg border border-border bg-muted/40" />
+              <div key={index} className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />
             ))}
           </div>
         </CardContent>
@@ -209,13 +210,13 @@ function ReplayLoadingState() {
 
       <Card>
         <CardHeader>
-          <div className="h-4 w-36 animate-pulse rounded bg-muted" />
-          <div className="h-3 w-64 animate-pulse rounded bg-muted/70" />
+          <div className="h-4 w-36 animate-pulse rounded-none border border-border bg-muted/40" />
+          <div className="h-3 w-64 animate-pulse rounded-none border border-border bg-muted/30" />
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
             {Array.from({ length: 3 }).map((_, index) => (
-              <div key={index} className="h-36 animate-pulse rounded-lg border border-border bg-muted/40" />
+              <div key={index} className="h-36 animate-pulse rounded-none border border-border bg-muted/40" />
             ))}
           </div>
         </CardContent>
@@ -241,6 +242,7 @@ export function ReplayPage() {
   const errorStatus = replayQuery.error instanceof ApiClientError ? replayQuery.error.status : undefined
   const isConfiguredError = errorStatus === 501
   const isNotFoundError = errorStatus === 404
+  const replayState = replayQuery.isError ? 'warn' : replayQuery.isLoading ? 'sync' : 'ok'
 
   return (
     <div className="space-y-4" data-testid="replay-page">
@@ -248,6 +250,7 @@ export function ReplayPage() {
         eyebrow="Audit trail"
         title="Replay workbench"
         description="Read-only event timeline for a trade decision."
+        meta={<StatusLed state={replayState} label={replay ? 'Replay ready' : 'Loading'} />}
         actions={(
           <Button asChild variant="outline" size="sm">
             <Link to="/journal">
@@ -288,12 +291,8 @@ export function ReplayPage() {
         </Card>
       ) : replay ? (
         <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Decision summary</CardTitle>
-              <CardDescription>Source decision captured by the backend replay API.</CardDescription>
-            </CardHeader>
-            <CardContent>
+          <ConsolePanel className="space-y-4 p-4">
+            <HudSection label="Decision summary" note="Source decision captured by the backend replay API" />
               <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                 <DecisionField label="Decision ID">{source?.id ?? '—'}</DecisionField>
                 <DecisionField label="Market type">{source?.market_type ?? '—'}</DecisionField>
@@ -362,8 +361,7 @@ export function ReplayPage() {
                   <div className="mt-1 text-sm text-muted-foreground">{source?.outcome || '—'}</div>
                 </div>
               </div>
-            </CardContent>
-          </Card>
+          </ConsolePanel>
 
           <Card>
             <CardHeader>
@@ -408,7 +406,7 @@ export function ReplayPage() {
               </div>
 
               {summary?.rejection_reasons?.length ? (
-                <div className="rounded-lg border border-border bg-background p-3">
+                <div className="border border-border bg-panel p-3">
                   <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
                     Rejection reasons
                   </div>
@@ -424,15 +422,12 @@ export function ReplayPage() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
+          <ConsolePanel className="space-y-4 p-4">
+            <HudSection label="Replay summary" note="Backend-computed timeline totals and coverage indicators" />
+            <div className="flex items-center gap-2">
                 <History className="size-4" />
-                Event timeline
-              </CardTitle>
-              <CardDescription>Ordered replay events with payload previews.</CardDescription>
-            </CardHeader>
-            <CardContent>
+                <span className="text-sm font-semibold uppercase tracking-[0.1em]">Event timeline</span>
+            </div>
               {events.length === 0 ? (
                 <div className="flex flex-col items-center gap-2 py-10 text-center" data-testid="replay-empty">
                   <Clock3 className="size-8 text-muted-foreground" />
@@ -450,8 +445,7 @@ export function ReplayPage() {
                   ))}
                 </ol>
               )}
-            </CardContent>
-          </Card>
+          </ConsolePanel>
         </div>
       ) : null}
     </div>

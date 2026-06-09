@@ -1,12 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, CircleAlert, FileText, Shield } from 'lucide-react'
+import { ArrowRight, CircleAlert, FileText } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 
 import { PageHeader } from '@/components/layout/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConsolePanel, HudBadge, HudRow, HudSection, StatusLed } from '@/components/ui/hud'
 import { apiClient } from '@/lib/api/client'
 import type {
   EngineStatus,
@@ -109,12 +109,12 @@ function DecisionRow({ decision }: { decision: TradeDecision }) {
     : 'text-muted-foreground'
   const decisionTone =
     decision.status === 'rejected'
-      ? 'border-destructive/30 bg-destructive/5'
+      ? 'border-destructive/30 bg-panel'
       : decision.status === 'live_ordered'
-        ? 'border-emerald-500/25 bg-emerald-500/5'
+        ? 'border-confirm/30 bg-panel'
         : decision.status === 'paper_ordered'
-          ? 'border-amber-500/25 bg-amber-500/5'
-          : 'border-border bg-card'
+          ? 'border-caution/30 bg-panel'
+          : 'border-border bg-panel'
 
   return (
     <tr className={cn('border-b border-border last:border-0', decisionTone)}>
@@ -182,7 +182,7 @@ function DecisionCard({ decision }: { decision: TradeDecision }) {
     : 'text-muted-foreground'
 
   return (
-    <article className="rounded-lg border border-border bg-card p-4 shadow-sm">
+    <article className="border border-border bg-panel p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-1">
           <div className="text-sm font-medium text-foreground">{safeDateLabel(decision.created_at)}</div>
@@ -261,76 +261,57 @@ export function DecisionJournalPage() {
 
   const decisions = decisionsQuery.data?.data ?? []
 
+  const journalState = riskQuery.data ? (riskQuery.data.kill_switch.active ? 'warn' : 'ok') : 'sync'
+
   return (
-    <div className="space-y-4" data-testid="decision-journal-page">
+    <div className="space-y-5" data-testid="decision-journal-page">
       <PageHeader
         eyebrow="Audit trail"
         title="Decision journal"
         description="Read-only record of trade decisions. Paper-first by default; live order IDs are audit references only."
+        meta={<StatusLed state={journalState} label={riskBannerLabel(riskQuery.data)} />}
       />
 
-      <Card className="border-primary/20 bg-primary/5">
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Shield className="size-4" />
-                Operator safety
-              </CardTitle>
-              <CardDescription>Paper-first journaling with live safety state visible.</CardDescription>
-            </div>
-            <Badge variant={riskQuery.data?.kill_switch.active ? 'destructive' : 'success'}>
-              {riskBannerLabel(riskQuery.data)}
-            </Badge>
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Operator safety" note="Paper-first journaling with live safety state visible" />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <HudBadge tone={riskQuery.data?.kill_switch.active ? 'alert' : 'confirm'}>
+            {riskBannerLabel(riskQuery.data)}
+          </HudBadge>
+          <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
+            <span>Live trading controls are intentionally absent here.</span>
           </div>
-        </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-border bg-card p-3">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Circuit breaker</div>
-            <div className="mt-1 text-sm font-medium">{riskQuery.data?.circuit_breaker.state ?? '—'}</div>
-            <div className="mt-1 text-xs text-muted-foreground">{riskQuery.data?.circuit_breaker.reason || 'No breaker reason recorded'}</div>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-3">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Kill switch</div>
-            <div className="mt-1 text-sm font-medium">
-              {riskQuery.data ? (riskQuery.data.kill_switch.active ? 'Active' : 'Inactive') : '—'}
-            </div>
-            <div className="mt-1 text-xs text-muted-foreground">
-              {riskQuery.data?.kill_switch.reason || 'No kill-switch reason recorded'}
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-card p-3">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Journal scope</div>
-            <div className="mt-1 text-sm font-medium">{decisionsQuery.isLoading ? 'Loading…' : `${decisions.length} visible`}</div>
-            <div className="mt-1 text-xs text-muted-foreground">Filters stay server-side and read-only.</div>
-          </div>
-        </CardContent>
-      </Card>
+        </div>
+        <div className="grid gap-3 md:grid-cols-3">
+          <HudRow label="Circuit breaker" value={riskQuery.data?.circuit_breaker.state ?? '—'} />
+          <HudRow label="Kill switch" value={riskQuery.data ? (riskQuery.data.kill_switch.active ? 'Active' : 'Inactive') : '—'} />
+          <HudRow label="Journal scope" value={decisionsQuery.isLoading ? 'Loading…' : `${decisions.length} visible`} />
+        </div>
+        <p className="text-xs text-muted-foreground">Filters stay server-side and read-only.</p>
+      </ConsolePanel>
 
-      <Card>
-        <CardHeader>
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Filters" note="Filter by market type and decision status" />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <CardTitle className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
                 <FileText className="size-4" />
                 Filters
-              </CardTitle>
-              <CardDescription>Filter by market type and decision status.</CardDescription>
+              </div>
+              <p className="text-sm text-muted-foreground">Filter by market type and decision status.</p>
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <CircleAlert className="size-4" />
               <span>Live trading controls are intentionally absent here.</span>
             </div>
           </div>
-        </CardHeader>
-        <CardContent>
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
             <label className="space-y-1.5">
               <span className="text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">Market type</span>
               <select
                 value={marketType}
                 onChange={(event) => setMarketType(event.target.value as '' | MarketType)}
-                className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                className="flex h-9 w-full rounded-none border border-input bg-panel px-3 py-1 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-pulse"
                 aria-label="Market type filter"
               >
                 {MARKET_TYPES.map((option) => (
@@ -346,7 +327,7 @@ export function DecisionJournalPage() {
               <select
                 value={status}
                 onChange={(event) => setStatus(event.target.value as '' | TradeDecisionStatus)}
-                className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                className="flex h-9 w-full rounded-none border border-input bg-panel px-3 py-1 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-pulse"
                 aria-label="Decision status filter"
               >
                 {DECISION_STATUSES.map((option) => (
@@ -375,21 +356,14 @@ export function DecisionJournalPage() {
               </Button>
             </div>
           </div>
-        </CardContent>
-      </Card>
+      </ConsolePanel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Decision feed</CardTitle>
-          <CardDescription>
-            Created time, market, instrument, net EV, risk state, and order audit IDs.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Decision feed" note="Created time, market, instrument, net EV, risk state, and order audit IDs" />
           {decisionsQuery.isLoading ? (
             <div className="space-y-3" data-testid="decision-journal-loading">
               {Array.from({ length: 4 }).map((_, index) => (
-                <div key={index} className="h-24 animate-pulse rounded-lg border border-border bg-muted/50" />
+                <div key={index} className="h-24 animate-pulse rounded-none border border-border bg-muted/40" />
               ))}
             </div>
           ) : decisionsQuery.isError ? (
@@ -406,7 +380,7 @@ export function DecisionJournalPage() {
             </div>
           ) : (
             <>
-              <div className="hidden overflow-hidden rounded-lg border border-border md:block">
+              <div className="hidden overflow-hidden border border-border md:block">
                 <table className="w-full text-left text-sm">
                   <thead>
                     <tr className="border-b border-border bg-muted/40 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -433,8 +407,7 @@ export function DecisionJournalPage() {
               </div>
             </>
           )}
-        </CardContent>
-      </Card>
+      </ConsolePanel>
     </div>
   )
 }

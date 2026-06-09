@@ -14,9 +14,9 @@ const buttonVariants = cva(
         secondary: 'border-border bg-panel text-ink shadow-[6px_6px_0_0_rgb(0_0_0_/_0.82)] hover:border-border-strong hover:bg-panel-raised',
         outline: 'border-border bg-void text-ink-dim hover:border-pulse hover:bg-panel hover:text-ink',
         ghost: 'border-transparent bg-transparent text-ink-dim hover:border-border-faint hover:bg-panel/60 hover:text-ink',
-        destructive: 'border-alert bg-alert text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-red-500',
-        success: 'border-confirm bg-confirm text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-emerald-400',
-        warning: 'border-caution bg-caution text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-amber-400',
+        destructive: 'border-alert bg-alert text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-alert/85',
+        success: 'border-confirm bg-confirm text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-confirm/85',
+        warning: 'border-caution bg-caution text-void shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)] hover:bg-caution/85',
       },
       size: {
         default: 'h-9 px-3.5 py-2',

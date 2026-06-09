@@ -23,6 +23,14 @@ const ledStateClasses: Record<StatusLedState, string> = {
   dead: '',
 }
 
+function primitiveLabel(value: ReactNode) {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+
+  return 'value'
+}
+
 type ConsolePanelProps = ComponentPropsWithoutRef<'div'>
 
 const ConsolePanel = forwardRef<HTMLDivElement, ConsolePanelProps>(function ConsolePanel(
@@ -116,7 +124,7 @@ const HudRow = forwardRef<HTMLDivElement, HudRowProps>(function HudRow(
   ref,
 ) {
   return (
-    <div ref={ref} aria-label={`${label}: ${typeof value === 'string' ? value : label}`} className={cn('hud-row', className)} role="group" {...props}>
+    <div ref={ref} aria-label={`${label}: ${primitiveLabel(value)}`} className={cn('hud-row', className)} role="group" {...props}>
       <span className="hud-row-key">{label}</span>
       <span className="hud-row-val" style={accent ? { color: accent } : undefined}>
         {value}

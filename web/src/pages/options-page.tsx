@@ -8,8 +8,9 @@ import { ChainTable } from '@/components/options/chain-table'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConsolePanel, HudBadge, HudSection, StatusLed } from '@/components/ui/hud'
 import { Input } from '@/components/ui/input'
-import { ApiClientError, apiClient } from '@/lib/api/client'
+import { apiClient } from '@/lib/api/client'
 import type { ResearchOpportunity, TradeDecisionStatus, TradeDecisionRiskStatus } from '@/lib/api/types'
 
 type OptionTypeFilter = '' | 'call' | 'put'
@@ -100,7 +101,7 @@ function OpportunityCard({ opportunity }: { opportunity: ResearchOpportunity }) 
   const reasons = splitReasons(opportunity.reasons ?? decision.risk_reasons)
 
   return (
-    <article className="rounded-lg border border-border bg-card p-4 shadow-sm">
+    <article className="border border-border bg-panel p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-1">
           <div className="font-mono text-xs text-muted-foreground break-all">{decision.instrument_key || '—'}</div>
@@ -208,23 +209,25 @@ export function OptionsPage() {
     : opportunitiesQuery.isLoading
       ? 'Loading opportunities…'
       : opportunitiesQuery.isError
-        ? opportunitiesQuery.error instanceof ApiClientError && opportunitiesQuery.error.status === 501
+        ? (opportunitiesQuery.error as { status?: number } | null | undefined)?.status === 501
           ? 'Scanner not configured'
           : 'Unable to load opportunities'
         : opportunities.length === 0
           ? 'No opportunities met the paper-first filters.'
           : `${opportunities.length} opportunities`
 
+  const opportunityScannerUnavailable = (opportunitiesQuery.error as { status?: number } | null | undefined)?.status === 501
+
   return (
-    <div className="space-y-4" data-testid="options-page">
+    <div className="space-y-5" data-testid="options-page">
       <PageHeader title="Options chain" description="Look up option chains by underlying ticker." />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Lookup</CardTitle>
-          <CardDescription>Enter a ticker and optional filters, then load the chain.</CardDescription>
-        </CardHeader>
-        <CardContent>
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Lookup" note="Enter a ticker and optional filters, then load the chain" />
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <HudBadge tone={ticker ? 'confirm' : 'caution'}>{ticker ? `${ticker} loaded` : 'scanner idle'}</HudBadge>
+          <StatusLed state={ticker ? 'ok' : 'sync'} label={ticker ? 'Chain active' : 'Waiting for ticker'} />
+        </div>
           <form
             className="grid gap-3 lg:grid-cols-[200px_170px_160px_auto]"
             onSubmit={(e) => {
@@ -248,7 +251,7 @@ export function OptionsPage() {
               value={draftType}
               onChange={(e) => setDraftType(e.target.value as OptionTypeFilter)}
               aria-label="Option type"
-              className="flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              className="flex h-9 w-full rounded-none border border-input bg-panel px-3 py-1 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-pulse"
             >
               <option value="">All types</option>
               <option value="call">Calls</option>
@@ -259,26 +262,16 @@ export function OptionsPage() {
               Load Chain
             </Button>
           </form>
-        </CardContent>
-      </Card>
+      </ConsolePanel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <TrendingUp className="size-4" />
-            Research opportunities
-          </CardTitle>
-          <CardDescription>
-            {ticker ? `${ticker} scanner` : 'Search a ticker above to enable the paper-first scanner.'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="mb-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>{opportunitiesStatus}</span>
-            {ticker ? <span>· Underlying {ticker}</span> : null}
-            {expiry ? <span>· Expiry {expiry}</span> : null}
-            {optionType ? <span>· {optionType.toUpperCase()}</span> : null}
-          </div>
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Research opportunities" note={ticker ? `${ticker} scanner` : 'Search a ticker above to enable the paper-first scanner.'} />
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span>{opportunitiesStatus}</span>
+          {ticker ? <span>· Underlying {ticker}</span> : null}
+          {expiry ? <span>· Expiry {expiry}</span> : null}
+          {optionType ? <span>· {optionType.toUpperCase()}</span> : null}
+        </div>
 
           {!ticker ? (
             <div className="flex flex-col items-center gap-2 py-8 text-center">
@@ -288,11 +281,11 @@ export function OptionsPage() {
           ) : opportunitiesQuery.isLoading ? (
             <div className="space-y-3" data-testid="options-opportunities-loading">
               {Array.from({ length: 3 }).map((_, index) => (
-                <div key={index} className="h-20 animate-pulse rounded-lg border border-border bg-muted/50" />
+                <div key={index} className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />
               ))}
             </div>
           ) : opportunitiesQuery.isError ? (
-            opportunitiesQuery.error instanceof ApiClientError && opportunitiesQuery.error.status === 501 ? (
+            opportunityScannerUnavailable ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center">
                 <TrendingUp className="size-8 text-muted-foreground" />
                 <p className="text-sm text-muted-foreground">Scanner not configured.</p>
@@ -312,7 +305,7 @@ export function OptionsPage() {
             </div>
           ) : (
             <>
-              <div className="hidden overflow-hidden rounded-lg border border-border md:block">
+              <div className="hidden overflow-hidden border border-border md:block">
                 <table className="w-full text-left text-sm">
                   <thead>
                     <tr className="border-b border-border bg-muted/40 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -339,8 +332,7 @@ export function OptionsPage() {
               </div>
             </>
           )}
-        </CardContent>
-      </Card>
+      </ConsolePanel>
 
       <Card>
         <CardHeader>
@@ -361,11 +353,11 @@ export function OptionsPage() {
           {isLoading ? (
             <div className="space-y-3" data-testid="options-loading">
               {Array.from({ length: 6 }).map((_, index) => (
-                <div key={index} className="flex items-center gap-3 rounded-lg border p-3">
-                  <div className="h-4 w-16 animate-pulse rounded bg-muted" />
-                  <div className="h-4 w-20 animate-pulse rounded bg-muted" />
-                  <div className="h-4 w-20 animate-pulse rounded bg-muted" />
-                  <div className="ml-auto h-4 w-14 animate-pulse rounded bg-muted" />
+                <div key={index} className="flex items-center gap-3 rounded-none border border-border p-3">
+                  <div className="h-4 w-16 animate-pulse rounded-none bg-muted/40" />
+                  <div className="h-4 w-20 animate-pulse rounded-none bg-muted/40" />
+                  <div className="h-4 w-20 animate-pulse rounded-none bg-muted/40" />
+                  <div className="ml-auto h-4 w-14 animate-pulse rounded-none bg-muted/40" />
                 </div>
               ))}
             </div>

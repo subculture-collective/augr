@@ -276,8 +276,8 @@ describe('RiskPage', () => {
     expect(screen.getByText('4 / 5')).toBeInTheDocument()
     expect(screen.getByText('Total exposure')).toBeInTheDocument()
     expect(screen.getByText('76% / 80%')).toBeInTheDocument()
-    expect(screen.getByTestId('risk-utilization-open-positions')).toHaveClass('bg-amber-500')
-    expect(screen.getByTestId('risk-utilization-total-exposure')).toHaveClass('bg-red-500')
+    expect(screen.getByTestId('risk-utilization-open-positions')).toHaveClass('bg-caution')
+    expect(screen.getByTestId('risk-utilization-total-exposure')).toHaveClass('bg-alert')
   })
 
   it('shows green utilization bars below warning threshold', async () => {
@@ -323,8 +323,8 @@ describe('RiskPage', () => {
 
     expect(await screen.findByText('3 / 5')).toBeInTheDocument()
     expect(screen.getByText('50% / 80%')).toBeInTheDocument()
-    expect(screen.getByTestId('risk-utilization-open-positions')).toHaveClass('bg-emerald-500')
-    expect(screen.getByTestId('risk-utilization-total-exposure')).toHaveClass('bg-emerald-500')
+    expect(screen.getByTestId('risk-utilization-open-positions')).toHaveClass('bg-confirm')
+    expect(screen.getByTestId('risk-utilization-total-exposure')).toHaveClass('bg-confirm')
   })
 
   it('keeps cockpit cards visible when cockpit arrays are missing', async () => {

@@ -5,7 +5,7 @@ import { useState } from 'react'
 import { PageHeader } from '@/components/layout/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConsolePanel, HudBadge, HudRow, HudSection, StatusLed } from '@/components/ui/hud'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ApiClientError, apiClient } from '@/lib/api/client'
@@ -65,9 +65,9 @@ function percentDisplayValue(value: number, usesFraction: boolean) {
 }
 
 function utilizationBarClass(ratio: number) {
-  if (ratio > 0.9) return 'bg-red-500'
-  if (ratio >= 0.7) return 'bg-amber-500'
-  return 'bg-emerald-500'
+  if (ratio > 0.9) return 'bg-alert'
+  if (ratio >= 0.7) return 'bg-caution'
+  return 'bg-confirm'
 }
 
 function UtilizationRow({
@@ -94,10 +94,10 @@ function UtilizationRow({
           {formatUtilizationValue(current)}{suffix} / {formatUtilizationValue(max)}{suffix}
         </span>
       </div>
-      <div className="h-3 overflow-hidden rounded-full bg-muted">
+      <div className="h-3 overflow-hidden rounded-none border border-border-faint bg-void-900">
         <div
           data-testid={testId}
-          className={`h-full rounded-full transition-all ${utilizationBarClass(ratio)}`}
+          className={`h-full rounded-none transition-all ${utilizationBarClass(ratio)}`}
           style={{ width: `${width}%` }}
         />
       </div>
@@ -107,45 +107,27 @@ function UtilizationRow({
 
 function CockpitMarketCard({ exposure, marketType }: { exposure?: RiskCockpitExposure; marketType: RiskCockpitExposure['market_type'] }) {
   return (
-    <Card className="border-border/70 bg-background/60" data-testid={`risk-cockpit-market-${marketType}`}>
-      <CardHeader className="space-y-2 pb-3">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle className="text-base">{cockpitMarketLabels[marketType]}</CardTitle>
-            <CardDescription className="text-xs uppercase tracking-[0.16em]">{marketType}</CardDescription>
-          </div>
-          <Badge variant={exposure ? 'outline' : 'secondary'}>{exposure ? 'Live' : 'Missing'}</Badge>
+    <ConsolePanel className="space-y-3 p-3" data-testid={`risk-cockpit-market-${marketType}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <HudSection label={cockpitMarketLabels[marketType]} note={marketType} />
         </div>
-      </CardHeader>
-      <CardContent>
+        <HudBadge tone={exposure ? 'confirm' : 'caution'}>{exposure ? 'Live' : 'Missing'}</HudBadge>
+      </div>
+      <div>
         {exposure ? (
-          <dl className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
-            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-              <dt className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Gross exposure</dt>
-              <dd className="mt-1 font-mono text-base">{formatSafeCurrency(exposure.gross_exposure)}</dd>
-            </div>
-            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-              <dt className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Net expected value</dt>
-              <dd className="mt-1 font-mono text-base">{formatSafeCurrency(exposure.net_expected_value)}</dd>
-            </div>
-            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-              <dt className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Open positions</dt>
-              <dd className="mt-1 font-mono text-base">{formatCount(exposure.open_positions)}</dd>
-            </div>
-            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-              <dt className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Approved decisions</dt>
-              <dd className="mt-1 font-mono text-base">{formatCount(exposure.approved_decisions)}</dd>
-            </div>
-            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 sm:col-span-2 xl:col-span-1">
-              <dt className="text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Rejected decisions</dt>
-              <dd className="mt-1 font-mono text-base">{formatCount(exposure.rejected_decisions)}</dd>
-            </div>
-          </dl>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
+            <HudRow label="Gross exposure" value={formatSafeCurrency(exposure.gross_exposure)} />
+            <HudRow label="Net EV" value={formatSafeCurrency(exposure.net_expected_value)} />
+            <HudRow label="Open positions" value={formatCount(exposure.open_positions)} />
+            <HudRow label="Approved decisions" value={formatCount(exposure.approved_decisions)} />
+            <HudRow label="Rejected decisions" value={formatCount(exposure.rejected_decisions)} className="sm:col-span-2 xl:col-span-1" />
+          </div>
         ) : (
           <p className="text-sm text-muted-foreground">No exposure data returned for this market.</p>
         )}
-      </CardContent>
-    </Card>
+      </div>
+    </ConsolePanel>
   )
 }
 
@@ -218,22 +200,21 @@ export function RiskPage() {
   const cockpitIsUnavailable =
     cockpitError && cockpitErrorValue instanceof ApiClientError && cockpitErrorValue.status === 501
 
+  const engineState = data ? (data.kill_switch.active || data.circuit_breaker.state === 'tripped' ? 'warn' : 'ok') : 'sync'
+
   return (
-    <div className="space-y-4" data-testid="risk-page">
+    <div className="space-y-5" data-testid="risk-page">
       <PageHeader
         eyebrow="Controls"
         title="Risk engine"
         description="Review circuit breaker state, kill switch controls, exposure utilization, and recent audit events."
+        meta={data ? <StatusLed state={engineState} label={data.risk_status} /> : <StatusLed state="sync" label="Loading" />}
       />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-        <Card>
-          <CardHeader>
-            <CardTitle>Circuit Breaker</CardTitle>
-            <CardDescription>Current state of the circuit breaker</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {isLoading && <div data-testid="circuit-breaker-loading" className="h-20 animate-pulse rounded bg-muted" />}
+        <ConsolePanel className="space-y-4 p-4">
+          <HudSection label="Circuit breaker" note="Current state of the circuit breaker" />
+            {isLoading && <div data-testid="circuit-breaker-loading" className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />}
             {isError && <p className="text-sm text-destructive">Failed to load: {(error as Error).message}</p>}
             {circuitBreaker && (
               <div className="space-y-3">
@@ -243,29 +224,16 @@ export function RiskPage() {
                     {circuitBreakerBadge[circuitBreaker.state].label}
                   </Badge>
                 </div>
-                {circuitBreaker.reason && (
-                  <p className="text-sm text-muted-foreground">
-                    <span className="font-medium">Reason:</span> {circuitBreaker.reason}
-                  </p>
-                )}
-                <p className="text-sm text-muted-foreground">
-                  <span className="font-medium">Tripped at:</span> {formatDateTime(circuitBreaker.tripped_at)}
-                </p>
-                <p className="text-sm text-muted-foreground">
-                  <span className="font-medium">Cooldown ends:</span> {formatDateTime(circuitBreaker.cooldown_end)}
-                </p>
+                <HudRow label="Reason" value={circuitBreaker.reason || '—'} />
+                <HudRow label="Tripped at" value={formatDateTime(circuitBreaker.tripped_at)} />
+                <HudRow label="Cooldown ends" value={formatDateTime(circuitBreaker.cooldown_end)} />
               </div>
             )}
-          </CardContent>
-        </Card>
+        </ConsolePanel>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Kill Switch</CardTitle>
-            <CardDescription>Emergency trading halt</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {isLoading && <div data-testid="kill-switch-loading" className="h-20 animate-pulse rounded bg-muted" />}
+        <ConsolePanel className="space-y-4 p-4">
+          <HudSection label="Kill switch" note="Emergency trading halt" />
+            {isLoading && <div data-testid="kill-switch-loading" className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />}
             {isError && <p className="text-sm text-destructive">Failed to load: {(error as Error).message}</p>}
             {killSwitch && (
               <div className="space-y-4">
@@ -334,22 +302,17 @@ export function RiskPage() {
                 ) : null}
               </div>
             )}
-          </CardContent>
-        </Card>
+        </ConsolePanel>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Cross-flow cockpit</CardTitle>
-          <CardDescription>Read-only cross-asset exposure snapshot with cockpit-wide warnings.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Cross-flow cockpit" note="Read-only cross-asset exposure snapshot with cockpit-wide warnings" />
           {cockpitLoading ? (
             <div data-testid="risk-cockpit-loading" className="space-y-3">
-              <div className="h-10 animate-pulse rounded bg-muted" />
+              <div className="h-10 animate-pulse rounded-none border border-border bg-muted/40" />
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 {Array.from({ length: 4 }).map((_, index) => (
-                  <div key={index} className="h-52 animate-pulse rounded-lg border border-border bg-muted/50" />
+                  <div key={index} className="h-52 animate-pulse rounded-none border border-border bg-muted/40" />
                 ))}
               </div>
             </div>
@@ -379,7 +342,7 @@ export function RiskPage() {
               </div>
 
               {cockpitExposures.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 rounded-lg border border-border/70 bg-muted/20 px-4 py-8 text-center" data-testid="risk-cockpit-empty">
+                <div className="flex flex-col items-center gap-2 border border-border px-4 py-8 text-center" data-testid="risk-cockpit-empty">
                   <p className="text-sm text-muted-foreground">No cross-flow exposures returned.</p>
                 </div>
               ) : null}
@@ -390,7 +353,7 @@ export function RiskPage() {
                 ))}
               </div>
 
-              <div className="rounded-lg border border-border/70 bg-muted/20 p-3">
+              <div className="border border-border p-3">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm font-medium">Warnings</p>
                   <Badge variant={cockpitWarnings.length ? 'warning' : 'secondary'}>
@@ -400,7 +363,7 @@ export function RiskPage() {
                 {cockpitWarnings.length ? (
                   <ul className="mt-2 space-y-2">
                     {cockpitWarnings.map((warning, index) => (
-                      <li key={`${warning}-${index}`} className="rounded-md border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-sm text-foreground">
+                      <li key={`${warning}-${index}`} className="rounded-none border border-caution/25 bg-caution/8 px-3 py-2 text-sm text-ink">
                         {String(warning)}
                       </li>
                     ))}
@@ -411,16 +374,11 @@ export function RiskPage() {
               </div>
             </>
           ) : null}
-        </CardContent>
-      </Card>
+      </ConsolePanel>
 
       {data ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>Position limit utilization</CardTitle>
-            <CardDescription>Current usage against configured open position and exposure caps</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
+        <ConsolePanel className="space-y-4 p-4">
+          <HudSection label="Position limit utilization" note="Current usage against configured open position and exposure caps" />
             <UtilizationRow
               label="Open positions"
               current={data.position_limits.current_open_positions ?? 0}
@@ -437,20 +395,15 @@ export function RiskPage() {
               suffix="%"
               testId="risk-utilization-total-exposure"
             />
-          </CardContent>
-        </Card>
+        </ConsolePanel>
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Audit Log</CardTitle>
-          <CardDescription>Recent system events</CardDescription>
-        </CardHeader>
-        <CardContent>
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Audit log" note="Recent system events" />
           {auditLoading ? (
             <div data-testid="audit-log-loading" className="space-y-2">
               {Array.from({ length: 3 }).map((_, index) => (
-                <div key={index} className="h-8 animate-pulse rounded bg-muted" />
+                <div key={index} className="h-8 animate-pulse rounded-none border border-border bg-muted/40" />
               ))}
             </div>
           ) : auditError ? (
@@ -513,8 +466,7 @@ export function RiskPage() {
               ) : null}
             </div>
           )}
-        </CardContent>
-      </Card>
+      </ConsolePanel>
     </div>
   )
 }

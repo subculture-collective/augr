@@ -7,8 +7,9 @@ import { PageHeader } from '@/components/layout/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ConsolePanel, HudBadge, HudRow, HudSection, StatusLed } from '@/components/ui/hud'
 import { Input } from '@/components/ui/input'
-import { ApiClientError, apiClient } from '@/lib/api/client'
+import { apiClient } from '@/lib/api/client'
 import { useAddPolymarketWatched, usePolymarketAccounts, usePolymarketDiscoveryLast, usePolymarketJobsStatus, usePolymarketRecentSignals, usePolymarketRecentTrades, usePolymarketWatched, useRemovePolymarketWatched, useRunPolymarketDiscovery, useSetPolymarketAccountTracked, useSetPolymarketWatchedEnabled } from '@/hooks/use-polymarket'
 import { useWebSocketClient } from '@/hooks/use-websocket-client'
 import type { ResearchOpportunity, TradeDecisionRiskStatus, TradeDecisionStatus } from '@/lib/api/types'
@@ -82,7 +83,7 @@ function ScannerOpportunityCard({ opportunity }: { opportunity: ResearchOpportun
   const reasons = splitReasons(opportunity.reasons ?? decision.risk_reasons)
 
   return (
-    <article className="rounded-lg border border-border bg-card p-4 shadow-sm">
+    <article className="border border-border bg-panel p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-1">
           <div className="font-mono text-xs text-muted-foreground break-all">{decision.instrument_key || '—'}</div>
@@ -271,7 +272,7 @@ export function PolymarketPage() {
     : scannerQuery.isLoading
       ? 'Loading opportunities…'
       : scannerQuery.isError
-        ? scannerQuery.error instanceof ApiClientError && scannerQuery.error.status === 501
+        ? (scannerQuery.error as { status?: number } | null | undefined)?.status === 501
           ? 'Scanner not configured'
           : 'Unable to load opportunities'
         : scannerOpps.length === 0
@@ -279,41 +280,31 @@ export function PolymarketPage() {
           : `${scannerOpps.length} opportunities`
 
   return (
-    <div className="space-y-4" data-testid="polymarket-page">
-      <PageHeader title="Polymarket" description="Prediction market intelligence: tracked wallets, whale trades, watched markets" />
+    <div className="space-y-5" data-testid="polymarket-page">
+      <PageHeader
+        title="Polymarket"
+        description="Prediction market intelligence: tracked wallets, whale trades, watched markets"
+        meta={<StatusLed state={ws.status === 'open' ? 'live' : ws.status === 'connecting' ? 'sync' : 'warn'} label={scannerStatus} />}
+      />
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Summary</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-3 md:grid-cols-4">
-            <div>
-              <div className="text-xs uppercase text-muted-foreground">Displayed Wallets</div>
-              <div className="text-2xl font-semibold">{displayedTrackedCount}</div>
-              <div className="text-xs text-muted-foreground">{tracked.data?.data?.length ?? 0} tracked total</div>
-            </div>
-            <div>
-              <div className="text-xs uppercase text-muted-foreground">Total Volume</div>
-              <div className="text-2xl font-semibold">{money.format(totalVolume)}</div>
-            </div>
-            <div>
-              <div className="text-xs uppercase text-muted-foreground">Open Polymarket Strategies</div>
-              <div className="text-2xl font-semibold">{strategiesData.length}</div>
-            </div>
-            <div>
-              <div className="text-xs uppercase text-muted-foreground">Recent Whale Signals</div>
-              <div className="text-2xl font-semibold">{signalsData.filter((signal) => signal.source === 'polymarket-whale').length}</div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Summary" note="Wallets, volume, strategies, and whale signals" />
+        <div className="grid gap-3 md:grid-cols-4">
+          <HudRow label="Displayed wallets" value={displayedTrackedCount} />
+          <HudRow label="Total volume" value={money.format(totalVolume)} />
+          <HudRow label="Open strategies" value={strategiesData.length} />
+          <HudRow label="Whale signals" value={signalsData.filter((signal) => signal.source === 'polymarket-whale').length} />
+        </div>
+      </ConsolePanel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Research scanner</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
+      <ConsolePanel className="space-y-4 p-4">
+        <HudSection label="Research scanner" note="Paper-first market scanning and opportunity review" />
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <HudBadge tone={hasScannerInputs ? 'confirm' : 'caution'}>{scannerStatus}</HudBadge>
+          {scannerSlug ? <span>· {scannerSlug}</span> : null}
+          {scannerTokenId ? <span>· token {scannerTokenId}</span> : null}
+          {scannerOutcome ? <span>· {scannerOutcome}</span> : null}
+        </div>
           <form
             className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4"
             onSubmit={(event) => {
@@ -335,17 +326,13 @@ export function PolymarketPage() {
             </div>
           </form>
 
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>{scannerStatus}</span>
-            {scannerSlug ? <span>· {scannerSlug}</span> : null}
-            {scannerTokenId ? <span>· token {scannerTokenId}</span> : null}
-            {scannerOutcome ? <span>· {scannerOutcome}</span> : null}
-            {scannerProbability != null ? <span>· p={scannerProbability}</span> : null}
-            {scannerBestBid != null ? <span>· bid={scannerBestBid}</span> : null}
-            {scannerBestAsk != null ? <span>· ask={scannerBestAsk}</span> : null}
-            {scannerAskDepthUsd != null ? <span>· depth=${scannerAskDepthUsd}</span> : null}
-            {scannerAskSize != null ? <span>· size={scannerAskSize}</span> : null}
-          </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {scannerProbability != null ? <span>· p={scannerProbability}</span> : null}
+          {scannerBestBid != null ? <span>· bid={scannerBestBid}</span> : null}
+          {scannerBestAsk != null ? <span>· ask={scannerBestAsk}</span> : null}
+          {scannerAskDepthUsd != null ? <span>· depth=${scannerAskDepthUsd}</span> : null}
+          {scannerAskSize != null ? <span>· size={scannerAskSize}</span> : null}
+        </div>
 
           {!hasScannerInputs ? (
             <div className="flex flex-col items-center gap-2 py-8 text-center">
@@ -355,11 +342,11 @@ export function PolymarketPage() {
           ) : scannerQuery.isLoading ? (
             <div className="space-y-3" data-testid="polymarket-opportunities-loading">
               {Array.from({ length: 3 }).map((_, index) => (
-                <div key={index} className="h-20 animate-pulse rounded-lg border border-border bg-muted/50" />
+                <div key={index} className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />
               ))}
             </div>
           ) : scannerQuery.isError ? (
-            scannerQuery.error instanceof ApiClientError && scannerQuery.error.status === 501 ? (
+            (scannerQuery.error as { status?: number } | null | undefined)?.status === 501 ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center">
                 <Search className="size-8 text-muted-foreground" />
                 <p className="text-sm text-muted-foreground">Scanner not configured.</p>
@@ -379,7 +366,7 @@ export function PolymarketPage() {
             </div>
           ) : (
             <>
-              <div className="hidden overflow-hidden rounded-lg border border-border md:block">
+              <div className="hidden overflow-hidden border border-border md:block">
                 <table className="w-full text-left text-sm">
                   <thead>
                     <tr className="border-b border-border bg-muted/40 font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
@@ -427,8 +414,7 @@ export function PolymarketPage() {
               </div>
             </>
           )}
-        </CardContent>
-      </Card>
+      </ConsolePanel>
 
       <Card>
         <CardHeader>
