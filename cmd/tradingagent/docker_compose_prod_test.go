@@ -17,7 +17,7 @@ func TestProductionDockerComposeContainsRequiredConfiguration(t *testing.T) {
 	compose := string(contents)
 	for _, want := range []string{
 		"services:",
-		"image: pgvector/pgvector:pg17",
+		"image: timescale/timescaledb-ha:pg17",
 		"postgres_data:/var/lib/postgresql/data",
 		"POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}",
 		"pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-tradingagent}",
