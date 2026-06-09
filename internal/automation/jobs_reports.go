@@ -20,6 +20,10 @@ import (
 
 const reportTypePaperValidation = "paper_validation"
 const reportTypeCalibration = "calibration"
+const reportTypeWalletIntel = "wallet_intelligence"
+const reportTypeEventCalibration = "event_calibration"
+const reportTypeSolverArb = "solver_arbitrage"
+const reportTypeLatencyResearch = "latency_research"
 
 var paperValidationReportSpec = scheduler.ScheduleSpec{
 	Type:         scheduler.ScheduleTypeAfterHours,
