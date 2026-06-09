@@ -1,7 +1,7 @@
 export type UUID = string;
 export type ISODateString = string;
 
-export type MarketType = 'stock' | 'crypto' | 'polymarket';
+export type MarketType = 'stock' | 'crypto' | 'polymarket' | 'options';
 export type StrategyLLMProvider =
   | 'openai'
   | 'anthropic'
@@ -73,6 +73,8 @@ export type PipelineSignal = 'buy' | 'sell' | 'hold';
 export type OrderSide = 'buy' | 'sell';
 export type OrderType = 'market' | 'limit' | 'stop' | 'stop_limit' | 'trailing_stop';
 export type OrderStatus = 'pending' | 'submitted' | 'partial' | 'filled' | 'cancelled' | 'rejected';
+export type TradeDecisionStatus = 'candidate' | 'rejected' | 'paper_ordered' | 'live_ordered' | 'closed';
+export type TradeDecisionRiskStatus = 'approved' | 'rejected';
 export type PositionSide = 'long' | 'short';
 export type AgentRole =
   | 'market_analyst'
@@ -380,6 +382,36 @@ export interface Trade {
   created_at: ISODateString;
 }
 
+export interface TradeDecision {
+  id: UUID;
+  strategy_id?: UUID;
+  pipeline_run_id?: UUID;
+  market_type: MarketType;
+  instrument_key: string;
+  external_market_id?: string;
+  side: OrderSide;
+  outcome?: string;
+  fair_value: number;
+  executable_price: number;
+  spread: number;
+  depth: number;
+  gross_ev: number;
+  net_ev: number;
+  kelly_fraction: number;
+  proposed_size: number;
+  approved_size: number;
+  risk_status: TradeDecisionRiskStatus;
+  risk_reasons: string[];
+  evidence?: unknown;
+  features?: unknown;
+  regime_tags: string[];
+  paper_order_id?: UUID;
+  live_order_id?: UUID;
+  status: TradeDecisionStatus;
+  created_at: ISODateString;
+  updated_at: ISODateString;
+}
+
 export interface AgentMemory {
   id: UUID;
   agent_role: AgentRole;
@@ -618,6 +650,14 @@ export interface TradeListParams {
   side?: OrderSide;
   order_id?: UUID;
   position_id?: UUID;
+}
+
+export interface TradeDecisionListParams {
+  strategy_id?: UUID;
+  market_type?: MarketType;
+  status?: TradeDecisionStatus;
+  created_after?: ISODateString;
+  created_before?: ISODateString;
 }
 
 export interface MemoryListParams {

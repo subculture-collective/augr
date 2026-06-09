@@ -61,19 +61,22 @@ type SizingConfig struct {
 // OrderManager orchestrates the full order lifecycle:
 // Signal → Risk Check → Size → Create → Submit → Track → Update Position → Audit.
 type OrderManager struct {
-	broker         Broker
-	brokerName     string
-	riskEngine     risk.RiskEngine
-	positionRepo   repository.PositionRepository
-	orderRepo      repository.OrderRepository
-	tradeRepo      repository.TradeRepository
-	auditLogRepo   repository.AuditLogRepository
-	agentEventRepo repository.AgentEventRepository
-	sizingConfig   SizingConfig
-	logger         *slog.Logger
-	nowMu          sync.RWMutex
-	nowFunc        func() time.Time
-	metrics        OrderMetricsRecorder
+	broker           Broker
+	brokerName       string
+	riskEngine       risk.RiskEngine
+	positionRepo     repository.PositionRepository
+	orderRepo        repository.OrderRepository
+	tradeRepo        repository.TradeRepository
+	auditLogRepo     repository.AuditLogRepository
+	agentEventRepo   repository.AgentEventRepository
+	decisionRecorder DecisionRecorder
+	sizingConfig     SizingConfig
+	liveTrading      bool
+	liveGate         LiveGateConfig
+	logger           *slog.Logger
+	nowMu            sync.RWMutex
+	nowFunc          func() time.Time
+	metrics          OrderMetricsRecorder
 }
 
 // OrderMetricsRecorder records order lifecycle metrics.
@@ -119,6 +122,34 @@ func (m *OrderManager) WithMetrics(metrics OrderMetricsRecorder) *OrderManager {
 		return nil
 	}
 	m.metrics = metrics
+	return m
+}
+
+// WithDecisionRecorder wires an optional decision journal recorder into the manager.
+func (m *OrderManager) WithDecisionRecorder(recorder DecisionRecorder) *OrderManager {
+	if m == nil {
+		return nil
+	}
+	m.decisionRecorder = recorder
+	return m
+}
+
+// WithLiveTrading toggles the live-execution path. Paper/default paths should
+// leave this disabled.
+func (m *OrderManager) WithLiveTrading(enabled bool) *OrderManager {
+	if m == nil {
+		return nil
+	}
+	m.liveTrading = enabled
+	return m
+}
+
+// WithLiveGate configures the explicit live-trading gate.
+func (m *OrderManager) WithLiveGate(gate LiveGateConfig) *OrderManager {
+	if m == nil {
+		return nil
+	}
+	m.liveGate = gate
 	return m
 }
 
@@ -208,6 +239,29 @@ func (m *OrderManager) ProcessSignal(
 		return fmt.Errorf("order_manager: kill switch active, order blocked for %s", plan.Ticker)
 	}
 
+	// 1b. Live execution gate (paper/default paths skip this entirely).
+	if m.liveTrading {
+		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
+		if !allowed {
+			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
+
+			m.recordTradeDecision(ctx, m.newTradeDecision(
+				strategyID,
+				runID,
+				plan,
+				domain.MarketTypeStock,
+				strings.ToUpper(strings.TrimSpace(plan.Side)),
+				0,
+				0,
+				domain.RiskDecisionRejected,
+				[]string{denial.Code + ": " + denial.Message},
+				domain.TradeDecisionStatusRejected,
+			))
+
+			return fmt.Errorf("order_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
+		}
+	}
+
 	// 2. Calculate position size.
 	balance, err := m.broker.GetAccountBalance(ctx)
 	if err != nil {
@@ -251,6 +305,18 @@ func (m *OrderManager) ProcessSignal(
 
 	if !approved {
 		m.logger.WarnContext(ctx, "position limits rejected", "ticker", plan.Ticker, "reason", reason)
+		m.recordTradeDecision(ctx, m.newTradeDecision(
+			strategyID,
+			runID,
+			plan,
+			domain.MarketTypeStock,
+			strings.ToUpper(strings.TrimSpace(plan.Side)),
+			quantity,
+			0,
+			domain.RiskDecisionRejected,
+			[]string{reason},
+			domain.TradeDecisionStatusRejected,
+		))
 
 		if auditErr := m.audit(ctx, "risk_check_rejected", "order", nil, map[string]any{
 			"ticker":      plan.Ticker,
@@ -275,6 +341,7 @@ func (m *OrderManager) ProcessSignal(
 		StrategyID:     &strategyID,
 		PipelineRunID:  &runID,
 		Ticker:         plan.Ticker,
+		MarketType:     domain.MarketTypeStock,
 		Side:           side,
 		OrderType:      orderType,
 		Quantity:       quantity,
@@ -320,6 +387,18 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
 		}
 		m.recordOrderMetric(order.Side, order.Status)
+		m.recordTradeDecision(ctx, m.newTradeDecision(
+			strategyID,
+			runID,
+			plan,
+			order.MarketType,
+			string(order.Side),
+			quantity,
+			0,
+			domain.RiskDecisionRejected,
+			[]string{reason},
+			domain.TradeDecisionStatusRejected,
+		))
 
 		if auditErr := m.audit(ctx, "pre_trade_rejected", "order", &order.ID, map[string]any{
 			"reason": reason,
@@ -330,6 +409,20 @@ func (m *OrderManager) ProcessSignal(
 		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
 	}
 
+	decision := m.newTradeDecision(
+		strategyID,
+		runID,
+		plan,
+		order.MarketType,
+		string(order.Side),
+		quantity,
+		quantity,
+		domain.RiskDecisionApproved,
+		nil,
+		domain.TradeDecisionStatusCandidate,
+	)
+	m.recordTradeDecision(ctx, decision)
+
 	// 6. Submit to broker (status = submitted).
 	externalID, err := m.broker.SubmitOrder(ctx, order)
 	if err != nil {
@@ -338,6 +431,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
 		}
 		m.recordOrderMetric(order.Side, order.Status)
+		m.attachTradeDecisionOrder(ctx, decision.ID, order.ID, m.liveTrading)
 
 		if auditErr := m.audit(ctx, "order_rejected", "order", &order.ID, map[string]any{
 			"error": err.Error(),
@@ -359,6 +453,7 @@ func (m *OrderManager) ProcessSignal(
 		return fmt.Errorf("order_manager: update submitted order: %w", err)
 	}
 	m.recordOrderMetric(order.Side, order.Status)
+	m.attachTradeDecisionOrder(ctx, decision.ID, order.ID, m.liveTrading)
 
 	if auditErr := m.audit(ctx, "order_submitted", "order", &order.ID, map[string]any{
 		"external_id": externalID,
@@ -413,6 +508,59 @@ func (m *OrderManager) ProcessSignal(
 		m.recordOrderMetric(order.Side, order.Status)
 
 		return nil
+	}
+}
+
+func (m *OrderManager) newTradeDecision(
+	strategyID, runID uuid.UUID,
+	plan TradingPlan,
+	marketType domain.MarketType,
+	side string,
+	proposedSize, approvedSize float64,
+	riskStatus domain.RiskDecisionStatus,
+	riskReasons []string,
+	status domain.TradeDecisionStatus,
+) *domain.TradeDecision {
+	decision := &domain.TradeDecision{
+		ID:              uuid.New(),
+		StrategyID:      &strategyID,
+		PipelineRunID:   &runID,
+		MarketType:      marketType.Normalize(),
+		InstrumentKey:   strings.TrimSpace(plan.Ticker),
+		Side:            domain.OrderSide(strings.ToLower(strings.TrimSpace(side))),
+		ExecutablePrice: plan.EntryPrice,
+		ProposedSize:    proposedSize,
+		ApprovedSize:    approvedSize,
+		RiskStatus:      riskStatus,
+		RiskReasons:     append([]string(nil), riskReasons...),
+		Status:          status,
+		CreatedAt:       m.currentTime(),
+		UpdatedAt:       m.currentTime(),
+	}
+	return decision
+}
+
+func (m *OrderManager) recordTradeDecision(ctx context.Context, decision *domain.TradeDecision) {
+	if m == nil || m.decisionRecorder == nil || decision == nil {
+		return
+	}
+	if err := m.decisionRecorder.RecordDecision(ctx, decision); err != nil {
+		m.logger.ErrorContext(ctx, "order_manager: record trade decision", "error", err, "decision_id", decision.ID)
+	}
+}
+
+func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, decisionID, orderID uuid.UUID, live bool) {
+	if m == nil || m.decisionRecorder == nil || decisionID == uuid.Nil || orderID == uuid.Nil {
+		return
+	}
+	var err error
+	if live {
+		err = m.decisionRecorder.AttachLiveOrder(ctx, decisionID, orderID)
+	} else {
+		err = m.decisionRecorder.AttachPaperOrder(ctx, decisionID, orderID)
+	}
+	if err != nil {
+		m.logger.ErrorContext(ctx, "order_manager: attach trade decision order", "error", err, "decision_id", decisionID, "order_id", orderID, "live", live)
 	}
 }
 

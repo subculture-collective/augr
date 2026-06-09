@@ -53,6 +53,8 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	t.Setenv("ALERT_DB_CONNECTION_CHANNELS", "email,pagerduty")
 	t.Setenv("ENABLE_SCHEDULER", "true")
 	t.Setenv("ENABLE_REDIS_CACHE", "false")
+	t.Setenv("LIVE_TRADING_ALLOWED_STRATEGIES", "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222")
+	t.Setenv("LIVE_TRADING_ALLOWED_BROKERS", "Alpaca,Binance")
 
 	cfg, err := Load()
 	if err != nil {
@@ -174,6 +176,19 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	if cfg.Features.EnableRedisCache {
 		t.Fatal("cfg.Features.EnableRedisCache = true, want false")
 	}
+
+	if len(cfg.LiveTradingAllowedStrategies) != 2 {
+		t.Fatalf("len(cfg.LiveTradingAllowedStrategies) = %d, want %d", len(cfg.LiveTradingAllowedStrategies), 2)
+	}
+	if cfg.LiveTradingAllowedStrategies[0] != "11111111-1111-1111-1111-111111111111" || cfg.LiveTradingAllowedStrategies[1] != "22222222-2222-2222-2222-222222222222" {
+		t.Fatalf("cfg.LiveTradingAllowedStrategies = %v, want parsed UUID strings", cfg.LiveTradingAllowedStrategies)
+	}
+	if len(cfg.LiveTradingAllowedBrokers) != 2 {
+		t.Fatalf("len(cfg.LiveTradingAllowedBrokers) = %d, want %d", len(cfg.LiveTradingAllowedBrokers), 2)
+	}
+	if cfg.LiveTradingAllowedBrokers[0] != "Alpaca" || cfg.LiveTradingAllowedBrokers[1] != "Binance" {
+		t.Fatalf("cfg.LiveTradingAllowedBrokers = %v, want parsed broker labels", cfg.LiveTradingAllowedBrokers)
+	}
 }
 
 func TestLoadReturnsTypeConversionErrors(t *testing.T) {
@@ -227,6 +242,12 @@ func TestLoadAppliesResilienceDefaults(t *testing.T) {
 	}
 	if cfg.LLM.ThrottleConcurrency != 4 {
 		t.Fatalf("cfg.LLM.ThrottleConcurrency = %d, want %d", cfg.LLM.ThrottleConcurrency, 4)
+	}
+	if len(cfg.LiveTradingAllowedStrategies) != 0 {
+		t.Fatalf("len(cfg.LiveTradingAllowedStrategies) = %d, want 0", len(cfg.LiveTradingAllowedStrategies))
+	}
+	if len(cfg.LiveTradingAllowedBrokers) != 0 {
+		t.Fatalf("len(cfg.LiveTradingAllowedBrokers) = %d, want 0", len(cfg.LiveTradingAllowedBrokers))
 	}
 }
 
@@ -782,6 +803,8 @@ func clearConfigEnv(t *testing.T) {
 		"ENABLE_REDIS_CACHE",
 		"ENABLE_AGENT_MEMORY",
 		"ENABLE_LIVE_TRADING",
+		"LIVE_TRADING_ALLOWED_STRATEGIES",
+		"LIVE_TRADING_ALLOWED_BROKERS",
 		"LLM_FALLBACK_PROVIDER",
 		"LLM_FALLBACK_MODEL",
 		"LLM_RETRY_MAX_ATTEMPTS",

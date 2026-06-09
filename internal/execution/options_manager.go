@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,10 +24,13 @@ type OptionsBroker interface {
 // and multi-leg strategies.
 type OptionsOrderManager struct {
 	broker       OptionsBroker
+	brokerName   string
 	orderRepo    repository.OrderRepository
 	positionRepo repository.PositionRepository
 	tradeRepo    repository.TradeRepository
 	riskEngine   risk.RiskEngine
+	liveTrading  bool
+	liveGate     LiveGateConfig
 	logger       *slog.Logger
 }
 
@@ -44,12 +48,43 @@ func NewOptionsOrderManager(
 	}
 	return &OptionsOrderManager{
 		broker:       broker,
+		brokerName:   "options",
 		orderRepo:    orderRepo,
 		positionRepo: positionRepo,
 		tradeRepo:    tradeRepo,
 		riskEngine:   riskEngine,
 		logger:       logger,
 	}
+}
+
+// WithBrokerName overrides the broker label used by the live-trading gate.
+func (m *OptionsOrderManager) WithBrokerName(name string) *OptionsOrderManager {
+	if m == nil {
+		return nil
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name != "" {
+		m.brokerName = name
+	}
+	return m
+}
+
+// WithLiveTrading toggles the live-execution path for options orders.
+func (m *OptionsOrderManager) WithLiveTrading(enabled bool) *OptionsOrderManager {
+	if m == nil {
+		return nil
+	}
+	m.liveTrading = enabled
+	return m
+}
+
+// WithLiveGate configures the live trading gate for options orders.
+func (m *OptionsOrderManager) WithLiveGate(gate LiveGateConfig) *OptionsOrderManager {
+	if m == nil {
+		return nil
+	}
+	m.liveGate = gate
+	return m
 }
 
 // ProcessOptionSignal handles a single-leg options trade: validate → risk check → submit → track.
@@ -77,6 +112,14 @@ func (m *OptionsOrderManager) ProcessOptionSignal(
 	if active {
 		m.logger.WarnContext(ctx, "options: kill switch active", "ticker", plan.Ticker)
 		return fmt.Errorf("options_manager: kill switch active, order blocked for %s", plan.Ticker)
+	}
+
+	if m.liveTrading {
+		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
+		if !allowed {
+			m.logger.WarnContext(ctx, "options: live execution denied", "ticker", plan.Ticker, "strategy_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
+			return fmt.Errorf("options_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
+		}
 	}
 
 	// 2. Build the order.
@@ -168,6 +211,14 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 	if active {
 		m.logger.WarnContext(ctx, "options: kill switch active for spread", "underlying", spread.Underlying)
 		return fmt.Errorf("options_manager: kill switch active, spread blocked for %s", spread.Underlying)
+	}
+
+	if m.liveTrading {
+		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
+		if !allowed {
+			m.logger.WarnContext(ctx, "options: live execution denied for spread", "underlying", spread.Underlying, "strategy_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
+			return fmt.Errorf("options_manager: live execution denied for spread %s: %s", spread.Underlying, denial.Message)
+		}
 	}
 
 	// 2. Create per-leg orders for tracking.

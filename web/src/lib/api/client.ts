@@ -48,6 +48,8 @@ import type {
   TrackedTicker,
   Trade,
   TradeListParams,
+  TradeDecision,
+  TradeDecisionListParams,
   UUID,
   WatchTerm,
   Conversation,
@@ -214,6 +216,16 @@ export class ApiClient {
 
   async listTrades(params: TradeListParams & PaginationParams = {}) {
     return this.requestList<Trade>('/api/v1/trades', { query: toQueryParams(params) });
+  }
+
+  async listTradeDecisions(params: TradeDecisionListParams & PaginationParams = {}) {
+    return this.requestList<TradeDecision>('/api/v1/journal/decisions', {
+      query: toQueryParams(params),
+    });
+  }
+
+  async getTradeDecision(id: UUID) {
+    return this.request<TradeDecision>(`/api/v1/journal/decisions/${id}`);
   }
 
   async listEvents(params: PaginationParams & { run_id?: UUID; event_kind?: string } = {}) {

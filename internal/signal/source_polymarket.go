@@ -19,6 +19,7 @@ import (
 // exceed a threshold or volume spikes beyond a rolling average multiplier.
 type PolymarketSource struct {
 	clobURL               string
+	gammaURL              string
 	client                *http.Client
 	interval              time.Duration
 	priceMoveThreshold    float64 // emit if |ΔpYES| >= this (e.g. 0.05 = 5pp)
@@ -43,6 +44,7 @@ type marketState struct {
 // PolymarketSourceConfig holds options for the Polymarket signal source.
 type PolymarketSourceConfig struct {
 	CLOBURL               string
+	GammaURL              string
 	Interval              time.Duration
 	PriceMoveThreshold    float64 // default 0.05
 	VolumeSpikeMultiplier float64 // default 3.0
@@ -54,6 +56,14 @@ type PolymarketSourceConfig struct {
 func NewPolymarketSource(cfg PolymarketSourceConfig, logger *slog.Logger) *PolymarketSource {
 	if cfg.CLOBURL == "" {
 		cfg.CLOBURL = "https://clob.polymarket.com"
+	}
+	if cfg.GammaURL == "" {
+		cfg.GammaURL = "https://gamma-api.polymarket.com"
+		if !strings.Contains(cfg.CLOBURL, "clob.polymarket.com") {
+			// Tests/local fakes often serve both market metadata and CLOB price
+			// responses from the same httptest server.
+			cfg.GammaURL = cfg.CLOBURL
+		}
 	}
 	if cfg.Interval == 0 {
 		cfg.Interval = 10 * time.Second
@@ -69,6 +79,7 @@ func NewPolymarketSource(cfg PolymarketSourceConfig, logger *slog.Logger) *Polym
 	}
 	return &PolymarketSource{
 		clobURL:               strings.TrimRight(cfg.CLOBURL, "/"),
+		gammaURL:              strings.TrimRight(cfg.GammaURL, "/"),
 		client:                &http.Client{Timeout: 10 * time.Second},
 		interval:              cfg.Interval,
 		priceMoveThreshold:    cfg.PriceMoveThreshold,
@@ -147,11 +158,31 @@ func (p *PolymarketSource) Start(ctx context.Context) (<-chan RawSignalEvent, er
 
 type clobMarketResp struct {
 	Data []struct {
-		Slug        string  `json:"market_slug"`
-		Question    string  `json:"question"`
-		ConditionID string  `json:"condition_id"`
-		Volume24h   jsonFloat `json:"volume_24hr"`
+		Slug        string      `json:"market_slug"`
+		Question    string      `json:"question"`
+		ConditionID string      `json:"condition_id"`
+		Volume24h   jsonFloat   `json:"volume_24hr"`
+		Tokens      []clobToken `json:"tokens"`
 	} `json:"data"`
+}
+
+type gammaMarketResp []struct {
+	Slug             string          `json:"slug"`
+	Question         string          `json:"question"`
+	ConditionID      string          `json:"conditionId"`
+	Volume24h        jsonFloat       `json:"volume24hrClob"`
+	FallbackVolume24 jsonFloat       `json:"volume24hr"`
+	ClobTokenIDs     flexibleStrings `json:"clobTokenIds"`
+	Outcomes         flexibleStrings `json:"outcomes"`
+	Active           bool            `json:"active"`
+	Closed           bool            `json:"closed"`
+	AcceptingOrders  bool            `json:"acceptingOrders"`
+	EnableOrderBook  bool            `json:"enableOrderBook"`
+}
+
+type clobToken struct {
+	TokenID string `json:"token_id"`
+	Outcome string `json:"outcome"`
 }
 
 type clobPricesResp struct {
@@ -168,7 +199,11 @@ func (p *PolymarketSource) poll(ctx context.Context, slug string) []RawSignalEve
 		return nil
 	}
 
-	yesPrice, err := p.fetchYesPrice(ctx, market.conditionID)
+	priceTokenID := market.yesTokenID
+	if priceTokenID == "" {
+		priceTokenID = market.conditionID
+	}
+	yesPrice, err := p.fetchYesPrice(ctx, priceTokenID)
 	if err != nil {
 		p.logger.Warn("polymarket source: fetch price failed",
 			slog.String("slug", slug), slog.Any("error", err))
@@ -247,6 +282,7 @@ func (p *PolymarketSource) poll(ctx context.Context, slug string) []RawSignalEve
 
 type clobMarketSummary struct {
 	conditionID string
+	yesTokenID  string
 	question    string
 	volume24h   float64
 }
@@ -283,7 +319,84 @@ func (f *jsonFloat) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("invalid float %q", trimmed)
 }
 
+type flexibleStrings []string
+
+func (s *flexibleStrings) UnmarshalJSON(data []byte) error {
+	var values []string
+	if err := json.Unmarshal(data, &values); err == nil {
+		*s = values
+		return nil
+	}
+	var encoded string
+	if err := json.Unmarshal(data, &encoded); err == nil {
+		if strings.TrimSpace(encoded) == "" {
+			*s = nil
+			return nil
+		}
+		if err := json.Unmarshal([]byte(encoded), &values); err != nil {
+			return err
+		}
+		*s = values
+		return nil
+	}
+	return fmt.Errorf("invalid string list %q", strings.TrimSpace(string(data)))
+}
+
 func (p *PolymarketSource) fetchMarket(ctx context.Context, slug string) (clobMarketSummary, error) {
+	if summary, err := p.fetchGammaMarket(ctx, slug); err == nil {
+		return summary, nil
+	}
+	return p.fetchClobMarket(ctx, slug)
+}
+
+func (p *PolymarketSource) fetchGammaMarket(ctx context.Context, slug string) (clobMarketSummary, error) {
+	u, err := url.Parse(p.gammaURL + "/markets")
+	if err != nil {
+		return clobMarketSummary{}, err
+	}
+	q := u.Query()
+	q.Set("slug", slug)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return clobMarketSummary{}, err
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return clobMarketSummary{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return clobMarketSummary{}, fmt.Errorf("gamma markets HTTP %d", resp.StatusCode)
+	}
+
+	var page gammaMarketResp
+	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
+		return clobMarketSummary{}, err
+	}
+	for _, m := range page {
+		if m.Slug != slug {
+			continue
+		}
+		if !m.Active || m.Closed || !m.AcceptingOrders || !m.EnableOrderBook {
+			return clobMarketSummary{}, fmt.Errorf("market %q is not accepting CLOB orders", slug)
+		}
+		volume := float64(m.Volume24h)
+		if volume == 0 {
+			volume = float64(m.FallbackVolume24)
+		}
+		return clobMarketSummary{
+			conditionID: m.ConditionID,
+			yesTokenID:  yesTokenID(m.ClobTokenIDs, m.Outcomes),
+			question:    m.Question,
+			volume24h:   volume,
+		}, nil
+	}
+	return clobMarketSummary{}, fmt.Errorf("no market for slug %q", slug)
+}
+
+func (p *PolymarketSource) fetchClobMarket(ctx context.Context, slug string) (clobMarketSummary, error) {
 	u, err := url.Parse(p.clobURL + "/markets")
 	if err != nil {
 		return clobMarketSummary{}, err
@@ -309,15 +422,42 @@ func (p *PolymarketSource) fetchMarket(ctx context.Context, slug string) (clobMa
 	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
 		return clobMarketSummary{}, err
 	}
-	if len(page.Data) == 0 {
-		return clobMarketSummary{}, fmt.Errorf("no market for slug %q", slug)
+	for _, m := range page.Data {
+		if m.Slug != slug {
+			continue
+		}
+		return clobMarketSummary{
+			conditionID: m.ConditionID,
+			yesTokenID:  yesTokenIDFromTokens(m.Tokens),
+			question:    m.Question,
+			volume24h:   float64(m.Volume24h),
+		}, nil
 	}
-	m := page.Data[0]
-	return clobMarketSummary{
-		conditionID: m.ConditionID,
-		question:    m.Question,
-		volume24h:   float64(m.Volume24h),
-	}, nil
+	return clobMarketSummary{}, fmt.Errorf("no market for slug %q", slug)
+}
+
+func yesTokenID(tokenIDs, outcomes []string) string {
+	for i, outcome := range outcomes {
+		if strings.EqualFold(strings.TrimSpace(outcome), "yes") && i < len(tokenIDs) {
+			return tokenIDs[i]
+		}
+	}
+	if len(tokenIDs) > 0 {
+		return tokenIDs[0]
+	}
+	return ""
+}
+
+func yesTokenIDFromTokens(tokens []clobToken) string {
+	for _, token := range tokens {
+		if strings.EqualFold(strings.TrimSpace(token.Outcome), "yes") {
+			return token.TokenID
+		}
+	}
+	if len(tokens) > 0 {
+		return tokens[0].TokenID
+	}
+	return ""
 }
 
 func (p *PolymarketSource) fetchYesPrice(ctx context.Context, conditionID string) (float64, error) {

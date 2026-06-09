@@ -60,28 +60,29 @@ type promptOverrideSource interface {
 }
 
 type realStrategyRunner struct {
-	cfg                 config.Config
-	globals             agent.GlobalSettings
-	dataService         marketDataService
-	runRepo             repository.PipelineRunRepository
-	snapshotRepo        repository.PipelineRunSnapshotRepository
-	decisionRepo        repository.AgentDecisionRepository
-	eventRepo           repository.AgentEventRepository
-	orderRepo           repository.OrderRepository
-	positionRepo        repository.PositionRepository
-	tradeRepo           repository.TradeRepository
-	auditLogRepo        repository.AuditLogRepository
-	riskEngine          risk.RiskEngine
-	metrics             *metrics.Metrics
-	notificationManager *notification.Manager
-	runRegistry         *agent.RunContextRegistry
-	llmBudget           *llm.Budget
-	promptOverrides     promptOverrideSource
-	logger              *slog.Logger
-	localPaperMu        sync.Mutex
-	localPaperBroker    *paper.PaperBroker
-	polymarketClient    *polymarketexecution.Client // nil if not configured
-	hub                 *api.Hub                    // nil until wired; optional WebSocket broadcast
+	cfg                   config.Config
+	globals               agent.GlobalSettings
+	dataService           marketDataService
+	runRepo               repository.PipelineRunRepository
+	snapshotRepo          repository.PipelineRunSnapshotRepository
+	decisionRepo          repository.AgentDecisionRepository
+	eventRepo             repository.AgentEventRepository
+	orderRepo             repository.OrderRepository
+	positionRepo          repository.PositionRepository
+	tradeRepo             repository.TradeRepository
+	auditLogRepo          repository.AuditLogRepository
+	riskEngine            risk.RiskEngine
+	tradeDecisionRecorder execution.DecisionRecorder
+	metrics               *metrics.Metrics
+	notificationManager   *notification.Manager
+	runRegistry           *agent.RunContextRegistry
+	llmBudget             *llm.Budget
+	promptOverrides       promptOverrideSource
+	logger                *slog.Logger
+	localPaperMu          sync.Mutex
+	localPaperBroker      *paper.PaperBroker
+	polymarketClient      *polymarketexecution.Client // nil if not configured
+	hub                   *api.Hub                    // nil until wired; optional WebSocket broadcast
 }
 
 func newRealStrategyRunner(
@@ -101,6 +102,7 @@ func newRealStrategyRunner(
 	runRegistry *agent.RunContextRegistry,
 	llmBudget *llm.Budget,
 	promptOverrides promptOverrideSource,
+	tradeDecisionRecorder execution.DecisionRecorder,
 	logger *slog.Logger,
 ) *realStrategyRunner {
 	if logger == nil {
@@ -108,25 +110,26 @@ func newRealStrategyRunner(
 	}
 
 	runner := &realStrategyRunner{
-		cfg:                 cfg,
-		globals:             globalSettingsFromConfig(cfg),
-		dataService:         dataService,
-		runRepo:             runRepo,
-		snapshotRepo:        snapshotRepo,
-		decisionRepo:        decisionRepo,
-		eventRepo:           eventRepo,
-		orderRepo:           orderRepo,
-		positionRepo:        positionRepo,
-		tradeRepo:           tradeRepo,
-		auditLogRepo:        auditLogRepo,
-		riskEngine:          riskEngine,
-		metrics:             appMetrics,
-		notificationManager: notificationManager,
-		runRegistry:         runRegistry,
-		llmBudget:           llmBudget,
-		promptOverrides:     promptOverrides,
-		logger:              logger,
-		localPaperBroker:    paper.NewPaperBroker(localPaperBuyingPower, 0, 0),
+		cfg:                   cfg,
+		globals:               globalSettingsFromConfig(cfg),
+		dataService:           dataService,
+		runRepo:               runRepo,
+		snapshotRepo:          snapshotRepo,
+		decisionRepo:          decisionRepo,
+		eventRepo:             eventRepo,
+		orderRepo:             orderRepo,
+		positionRepo:          positionRepo,
+		tradeRepo:             tradeRepo,
+		auditLogRepo:          auditLogRepo,
+		riskEngine:            riskEngine,
+		tradeDecisionRecorder: tradeDecisionRecorder,
+		metrics:               appMetrics,
+		notificationManager:   notificationManager,
+		runRegistry:           runRegistry,
+		llmBudget:             llmBudget,
+		promptOverrides:       promptOverrides,
+		logger:                logger,
+		localPaperBroker:      paper.NewPaperBroker(localPaperBuyingPower, 0, 0),
 	}
 	runner.setRiskPortfolioSnapshotSource(runner.localPaperBroker)
 
@@ -325,7 +328,7 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 		return nil, agent.PreparedRun{}, nil, nil, err
 	}
 
-	slog.Info("DEBUG: prepareStrategyRun returning successfully")
+	r.logger.Debug("prepareStrategyRun returning successfully")
 	return runner, prepared, strategyConfig, eventsCh, nil
 }
 
@@ -343,7 +346,7 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 	if len(bars) == 0 {
 		return agent.InitialStateSeed{}, fmt.Errorf("load ohlcv for %s: no bars returned", strategy.Ticker)
 	}
-	slog.Info("DEBUG: loadInitialState after OHLCV", slog.Int("bars", len(bars)))
+	r.logger.Debug("loadInitialState after OHLCV", slog.Int("bars", len(bars)))
 
 	seed := agent.InitialStateSeed{
 		Market: &agent.MarketData{
@@ -363,7 +366,7 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 		)
 	}
 
-	slog.Info("DEBUG: loadInitialState after fundamentals")
+	r.logger.Debug("loadInitialState after fundamentals")
 	newsFrom := to.Add(-strategyNewsLookback)
 	if articles, err := r.dataService.GetNews(ctx, strategy.MarketType, strategy.Ticker, newsFrom, to); err == nil {
 		seed.News = articles
@@ -376,7 +379,7 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 		)
 	}
 
-	slog.Info("DEBUG: loadInitialState after news")
+	r.logger.Debug("loadInitialState after news")
 	socialFrom := to.Add(-strategySocialLookback)
 	if snapshots, err := r.dataService.GetSocialSentiment(ctx, strategy.MarketType, strategy.Ticker, socialFrom, to); err == nil {
 		seed.Social = latestSocialSnapshot(snapshots)
@@ -394,7 +397,7 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 		)
 	}
 
-	slog.Info("DEBUG: loadInitialState after social sentiment")
+	r.logger.Debug("loadInitialState after social sentiment")
 	// Polymarket: load prediction market metadata for the market slug.
 	if strategy.MarketType.Normalize() == domain.MarketTypePolymarket && r.polymarketClient != nil {
 		pm, err := r.polymarketClient.GetMarketData(ctx, strategy.Ticker)
@@ -408,7 +411,7 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 		}
 	}
 
-	slog.Info("DEBUG: loadInitialState returning seed")
+	r.logger.Debug("loadInitialState returning seed")
 	return seed, nil
 }
 
@@ -706,6 +709,10 @@ func (r *realStrategyRunner) newOrderManager(strategy domain.Strategy, resolved 
 	if err != nil {
 		return nil, err
 	}
+	gate, err := r.liveGateForStrategy(strategy)
+	if err != nil {
+		return nil, err
+	}
 	r.setRiskPortfolioSnapshotSource(broker)
 
 	return execution.NewOrderManager(
@@ -722,7 +729,37 @@ func (r *realStrategyRunner) newOrderManager(strategy domain.Strategy, resolved 
 			FractionPct: resolved.RiskConfig.PositionSizePct / 100.0,
 		},
 		r.logger,
-	).WithMetrics(r.metrics), nil
+	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper), nil
+}
+
+func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (execution.LiveGateConfig, error) {
+	if r == nil || strategy.IsPaper || !r.cfg.Features.EnableLiveTrading {
+		return execution.LiveGateConfig{}, nil
+	}
+
+	allowedStrategies := make(map[uuid.UUID]bool, len(r.cfg.LiveTradingAllowedStrategies))
+	for _, raw := range r.cfg.LiveTradingAllowedStrategies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		strategyID, err := uuid.Parse(raw)
+		if err != nil {
+			return execution.LiveGateConfig{}, fmt.Errorf("parse LIVE_TRADING_ALLOWED_STRATEGIES value %q: %w", raw, err)
+		}
+		allowedStrategies[strategyID] = true
+	}
+
+	allowedBrokers := make(map[string]bool, len(r.cfg.LiveTradingAllowedBrokers))
+	for _, raw := range r.cfg.LiveTradingAllowedBrokers {
+		broker := strings.ToLower(strings.TrimSpace(raw))
+		if broker == "" {
+			continue
+		}
+		allowedBrokers[broker] = true
+	}
+
+	return execution.LiveGateConfig{EnableLiveTrading: true, AllowedStrategies: allowedStrategies, AllowedBrokers: allowedBrokers}, nil
 }
 
 func (r *realStrategyRunner) recordPipelineMetrics(run domain.PipelineRun) {

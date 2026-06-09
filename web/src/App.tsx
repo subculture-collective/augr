@@ -30,6 +30,7 @@ import { PolymarketPage } from '@/pages/polymarket-page'
 import { PolymarketAccountPage } from '@/pages/polymarket-account-page'
 import { PromptsPage } from '@/pages/prompts-page'
 import { GlossaryPage } from '@/pages/glossary-page'
+import { DecisionJournalPage } from '@/pages/decision-journal-page'
 import { ReliabilityPage } from '@/pages/reliability-page'
 import { SurfersOpsPage } from '@/pages/surfers-ops-page'
 
@@ -63,6 +64,7 @@ export function AppRoutes() {
           <Route path="portfolio" element={<PortfolioPage />} />
           <Route path="memories" element={<MemoriesPage />} />
           <Route path="prompts" element={<PromptsPage />} />
+          <Route path="journal" element={<DecisionJournalPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="risk" element={<RiskPage />} />
           <Route path="realtime" element={<RealtimePage />} />

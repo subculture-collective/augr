@@ -25,6 +25,52 @@ func TestPolymarketFetchMarketAcceptsStringVolume(t *testing.T) {
 	}
 }
 
+func TestPolymarketPollUsesGammaYesTokenForPriceLookup(t *testing.T) {
+	t.Parallel()
+
+	const (
+		slug        = "slug-1"
+		conditionID = "cond-1"
+		yesToken    = "yes-token"
+	)
+
+	var gotPriceToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/markets":
+			if got := r.URL.Query().Get("slug"); got != slug {
+				t.Fatalf("/markets slug = %q, want %q", got, slug)
+			}
+			fmt.Fprintf(w, `[{"slug":%q,"question":"Will it happen?","conditionId":%q,"clobTokenIds":[%q,"no-token"],"outcomes":["Yes","No"],"active":true,"closed":false,"acceptingOrders":true,"enableOrderBook":true,"volume24hrClob":321.5}]`, slug, conditionID, yesToken)
+		case "/price":
+			gotPriceToken = r.URL.Query().Get("token_id")
+			if gotPriceToken != yesToken {
+				http.Error(w, "wrong token", http.StatusNotFound)
+				return
+			}
+			if got := r.URL.Query().Get("side"); got != "BUY" {
+				t.Fatalf("/price side = %q, want BUY", got)
+			}
+			fmt.Fprint(w, `{"market":"slug-1","price":"0.61"}`)
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	p := NewPolymarketSource(PolymarketSourceConfig{CLOBURL: server.URL, Interval: time.Second}, nil)
+	p.client = server.Client()
+	p.state[slug] = &marketState{lastYesPrice: 0.50}
+
+	events := p.poll(context.Background(), slug)
+	if gotPriceToken != yesToken {
+		t.Fatalf("price token_id = %q, want %q", gotPriceToken, yesToken)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected price-move event when Gamma yes token is used")
+	}
+}
+
 func fetchMarketSummary(t *testing.T, body string) (*PolymarketSource, clobMarketSummary) {
 	t.Helper()
 

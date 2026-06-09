@@ -12,19 +12,21 @@ import (
 
 // Config contains application configuration loaded from the environment.
 type Config struct {
-	Environment     string
-	Server          ServerConfig
-	Database        DatabaseConfig
-	Redis           RedisConfig
-	LLM             LLMConfig
-	Embedding       EmbeddingConfig
-	DataProviders   DataProviderConfigs
-	Brokers         BrokerConfigs
-	Polygon         PolygonConnectionConfig
-	Risk            RiskConfig
-	Notifications   NotificationConfig
-	Features        FeatureFlags
-	TickerDiscovery TickerDiscoveryConfig
+	Environment                  string
+	Server                       ServerConfig
+	Database                     DatabaseConfig
+	Redis                        RedisConfig
+	LLM                          LLMConfig
+	Embedding                    EmbeddingConfig
+	DataProviders                DataProviderConfigs
+	Brokers                      BrokerConfigs
+	Polygon                      PolygonConnectionConfig
+	Risk                         RiskConfig
+	Notifications                NotificationConfig
+	Features                     FeatureFlags
+	LiveTradingAllowedStrategies []string
+	LiveTradingAllowedBrokers    []string
+	TickerDiscovery              TickerDiscoveryConfig
 }
 
 // TickerDiscoveryConfig holds settings for the automated ticker discovery pipeline.
@@ -677,6 +679,8 @@ func loadFromEnvironment() (Config, error) {
 			EnableLiveTrading:     enableLiveTrading,
 			EnableTickerDiscovery: enableTickerDiscovery,
 		},
+		LiveTradingAllowedStrategies: getEnvCSV("LIVE_TRADING_ALLOWED_STRATEGIES"),
+		LiveTradingAllowedBrokers:    getEnvCSV("LIVE_TRADING_ALLOWED_BROKERS"),
 		TickerDiscovery: TickerDiscoveryConfig{
 			Enabled:    enableTickerDiscovery,
 			Cron:       getEnvString("TICKER_DISCOVERY_CRON", "30 10 * * 1-5"),

@@ -46,6 +46,7 @@ const navigationItems: NavItem[] = [
       { to: '/strategies', label: 'Strategies', icon: BriefcaseBusiness, authRequired: true },
       { to: '/runs', label: 'Runs', icon: Activity, authRequired: true },
       { to: '/orders', label: 'Orders', icon: Receipt, authRequired: true },
+      { to: '/journal', label: 'Journal', icon: FileText, authRequired: true },
       { to: '/backtests', label: 'Backtests', icon: FlaskConical, authRequired: true },
       { to: '/portfolio', label: 'Portfolio', icon: BriefcaseBusiness, authRequired: true },
       { to: '/signals', label: 'Signals', icon: Signal, authRequired: true },

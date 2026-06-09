@@ -111,6 +111,15 @@ type TradeFilter struct {
 	EndDate    *time.Time
 }
 
+// TradeDecisionFilter defines supported filters when listing trade decisions.
+type TradeDecisionFilter struct {
+	StrategyID    *uuid.UUID
+	MarketType    domain.MarketType
+	Status        domain.TradeDecisionStatus
+	CreatedAfter  *time.Time
+	CreatedBefore *time.Time
+}
+
 // PolymarketAccountFilter defines filters when listing Polymarket accounts.
 type PolymarketAccountFilter struct {
 	Tracked     *bool
@@ -338,6 +347,17 @@ type TradeRepository interface {
 	Count(ctx context.Context, filter TradeFilter) (int, error)
 	GetByOrder(ctx context.Context, orderID uuid.UUID, filter TradeFilter, limit, offset int) ([]domain.Trade, error)
 	GetByPosition(ctx context.Context, positionID uuid.UUID, filter TradeFilter, limit, offset int) ([]domain.Trade, error)
+}
+
+// TradeDecisionJournalRepository provides access to persisted trade decisions.
+type TradeDecisionJournalRepository interface {
+	Create(ctx context.Context, decision *domain.TradeDecision) error
+	Get(ctx context.Context, id uuid.UUID) (*domain.TradeDecision, error)
+	List(ctx context.Context, filter TradeDecisionFilter, limit, offset int) ([]domain.TradeDecision, error)
+	// Count returns the total number of trade decisions matching the filter.
+	Count(ctx context.Context, filter TradeDecisionFilter) (int, error)
+	AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) error
+	AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error
 }
 
 // MemoryRepository provides storage and retrieval for agent memories.

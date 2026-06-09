@@ -1,0 +1,119 @@
+---
+title: "Jon-Becker/prediction-market-analysis: A framework for collecting and analyzing prediction market data, including the largest publicly available dataset of Polymarket and Kalshi market and trade data."
+source: "https://github.com/Jon-Becker/prediction-market-analysis#"
+author:
+published:
+created: 2026-06-07
+description: "A framework for collecting and analyzing prediction market data, including the largest publicly available dataset of Polymarket and Kalshi market and trade data. - Jon-Becker/prediction-market-analysis"
+tags:
+  - "clippings"
+---
+## Prediction Market Analysis
+
+A framework for analyzing prediction market data, including the largest publicly available dataset of Polymarket and Kalshi market and trade data. Provides tools for data collection, storage, and running analysis scripts that generate figures and statistics.
+
+## Overview
+
+This project enables research and analysis of prediction markets by providing:
+
+- Pre-collected datasets from Polymarket and Kalshi
+- Data collection indexers for gathering new data
+- Analysis framework for generating figures and statistics
+
+Currently supported features:
+
+- Market metadata collection (Kalshi & Polymarket)
+- Trade history collection via API and blockchain
+- Parquet-based storage with automatic progress saving
+- Extensible analysis script framework
+
+## Installation & Usage
+
+Requires Python 3.9+. Install dependencies with [uv](https://github.com/astral-sh/uv):
+
+```
+uv sync
+```
+
+Download and extract the pre-collected dataset (36GiB compressed):
+
+```
+make setup
+```
+
+This downloads `data.tar.zst` from [Cloudflare R2 Storage](https://s3.jbecker.dev/data.tar.zst) and extracts it to `data/`.
+
+### Data Collection
+
+Collect market and trade data from prediction market APIs:
+
+```
+make index
+```
+
+This opens an interactive menu to select which indexer to run. Data is saved to `data/kalshi/` and `data/polymarket/` directories. Progress is saved automatically, so you can interrupt and resume collection.
+
+### Running Analyses
+
+```
+make analyze
+```
+
+This opens an interactive menu to select which analysis to run. You can run all analyses or select a specific one. Output files (PNG, PDF, CSV, JSON) are saved to `output/`.
+
+### Packaging Data
+
+To compress the data directory for storage/distribution:
+
+```
+make package
+```
+
+This creates a zstd-compressed tar archive (`data.tar.zst`) and removes the `data/` directory.
+
+## Project Structure
+
+```
+├── src/
+│   ├── analysis/           # Analysis scripts
+│   │   ├── kalshi/         # Kalshi-specific analyses
+│   │   └── polymarket/     # Polymarket-specific analyses
+│   ├── indexers/           # Data collection indexers
+│   │   ├── kalshi/         # Kalshi API client and indexers
+│   │   └── polymarket/     # Polymarket API/blockchain indexers
+│   └── common/             # Shared utilities and interfaces
+├── data/                   # Data directory (extracted from data.tar.zst)
+│   ├── kalshi/
+│   │   ├── markets/
+│   │   └── trades/
+│   └── polymarket/
+│       ├── blocks/
+│       ├── markets/
+│       └── trades/
+├── docs/                   # Documentation
+└── output/                 # Analysis outputs (figures, CSVs)
+```
+
+## Documentation
+
+- [Data Schemas](https://github.com/Jon-Becker/prediction-market-analysis/blob/main/docs/SCHEMAS.md) - Parquet file schemas for markets and trades
+- [Writing Analyses](https://github.com/Jon-Becker/prediction-market-analysis/blob/main/docs/ANALYSIS.md) - Guide for writing custom analysis scripts
+
+## Contributing
+
+If you'd like to contribute to this project, please open a pull-request with your changes, as well as detailed information on what is changed, added, or improved.
+
+For more information, see the [contributing guide](https://github.com/Jon-Becker/prediction-market-analysis/blob/main/CONTRIBUTING.md).
+
+## Issues
+
+If you've found an issue or have a question, please open an issue [here](https://github.com/jon-becker/prediction-market-analysis/issues).
+
+## Research & Citations
+
+- Becker, J. (2026). *The Microstructure of Wealth Transfer in Prediction Markets*. Jbecker. [https://jbecker.dev/research/prediction-market-microstructure](https://jbecker.dev/research/prediction-market-microstructure)
+- Le, N. A. (2026). *Decomposing Crowd Wisdom: Domain-Specific Calibration Dynamics in Prediction Markets*. arXiv. [https://arxiv.org/abs/2602.19520](https://arxiv.org/abs/2602.19520)
+- Akey P., Gregoire, V., Harvie, N., Martineau, C. (2026). *Who Wins and Who Loses In Prediction Markets? Evidence from Polymarket*. SSRN. [https://papers.ssrn.com/sol3/papers.cfm?abstract\_id=6443103](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6443103)
+- Vedova, J. (2026). *Who Profits from Prediction Markets? Execution, not Information*. SSRN. [https://papers.ssrn.com/sol3/papers.cfm?abstract\_id=6191618](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6191618)
+
+If you have used or plan to use this dataset in your research, please reach out via [email](mailto:jonathan@jbecker.dev) or [Twitter](https://x.com/BeckerrJon) -- i'd love to hear about what you're using the data for! Additionally, feel free to open a PR and update this section with a link to your paper.

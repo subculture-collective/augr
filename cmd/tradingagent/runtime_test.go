@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -816,6 +817,35 @@ func TestRealStrategyRunnerLoadInitialState_PopulatesSeededInputs(t *testing.T) 
 	}
 }
 
+func TestRealStrategyRunnerLoadInitialState_DoesNotEmitDebugProgressAtInfo(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	t.Cleanup(func() {
+		slog.SetDefault(previous)
+	})
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	runner := &realStrategyRunner{
+		dataService: &stubMarketDataService{
+			ohlcv: []domain.OHLCV{
+				{Timestamp: time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC), Open: 100, High: 105, Low: 99, Close: 104, Volume: 1000},
+				{Timestamp: time.Date(2026, 4, 5, 12, 0, 0, 0, time.UTC), Open: 104, High: 109, Low: 103, Close: 108, Volume: 1200},
+			},
+			fundamentals: data.Fundamentals{Ticker: "AAPL"},
+			news:         []data.NewsArticle{{Title: "AAPL beats"}},
+			social:       []data.SocialSentiment{{Ticker: "AAPL", Score: 0.9, MeasuredAt: time.Date(2026, 4, 5, 11, 0, 0, 0, time.UTC)}},
+		},
+		logger: slogDiscardLogger(),
+	}
+
+	if _, err := runner.loadInitialState(context.Background(), domain.Strategy{Ticker: "AAPL", MarketType: domain.MarketTypeStock}); err != nil {
+		t.Fatalf("loadInitialState() error = %v", err)
+	}
+	if got := logs.String(); strings.Contains(got, `msg="DEBUG:`) {
+		t.Fatalf("found DEBUG-prefixed info log output: %s", got)
+	}
+}
+
 func TestRealStrategyRunnerNewBrokerForStrategy_ReusesFallbackPaperBroker(t *testing.T) {
 	t.Parallel()
 
@@ -880,6 +910,70 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 	}
 	if status.PositionLimits.CurrentTotalExposurePct == nil || *status.PositionLimits.CurrentTotalExposurePct != 0 {
 		t.Fatalf("CurrentTotalExposurePct = %+v, want pointer to 0", status.PositionLimits.CurrentTotalExposurePct)
+	}
+}
+
+func TestRuntimeLiveGateForStrategyParsesAllowlists(t *testing.T) {
+	t.Parallel()
+
+	strategyID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	runner := &realStrategyRunner{
+		cfg: config.Config{
+			Features:                     config.FeatureFlags{EnableLiveTrading: true},
+			LiveTradingAllowedStrategies: []string{strategyID.String()},
+			LiveTradingAllowedBrokers:    []string{"Alpaca", "Binance"},
+		},
+	}
+
+	gate, err := runner.liveGateForStrategy(domain.Strategy{ID: strategyID, IsPaper: false})
+	if err != nil {
+		t.Fatalf("liveGateForStrategy() error = %v", err)
+	}
+	if !gate.EnableLiveTrading {
+		t.Fatal("gate.EnableLiveTrading = false, want true")
+	}
+	if !gate.AllowedStrategies[strategyID] {
+		t.Fatal("strategy ID not allowlisted")
+	}
+	if !gate.AllowedBrokers["alpaca"] || !gate.AllowedBrokers["binance"] {
+		t.Fatalf("allowed brokers = %v, want normalized lowercase labels", gate.AllowedBrokers)
+	}
+}
+
+func TestRuntimeLiveGateForStrategyRejectsInvalidUUID(t *testing.T) {
+	t.Parallel()
+
+	runner := &realStrategyRunner{
+		cfg: config.Config{
+			Features:                     config.FeatureFlags{EnableLiveTrading: true},
+			LiveTradingAllowedStrategies: []string{"not-a-uuid"},
+			LiveTradingAllowedBrokers:    []string{"alpaca"},
+		},
+	}
+
+	_, err := runner.liveGateForStrategy(domain.Strategy{IsPaper: false})
+	if err == nil {
+		t.Fatal("liveGateForStrategy() error = nil, want UUID parse error")
+	}
+}
+
+func TestRuntimeLiveGateForStrategySkipsPaperParsing(t *testing.T) {
+	t.Parallel()
+
+	runner := &realStrategyRunner{
+		cfg: config.Config{
+			Features:                     config.FeatureFlags{EnableLiveTrading: true},
+			LiveTradingAllowedStrategies: []string{"not-a-uuid"},
+			LiveTradingAllowedBrokers:    []string{"alpaca"},
+		},
+	}
+
+	gate, err := runner.liveGateForStrategy(domain.Strategy{IsPaper: true})
+	if err != nil {
+		t.Fatalf("liveGateForStrategy() error = %v, want nil for paper strategy", err)
+	}
+	if gate.EnableLiveTrading || len(gate.AllowedStrategies) != 0 || len(gate.AllowedBrokers) != 0 {
+		t.Fatalf("gate = %+v, want zero-value gate for paper strategy", gate)
 	}
 }
 

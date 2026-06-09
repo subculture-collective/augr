@@ -84,6 +84,131 @@ describe('ApiClient', () => {
     await expect(client.listStrategies()).resolves.toEqual(payload)
   })
 
+  it('supports trade decision journal endpoints', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [
+            {
+              id: 'decision-1',
+              market_type: 'polymarket',
+              instrument_key: 'pm:market-123:YES',
+              side: 'buy',
+              fair_value: 0.52,
+              executable_price: 0.51,
+              spread: 0.01,
+              depth: 100,
+              gross_ev: 0.12,
+              net_ev: 0.08,
+              kelly_fraction: 0.25,
+              proposed_size: 50,
+              approved_size: 25,
+              risk_status: 'approved',
+              risk_reasons: [],
+              regime_tags: ['momentum'],
+              status: 'paper_ordered',
+              created_at: '2026-06-08T12:00:00Z',
+              updated_at: '2026-06-08T12:01:00Z',
+            },
+          ],
+          limit: 100,
+          offset: 0,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: 'decision-1',
+          market_type: 'polymarket',
+          instrument_key: 'pm:market-123:YES',
+          side: 'buy',
+          fair_value: 0.52,
+          executable_price: 0.51,
+          spread: 0.01,
+          depth: 100,
+          gross_ev: 0.12,
+          net_ev: 0.08,
+          kelly_fraction: 0.25,
+          proposed_size: 50,
+          approved_size: 25,
+          risk_status: 'approved',
+          risk_reasons: [],
+          regime_tags: ['momentum'],
+          status: 'paper_ordered',
+          created_at: '2026-06-08T12:00:00Z',
+          updated_at: '2026-06-08T12:01:00Z',
+        }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new ApiClient({ baseUrl: 'http://localhost:8080' })
+
+    await expect(
+      client.listTradeDecisions({ market_type: 'polymarket', status: 'paper_ordered', limit: 100 }),
+    ).resolves.toEqual({
+      data: [
+        {
+          id: 'decision-1',
+          market_type: 'polymarket',
+          instrument_key: 'pm:market-123:YES',
+          side: 'buy',
+          fair_value: 0.52,
+          executable_price: 0.51,
+          spread: 0.01,
+          depth: 100,
+          gross_ev: 0.12,
+          net_ev: 0.08,
+          kelly_fraction: 0.25,
+          proposed_size: 50,
+          approved_size: 25,
+          risk_status: 'approved',
+          risk_reasons: [],
+          regime_tags: ['momentum'],
+          status: 'paper_ordered',
+          created_at: '2026-06-08T12:00:00Z',
+          updated_at: '2026-06-08T12:01:00Z',
+        },
+      ],
+      limit: 100,
+      offset: 0,
+    })
+
+    await expect(client.getTradeDecision('decision-1')).resolves.toEqual({
+      id: 'decision-1',
+      market_type: 'polymarket',
+      instrument_key: 'pm:market-123:YES',
+      side: 'buy',
+      fair_value: 0.52,
+      executable_price: 0.51,
+      spread: 0.01,
+      depth: 100,
+      gross_ev: 0.12,
+      net_ev: 0.08,
+      kelly_fraction: 0.25,
+      proposed_size: 50,
+      approved_size: 25,
+      risk_status: 'approved',
+      risk_reasons: [],
+      regime_tags: ['momentum'],
+      status: 'paper_ordered',
+      created_at: '2026-06-08T12:00:00Z',
+      updated_at: '2026-06-08T12:01:00Z',
+    })
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const [listUrl] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(listUrl.toString()).toBe(
+      'http://localhost:8080/api/v1/journal/decisions?market_type=polymarket&status=paper_ordered&limit=100',
+    )
+
+    const [detailUrl] = fetchMock.mock.calls[1] as [URL, RequestInit]
+    expect(detailUrl.toString()).toBe('http://localhost:8080/api/v1/journal/decisions/decision-1')
+  })
+
   it('supports conversation list/create/message endpoints', async () => {
     const fetchMock = vi
       .fn()

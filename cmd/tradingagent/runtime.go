@@ -175,6 +175,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	orderRepo := pgrepo.NewOrderRepo(db.Pool)
 	positionRepo := pgrepo.NewPositionRepo(db.Pool)
 	tradeRepo := pgrepo.NewTradeRepo(db.Pool)
+	tradeDecisionRepo := pgrepo.NewTradeDecisionJournalRepo(db.Pool)
+	tradeDecisionRecorder := execution.NewTradeDecisionJournalRecorder(tradeDecisionRepo)
 	memoryRepo := pgrepo.NewMemoryRepo(db.Pool)
 	apiKeyRepo := pgrepo.NewAPIKeyRepo(db.Pool)
 	auditLogRepo := pgrepo.NewAuditLogRepo(db.Pool)
@@ -229,6 +231,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		Orders:                orderRepo,
 		Positions:             positionRepo,
 		Trades:                tradeRepo,
+		TradeDecisions:        tradeDecisionRepo,
 		Memories:              memoryRepo,
 		APIKeys:               apiKeyRepo,
 		Users:                 userRepo,
@@ -308,7 +311,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if strings.EqualFold(cfg.Environment, "smoke") {
 		pipeline := newSmokePipeline(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)
 		runner := newSmokeRunner(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)
-		strategyRunner := newSmokeStrategyRunner(runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, notificationManager, logger)
+		strategyRunner := newSmokeStrategyRunner(runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, notificationManager, tradeDecisionRecorder, logger)
 		deps.Runner = strategyRunner
 		sched = scheduler.NewScheduler(
 			strategyRepo,
@@ -409,6 +412,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			runRegistry,
 			sharedLLMBudget,
 			promptSettingsSvc,
+			tradeDecisionRecorder,
 			logger,
 		)
 		deps.Runner = strategyRunner
@@ -1021,14 +1025,15 @@ func newRedisHealthCheck(cfg config.Config) (api.HealthCheck, func()) {
 }
 
 type smokeStrategyRunner struct {
-	runner              *agent.Runner
-	runRepo             repository.PipelineRunRepository
-	decisionRepo        repository.AgentDecisionRepository
-	orderRepo           repository.OrderRepository
-	positionRepo        repository.PositionRepository
-	orderManager        *execution.OrderManager
-	notificationManager *notification.Manager
-	logger              *slog.Logger
+	runner                *agent.Runner
+	runRepo               repository.PipelineRunRepository
+	decisionRepo          repository.AgentDecisionRepository
+	orderRepo             repository.OrderRepository
+	positionRepo          repository.PositionRepository
+	orderManager          *execution.OrderManager
+	tradeDecisionRecorder execution.DecisionRecorder
+	notificationManager   *notification.Manager
+	logger                *slog.Logger
 }
 
 func newSmokeStrategyRunner(
@@ -1042,6 +1047,7 @@ func newSmokeStrategyRunner(
 	agentEventRepo repository.AgentEventRepository,
 	riskEngine risk.RiskEngine,
 	notificationManager *notification.Manager,
+	tradeDecisionRecorder execution.DecisionRecorder,
 	logger *slog.Logger,
 ) api.StrategyRunner {
 	broker := paper.NewPaperBroker(100_000, 0, 0)
@@ -1065,17 +1071,18 @@ func newSmokeStrategyRunner(
 			FractionPct: 0.05,
 		},
 		logger,
-	)
+	).WithDecisionRecorder(tradeDecisionRecorder)
 
 	return &smokeStrategyRunner{
-		runner:              runner,
-		runRepo:             runRepo,
-		decisionRepo:        decisionRepo,
-		orderRepo:           orderRepo,
-		positionRepo:        positionRepo,
-		orderManager:        orderManager,
-		notificationManager: notificationManager,
-		logger:              logger,
+		runner:                runner,
+		runRepo:               runRepo,
+		decisionRepo:          decisionRepo,
+		orderRepo:             orderRepo,
+		positionRepo:          positionRepo,
+		orderManager:          orderManager,
+		tradeDecisionRecorder: tradeDecisionRecorder,
+		notificationManager:   notificationManager,
+		logger:                logger,
 	}
 }
 

@@ -34,19 +34,20 @@ type Server struct {
 	redisHealth HealthCheck
 
 	// Repositories
-	strategies    repository.StrategyRepository
-	runs          repository.PipelineRunRepository
-	decisions     repository.AgentDecisionRepository
-	orders        repository.OrderRepository
-	positions     repository.PositionRepository
-	trades        repository.TradeRepository
-	memories      repository.MemoryRepository
-	users         repository.UserRepository
-	auditLog      repository.AuditLogRepository
-	conversations repository.ConversationRepository
-	snapshots     repository.PipelineRunSnapshotRepository
-	llmProvider   llm.Provider
-	events        repository.AgentEventRepository
+	strategies     repository.StrategyRepository
+	runs           repository.PipelineRunRepository
+	decisions      repository.AgentDecisionRepository
+	orders         repository.OrderRepository
+	positions      repository.PositionRepository
+	trades         repository.TradeRepository
+	tradeDecisions repository.TradeDecisionJournalRepository
+	memories       repository.MemoryRepository
+	users          repository.UserRepository
+	auditLog       repository.AuditLogRepository
+	conversations  repository.ConversationRepository
+	snapshots      repository.PipelineRunSnapshotRepository
+	llmProvider    llm.Provider
+	events         repository.AgentEventRepository
 
 	// Backtest
 	backtestConfigs repository.BacktestConfigRepository
@@ -178,6 +179,7 @@ type Deps struct {
 	Orders            repository.OrderRepository
 	Positions         repository.PositionRepository
 	Trades            repository.TradeRepository
+	TradeDecisions    repository.TradeDecisionJournalRepository
 	Memories          repository.MemoryRepository
 	APIKeys           repository.APIKeyRepository
 	Users             repository.UserRepository
@@ -303,6 +305,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		orders:                deps.Orders,
 		positions:             deps.Positions,
 		trades:                deps.Trades,
+		tradeDecisions:        deps.TradeDecisions,
 		memories:              deps.Memories,
 		users:                 deps.Users,
 		conversations:         deps.Conversations,
@@ -453,6 +456,12 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Route("/orders", func(or chi.Router) {
 			or.Get("/", s.handleListOrders)
 			or.Get("/{id}", s.handleGetOrder)
+		})
+
+		// Decision journal
+		v1.Route("/journal", func(jr chi.Router) {
+			jr.Get("/decisions", s.handleListTradeDecisions)
+			jr.Get("/decisions/{id}", s.handleGetTradeDecision)
 		})
 
 		// Trades

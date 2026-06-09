@@ -19,6 +19,7 @@ import (
 )
 
 const reportTypePaperValidation = "paper_validation"
+const reportTypeCalibration = "calibration"
 
 var paperValidationReportSpec = scheduler.ScheduleSpec{
 	Type:         scheduler.ScheduleTypeAfterHours,

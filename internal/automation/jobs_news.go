@@ -9,6 +9,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data/rss"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/stocktwits"
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
@@ -166,6 +167,9 @@ func (o *JobOrchestrator) socialScan(ctx context.Context) error {
 			return fmt.Errorf("social_scan: list strategies: %w", err)
 		}
 		for _, s := range strategies {
+			if s.MarketType.Normalize() != domain.MarketTypeStock {
+				continue
+			}
 			addTicker(s.Ticker)
 		}
 	}

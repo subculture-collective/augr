@@ -435,6 +435,38 @@ type mockAgentEventRepo struct {
 	createFn func(ctx context.Context, event *domain.AgentEvent) error
 }
 
+type mockDecisionRecorder struct {
+	mu          sync.Mutex
+	decisions   []*domain.TradeDecision
+	paperAttach []struct{ decisionID, orderID uuid.UUID }
+	liveAttach  []struct{ decisionID, orderID uuid.UUID }
+}
+
+func (r *mockDecisionRecorder) RecordDecision(_ context.Context, decision *domain.TradeDecision) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if decision == nil {
+		return nil
+	}
+	cp := *decision
+	r.decisions = append(r.decisions, &cp)
+	return nil
+}
+
+func (r *mockDecisionRecorder) AttachPaperOrder(_ context.Context, decisionID, orderID uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.paperAttach = append(r.paperAttach, struct{ decisionID, orderID uuid.UUID }{decisionID: decisionID, orderID: orderID})
+	return nil
+}
+
+func (r *mockDecisionRecorder) AttachLiveOrder(_ context.Context, decisionID, orderID uuid.UUID) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.liveAttach = append(r.liveAttach, struct{ decisionID, orderID uuid.UUID }{decisionID: decisionID, orderID: orderID})
+	return nil
+}
+
 type mockOrderMetrics struct{ records []string }
 
 func (m *mockOrderMetrics) RecordOrder(broker, side, status string) {
@@ -780,6 +812,138 @@ func TestProcessSignal_RiskCheckRejection(t *testing.T) {
 	}
 }
 
+func TestProcessSignal_RecordsPaperDecisionAndAttachesOrder(t *testing.T) {
+	broker := &mockBroker{}
+	riskEng := &mockRiskEngine{}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
+
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
+
+	err := mgr.ProcessSignal(
+		context.Background(),
+		defaultSignal(),
+		defaultPlan(),
+		uuid.New(),
+		uuid.New(),
+	)
+	if err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+
+	if len(recorder.decisions) != 1 {
+		t.Fatalf("expected 1 recorded decision, got %d", len(recorder.decisions))
+	}
+	decision := recorder.decisions[0]
+	if decision.Status != domain.TradeDecisionStatusCandidate {
+		t.Fatalf("decision status = %s, want %s", decision.Status, domain.TradeDecisionStatusCandidate)
+	}
+	if decision.RiskStatus != domain.RiskDecisionApproved {
+		t.Fatalf("decision risk status = %s, want %s", decision.RiskStatus, domain.RiskDecisionApproved)
+	}
+	if decision.InstrumentKey != "AAPL" {
+		t.Fatalf("decision instrument key = %q, want AAPL", decision.InstrumentKey)
+	}
+
+	if len(recorder.paperAttach) != 1 {
+		t.Fatalf("expected 1 paper attachment, got %d", len(recorder.paperAttach))
+	}
+	if len(recorder.liveAttach) != 0 {
+		t.Fatalf("expected 0 live attachments, got %d", len(recorder.liveAttach))
+	}
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("expected 1 created order, got %d", len(orderRepo.orders))
+	}
+	if got, want := recorder.paperAttach[0].orderID, orderRepo.orders[0].ID; got != want {
+		t.Fatalf("paper attachment orderID = %s, want %s", got, want)
+	}
+	if got, want := recorder.paperAttach[0].decisionID, decision.ID; got != want {
+		t.Fatalf("paper attachment decisionID = %s, want %s", got, want)
+	}
+}
+
+func TestProcessSignal_LiveGateBlocksBrokerSubmission(t *testing.T) {
+	broker := &mockBroker{}
+	riskEng := &mockRiskEngine{}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
+	strategyID := uuid.New()
+
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).
+		WithDecisionRecorder(recorder).
+		WithLiveTrading(true).
+		WithLiveGate(execution.LiveGateConfig{EnableLiveTrading: true, AllowedStrategies: map[uuid.UUID]bool{}, AllowedBrokers: map[string]bool{}})
+
+	err := mgr.ProcessSignal(context.Background(), defaultSignal(), defaultPlan(), strategyID, uuid.New())
+	if err == nil {
+		t.Fatal("expected live gate error")
+	}
+	if len(orderRepo.orders) != 0 {
+		t.Fatalf("expected 0 orders, got %d", len(orderRepo.orders))
+	}
+	if len(recorder.decisions) != 1 {
+		t.Fatalf("expected 1 recorded decision, got %d", len(recorder.decisions))
+	}
+	if recorder.decisions[0].Status != domain.TradeDecisionStatusRejected {
+		t.Fatalf("decision status = %s, want %s", recorder.decisions[0].Status, domain.TradeDecisionStatusRejected)
+	}
+	if len(recorder.paperAttach) != 0 || len(recorder.liveAttach) != 0 {
+		t.Fatalf("expected no attachments, got paper=%d live=%d", len(recorder.paperAttach), len(recorder.liveAttach))
+	}
+}
+
+func TestProcessSignal_RecordsLiveDecisionAndAttachesLiveOrder(t *testing.T) {
+	broker := &mockBroker{}
+	riskEng := &mockRiskEngine{}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
+	strategyID := uuid.New()
+	gate := execution.LiveGateConfig{
+		EnableLiveTrading: true,
+		AllowedStrategies: map[uuid.UUID]bool{strategyID: true},
+		AllowedBrokers:    map[string]bool{"alpaca": true},
+	}
+
+	mgr := execution.NewOrderManager(
+		broker,
+		"alpaca",
+		riskEng,
+		positionRepo,
+		orderRepo,
+		tradeRepo,
+		auditRepo,
+		nil,
+		execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: 0.02},
+		slog.Default(),
+	).WithDecisionRecorder(recorder).WithLiveTrading(true).WithLiveGate(gate)
+
+	err := mgr.ProcessSignal(context.Background(), defaultSignal(), defaultPlan(), strategyID, uuid.New())
+	if err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+	if len(recorder.decisions) != 1 {
+		t.Fatalf("expected 1 recorded decision, got %d", len(recorder.decisions))
+	}
+	if len(recorder.liveAttach) != 1 {
+		t.Fatalf("expected 1 live attachment, got %d", len(recorder.liveAttach))
+	}
+	if len(recorder.paperAttach) != 0 {
+		t.Fatalf("expected 0 paper attachments, got %d", len(recorder.paperAttach))
+	}
+	if got, want := recorder.liveAttach[0].decisionID, recorder.decisions[0].ID; got != want {
+		t.Fatalf("live attachment decisionID = %s, want %s", got, want)
+	}
+}
+
 func TestProcessSignal_PreTradeRejection(t *testing.T) {
 	broker := &mockBroker{}
 	riskEng := &mockRiskEngine{
@@ -1030,8 +1194,9 @@ func TestProcessSignal_BrokerSubmitError(t *testing.T) {
 	positionRepo := &mockPositionRepo{}
 	tradeRepo := &mockTradeRepo{}
 	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
 
-	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
 
 	err := mgr.ProcessSignal(
 		context.Background(),
@@ -1057,6 +1222,18 @@ func TestProcessSignal_BrokerSubmitError(t *testing.T) {
 	lastUpdate := orderRepo.updates[len(orderRepo.updates)-1]
 	if lastUpdate.Status != domain.OrderStatusRejected {
 		t.Errorf("expected rejected status, got %s", lastUpdate.Status)
+	}
+	if len(recorder.decisions) != 1 {
+		t.Fatalf("expected 1 decision recorded, got %d", len(recorder.decisions))
+	}
+	if len(recorder.paperAttach) != 1 {
+		t.Fatalf("expected 1 paper attachment, got %d", len(recorder.paperAttach))
+	}
+	if got, want := recorder.paperAttach[0].decisionID, recorder.decisions[0].ID; got != want {
+		t.Fatalf("paper attachment decisionID = %s, want %s", got, want)
+	}
+	if got, want := recorder.paperAttach[0].orderID, orderRepo.orders[0].ID; got != want {
+		t.Fatalf("paper attachment orderID = %s, want %s", got, want)
 	}
 
 	// Verify audit log has order_created and order_rejected.
