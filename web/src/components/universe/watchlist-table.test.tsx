@@ -1,18 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { WatchlistTable } from '@/components/universe/watchlist-table'
-
-const navigateMock = vi.fn()
-vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom')
-  return {
-    ...actual,
-    useNavigate: () => navigateMock,
-  }
-})
 
 function Wrapper({ children }: { children: React.ReactNode }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -45,6 +36,11 @@ describe('WatchlistTable', () => {
     expect(screen.getByText('AAPL')).toBeInTheDocument()
     expect(screen.getByText('0.82')).toBeInTheDocument()
     expect(screen.getByText('gap_up')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'AAPL' })).toHaveAttribute('href', '/stocks/AAPL')
+    expect(screen.getByRole('link', { name: 'Discovery' })).toHaveAttribute(
+      'href',
+      '/discovery?tickers=AAPL',
+    )
   })
 
   it('falls back to watch_score when score is absent', () => {
@@ -66,6 +62,7 @@ describe('WatchlistTable', () => {
 
     expect(screen.getByText('MSFT')).toBeInTheDocument()
     expect(screen.getByText('0.64')).toBeInTheDocument()
+    expect(screen.getByText('Active')).toBeInTheDocument()
   })
 
   it('renders 0.00 when score is undefined (null-guard)', () => {
@@ -90,7 +87,7 @@ describe('WatchlistTable', () => {
     expect(screen.getByText('0.00')).toBeInTheDocument()
   })
 
-  it('navigates to discovery with selected ticker when row clicked', () => {
+  it('shows current holding and strategy state badges when notes are present', () => {
     render(
       <WatchlistTable
         tickers={[
@@ -102,13 +99,19 @@ describe('WatchlistTable', () => {
             day_close: 250,
             change_pct: -0.5,
             gap_pct: 0,
+            active: true,
+            notes: 'Current holding',
+            strategy_count: 2,
+            position_count: 1,
           },
         ]}
       />,
       { wrapper: Wrapper },
     )
 
-    fireEvent.click(screen.getByText('TSLA'))
-    expect(navigateMock).toHaveBeenCalledWith('/discovery?tickers=TSLA')
+    expect(screen.getAllByText('Current holding').length).toBeGreaterThan(0)
+    expect(screen.getByText('2 strategies')).toBeInTheDocument()
+    expect(screen.getByText('1 positions')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'TSLA' })).toHaveAttribute('href', '/stocks/TSLA')
   })
 })

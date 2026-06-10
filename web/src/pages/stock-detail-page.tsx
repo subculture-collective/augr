@@ -87,6 +87,10 @@ function periodTimeframe(period: ChartPeriod): '5m' | '1d' {
   return period === '1D' || period === '5D' ? '5m' : '1d'
 }
 
+function periodBarLabel(period: ChartPeriod): string {
+  return periodTimeframe(period) === '5m' ? '5m bars' : 'daily bars'
+}
+
 function thirtyDaysStr(): string {
   const d = new Date()
   d.setDate(d.getDate() + 30)
@@ -234,38 +238,194 @@ function LoadingRows({ count = 3 }: { count?: number }) {
   )
 }
 
-function PriceChart({ bars }: { bars: HistoricalOHLCV[] }) {
+function movingAverage(bars: HistoricalOHLCV[], period: number): Array<number | null> {
+  return bars.map((_, index) => {
+    if (index + 1 < period) return null
+    const slice = bars.slice(index + 1 - period, index + 1)
+    const total = slice.reduce((sum, bar) => sum + bar.close, 0)
+    return total / period
+  })
+}
+
+function formatVolume(vol?: number): string {
+  if (vol == null) return '--'
+  if (vol >= 1_000_000_000) return `${(vol / 1_000_000_000).toFixed(1)}B`
+  if (vol >= 1_000_000) return `${(vol / 1_000_000).toFixed(1)}M`
+  if (vol >= 1_000) return `${(vol / 1_000).toFixed(1)}K`
+  return vol.toFixed(0)
+}
+
+function PriceChart({ bars, barLabel }: { bars: HistoricalOHLCV[]; barLabel: string }) {
+  const [showSma20, setShowSma20] = useState(true)
+  const [showSma50, setShowSma50] = useState(false)
+  const [showVolume, setShowVolume] = useState(false)
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null)
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
+
   if (bars.length === 0) {
     return null
   }
 
   const width = 720
-  const height = 240
+  const height = showVolume ? 304 : 256
   const paddingX = 28
   const paddingY = 22
+  const chartBottom = showVolume ? 232 : 232
   const lows = bars.map((bar) => bar.low)
   const highs = bars.map((bar) => bar.high)
-  const min = Math.min(...lows)
-  const max = Math.max(...highs)
+  const sma20 = movingAverage(bars, 20)
+  const sma50 = movingAverage(bars, 50)
+  const minCandidates = [...lows, ...sma20.filter((value): value is number => value != null), ...sma50.filter((value): value is number => value != null)]
+  const maxCandidates = [...highs, ...sma20.filter((value): value is number => value != null), ...sma50.filter((value): value is number => value != null)]
+  const min = Math.min(...minCandidates)
+  const max = Math.max(...maxCandidates)
   const span = max - min || 1
   const step = bars.length > 1 ? (width - paddingX * 2) / (bars.length - 1) : width - paddingX * 2
   const tickWidth = Math.max(2.5, Math.min(7, step * 0.35))
-  const yFor = (price: number) => height - paddingY - ((price - min) / span) * (height - paddingY * 2)
+  const plotHeight = chartBottom - paddingY
+  const yFor = (price: number) => chartBottom - ((price - min) / span) * plotHeight
   const firstBar = bars[0]
   const lastBar = bars[bars.length - 1]
+  const activeIndex = hoverIndex ?? selectedIndex ?? bars.length - 1
+  const activeBar = bars[activeIndex]
+  const activeLabel = hoverIndex != null ? 'Hovering' : selectedIndex != null ? 'Selected' : 'Latest'
+  const summaryMode = hoverIndex != null ? 'hover' : selectedIndex != null ? 'selected' : 'latest'
+  const volumeMax = Math.max(...bars.map((bar) => bar.volume)) || 1
+
+  const indexFromPoint = (clientX: number, rect: DOMRect) => {
+    const x = clientX - rect.left
+    const usableWidth = width - paddingX * 2
+    const ratio = Math.min(1, Math.max(0, (x - paddingX) / usableWidth))
+    return Math.max(0, Math.min(bars.length - 1, Math.round(ratio * (bars.length - 1))))
+  }
+
+  const activeSummary = activeBar
+    ? [
+        { label: 'Open', value: formatCurrency(activeBar.open) },
+        { label: 'High', value: formatCurrency(activeBar.high) },
+        { label: 'Low', value: formatCurrency(activeBar.low) },
+        { label: 'Close', value: formatCurrency(activeBar.close) },
+        { label: 'Volume', value: formatVolume(activeBar.volume) },
+      ]
+    : []
 
   return (
     <div className="space-y-2">
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-56 w-full">
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 bg-muted/10 p-3" data-testid="price-chart-summary">
+        <div className="space-y-1">
+          <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">{activeLabel} bar</p>
+          <p className="text-sm font-medium">{activeBar ? formatDate(activeBar.timestamp) : '--'}</p>
+          <p className="text-xs text-muted-foreground">
+            {activeBar ? `${activeBar.provider} · ${activeBar.timeframe} · ${summaryMode}` : 'No active bar'}
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-5">
+          {activeSummary.map((entry) => (
+            <div key={entry.label}>
+              <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{entry.label}</p>
+              <p className="font-mono">{entry.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-2 text-xs" data-testid="price-chart-controls">
+        <button
+          type="button"
+          aria-pressed={showSma20}
+          onClick={() => setShowSma20((value) => !value)}
+          className={`rounded-md border px-2.5 py-1 transition-colors ${
+            showSma20 ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-card text-muted-foreground'
+          }`}
+        >
+          SMA 20
+        </button>
+        <button
+          type="button"
+          aria-pressed={showSma50}
+          onClick={() => setShowSma50((value) => !value)}
+          className={`rounded-md border px-2.5 py-1 transition-colors ${
+            showSma50 ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-card text-muted-foreground'
+          }`}
+        >
+          SMA 50
+        </button>
+        <button
+          type="button"
+          aria-pressed={showVolume}
+          onClick={() => setShowVolume((value) => !value)}
+          className={`rounded-md border px-2.5 py-1 transition-colors ${
+            showVolume ? 'border-primary bg-primary/10 text-primary' : 'border-border bg-card text-muted-foreground'
+          }`}
+        >
+          Volume overlay
+        </button>
+      </div>
+
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-72 w-full"
+        onMouseLeave={() => setHoverIndex(null)}
+        onMouseMove={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect()
+          setHoverIndex(indexFromPoint(event.clientX, rect))
+        }}
+        onClick={(event) => {
+          const rect = event.currentTarget.getBoundingClientRect()
+          setSelectedIndex(indexFromPoint(event.clientX, rect))
+        }}
+      >
         <line x1={paddingX} y1={paddingY} x2={width - paddingX} y2={paddingY} className="stroke-border" />
-        <line x1={paddingX} y1={height / 2} x2={width - paddingX} y2={height / 2} className="stroke-border/70" />
-        <line x1={paddingX} y1={height - paddingY} x2={width - paddingX} y2={height - paddingY} className="stroke-border" />
+        <line x1={paddingX} y1={chartBottom / 2} x2={width - paddingX} y2={chartBottom / 2} className="stroke-border/70" />
+        <line x1={paddingX} y1={chartBottom} x2={width - paddingX} y2={chartBottom} className="stroke-border" />
         <text x={paddingX} y={paddingY - 7} className="fill-muted-foreground text-[11px]">
           ${max.toFixed(2)}
         </text>
-        <text x={paddingX} y={height - 6} className="fill-muted-foreground text-[11px]">
+        <text x={paddingX} y={chartBottom - 6} className="fill-muted-foreground text-[11px]">
           ${min.toFixed(2)}
         </text>
+        {showVolume && (
+          <g>
+            {bars.map((bar, index) => {
+              const x = paddingX + index * step
+              const barHeight = ((bar.volume / volumeMax) * 42) || 0
+              const isUp = bar.close >= bar.open
+              return (
+                <rect
+                  key={`volume-${bar.timestamp}-${index}`}
+                  x={x - tickWidth}
+                  y={height - 18 - barHeight}
+                  width={Math.max(2, tickWidth * 2)}
+                  height={barHeight}
+                  rx="1.5"
+                  className={isUp ? 'fill-emerald-400/35' : 'fill-red-400/35'}
+                />
+              )
+            })}
+          </g>
+        )}
+        {showSma20 && (
+          <polyline
+            fill="none"
+            strokeWidth="1.8"
+            className="stroke-sky-400"
+            points={sma20
+              .map((value, index) => (value == null ? null : `${paddingX + index * step},${yFor(value)}`))
+              .filter(Boolean)
+              .join(' ')}
+          />
+        )}
+        {showSma50 && (
+          <polyline
+            fill="none"
+            strokeWidth="1.8"
+            className="stroke-violet-400"
+            points={sma50
+              .map((value, index) => (value == null ? null : `${paddingX + index * step},${yFor(value)}`))
+              .filter(Boolean)
+              .join(' ')}
+          />
+        )}
         {bars.map((bar, index) => {
           const x = paddingX + index * step
           const highY = yFor(bar.high)
@@ -274,19 +434,26 @@ function PriceChart({ bars }: { bars: HistoricalOHLCV[] }) {
           const closeY = yFor(bar.close)
           const up = bar.close >= bar.open
           const strokeClass = up ? 'stroke-emerald-400' : 'stroke-red-400'
+          const isActive = index === activeIndex
 
           return (
             <g key={`${bar.timestamp}-${index}`} className={strokeClass}>
               <line x1={x} y1={highY} x2={x} y2={lowY} strokeWidth={Math.max(1, Math.min(2, step * 0.16))} />
               <line x1={x - tickWidth} y1={openY} x2={x} y2={openY} strokeWidth={Math.max(1.5, Math.min(2.5, step * 0.2))} />
               <line x1={x} y1={closeY} x2={x + tickWidth} y2={closeY} strokeWidth={Math.max(1.5, Math.min(2.5, step * 0.2))} />
+              {isActive && (
+                <>
+                  <line x1={x} y1={paddingY} x2={x} y2={chartBottom} className="stroke-primary/50" strokeDasharray="4 3" />
+                  <circle cx={x} cy={closeY} r="3.5" className="fill-primary" />
+                </>
+              )}
             </g>
           )
         })}
       </svg>
       <div className="flex justify-between text-xs text-muted-foreground">
         <span>{formatDate(firstBar?.timestamp)}</span>
-        <span>{bars.length.toLocaleString()} daily bars</span>
+        <span>{bars.length.toLocaleString()} {barLabel}</span>
         <span>{formatDate(lastBar?.timestamp)}</span>
       </div>
     </div>
@@ -300,6 +467,7 @@ export function StockDetailPage() {
   const navigate = useNavigate()
   const upperTicker = (ticker ?? '').toUpperCase()
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>('1Y')
+  const chartBarLabel = periodBarLabel(chartPeriod)
 
   // ---- data queries (parallel) ----
 
@@ -478,7 +646,7 @@ export function StockDetailPage() {
                     </button>
                   ))}
                 </div>
-                <span className="text-xs text-muted-foreground">OHLC daily bars</span>
+                <span className="text-xs text-muted-foreground">OHLC {chartBarLabel}</span>
               </div>
               {priceHistoryLoading ? (
                 <LoadingRows count={2} />
@@ -502,7 +670,7 @@ export function StockDetailPage() {
                     </p>
                   </div>
                   <div className="rounded-md border border-border bg-muted/10 p-2 text-primary">
-                    <PriceChart bars={priceHistory} />
+                    <PriceChart bars={priceHistory} barLabel={chartBarLabel} />
                   </div>
                 </div>
               )}

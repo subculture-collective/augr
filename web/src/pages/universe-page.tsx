@@ -14,6 +14,37 @@ import type { ScoredTicker, TrackedTicker } from '@/lib/api/types'
 
 type Tab = 'browser' | 'watchlist'
 
+function formatRelativeDate(value?: string): string {
+  if (!value) return 'Never scanned'
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Never scanned'
+
+  const diffMs = Date.now() - date.getTime()
+  const diffDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)))
+
+  if (diffDays === 0) return 'Today'
+  if (diffDays === 1) return 'Yesterday'
+  if (diffDays < 7) return `${diffDays}d ago`
+  if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function resolveTickerNotes(ticker: TrackedTicker): string[] {
+  const notes = (ticker as TrackedTicker & { notes?: string | string[] }).notes
+  if (Array.isArray(notes)) return notes.filter((note): note is string => typeof note === 'string')
+  if (typeof notes === 'string' && notes.trim()) return [notes.trim()]
+  return []
+}
+
+function resolveOptionalCount(
+  ticker: TrackedTicker,
+  key: 'strategy_count' | 'position_count',
+): number {
+  const value = (ticker as TrackedTicker & Record<string, unknown>)[key]
+  return typeof value === 'number' ? value : 0
+}
+
 export function UniversePage() {
   const [tab, setTab] = useState<Tab>('browser')
   const [search, setSearch] = useState('')
@@ -54,6 +85,12 @@ export function UniversePage() {
 
   const tickers: TrackedTicker[] = universeQuery.data?.data ?? []
   const watchlist = (watchlistQuery.data ?? []) as Array<ScoredTicker | TrackedTicker>
+  const pageActiveCount = tickers.filter((t) => t.active).length
+  const pageWatchlistedCount = tickers.filter((t) => t.watch_score > 0).length
+  const pageNeverScannedCount = tickers.filter((t) => !t.last_scanned).length
+  const pageHoldingCount = tickers.filter((t) =>
+    resolveTickerNotes(t).some((note) => /current holding/i.test(note)),
+  ).length
 
   return (
     <div className="space-y-4" data-testid="universe-page">
@@ -154,6 +191,16 @@ export function UniversePage() {
               <p className="py-4 text-sm text-destructive">Failed to load universe.</p>
             )}
 
+            {tickers.length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                <Badge variant="secondary">{tickers.length} on page</Badge>
+                <Badge variant="success">{pageActiveCount} active</Badge>
+                <Badge variant="outline">{pageWatchlistedCount} watchlisted</Badge>
+                <Badge variant="warning">{pageHoldingCount} holdings</Badge>
+                <Badge variant="secondary">{pageNeverScannedCount} never scanned</Badge>
+              </div>
+            )}
+
             {!universeQuery.isLoading && tickers.length === 0 && (
               <p className="py-4 text-sm text-muted-foreground">
                 No tickers found. Try refreshing the universe.
@@ -168,26 +215,51 @@ export function UniversePage() {
                       <tr className="border-b border-border text-xs font-medium uppercase tracking-wider text-muted-foreground">
                         <th className="px-2 py-2">Ticker</th>
                         <th className="px-2 py-2">Name</th>
-                        <th className="px-2 py-2">Active</th>
+                        <th className="px-2 py-2">State</th>
                         <th className="px-2 py-2">Exchange</th>
                         <th className="px-2 py-2">Index Group</th>
                         <th className="px-2 py-2 text-right">Watch Score</th>
                         <th className="px-2 py-2">Last Scanned</th>
+                        <th className="px-2 py-2">Links</th>
                       </tr>
                     </thead>
                     <tbody>
                       {tickers.map((t) => (
                         <tr key={t.ticker} className="border-b border-border/50 hover:bg-accent/30">
                           <td className="px-2 py-1.5 font-mono font-medium">
-                            <Link to={`/stocks/${t.ticker}`} className="text-primary hover:underline">
-                              {t.ticker}
-                            </Link>
+                            <div className="flex flex-col gap-1">
+                              <Link to={`/stocks/${t.ticker}`} className="text-primary hover:underline">
+                                {t.ticker}
+                              </Link>
+                              <Link
+                                to={`/discovery?tickers=${encodeURIComponent(t.ticker)}`}
+                                className="text-xs text-muted-foreground hover:text-primary hover:underline"
+                              >
+                                Discovery
+                              </Link>
+                            </div>
                           </td>
                           <td className="max-w-48 truncate px-2 py-1.5 text-muted-foreground">
-                            {t.name}
+                            <Link to={`/stocks/${t.ticker}`} className="hover:text-primary hover:underline">
+                              {t.name}
+                            </Link>
                           </td>
                           <td className="px-2 py-1.5">
-                            <span className={`inline-block size-2 rounded-full ${t.active ? 'bg-emerald-400' : 'bg-muted-foreground/30'}`} />
+                            <div className="flex flex-wrap gap-1">
+                              <Badge variant={t.active ? 'success' : 'secondary'}>
+                                {t.active ? 'Active' : 'Inactive'}
+                              </Badge>
+                              {t.watch_score > 0 && <Badge variant="outline">Watchlisted</Badge>}
+                              {resolveTickerNotes(t).some((note) => /current holding/i.test(note)) && (
+                                <Badge variant="warning">Current holding</Badge>
+                              )}
+                              {resolveOptionalCount(t, 'strategy_count') > 0 && (
+                                <Badge variant="secondary">{resolveOptionalCount(t, 'strategy_count')} strategies</Badge>
+                              )}
+                              {resolveOptionalCount(t, 'position_count') > 0 && (
+                                <Badge variant="secondary">{resolveOptionalCount(t, 'position_count')} positions</Badge>
+                              )}
+                            </div>
                           </td>
                           <td className="px-2 py-1.5 text-muted-foreground">{t.exchange}</td>
                           <td className="px-2 py-1.5">
@@ -197,9 +269,25 @@ export function UniversePage() {
                             {t.watch_score.toFixed(2)}
                           </td>
                           <td className="px-2 py-1.5 text-xs text-muted-foreground">
-                            {t.last_scanned
-                              ? new Date(t.last_scanned).toLocaleDateString()
-                              : '--'}
+                            <div className="flex flex-col gap-0.5">
+                              <span>{formatRelativeDate(t.last_scanned)}</span>
+                              {t.last_scanned && (
+                                <span>{new Date(t.last_scanned).toLocaleDateString()}</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <div className="flex flex-wrap gap-2 text-xs">
+                              <Link to={`/stocks/${t.ticker}`} className="text-primary hover:underline">
+                                Stock
+                              </Link>
+                              <Link
+                                to={`/discovery?tickers=${encodeURIComponent(t.ticker)}`}
+                                className="text-muted-foreground hover:text-primary hover:underline"
+                              >
+                                Discovery
+                              </Link>
+                            </div>
                           </td>
                         </tr>
                       ))}

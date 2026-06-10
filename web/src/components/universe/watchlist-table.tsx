@@ -1,9 +1,15 @@
-import { useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 
 import { Badge } from '@/components/ui/badge'
 import type { ScoredTicker, TrackedTicker } from '@/lib/api/types'
 
-type WatchlistTicker = ScoredTicker | TrackedTicker
+type WatchlistTickerEnrichment = {
+  notes?: string | string[]
+  strategy_count?: number
+  position_count?: number
+}
+
+type WatchlistTicker = (ScoredTicker | TrackedTicker) & WatchlistTickerEnrichment
 
 interface WatchlistTableProps {
   tickers: WatchlistTicker[]
@@ -45,9 +51,24 @@ function resolveTickerReasons(ticker: WatchlistTicker): string[] {
   return 'reasons' in ticker && Array.isArray(ticker.reasons) ? ticker.reasons : []
 }
 
-export function WatchlistTable({ tickers }: WatchlistTableProps) {
-  const navigate = useNavigate()
+function resolveTickerNotes(ticker: WatchlistTicker): string[] {
+  const notes = ticker.notes
+  if (Array.isArray(notes)) return notes.filter((note): note is string => typeof note === 'string')
+  if (typeof notes === 'string' && notes.trim()) return [notes.trim()]
+  if ('name' in ticker && /current holding/i.test(ticker.name)) return [ticker.name]
+  return []
+}
 
+function resolveCount(ticker: WatchlistTicker, key: 'strategy_count' | 'position_count'): number {
+  const value = ticker[key]
+  return typeof value === 'number' ? value : 0
+}
+
+function formatScore(score: number | undefined): string {
+  return (score ?? 0).toFixed(2)
+}
+
+export function WatchlistTable({ tickers }: WatchlistTableProps) {
   if (tickers.length === 0) {
     return <p className="py-4 text-sm text-muted-foreground">No scored tickers.</p>
   }
@@ -59,11 +80,13 @@ export function WatchlistTable({ tickers }: WatchlistTableProps) {
           <tr className="border-b border-border text-xs font-medium uppercase tracking-wider text-muted-foreground">
             <th className="px-2 py-2">Ticker</th>
             <th className="px-2 py-2">Score</th>
+            <th className="px-2 py-2">State</th>
             <th className="px-2 py-2 text-right">Change%</th>
             <th className="px-2 py-2 text-right">Gap%</th>
             <th className="px-2 py-2 text-right">Volume</th>
             <th className="px-2 py-2 text-right">Close</th>
             <th className="px-2 py-2">Reasons</th>
+            <th className="px-2 py-2">Links</th>
           </tr>
         </thead>
         <tbody>
@@ -74,16 +97,46 @@ export function WatchlistTable({ tickers }: WatchlistTableProps) {
             const dayVolume = resolveTickerDayVolume(t)
             const dayClose = resolveTickerDayClose(t)
             const reasons = resolveTickerReasons(t)
+            const notes = resolveTickerNotes(t)
+            const strategyCount = resolveCount(t, 'strategy_count')
+            const positionCount = resolveCount(t, 'position_count')
+            const currentHolding = notes.some((note) => /current holding/i.test(note))
 
             return (
-              <tr
-                key={t.ticker}
-                className="cursor-pointer border-b border-border/50 hover:bg-accent/30"
-                onClick={() => navigate(`/discovery?tickers=${encodeURIComponent(t.ticker)}`)}
-              >
-                <td className="px-2 py-1.5 font-mono font-medium">{t.ticker}</td>
+              <tr key={t.ticker} className="border-b border-border/50 hover:bg-accent/30">
                 <td className="px-2 py-1.5">
-                  <Badge variant={scoreBadgeVariant(score)}>{score.toFixed(2)}</Badge>
+                  <div className="flex flex-col gap-1">
+                    <Link to={`/stocks/${t.ticker}`} className="font-mono font-medium text-primary hover:underline">
+                      {t.ticker}
+                    </Link>
+                    <Link
+                      to={`/discovery?tickers=${encodeURIComponent(t.ticker)}`}
+                      className="text-xs text-muted-foreground hover:text-primary hover:underline"
+                    >
+                      Open discovery
+                    </Link>
+                  </div>
+                </td>
+                <td className="px-2 py-1.5">
+                  <Badge variant={scoreBadgeVariant(score)}>{formatScore(score)}</Badge>
+                </td>
+                <td className="px-2 py-1.5">
+                  <div className="flex flex-wrap gap-1">
+                    {'active' in t && (
+                      <Badge variant={t.active ? 'success' : 'secondary'}>
+                        {t.active ? 'Active' : 'Inactive'}
+                      </Badge>
+                    )}
+                    {score > 0 && <Badge variant="outline">Watchlist</Badge>}
+                    {currentHolding && <Badge variant="warning">Current holding</Badge>}
+                    {strategyCount > 0 && <Badge variant="secondary">{strategyCount} strategies</Badge>}
+                    {positionCount > 0 && <Badge variant="secondary">{positionCount} positions</Badge>}
+                    {notes.map((note) => (
+                      <Badge key={note} variant="outline" className="text-[10px]">
+                        {note}
+                      </Badge>
+                    ))}
+                  </div>
                 </td>
                 <td
                   className={`px-2 py-1.5 text-right font-mono ${
@@ -114,6 +167,19 @@ export function WatchlistTable({ tickers }: WatchlistTableProps) {
                         {reason}
                       </Badge>
                     ))}
+                  </div>
+                </td>
+                <td className="px-2 py-1.5">
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    <Link to={`/stocks/${t.ticker}`} className="text-primary hover:underline">
+                      Stock
+                    </Link>
+                    <Link
+                      to={`/discovery?tickers=${encodeURIComponent(t.ticker)}`}
+                      className="text-muted-foreground hover:text-primary hover:underline"
+                    >
+                      Discovery
+                    </Link>
                   </div>
                 </td>
               </tr>

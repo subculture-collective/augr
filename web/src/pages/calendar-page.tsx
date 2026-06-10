@@ -1,6 +1,8 @@
 import { useQuery, useMutation } from '@tanstack/react-query'
 import { CalendarDays, ExternalLink, Loader2, Sparkles } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
+import { Link } from 'react-router-dom'
 
 import { PageHeader } from '@/components/layout/page-header'
 import { Badge } from '@/components/ui/badge'
@@ -11,6 +13,26 @@ import { apiClient } from '@/lib/api/client'
 import type { SECFiling, FilingAnalysis } from '@/lib/api/types'
 
 type Tab = 'earnings' | 'economic' | 'filings' | 'ipo'
+
+type MonthItem =
+  | { kind: 'earnings'; date: string; symbol: string; title: string; href: string }
+  | { kind: 'economic'; date: string; title: string }
+  | {
+      kind: 'filing'
+      date: string
+      symbol: string
+      title: string
+      href: string
+      filing: SECFiling
+    }
+  | { kind: 'ipo'; date: string; symbol: string; title: string; href: string }
+
+type LocalNote = {
+  id: string
+  date: string
+  ticker?: string
+  title: string
+}
 
 function formatDate(iso: string): string {
   if (!iso) return '--'
@@ -34,6 +56,44 @@ function defaultTo(daysAhead: number): string {
   const d = new Date()
   d.setDate(d.getDate() + daysAhead)
   return d.toISOString().slice(0, 10)
+}
+
+function monthStartStr(date = new Date()): string {
+  return new Date(date.getFullYear(), date.getMonth(), 1).toISOString().slice(0, 10)
+}
+
+function monthEndStr(date = new Date()): string {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0).toISOString().slice(0, 10)
+}
+
+function monthLabel(date = new Date()): string {
+  return date.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+}
+
+function monthDayKey(date: string): string {
+  return new Date(date).toISOString().slice(0, 10)
+}
+
+function startOfMonth(date = new Date()): Date {
+  return new Date(date.getFullYear(), date.getMonth(), 1)
+}
+
+function endOfMonth(date = new Date()): Date {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0)
+}
+
+function buildMonthGrid(date = new Date()): Array<Date | null> {
+  const first = startOfMonth(date)
+  const last = endOfMonth(date)
+  const startOffset = first.getDay()
+  const days: Array<Date | null> = []
+
+  for (let i = 0; i < startOffset; i += 1) days.push(null)
+  for (let day = 1; day <= last.getDate(); day += 1) {
+    days.push(new Date(date.getFullYear(), date.getMonth(), day))
+  }
+  while (days.length % 7 !== 0) days.push(null)
+  return days
 }
 
 function sortBySoonestDate<T>(items: T[], getDate: (item: T) => string): T[] {
@@ -259,10 +319,15 @@ function FilingAnalysisResult({ analysis }: { analysis: FilingAnalysis }) {
   )
 }
 
-function FilingsTab() {
+function FilingsTab({
+  analyses,
+  setAnalyses,
+}: {
+  analyses: Record<string, FilingAnalysis>
+  setAnalyses: Dispatch<SetStateAction<Record<string, FilingAnalysis>>>
+}) {
   const [ticker, setTicker] = useState('')
   const [form, setForm] = useState('')
-  const [analyses, setAnalyses] = useState<Record<string, FilingAnalysis>>({})
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['calendar-filings', ticker, form],
@@ -368,7 +433,11 @@ function FilingsTab() {
                       </td>
                       <td className="px-2 py-1.5">
                         {analysis ? (
-                          <SentimentBadge sentiment={analysis.sentiment} />
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge variant="success">Analyzed</Badge>
+                            <SentimentBadge sentiment={analysis.sentiment} />
+                            <Badge variant="outline">{analysis.impact}</Badge>
+                          </div>
                         ) : (
                           <Button
                             variant="outline"
@@ -407,6 +476,134 @@ function FilingsTab() {
 
 function filingKey(f: SECFiling): string {
   return `${f.symbol}-${f.form}-${f.access_number}`
+}
+
+function MonthEventItem({ item, analysis }: { item: MonthItem; analysis?: FilingAnalysis }) {
+  if (item.kind === 'earnings') {
+    return (
+      <div className="space-y-1 rounded-md border border-border/50 bg-card/70 p-2 text-xs">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="outline">Earnings</Badge>
+          <Link to={item.href} className="font-mono font-medium text-primary hover:underline">
+            {item.symbol}
+          </Link>
+        </div>
+        <p className="text-muted-foreground">{item.title}</p>
+      </div>
+    )
+  }
+
+  if (item.kind === 'economic') {
+    return (
+      <div className="space-y-1 rounded-md border border-border/50 bg-card/70 p-2 text-xs">
+        <Badge variant="secondary">Economic</Badge>
+        <p className="text-sm font-medium">{item.title}</p>
+      </div>
+    )
+  }
+
+  if (item.kind === 'ipo') {
+    return (
+      <div className="space-y-1 rounded-md border border-border/50 bg-card/70 p-2 text-xs">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge variant="warning">IPO</Badge>
+          <Link to={item.href} className="font-mono font-medium text-primary hover:underline">
+            {item.symbol}
+          </Link>
+        </div>
+        <p className="text-muted-foreground">{item.title}</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2 rounded-md border border-border/50 bg-card/70 p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge variant="secondary">Filing</Badge>
+        <Link to={item.href} className="font-mono font-medium text-primary hover:underline">
+          {item.symbol}
+        </Link>
+        <Badge variant="outline">{item.filing.form}</Badge>
+        <a
+          href={item.filing.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-muted-foreground hover:text-primary hover:underline"
+        >
+          <ExternalLink className="size-3" />
+          SEC
+        </a>
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {analysis ? (
+          <>
+            <Badge variant="success">Analyzed</Badge>
+            <Badge variant="outline">{analysis.sentiment}</Badge>
+            <Badge variant="outline">{analysis.impact}</Badge>
+            <Badge variant="outline">{analysis.action.replace(/_/g, ' ')}</Badge>
+          </>
+        ) : (
+          <Badge variant="secondary">Not analyzed</Badge>
+        )}
+      </div>
+      {analysis && <p className="text-muted-foreground">{analysis.summary}</p>}
+    </div>
+  )
+}
+
+function MonthGrid({
+  days,
+  itemsByDay,
+  analyses,
+}: {
+  days: Array<Date | null>
+  itemsByDay: Map<string, MonthItem[]>
+  analyses: Record<string, FilingAnalysis>
+}) {
+  const weekLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-7 gap-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+        {weekLabels.map((label) => (
+          <div key={label} className="px-1">
+            {label}
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-7 gap-2">
+        {days.map((day, index) => {
+          if (!day) {
+            return <div key={`empty-${index}`} className="min-h-32 rounded-lg border border-dashed border-border/50 bg-muted/10" />
+          }
+
+          const key = day.toISOString().slice(0, 10)
+          const items = itemsByDay.get(key) ?? []
+
+          return (
+            <div key={key} className="min-h-32 rounded-lg border border-border/70 bg-card p-2 shadow-sm">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-medium">{day.getDate()}</span>
+                <span className="text-[11px] text-muted-foreground">{items.length} events</span>
+              </div>
+              <div className="mt-2 space-y-2">
+                {items.slice(0, 3).map((item) => (
+                  <MonthEventItem
+                    key={`${item.kind}-${item.title}-${item.date}`}
+                    item={item}
+                    analysis={item.kind === 'filing' ? analyses[filingKey(item.filing)] : undefined}
+                  />
+                ))}
+                {items.length > 3 && (
+                  <p className="text-[11px] text-muted-foreground">+{items.length - 3} more</p>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 // ---------- IPO Tab ----------
@@ -537,6 +734,146 @@ const tabs: { key: Tab; label: string }[] = [
 
 export function CalendarPage() {
   const [activeTab, setActiveTab] = useState<Tab>('earnings')
+  const [filingAnalyses, setFilingAnalyses] = useState<Record<string, FilingAnalysis>>({})
+  const [localNotes, setLocalNotes] = useState<LocalNote[]>([])
+  const [noteDate, setNoteDate] = useState(defaultFrom())
+  const [noteTicker, setNoteTicker] = useState('')
+  const [noteTitle, setNoteTitle] = useState('')
+
+  const overviewFrom = monthStartStr()
+  const overviewTo = monthEndStr()
+
+  const monthEarningsQuery = useQuery({
+    queryKey: ['calendar-month-earnings', overviewFrom, overviewTo],
+    queryFn: () => apiClient.getEarningsCalendar({ from: overviewFrom, to: overviewTo }),
+  })
+
+  const monthEconomicQuery = useQuery({
+    queryKey: ['calendar-month-economic'],
+    queryFn: () => apiClient.getEconomicCalendar(),
+    staleTime: 60_000,
+  })
+
+  const monthFilingsQuery = useQuery({
+    queryKey: ['calendar-month-filings', overviewFrom, overviewTo],
+    queryFn: () => apiClient.getFilings({ from: overviewFrom, to: overviewTo }),
+  })
+
+  const monthIpoQuery = useQuery({
+    queryKey: ['calendar-month-ipo', overviewFrom, overviewTo],
+    queryFn: () => apiClient.getIPOCalendar({ from: overviewFrom, to: overviewTo }),
+  })
+
+  const monthDays = useMemo(() => buildMonthGrid(new Date()), [])
+
+  const monthItemsByDay = useMemo(() => {
+    const month = new Date().getMonth()
+    const year = new Date().getFullYear()
+    const map = new Map<string, MonthItem[]>()
+
+    const addItem = (date: string, item: MonthItem) => {
+      const key = monthDayKey(date)
+      const existing = map.get(key)
+      if (existing) existing.push(item)
+      else map.set(key, [item])
+    }
+
+    ;(monthEarningsQuery.data ?? [])
+      .filter((event) => {
+        const d = new Date(event.date)
+        return d.getFullYear() === year && d.getMonth() === month
+      })
+      .forEach((event) => {
+        addItem(event.date, {
+          kind: 'earnings',
+          date: event.date,
+          symbol: event.symbol,
+          title: `${event.hour.toUpperCase()} · Q${event.quarter} ${event.year}`,
+          href: `/stocks/${event.symbol}`,
+        })
+      })
+
+    ;(monthEconomicQuery.data ?? [])
+      .filter((event) => {
+        const d = new Date(event.time)
+        return d.getFullYear() === year && d.getMonth() === month
+      })
+      .forEach((event) => {
+        addItem(event.time, {
+          kind: 'economic',
+          date: event.time,
+          title: `${event.event} · ${event.country} · ${event.impact}`,
+        })
+      })
+
+    ;(monthFilingsQuery.data ?? [])
+      .filter((filing) => {
+        const d = new Date(filing.filed_date)
+        return d.getFullYear() === year && d.getMonth() === month
+      })
+      .forEach((filing) => {
+        addItem(filing.filed_date, {
+          kind: 'filing',
+          date: filing.filed_date,
+          symbol: filing.symbol,
+          title: `${filing.form} filed ${formatDate(filing.filed_date)}`,
+          href: `/stocks/${filing.symbol}`,
+          filing,
+        })
+      })
+
+    ;(monthIpoQuery.data ?? []).forEach((event) => {
+      addItem(event.date, {
+        kind: 'ipo',
+        date: event.date,
+        symbol: event.symbol,
+        title: `${event.name} · ${event.status}`,
+        href: `/stocks/${event.symbol}`,
+      })
+    })
+
+    return map
+  }, [monthEarningsQuery.data, monthEconomicQuery.data, monthFilingsQuery.data, monthIpoQuery.data])
+
+  const monthMetrics = useMemo(() => {
+    const filings = monthFilingsQuery.data ?? []
+    const analyzed = filings.filter((filing) => filingKey(filing) in filingAnalyses).length
+    return {
+      earnings: monthEarningsQuery.data?.length ?? 0,
+      economic: monthEconomicQuery.data?.filter((event) => {
+        const d = new Date(event.time)
+        const now = new Date()
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+      }).length ?? 0,
+      filings: filings.filter((filing) => {
+        const d = new Date(filing.filed_date)
+        const now = new Date()
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+      }).length,
+      ipo: monthIpoQuery.data?.length ?? 0,
+      analyzed,
+    }
+  }, [filingAnalyses, monthEconomicQuery.data, monthEarningsQuery.data, monthFilingsQuery.data, monthIpoQuery.data])
+
+  const addLocalNote = () => {
+    const trimmedTitle = noteTitle.trim()
+    if (!trimmedTitle) return
+
+    setLocalNotes((prev) => [
+      {
+        id: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${prev.length}`,
+        date: noteDate,
+        ticker: noteTicker.trim() ? noteTicker.trim().toUpperCase() : undefined,
+        title: trimmedTitle,
+      },
+      ...prev,
+    ])
+    setNoteTitle('')
+    setNoteTicker('')
+  }
+
+  const overviewLoading =
+    monthEarningsQuery.isLoading || monthEconomicQuery.isLoading || monthFilingsQuery.isLoading || monthIpoQuery.isLoading
 
   return (
     <div className="space-y-4" data-testid="calendar-page">
@@ -545,6 +882,97 @@ export function CalendarPage() {
         description="Earnings, economic events, SEC filings, and IPOs."
         meta={<CalendarDays className="size-4 text-muted-foreground" />}
       />
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex flex-wrap items-center gap-2">
+            <span>This month at a glance</span>
+            <Badge variant="secondary">{monthLabel()}</Badge>
+          </CardTitle>
+          <p className="text-sm text-muted-foreground">
+            Stock links, SEC links, and filing analysis badges are shown inline. Local notes stay in this browser session only.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-2 text-xs">
+            <Badge variant="secondary">{monthMetrics.earnings} earnings</Badge>
+            <Badge variant="secondary">{monthMetrics.economic} economic</Badge>
+            <Badge variant="secondary">{monthMetrics.filings} filings</Badge>
+            <Badge variant="secondary">{monthMetrics.ipo} IPOs</Badge>
+            <Badge variant="success">{monthMetrics.analyzed} filings analyzed locally</Badge>
+          </div>
+
+          {overviewLoading && <p className="text-xs text-muted-foreground">Loading month summary…</p>}
+
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.9fr)]">
+            <MonthGrid days={monthDays} itemsByDay={monthItemsByDay} analyses={filingAnalyses} />
+
+            <div className="space-y-3">
+              <Card className="border-border/70 bg-card/80">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base">Local session note</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="text-xs text-muted-foreground">
+                    This is a local-only placeholder for event notes. It is not saved to the backend.
+                  </p>
+                  <div className="grid gap-2">
+                    <label className="space-y-1">
+                      <span className="text-xs text-muted-foreground">Date</span>
+                      <Input type="date" value={noteDate} onChange={(e) => setNoteDate(e.target.value)} />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-xs text-muted-foreground">Ticker (optional)</span>
+                      <Input
+                        placeholder="AAPL"
+                        value={noteTicker}
+                        onChange={(e) => setNoteTicker(e.target.value.toUpperCase())}
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-xs text-muted-foreground">Note</span>
+                      <Input
+                        placeholder="Why this event matters"
+                        value={noteTitle}
+                        onChange={(e) => setNoteTitle(e.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={addLocalNote} disabled={!noteTitle.trim()}>
+                    Add local note
+                  </Button>
+                </CardContent>
+              </Card>
+
+              <div className="space-y-2 rounded-lg border border-border/70 bg-muted/10 p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">Session notes</span>
+                  <Badge variant="outline">{localNotes.length}</Badge>
+                </div>
+                {localNotes.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">No local notes yet.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {localNotes.map((note) => (
+                      <li key={note.id} className="rounded-md border border-border/50 bg-card/80 p-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-muted-foreground">{formatDate(note.date)}</span>
+                          {note.ticker ? (
+                            <Link to={`/stocks/${note.ticker}`} className="font-mono text-xs text-primary hover:underline">
+                              {note.ticker}
+                            </Link>
+                          ) : null}
+                        </div>
+                        <p className="mt-1 text-sm">{note.title}</p>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -569,7 +997,9 @@ export function CalendarPage() {
         <CardContent>
           {activeTab === 'earnings' && <EarningsTab />}
           {activeTab === 'economic' && <EconomicTab />}
-          {activeTab === 'filings' && <FilingsTab />}
+          {activeTab === 'filings' && (
+            <FilingsTab analyses={filingAnalyses} setAnalyses={setFilingAnalyses} />
+          )}
           {activeTab === 'ipo' && <IPOTab />}
         </CardContent>
       </Card>

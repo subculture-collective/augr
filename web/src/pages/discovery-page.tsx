@@ -1,6 +1,7 @@
 import { useMutation } from '@tanstack/react-query'
 import { AlertTriangle, ChevronDown, ChevronUp, Loader2, Sparkles } from 'lucide-react'
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 
 import { DiscoveryPipeline } from '@/components/discovery/discovery-pipeline'
 import { DiscoveryWinnerCard } from '@/components/discovery/discovery-winner-card'
@@ -8,11 +9,23 @@ import { PageHeader } from '@/components/layout/page-header'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { apiClient } from '@/lib/api/client'
+import { ApiClientError, apiClient } from '@/lib/api/client'
 import type { DiscoveryResult, DiscoveryRunRequest } from '@/lib/api/types'
 
+const DEFAULT_DISCOVERY_TICKERS = 'AAPL, MSFT, GOOGL, TSLA, NVDA'
+
+function initialTickersFromSearch(params: URLSearchParams): string {
+  const raw = params.get('tickers') ?? params.get('ticker') ?? ''
+  const parsed = raw
+    .split(',')
+    .map((ticker) => ticker.trim().toUpperCase())
+    .filter(Boolean)
+  return parsed.length > 0 ? parsed.join(', ') : DEFAULT_DISCOVERY_TICKERS
+}
+
 export function DiscoveryPage() {
-  const [tickers, setTickers] = useState('AAPL, MSFT, GOOGL, TSLA, NVDA')
+  const [searchParams] = useSearchParams()
+  const [tickers, setTickers] = useState(() => initialTickersFromSearch(searchParams))
   const [marketType, setMarketType] = useState('')
   const [maxWinners, setMaxWinners] = useState(3)
   const [dryRun, setDryRun] = useState(false)
@@ -23,6 +36,11 @@ export function DiscoveryPage() {
   })
 
   const result: DiscoveryResult | undefined = mutation.data
+  const error = mutation.error
+
+  const isRateLimited =
+    error instanceof ApiClientError &&
+    (error.status === 429 || error.code === 'ERR_RATE_LIMITED' || /rate limit/i.test(error.message))
 
   function handleRun() {
     const parsed = tickers
@@ -121,8 +139,31 @@ export function DiscoveryPage() {
       )}
 
       {/* Error state */}
-      {mutation.isError && (
-        <Card>
+      {mutation.isError && isRateLimited && (
+        <Card className="border-caution/40 bg-caution/5" data-testid="discovery-rate-limit">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-caution">
+              <AlertTriangle className="size-4" />
+              Discovery rate limited
+            </CardTitle>
+            <CardDescription>
+              The API is asking us to slow down before trying again.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm text-muted-foreground">
+            <p>Wait a bit, retry later, or reduce how often you run discovery.</p>
+            <p className="font-mono text-xs text-caution">
+              {error?.message ?? 'Rate limit exceeded'}
+            </p>
+            <Button type="button" variant="outline" size="sm" onClick={handleRun} disabled={mutation.isPending || !tickers.trim()}>
+              Retry discovery
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {mutation.isError && !isRateLimited && (
+        <Card data-testid="discovery-error">
           <CardContent className="py-6">
             <p className="text-sm text-destructive">
               Discovery failed: {mutation.error instanceof Error ? mutation.error.message : 'Unknown error'}

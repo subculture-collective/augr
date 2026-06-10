@@ -616,7 +616,7 @@ export class ApiClient {
     return this.request<EconomicEvent[]>('/api/v1/calendar/economic');
   }
 
-  async getFilings(params: { ticker?: string; form?: string } = {}) {
+  async getFilings(params: { ticker?: string; form?: string; from?: string; to?: string } = {}) {
     return this.request<SECFiling[]>('/api/v1/calendar/filings', { query: toQueryParams(params) });
   }
 

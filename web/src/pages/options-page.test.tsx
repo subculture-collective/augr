@@ -43,6 +43,23 @@ const mockOptionsChain = vi.hoisted((): OptionSnapshot[] => [
     volume: 845,
     open_interest: 2468,
   },
+  {
+    contract: {
+      occ_symbol: 'TSLA260717C00110000',
+      underlying: 'TSLA',
+      option_type: 'call',
+      strike: 110,
+      expiry: '2026-07-17',
+      multiplier: 100,
+    },
+    greeks: { delta: 0.4, gamma: 0.01, theta: -0.02, vega: 0.08, iv: 0.27 },
+    bid: 8.1,
+    ask: 8.4,
+    mid: 8.25,
+    last: 8.3,
+    volume: 600,
+    open_interest: 1800,
+  },
 ])
 
 const mockOpportunities = vi.hoisted((): ResearchOpportunity[] => [
@@ -108,6 +125,26 @@ describe('OptionsPage', () => {
     expect(screen.getByTestId('options-page')).toBeInTheDocument()
   })
 
+  it('offers quick-pick tickers without auto-loading', async () => {
+    const user = userEvent.setup()
+
+    renderAt()
+
+    await user.click(screen.getByRole('button', { name: 'AAPL' }))
+
+    expect(screen.getByRole<HTMLInputElement>('textbox', { name: /underlying ticker/i }).value).toBe('AAPL')
+    expect(apiClientMock.getOptionsChain).not.toHaveBeenCalled()
+  })
+
+  it('shows truthful no-ticker empty states before any lookup', () => {
+    renderAt()
+
+    expect(screen.getByTestId('options-empty')).toHaveTextContent('No ticker selected yet. Search for a ticker to view its options chain.')
+    expect(screen.getByTestId('options-opportunities-no-ticker')).toHaveTextContent(
+      'No ticker selected yet. Search a ticker above to enable the scanner.',
+    )
+  })
+
   it('seeds ticker input from ?ticker= URL param and loads chain', async () => {
     apiClientMock.getOptionsChain.mockResolvedValueOnce(mockOptionsChain)
     apiClientMock.listOptionsOpportunities.mockResolvedValueOnce({ data: mockOpportunities })
@@ -123,8 +160,38 @@ describe('OptionsPage', () => {
 
     expect(screen.getByRole<HTMLInputElement>('textbox', { name: /underlying ticker/i }).value).toBe('TSLA')
     expect(await screen.findByText('Expiry 2026-06-19')).toBeInTheDocument()
-    expect(screen.getByText('call')).toBeInTheDocument()
+    expect(screen.getAllByText('call')[0]).toBeInTheDocument()
     expect(screen.getByText('100.00')).toBeInTheDocument()
+  })
+
+  it('switches among loaded expiries and refetches chain and opportunities', async () => {
+    const user = userEvent.setup()
+    apiClientMock.getOptionsChain.mockResolvedValue(mockOptionsChain)
+    apiClientMock.listOptionsOpportunities.mockResolvedValue({ data: mockOpportunities })
+
+    renderAt('?ticker=TSLA')
+
+    await screen.findByRole('option', { name: '2026-07-17' })
+    const expirySelect = screen.getByLabelText('Loaded expiries')
+    expect(expirySelect).toHaveValue('')
+
+    await user.selectOptions(expirySelect, '2026-07-17')
+
+    await waitFor(() => {
+      expect(apiClientMock.getOptionsChain).toHaveBeenLastCalledWith(
+        'TSLA',
+        expect.objectContaining({ expiry: '2026-07-17', type: undefined }),
+      )
+    })
+    await waitFor(() => {
+      expect(apiClientMock.listOptionsOpportunities).toHaveBeenLastCalledWith(
+        'TSLA',
+        expect.objectContaining({ expiry: '2026-07-17', type: undefined }),
+      )
+    })
+
+    expect(expirySelect).toHaveValue('2026-07-17')
+    expect(await screen.findByText('Expiry 2026-07-17')).toBeInTheDocument()
   })
 
   it('loads and displays contracts after submit', async () => {
