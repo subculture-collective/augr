@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -72,6 +72,7 @@ function createListResponse<T>(data: T[]) {
 
 function stubStrategyFetch({
   strategy = createStrategy(),
+  runs = [],
   pauseResult,
   resumeResult,
   skipResult,
@@ -80,6 +81,7 @@ function stubStrategyFetch({
   backtests = [],
 }: {
   strategy?: StrategyFixture
+  runs?: Array<{ id: string; strategy_id: string; ticker: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; signal?: 'buy' | 'sell' | 'hold'; started_at: string; completed_at?: string }>
   pauseResult?: MutationStub
   resumeResult?: MutationStub
   skipResult?: MutationStub
@@ -88,7 +90,7 @@ function stubStrategyFetch({
   backtests?: Array<{ id: string; name: string; description?: string; start_date: string; end_date: string }>
 } = {}) {
   let currentStrategy = strategy
-  const runs = createListResponse([])
+  const runList = createListResponse(runs)
   const orderList = createListResponse(orders)
   const backtestList = createListResponse(backtests)
 
@@ -101,7 +103,7 @@ function stubStrategyFetch({
     }
 
     if (url.includes('/runs')) {
-      return createResponse(runs)
+      return createResponse(runList)
     }
 
     if (url.includes('/orders')) {
@@ -160,7 +162,7 @@ describe('StrategyDetailPage', () => {
     renderPage()
 
     expect(await screen.findByText('AAPL Momentum')).toBeInTheDocument()
-    expect(screen.getByText('A momentum-based strategy')).toBeInTheDocument()
+    expect(screen.getByTestId('strategy-human-summary')).toHaveTextContent('A momentum-based strategy')
     expect(screen.getByText('AAPL')).toBeInTheDocument()
     expect(screen.getByTestId('strategy-detail-page')).toBeInTheDocument()
     expect(screen.getByTestId('strategy-status-badge')).toHaveTextContent('active')
@@ -201,6 +203,68 @@ describe('StrategyDetailPage', () => {
     expect(screen.getByTestId('pause-strategy-button')).toBeDisabled()
     expect(screen.getByTestId('resume-strategy-button')).toBeDisabled()
     expect(screen.getByTestId('skip-next-button')).toBeDisabled()
+  })
+
+  it('renders the human summary and rules table when rules engine config is present', async () => {
+    stubStrategyFetch({
+      strategy: createStrategy({
+        description: 'Trades trend continuation with risk controls',
+        schedule_cron: '0 9 * * 1-5',
+        is_paper: true,
+        config: {
+          rules_engine: {
+            name: 'Momentum Rules',
+            description: 'Entry on strength, exit on weakness',
+            entry: {
+              operator: 'all',
+              conditions: [
+                { field: 'rsi', op: 'lt', value: 30, explanation: 'Oversold entry' },
+              ],
+            },
+            exit: {
+              operator: 'any',
+              conditions: [
+                { field: 'price', op: 'lt', ref: 'support_level' },
+              ],
+            },
+            position_sizing: { method: 'fraction', fraction_pct: 5, risk_per_trade_pct: 0.02 },
+            stop_loss: { method: 'atr', atr_multiplier: 2, pct: 3 },
+            take_profit: { method: 'rr', ratio: 2 },
+            filters: { min_volume: 1000000, min_atr: 2.5 },
+          },
+        },
+      }),
+    })
+
+    renderPage()
+
+    const summary = await screen.findByTestId('strategy-human-summary')
+    expect(summary).toHaveTextContent('Trades trend continuation with risk controls')
+    expect(summary).toHaveTextContent('AAPL')
+    expect(summary).toHaveTextContent('stock')
+    expect(summary).toHaveTextContent('paper')
+    expect(summary).toHaveTextContent('skip-next clear')
+    const rules = await screen.findByTestId('strategy-rules-table')
+    expect(rules).toHaveTextContent('Momentum Rules')
+    expect(rules).toHaveTextContent('Entry rules: 1; exit rules: 1')
+    expect(rules).toHaveTextContent('Group')
+    expect(rules).toHaveTextContent('Field')
+    expect(rules).toHaveTextContent('rsi')
+    expect(rules).toHaveTextContent('support_level')
+  })
+
+  it('renders empty backtests and orders sections with truthful copy', async () => {
+    stubStrategyFetch()
+
+    renderPage()
+
+    const backtests = await screen.findByTestId('strategy-backtests-empty')
+    expect(backtests).toHaveTextContent('No linked backtests yet')
+    expect(within(backtests).getByRole('link', { name: 'Browse backtests' })).toHaveAttribute('href', '/backtests')
+
+    const orders = await screen.findByTestId('strategy-orders-empty')
+    expect(orders).toHaveTextContent('No recent orders for AAPL')
+    expect(orders).toHaveTextContent('ticker-level')
   })
 
   it('pauses an active strategy through the pause endpoint and refreshes the action state', async () => {

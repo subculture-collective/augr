@@ -11,6 +11,15 @@ import (
 // BacktestModelConfig stores flexible JSON for simulation components.
 type BacktestModelConfig = json.RawMessage
 
+// BacktestLatestRunSummary captures the most recent run surfaced alongside
+// backtest config list responses.
+type BacktestLatestRunSummary struct {
+	ID               uuid.UUID       `json:"id"`
+	BacktestConfigID uuid.UUID       `json:"backtest_config_id"`
+	Metrics          json.RawMessage `json:"metrics"`
+	RunTimestamp     time.Time       `json:"run_timestamp"`
+}
+
 // BacktestSimulationParameters captures reusable simulation settings for a backtest.
 type BacktestSimulationParameters struct {
 	InitialCapital   float64             `json:"initial_capital"`
@@ -22,16 +31,17 @@ type BacktestSimulationParameters struct {
 
 // BacktestConfig represents a reusable backtest definition.
 type BacktestConfig struct {
-	ID           uuid.UUID                    `json:"id"`
-	StrategyID   uuid.UUID                    `json:"strategy_id"`
-	Name         string                       `json:"name"`
-	Description  string                       `json:"description,omitempty"`
-	ScheduleCron string                       `json:"schedule_cron,omitempty"`
-	StartDate    time.Time                    `json:"start_date"`
-	EndDate      time.Time                    `json:"end_date"`
-	Simulation   BacktestSimulationParameters `json:"simulation"`
-	CreatedAt    time.Time                    `json:"created_at"`
-	UpdatedAt    time.Time                    `json:"updated_at"`
+	ID               uuid.UUID                    `json:"id"`
+	StrategyID       uuid.UUID                    `json:"strategy_id"`
+	Name             string                       `json:"name"`
+	Description      string                       `json:"description,omitempty"`
+	ScheduleCron     string                       `json:"schedule_cron,omitempty"`
+	StartDate        time.Time                    `json:"start_date"`
+	EndDate          time.Time                    `json:"end_date"`
+	Simulation       BacktestSimulationParameters `json:"simulation"`
+	CreatedAt        time.Time                    `json:"created_at"`
+	UpdatedAt        time.Time                    `json:"updated_at"`
+	LatestRunSummary *BacktestLatestRunSummary    `json:"latest_run_summary,omitempty"`
 }
 
 // Validate checks that the backtest configuration has valid required fields.

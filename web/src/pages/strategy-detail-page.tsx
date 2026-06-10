@@ -33,6 +33,139 @@ function statusBadgeVariant(status: StrategyStatus): 'success' | 'warning' | 'se
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function getRulesEngine(config: unknown): Record<string, unknown> | null {
+  if (!isRecord(config)) return null
+
+  const rulesEngine = config.rules_engine
+  return isRecord(rulesEngine) ? rulesEngine : null
+}
+
+function toDisplayValue(value: unknown): string {
+  if (value == null) return '—'
+  if (Array.isArray(value)) return value.map((item) => toDisplayValue(item)).join(', ')
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+
+  return String(value)
+}
+
+function formatMaybeNumber(value: unknown, fractionDigits = 2): string {
+  const num = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(num) ? num.toFixed(fractionDigits) : toDisplayValue(value)
+}
+
+function collectRuleRows(rulesEngine: Record<string, unknown> | null) {
+  const rows: Array<{ group: string; field: string; operator: string; value: string; explanation: string }> = []
+
+  for (const [group, label] of [
+    ['entry', 'Entry'],
+    ['exit', 'Exit'],
+  ] as const) {
+    const section = rulesEngine && isRecord(rulesEngine[group]) ? rulesEngine[group] : null
+    const conditions = Array.isArray(section?.conditions) ? section.conditions : []
+
+    for (const condition of conditions) {
+      if (!isRecord(condition)) continue
+
+      const field = toDisplayValue(condition.field)
+      const operator = toDisplayValue(condition.op ?? condition.operator)
+      const valueSource = condition.value ?? condition.ref ?? condition.reference
+      const explanation =
+        typeof condition.explanation === 'string' && condition.explanation.trim().length > 0
+          ? condition.explanation
+          : typeof condition.description === 'string' && condition.description.trim().length > 0
+            ? condition.description
+            : `${label} condition`
+
+      rows.push({
+        group: label,
+        field,
+        operator,
+        value: toDisplayValue(valueSource),
+        explanation,
+      })
+    }
+  }
+
+  return rows
+}
+
+function summarizeRules(rulesEngine: Record<string, unknown> | null, rows: Array<{ group: string }>) {
+  if (!rulesEngine) return 'No rules engine configuration is available.'
+
+  const entryCount = rows.filter((row) => row.group === 'Entry').length
+  const exitCount = rows.filter((row) => row.group === 'Exit').length
+  const hints: string[] = []
+
+  if (isRecord(rulesEngine.position_sizing)) hints.push('position sizing')
+  if (isRecord(rulesEngine.stop_loss)) hints.push('stop loss')
+  if (isRecord(rulesEngine.take_profit)) hints.push('take profit')
+  if (isRecord(rulesEngine.filters)) hints.push('filters')
+
+  const hintText = hints.length > 0 ? ` Risk controls: ${hints.join(', ')}.` : ''
+
+  return `Entry rules: ${entryCount}; exit rules: ${exitCount}.${hintText}`
+}
+
+function summarizeRiskHints(rulesEngine: Record<string, unknown> | null) {
+  if (!rulesEngine) return []
+
+  const hints: string[] = []
+  const positionSizing = isRecord(rulesEngine.position_sizing) ? rulesEngine.position_sizing : null
+  const stopLoss = isRecord(rulesEngine.stop_loss) ? rulesEngine.stop_loss : null
+  const takeProfit = isRecord(rulesEngine.take_profit) ? rulesEngine.take_profit : null
+  const filters = isRecord(rulesEngine.filters) ? rulesEngine.filters : null
+
+  if (positionSizing) {
+    const parts = [
+      typeof positionSizing.method === 'string' ? positionSizing.method : null,
+      positionSizing.fraction_pct != null ? `${toDisplayValue(positionSizing.fraction_pct)}%` : null,
+      positionSizing.risk_per_trade_pct != null
+        ? `${formatMaybeNumber(Number(positionSizing.risk_per_trade_pct) * 100, 1)}% risk/trade`
+        : null,
+      positionSizing.atr_multiplier != null ? `ATR × ${formatMaybeNumber(positionSizing.atr_multiplier, 2)}` : null,
+    ].filter(Boolean)
+    if (parts.length > 0) hints.push(`Position sizing: ${parts.join(' • ')}`)
+  }
+
+  if (stopLoss) {
+    const parts = [
+      typeof stopLoss.method === 'string' ? stopLoss.method : null,
+      stopLoss.pct != null ? `${toDisplayValue(stopLoss.pct)}%` : null,
+      stopLoss.atr_multiplier != null ? `ATR × ${formatMaybeNumber(stopLoss.atr_multiplier, 2)}` : null,
+    ].filter(Boolean)
+    if (parts.length > 0) hints.push(`Stop loss: ${parts.join(' • ')}`)
+  }
+
+  if (takeProfit) {
+    const parts = [
+      typeof takeProfit.method === 'string' ? takeProfit.method : null,
+      takeProfit.ratio != null ? `R:R ${formatMaybeNumber(takeProfit.ratio, 2)}` : null,
+      takeProfit.atr_multiplier != null ? `ATR × ${formatMaybeNumber(takeProfit.atr_multiplier, 2)}` : null,
+    ].filter(Boolean)
+    if (parts.length > 0) hints.push(`Take profit: ${parts.join(' • ')}`)
+  }
+
+  if (filters) {
+    const parts = [
+      filters.min_volume != null ? `min volume ${toDisplayValue(filters.min_volume)}` : null,
+      filters.min_atr != null ? `min ATR ${toDisplayValue(filters.min_atr)}` : null,
+    ].filter(Boolean)
+    if (parts.length > 0) hints.push(`Filters: ${parts.join(' • ')}`)
+  }
+
+  return hints
+}
+
 export function StrategyDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -154,17 +287,26 @@ export function StrategyDetailPage() {
         ? 'Resume is unavailable because this strategy is already active.'
         : 'Resume is unavailable until the strategy is paused.'
 
-  const { data: ordersData } = useQuery({
+  const { data: ordersData, isLoading: isOrdersLoading, isError: isOrdersError } = useQuery({
     queryKey: ['strategy-orders', id, strategy?.ticker],
     queryFn: () => apiClient.listOrders({ ticker: strategy?.ticker, limit: 5 }),
     enabled: !!strategy?.ticker,
   })
 
-  const { data: backtestsData } = useQuery({
+  const { data: backtestsData, isLoading: isBacktestsLoading, isError: isBacktestsError } = useQuery({
     queryKey: ['strategy-backtests', id],
     queryFn: () => apiClient.listBacktestConfigs({ strategy_id: id }),
     enabled: !!id,
   })
+
+  const rulesEngine = useMemo(() => getRulesEngine(strategy?.config), [strategy?.config])
+  const ruleRows = useMemo(() => collectRuleRows(rulesEngine), [rulesEngine])
+  const rulesSummary = useMemo(() => summarizeRules(rulesEngine, ruleRows), [rulesEngine, ruleRows])
+  const riskHints = useMemo(() => summarizeRiskHints(rulesEngine), [rulesEngine])
+  const positionSizing = rulesEngine && isRecord(rulesEngine.position_sizing) ? rulesEngine.position_sizing : null
+  const stopLoss = rulesEngine && isRecord(rulesEngine.stop_loss) ? rulesEngine.stop_loss : null
+  const takeProfit = rulesEngine && isRecord(rulesEngine.take_profit) ? rulesEngine.take_profit : null
+  const filters = rulesEngine && isRecord(rulesEngine.filters) ? rulesEngine.filters : null
 
   if (isLoading) {
     return (
@@ -289,42 +431,69 @@ export function StrategyDetailPage() {
         <p className="text-sm text-destructive" data-testid="strategy-action-error">{actionError}</p>
       ) : null}
 
-      <Card>
+      <Card data-testid="strategy-human-summary">
         <CardHeader>
-          <CardTitle>Overview</CardTitle>
-          <CardDescription>Strategy summary and current state</CardDescription>
+          <CardTitle>Strategy summary</CardTitle>
+          <CardDescription>Purpose, execution mode, schedule, and guardrails</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">Purpose / description</p>
+            <p className="text-sm leading-6">{strategy.description || 'No strategy description provided.'}</p>
+          </div>
+
           <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div>
-              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Ticker</dt>
-              <dd className="mt-1 text-sm font-medium">{strategy.ticker}</dd>
-            </div>
-            <div>
-              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Market type</dt>
-              <dd>
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Ticker / market</dt>
+              <dd className="mt-1 flex flex-wrap items-center gap-2 text-sm font-medium">
+                <Link to={`/stocks/${strategy.ticker}`} className="text-primary hover:underline">
+                  {strategy.ticker}
+                </Link>
                 <Badge variant={strategy.market_type === 'stock' ? 'default' : strategy.market_type === 'crypto' ? 'secondary' : 'outline'}>
                   {strategy.market_type}
                 </Badge>
               </dd>
             </div>
             <div>
-              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Status</dt>
-              <dd className="flex items-center gap-2">
-                <Badge variant={statusBadgeVariant(strategyStatus)}>{strategyStatus}</Badge>
-                {strategy.is_paper ? <Badge variant="warning">paper</Badge> : null}
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Schedule</dt>
+              <dd className="mt-1 text-sm font-medium">
+                {strategy.schedule_cron ? describeCron(strategy.schedule_cron) : 'Manual only'}
+                {strategy.schedule_cron ? (
+                  <span className="ml-2 font-mono text-[11px] text-muted-foreground">{strategy.schedule_cron}</span>
+                ) : null}
               </dd>
             </div>
             <div>
-              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Schedule</dt>
-              <dd className="mt-1 font-mono text-[13px] font-medium">
-                {strategy.schedule_cron ? describeCron(strategy.schedule_cron) : 'Manual only'}
-                {strategy.schedule_cron && (
-                  <span className="ml-2 text-[11px] text-muted-foreground">{strategy.schedule_cron}</span>
-                )}
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Mode</dt>
+              <dd className="flex items-center gap-2">
+                {strategy.is_paper ? <Badge variant="warning">paper</Badge> : null}
+                {!strategy.is_paper ? <Badge variant="success">live</Badge> : null}
+                <span className="text-sm text-muted-foreground">{strategy.is_paper ? 'Paper trading' : 'Live trading'}</span>
+              </dd>
+            </div>
+            <div>
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Status / skip-next</dt>
+              <dd className="mt-1 flex flex-wrap items-center gap-2">
+                <Badge variant={statusBadgeVariant(strategyStatus)}>{strategyStatus}</Badge>
+                <Badge variant={strategy.skip_next_run ? 'outline' : 'secondary'}>
+                  {strategy.skip_next_run ? 'skip-next queued' : 'skip-next clear'}
+                </Badge>
               </dd>
             </div>
           </dl>
+
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Risk / parameter hints</p>
+            {riskHints.length > 0 ? (
+              <ul className="space-y-1 text-sm text-muted-foreground">
+                {riskHints.map((hint) => (
+                  <li key={hint}>{hint}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-sm text-muted-foreground">No rules-engine hints available.</p>
+            )}
+          </div>
         </CardContent>
       </Card>
 
@@ -389,118 +558,107 @@ export function StrategyDetailPage() {
         </Card>
       )}
 
-      {(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const rulesEngine = (strategy.config as any)?.rules_engine
-        if (!rulesEngine) return null
-        return (
-          <Card>
-            <CardHeader>
-              <CardTitle>Rules Engine</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {rulesEngine.name && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">Strategy</span>
-                  <p className="font-medium">{rulesEngine.name}</p>
-                  {rulesEngine.description && <p className="text-sm text-muted-foreground">{rulesEngine.description}</p>}
-                </div>
-              )}
+      {rulesEngine ? (
+        <Card data-testid="strategy-rules-table">
+          <CardHeader>
+            <CardTitle>Rules engine</CardTitle>
+            <CardDescription>{rulesSummary}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {(typeof rulesEngine.name === 'string' || typeof rulesEngine.description === 'string') && (
+              <div className="space-y-1">
+                {typeof rulesEngine.name === 'string' ? <p className="font-medium">{rulesEngine.name}</p> : null}
+                {typeof rulesEngine.description === 'string' ? (
+                  <p className="text-sm text-muted-foreground">{rulesEngine.description}</p>
+                ) : null}
+              </div>
+            )}
 
-              {rulesEngine.entry?.conditions && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">Entry ({rulesEngine.entry?.operator})</span>
-                  <ul className="mt-1 space-y-1">
-                    {rulesEngine.entry.conditions.map((c: { field: string; op: string; value?: unknown; ref?: string }, i: number) => (
-                      <li key={i} className="text-sm font-mono">
-                        {c.field} {c.op} {c.value != null ? String(c.value) : c.ref}
-                      </li>
+            {ruleRows.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-border text-left font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      <th className="pb-2 font-medium">Group</th>
+                      <th className="pb-2 font-medium">Field</th>
+                      <th className="pb-2 font-medium">Operator</th>
+                      <th className="pb-2 font-medium">Value/reference</th>
+                      <th className="pb-2 font-medium">Explanation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ruleRows.map((row, index) => (
+                      <tr key={`${row.group}-${row.field}-${row.operator}-${index}`} className="border-b border-border last:border-0">
+                        <td className="py-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">{row.group}</td>
+                        <td className="py-2 font-mono text-[13px]">{row.field}</td>
+                        <td className="py-2 font-mono text-[13px]">{row.operator}</td>
+                        <td className="py-2 font-mono text-[13px]">{row.value}</td>
+                        <td className="py-2 text-sm text-muted-foreground">{row.explanation}</td>
+                      </tr>
                     ))}
-                  </ul>
-                </div>
-              )}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">No entry or exit conditions are defined yet.</p>
+            )}
 
-              {rulesEngine.exit?.conditions && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">Exit ({rulesEngine.exit?.operator})</span>
-                  <ul className="mt-1 space-y-1">
-                    {rulesEngine.exit.conditions.map((c: { field: string; op: string; value?: unknown; ref?: string }, i: number) => (
-                      <li key={i} className="text-sm font-mono">
-                        {c.field} {c.op} {c.value != null ? String(c.value) : c.ref}
-                      </li>
-                    ))}
-                  </ul>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {positionSizing ? (
+                <div className="rounded-md border border-border p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Position sizing</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {typeof positionSizing.method === 'string' ? positionSizing.method : '—'}
+                    {positionSizing.fraction_pct != null ? ` • ${toDisplayValue(positionSizing.fraction_pct)}%` : ''}
+                    {positionSizing.risk_per_trade_pct != null
+                      ? ` • ${formatMaybeNumber(Number(positionSizing.risk_per_trade_pct) * 100, 1)}% risk/trade`
+                      : ''}
+                    {positionSizing.atr_multiplier != null
+                      ? ` • ATR × ${formatMaybeNumber(positionSizing.atr_multiplier, 2)}`
+                      : ''}
+                  </p>
                 </div>
-              )}
+              ) : null}
 
-              {rulesEngine.position_sizing && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">Position Sizing</span>
-                  <div className="mt-1 grid grid-cols-2 gap-2 text-sm">
-                    <span className="text-muted-foreground">Method</span>
-                    <span className="font-mono">{rulesEngine.position_sizing.method}</span>
-                    {rulesEngine.position_sizing.fraction_pct != null && (
-                      <><span className="text-muted-foreground">Fraction</span><span className="font-mono">{rulesEngine.position_sizing.fraction_pct}%</span></>
-                    )}
-                    {rulesEngine.position_sizing.risk_per_trade_pct != null && (
-                      <><span className="text-muted-foreground">Risk/Trade</span><span className="font-mono">{(rulesEngine.position_sizing.risk_per_trade_pct * 100).toFixed(1)}%</span></>
-                    )}
-                    {rulesEngine.position_sizing.atr_multiplier != null && (
-                      <><span className="text-muted-foreground">ATR Mult</span><span className="font-mono">{rulesEngine.position_sizing.atr_multiplier}</span></>
-                    )}
-                  </div>
+              {stopLoss ? (
+                <div className="rounded-md border border-border p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Stop loss</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {typeof stopLoss.method === 'string' ? stopLoss.method : '—'}
+                    {stopLoss.pct != null ? ` • ${toDisplayValue(stopLoss.pct)}%` : ''}
+                    {stopLoss.atr_multiplier != null
+                      ? ` • ATR × ${formatMaybeNumber(stopLoss.atr_multiplier, 2)}`
+                      : ''}
+                  </p>
                 </div>
-              )}
+              ) : null}
 
-              {rulesEngine.stop_loss && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">Stop Loss</span>
-                  <div className="mt-1 grid grid-cols-2 gap-2 text-sm">
-                    <span className="text-muted-foreground">Method</span>
-                    <span className="font-mono">{rulesEngine.stop_loss.method}</span>
-                    {rulesEngine.stop_loss.atr_multiplier != null && (
-                      <><span className="text-muted-foreground">ATR Mult</span><span className="font-mono">{Number(rulesEngine.stop_loss.atr_multiplier).toFixed(2)}</span></>
-                    )}
-                    {rulesEngine.stop_loss.pct != null && (
-                      <><span className="text-muted-foreground">Pct</span><span className="font-mono">{rulesEngine.stop_loss.pct}%</span></>
-                    )}
-                  </div>
+              {takeProfit ? (
+                <div className="rounded-md border border-border p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Take profit</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {typeof takeProfit.method === 'string' ? takeProfit.method : '—'}
+                    {takeProfit.ratio != null ? ` • R:R ${formatMaybeNumber(takeProfit.ratio, 2)}` : ''}
+                    {takeProfit.atr_multiplier != null
+                      ? ` • ATR × ${formatMaybeNumber(takeProfit.atr_multiplier, 2)}`
+                      : ''}
+                  </p>
                 </div>
-              )}
+              ) : null}
 
-              {rulesEngine.take_profit && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">Take Profit</span>
-                  <div className="mt-1 grid grid-cols-2 gap-2 text-sm">
-                    <span className="text-muted-foreground">Method</span>
-                    <span className="font-mono">{rulesEngine.take_profit.method}</span>
-                    {rulesEngine.take_profit.ratio != null && (
-                      <><span className="text-muted-foreground">R:R Ratio</span><span className="font-mono">{Number(rulesEngine.take_profit.ratio).toFixed(2)}</span></>
-                    )}
-                    {rulesEngine.take_profit.atr_multiplier != null && (
-                      <><span className="text-muted-foreground">ATR Mult</span><span className="font-mono">{Number(rulesEngine.take_profit.atr_multiplier).toFixed(2)}</span></>
-                    )}
-                  </div>
+              {filters ? (
+                <div className="rounded-md border border-border p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Filters</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {filters.min_volume != null ? `Min volume ${toDisplayValue(filters.min_volume)}` : 'No volume floor'}
+                    {filters.min_atr != null ? ` • Min ATR ${toDisplayValue(filters.min_atr)}` : ''}
+                  </p>
                 </div>
-              )}
-
-              {rulesEngine.filters && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">Filters</span>
-                  <div className="mt-1 grid grid-cols-2 gap-2 text-sm">
-                    {rulesEngine.filters.min_volume != null && (
-                      <><span className="text-muted-foreground">Min Volume</span><span className="font-mono">{Number(rulesEngine.filters.min_volume).toLocaleString()}</span></>
-                    )}
-                    {rulesEngine.filters.min_atr != null && (
-                      <><span className="text-muted-foreground">Min ATR</span><span className="font-mono">{rulesEngine.filters.min_atr}</span></>
-                    )}
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        )
-      })()}
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
         <StrategyRunHistory strategyId={strategy.id} />
@@ -511,13 +669,24 @@ export function StrategyDetailPage() {
         />
       </div>
 
-      {(backtestsData?.data?.length ?? 0) > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Backtests</CardTitle>
-            <CardDescription>Backtest configurations linked to this strategy</CardDescription>
-          </CardHeader>
-          <CardContent>
+      <Card>
+        <CardHeader>
+          <CardTitle>Backtests</CardTitle>
+          <CardDescription>Backtest configurations linked to this strategy</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isBacktestsLoading ? (
+            <p className="text-sm text-muted-foreground">Loading backtests…</p>
+          ) : isBacktestsError ? (
+            <p className="text-sm text-muted-foreground">Backtests unavailable right now.</p>
+          ) : (backtestsData?.data?.length ?? 0) === 0 ? (
+            <div className="space-y-2 rounded-lg border border-dashed border-border bg-background p-4 text-sm text-muted-foreground" data-testid="strategy-backtests-empty">
+              <p>No linked backtests yet</p>
+              <Link to="/backtests" className="inline-flex items-center gap-1 text-primary hover:underline">
+                Browse backtests
+              </Link>
+            </div>
+          ) : (
             <ul className="space-y-2">
               {backtestsData!.data.map((config) => (
                 <li key={config.id} className="flex items-center justify-between rounded-md border border-border p-3">
@@ -525,9 +694,7 @@ export function StrategyDetailPage() {
                     <Link to={`/backtests/${config.id}`} className="text-sm font-medium text-primary hover:underline">
                       {config.name}
                     </Link>
-                    {config.description && (
-                      <p className="text-xs text-muted-foreground">{config.description}</p>
-                    )}
+                    {config.description && <p className="text-xs text-muted-foreground">{config.description}</p>}
                   </div>
                   <span className="text-xs text-muted-foreground">
                     {new Date(config.start_date).toLocaleDateString()} &ndash; {new Date(config.end_date).toLocaleDateString()}
@@ -535,17 +702,28 @@ export function StrategyDetailPage() {
                 </li>
               ))}
             </ul>
-          </CardContent>
-        </Card>
-      )}
+          )}
+        </CardContent>
+      </Card>
 
-      {(ordersData?.data?.length ?? 0) > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Recent Orders</CardTitle>
-            <CardDescription>Last 5 orders for {strategy.ticker}</CardDescription>
-          </CardHeader>
-          <CardContent>
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Orders</CardTitle>
+          <CardDescription>
+            Last 5 orders for {strategy.ticker}. The API only exposes ticker-level order history.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {isOrdersLoading ? (
+            <p className="text-sm text-muted-foreground">Loading recent orders…</p>
+          ) : isOrdersError ? (
+            <p className="text-sm text-muted-foreground">Recent orders unavailable right now.</p>
+          ) : (ordersData?.data?.length ?? 0) === 0 ? (
+            <div className="space-y-2 rounded-lg border border-dashed border-border bg-background p-4 text-sm text-muted-foreground" data-testid="strategy-orders-empty">
+              <p>No recent orders for {strategy.ticker}</p>
+              <p>The order API is ticker-level, so this list is filtered by ticker instead of strategy.</p>
+            </div>
+          ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -576,9 +754,9 @@ export function StrategyDetailPage() {
                 </tbody>
               </table>
             </div>
-          </CardContent>
-        </Card>
-      )}
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

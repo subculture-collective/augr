@@ -221,6 +221,16 @@ export interface DivergenceResponse {
   status: string;
 }
 
+export interface StrategyLatestRunSummary {
+  id: UUID;
+  strategy_id: UUID;
+  ticker: string;
+  status: PipelineStatus;
+  signal?: PipelineSignal;
+  started_at: ISODateString;
+  completed_at?: ISODateString;
+}
+
 export type PolymarketAccountSort = 'volume' | 'win_rate' | 'bayesian_win_rate' | 'consistency_score' | 'resolved_markets' | 'last_active' | 'trades';
 
 export interface PolymarketAccountListParams {
@@ -250,6 +260,7 @@ export interface Strategy {
   prediction_market?: PredictionMarketData;
   created_at: ISODateString;
   updated_at: ISODateString;
+  latest_run_summary?: StrategyLatestRunSummary;
 }
 
 export interface PipelineRun {
@@ -801,6 +812,7 @@ export interface BacktestConfig {
   simulation: BacktestSimulationParameters;
   created_at: ISODateString;
   updated_at: ISODateString;
+  latest_run_summary?: BacktestLatestRunSummary;
 }
 
 export interface BacktestMetrics {
@@ -847,6 +859,13 @@ export interface BacktestRun {
   prompt_version_hash: string;
   created_at: ISODateString;
   updated_at: ISODateString;
+}
+
+export interface BacktestLatestRunSummary {
+  id: UUID;
+  backtest_config_id: UUID;
+  metrics: BacktestRun['metrics'];
+  run_timestamp: ISODateString;
 }
 
 export interface BacktestConfigCreateRequest {

@@ -30,9 +30,12 @@ func TestBuildBacktestConfigListQuery_NoFilters(t *testing.T) {
 	}
 
 	assertContains(t, query, "FROM backtest_configs")
-	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
+	assertContains(t, query, "LEFT JOIN LATERAL")
+	assertContains(t, query, "latest_run_summary.latest_run_summary")
+	assertContains(t, query, "FROM backtest_configs bc")
+	assertContains(t, query, "ORDER BY bc.created_at DESC, bc.id DESC")
 	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertNotContains(t, query, " WHERE bc.")
 }
 
 func TestBuildBacktestConfigListQuery_AllFilters(t *testing.T) {
@@ -50,9 +53,9 @@ func TestBuildBacktestConfigListQuery_AllFilters(t *testing.T) {
 		t.Fatalf("expected 5 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "strategy_id = $1")
-	assertContains(t, query, "created_at >= $2")
-	assertContains(t, query, "created_at <= $3")
+	assertContains(t, query, "bc.strategy_id = $1")
+	assertContains(t, query, "bc.created_at >= $2")
+	assertContains(t, query, "bc.created_at <= $3")
 	assertContains(t, query, "LIMIT $4 OFFSET $5")
 }
 

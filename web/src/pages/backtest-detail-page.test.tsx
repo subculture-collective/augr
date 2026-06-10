@@ -104,6 +104,34 @@ describe('BacktestDetailPage', () => {
     fireEvent.click(screen.getByTestId('empty-run-backtest-button'))
 
     await waitFor(() => expect(apiClientMock.runBacktestConfig).toHaveBeenCalledWith(backtestId))
+    expect(await screen.findByTestId('backtest-metrics-card')).toBeInTheDocument()
+  })
+
+  it('shows a selection empty state when runs exist but none is selected', async () => {
+    apiClientMock.getBacktestConfig.mockResolvedValue(configFixture)
+    apiClientMock.listBacktestRuns.mockResolvedValue({ data: [runFixture] })
+
+    render(<BacktestDetailPage />, { wrapper: Wrapper })
+
+    expect(await screen.findByTestId('backtest-run-selection-empty')).toBeInTheDocument()
+    expect(screen.getByText('Select a run to inspect metrics')).toBeInTheDocument()
+    expect(screen.getByTestId('backtest-config-note')).toHaveTextContent(
+      'Top card shows the configuration only.',
+    )
+  })
+
+  it('selects the returned run after running the backtest', async () => {
+    apiClientMock.getBacktestConfig.mockResolvedValue(configFixture)
+    apiClientMock.listBacktestRuns.mockResolvedValue({ data: [] })
+    apiClientMock.runBacktestConfig.mockResolvedValue(runFixture)
+
+    render(<BacktestDetailPage />, { wrapper: Wrapper })
+
+    fireEvent.click(await screen.findByTestId('run-backtest-button'))
+
+    await waitFor(() => expect(apiClientMock.runBacktestConfig).toHaveBeenCalledWith(backtestId))
+    expect(await screen.findByTestId('backtest-metrics-card')).toBeInTheDocument()
+    expect(screen.getByTestId('backtest-config-note')).toBeInTheDocument()
   })
 
   it('shows an unavailable state when run history is not configured', async () => {

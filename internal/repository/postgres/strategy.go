@@ -95,7 +95,7 @@ func (r *StrategyRepo) List(ctx context.Context, filter repository.StrategyFilte
 
 	var strategies []domain.Strategy
 	for rows.Next() {
-		s, err := scanStrategy(rows)
+		s, err := scanStrategyWithLatestRun(rows)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: list strategies scan: %w", err)
 		}
@@ -284,6 +284,43 @@ func scanStrategy(sc scanner) (*domain.Strategy, error) {
 	return &s, nil
 }
 
+func scanStrategyWithLatestRun(sc scanner) (*domain.Strategy, error) {
+	var (
+		s             domain.Strategy
+		configBytes   []byte
+		latestRunJSON []byte
+	)
+
+	if err := sc.Scan(
+		&s.ID,
+		&s.Name,
+		&s.Description,
+		&s.Ticker,
+		&s.MarketType,
+		&s.ScheduleCron,
+		&configBytes,
+		&s.Status,
+		&s.SkipNextRun,
+		&s.IsPaper,
+		&s.CreatedAt,
+		&s.UpdatedAt,
+		&latestRunJSON,
+	); err != nil {
+		return nil, err
+	}
+
+	s.Config = json.RawMessage(configBytes)
+	if len(latestRunJSON) != 0 {
+		var summary domain.StrategyLatestRunSummary
+		if err := json.Unmarshal(latestRunJSON, &summary); err != nil {
+			return nil, fmt.Errorf("postgres: unmarshal strategy latest run summary: %w", err)
+		}
+		s.LatestRunSummary = &summary
+	}
+
+	return &s, nil
+}
+
 // buildListQuery constructs the SELECT query and arguments for List with
 // dynamic WHERE conditions. All values are parameterized.
 func buildListQuery(filter repository.StrategyFilter, limit, offset int) (string, []any) {
@@ -300,29 +337,44 @@ func buildListQuery(filter repository.StrategyFilter, limit, offset int) (string
 	}
 
 	if filter.Ticker != "" {
-		conditions = append(conditions, "ticker = "+nextArg(filter.Ticker))
+		conditions = append(conditions, "s.ticker = "+nextArg(filter.Ticker))
 	}
 
 	if filter.MarketType != "" {
-		conditions = append(conditions, "market_type = "+nextArg(filter.MarketType))
+		conditions = append(conditions, "s.market_type = "+nextArg(filter.MarketType))
 	}
 
 	if filter.Status != "" {
-		conditions = append(conditions, "status = "+nextArg(filter.Status))
+		conditions = append(conditions, "s.status = "+nextArg(filter.Status))
 	}
 
 	if filter.IsPaper != nil {
-		conditions = append(conditions, "is_paper = "+nextArg(*filter.IsPaper))
+		conditions = append(conditions, "s.is_paper = "+nextArg(*filter.IsPaper))
 	}
 
-	base := `SELECT id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at
-		 FROM strategies`
+	base := `SELECT s.id, s.name, s.description, s.ticker, s.market_type, s.schedule_cron, s.config, s.status, s.skip_next_run, s.is_paper, s.created_at, s.updated_at, latest_run_summary.latest_run_summary
+		 FROM strategies s
+		 LEFT JOIN LATERAL (
+             SELECT jsonb_build_object(
+                 'id', pr.id,
+                 'strategy_id', pr.strategy_id,
+                 'ticker', pr.ticker,
+                 'status', pr.status,
+                 'signal', pr.signal,
+                 'started_at', pr.started_at,
+                 'completed_at', pr.completed_at
+             ) AS latest_run_summary
+             FROM pipeline_runs pr
+             WHERE pr.strategy_id = s.id
+             ORDER BY pr.started_at DESC, pr.id DESC
+             LIMIT 1
+		 ) AS latest_run_summary ON TRUE`
 
 	if len(conditions) > 0 {
 		base += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	base += " ORDER BY created_at DESC"
+	base += " ORDER BY s.created_at DESC"
 	if limit > 0 {
 		base += fmt.Sprintf(" LIMIT %s", nextArg(limit))
 	}

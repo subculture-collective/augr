@@ -88,7 +88,7 @@ func (r *BacktestConfigRepo) List(ctx context.Context, filter repository.Backtes
 
 	var configs []domain.BacktestConfig
 	for rows.Next() {
-		config, err := scanBacktestConfig(rows)
+		config, err := scanBacktestConfigWithLatestRun(rows)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: list backtest configs scan: %w", err)
 		}
@@ -162,6 +162,21 @@ func (r *BacktestConfigRepo) Delete(ctx context.Context, id uuid.UUID) error {
 const backtestConfigSelectSQL = `SELECT id, strategy_id, name, COALESCE(description, ''), COALESCE(schedule_cron, ''), start_date, end_date, simulation_params, created_at, updated_at
 	 FROM backtest_configs`
 
+const backtestConfigListSelectSQL = `SELECT bc.id, bc.strategy_id, bc.name, COALESCE(bc.description, ''), COALESCE(bc.schedule_cron, ''), bc.start_date, bc.end_date, bc.simulation_params, bc.created_at, bc.updated_at, latest_run_summary.latest_run_summary
+	 FROM backtest_configs bc
+	 LEFT JOIN LATERAL (
+         SELECT jsonb_build_object(
+             'id', br.id,
+             'backtest_config_id', br.backtest_config_id,
+             'metrics', br.metrics,
+             'run_timestamp', br.run_timestamp
+         ) AS latest_run_summary
+         FROM backtest_runs br
+         WHERE br.backtest_config_id = bc.id
+         ORDER BY br.run_timestamp DESC, br.id DESC
+         LIMIT 1
+	 ) AS latest_run_summary ON TRUE`
+
 // scanBacktestConfig scans a single row (pgx.Row or pgx.Rows) into a BacktestConfig.
 func scanBacktestConfig(sc scanner) (*domain.BacktestConfig, error) {
 	var (
@@ -194,6 +209,46 @@ func scanBacktestConfig(sc scanner) (*domain.BacktestConfig, error) {
 	return &config, nil
 }
 
+func scanBacktestConfigWithLatestRun(sc scanner) (*domain.BacktestConfig, error) {
+	var (
+		config         domain.BacktestConfig
+		simulationJSON []byte
+		latestRunJSON  []byte
+	)
+
+	err := sc.Scan(
+		&config.ID,
+		&config.StrategyID,
+		&config.Name,
+		&config.Description,
+		&config.ScheduleCron,
+		&config.StartDate,
+		&config.EndDate,
+		&simulationJSON,
+		&config.CreatedAt,
+		&config.UpdatedAt,
+		&latestRunJSON,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(simulationJSON) != 0 {
+		if err := json.Unmarshal(simulationJSON, &config.Simulation); err != nil {
+			return nil, fmt.Errorf("postgres: unmarshal backtest simulation params: %w", err)
+		}
+	}
+	if len(latestRunJSON) != 0 {
+		var summary domain.BacktestLatestRunSummary
+		if err := json.Unmarshal(latestRunJSON, &summary); err != nil {
+			return nil, fmt.Errorf("postgres: unmarshal backtest latest run summary: %w", err)
+		}
+		config.LatestRunSummary = &summary
+	}
+
+	return &config, nil
+}
+
 // buildBacktestConfigListQuery constructs the SELECT query and arguments for List.
 func buildBacktestConfigListQuery(filter repository.BacktestConfigFilter, limit, offset int) (string, []any) {
 	var (
@@ -209,21 +264,21 @@ func buildBacktestConfigListQuery(filter repository.BacktestConfigFilter, limit,
 	}
 
 	if filter.StrategyID != nil {
-		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))
+		conditions = append(conditions, "bc.strategy_id = "+nextArg(*filter.StrategyID))
 	}
 	if filter.CreatedAfter != nil {
-		conditions = append(conditions, "created_at >= "+nextArg(*filter.CreatedAfter))
+		conditions = append(conditions, "bc.created_at >= "+nextArg(*filter.CreatedAfter))
 	}
 	if filter.CreatedBefore != nil {
-		conditions = append(conditions, "created_at <= "+nextArg(*filter.CreatedBefore))
+		conditions = append(conditions, "bc.created_at <= "+nextArg(*filter.CreatedBefore))
 	}
 
-	base := backtestConfigSelectSQL
+	base := backtestConfigListSelectSQL
 	if len(conditions) > 0 {
 		base += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	base += " ORDER BY created_at DESC, id DESC"
+	base += " ORDER BY bc.created_at DESC, bc.id DESC"
 	base += fmt.Sprintf(" LIMIT %s OFFSET %s", nextArg(limit), nextArg(offset))
 
 	return base, args

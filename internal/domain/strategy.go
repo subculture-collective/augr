@@ -68,18 +68,31 @@ func (s *Strategy) Validate() error {
 // StrategyConfig holds strategy-specific parameters stored as flexible JSON.
 type StrategyConfig = json.RawMessage
 
+// StrategyLatestRunSummary captures the most recent run surfaced alongside
+// strategy list responses.
+type StrategyLatestRunSummary struct {
+	ID          uuid.UUID      `json:"id"`
+	StrategyID  uuid.UUID      `json:"strategy_id"`
+	Ticker      string         `json:"ticker"`
+	Status      string         `json:"status"`
+	Signal      PipelineSignal `json:"signal,omitempty"`
+	StartedAt   time.Time      `json:"started_at"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+}
+
 // Strategy represents a trading strategy configuration.
 type Strategy struct {
-	ID           uuid.UUID      `json:"id"`
-	Name         string         `json:"name"`
-	Description  string         `json:"description,omitempty"`
-	Ticker       string         `json:"ticker"`
-	MarketType   MarketType     `json:"market_type"`
-	ScheduleCron string         `json:"schedule_cron,omitempty"`
-	Config       StrategyConfig `json:"config"`
-	Status       string         `json:"status"`
-	SkipNextRun  bool           `json:"skip_next_run"`
-	IsPaper      bool           `json:"is_paper"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	ID               uuid.UUID                 `json:"id"`
+	Name             string                    `json:"name"`
+	Description      string                    `json:"description,omitempty"`
+	Ticker           string                    `json:"ticker"`
+	MarketType       MarketType                `json:"market_type"`
+	ScheduleCron     string                    `json:"schedule_cron,omitempty"`
+	Config           StrategyConfig            `json:"config"`
+	Status           string                    `json:"status"`
+	SkipNextRun      bool                      `json:"skip_next_run"`
+	IsPaper          bool                      `json:"is_paper"`
+	CreatedAt        time.Time                 `json:"created_at"`
+	UpdatedAt        time.Time                 `json:"updated_at"`
+	LatestRunSummary *StrategyLatestRunSummary `json:"latest_run_summary,omitempty"`
 }

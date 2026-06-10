@@ -5,12 +5,14 @@ import { Link } from 'react-router-dom'
 
 import { PageHeader } from '@/components/layout/page-header'
 import { CreateStrategyDialog } from '@/components/strategies/create-strategy-dialog'
+import { RunSignalBadge, RunStatusBadge } from '@/components/runs/run-badges'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { apiClient } from '@/lib/api/client'
 import type { Strategy, StrategyCreateRequest, StrategyStatus } from '@/lib/api/types'
 import { describeCron } from '@/lib/cron-describe'
+import { formatRunDate } from '@/lib/run-format'
 
 function MarketTypeBadge({ type }: { type: Strategy['market_type'] }) {
   const variants: Record<Strategy['market_type'], 'default' | 'secondary' | 'outline'> = {
@@ -48,6 +50,36 @@ function formatDate(dateStr: string) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function StrategyLastRunSummary({ strategy }: { strategy: Strategy }) {
+  const lastRun = strategy.latest_run_summary
+
+  return (
+    <div
+      className="space-y-2 rounded-md border border-border bg-background/60 p-3"
+      data-testid={`strategy-last-run-${strategy.id}`}
+    >
+      <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Last run</p>
+      {lastRun == null ? (
+        <p className="text-sm text-muted-foreground">No runs yet</p>
+      ) : (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <RunStatusBadge status={lastRun.status} />
+            {lastRun.signal ? <RunSignalBadge signal={lastRun.signal} /> : null}
+          </div>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+            <span>{formatRunDate(lastRun.started_at)}</span>
+            {lastRun.completed_at ? <span>Completed {formatRunDate(lastRun.completed_at)}</span> : null}
+          </div>
+          <Link to={`/runs/${lastRun.id}`} className="text-xs font-medium text-primary hover:underline">
+            Open run
+          </Link>
+        </div>
+      )}
+    </div>
+  )
 }
 
 export function StrategiesPage() {
@@ -163,6 +195,9 @@ export function StrategiesPage() {
                               <span>manual only</span>
                             )}
                             <span>updated {formatDate(strategy.updated_at)}</span>
+                          </div>
+                          <div className="mt-3">
+                            <StrategyLastRunSummary strategy={strategy} />
                           </div>
                         </div>
                       </div>

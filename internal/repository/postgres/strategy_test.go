@@ -27,10 +27,13 @@ func TestBuildListQuery_NoFilters(t *testing.T) {
 	}
 
 	assertContains(t, query, "FROM strategies")
-	assertContains(t, query, "ORDER BY created_at DESC")
+	assertContains(t, query, "LEFT JOIN LATERAL")
+	assertContains(t, query, "latest_run_summary.latest_run_summary")
+	assertContains(t, query, "FROM strategies s")
+	assertContains(t, query, "ORDER BY s.created_at DESC")
 	assertContains(t, query, "LIMIT $1")
 	assertNotContains(t, query, "OFFSET")
-	assertNotContains(t, query, "WHERE")
+	assertNotContains(t, query, " WHERE s.")
 }
 
 func TestBuildListQuery_AllFilters(t *testing.T) {
@@ -50,10 +53,10 @@ func TestBuildListQuery_AllFilters(t *testing.T) {
 		t.Fatalf("expected 6 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "ticker = $1")
-	assertContains(t, query, "market_type = $2")
-	assertContains(t, query, "status = $3")
-	assertContains(t, query, "is_paper = $4")
+	assertContains(t, query, "s.ticker = $1")
+	assertContains(t, query, "s.market_type = $2")
+	assertContains(t, query, "s.status = $3")
+	assertContains(t, query, "s.is_paper = $4")
 	assertContains(t, query, "LIMIT $5 OFFSET $6")
 
 	if args[0] != "AAPL" {
@@ -86,9 +89,9 @@ func TestBuildListQuery_PartialFilters(t *testing.T) {
 		t.Fatalf("expected 3 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "ticker = $1")
+	assertContains(t, query, "s.ticker = $1")
 	assertNotContains(t, query, "market_type =")
-	assertContains(t, query, "status = $2")
+	assertContains(t, query, "s.status = $2")
 	assertNotContains(t, query, "is_paper =")
 	assertContains(t, query, "LIMIT $3")
 	assertNotContains(t, query, "OFFSET")

@@ -91,7 +91,8 @@ export function BacktestDetailPage() {
 
   const runMutation = useMutation({
     mutationFn: () => apiClient.runBacktestConfig(id!),
-    onSuccess: () => {
+    onSuccess: (run) => {
+      setSelectedRun(run)
       queryClient.invalidateQueries({ queryKey: ['backtest-runs', { config_id: id }] })
     },
   })
@@ -230,6 +231,10 @@ export function BacktestDetailPage() {
         </CardContent>
       </Card>
 
+      <p className="text-sm text-muted-foreground" data-testid="backtest-config-note">
+        Top card shows the configuration only. Metrics, equity curve, and trade log appear after selecting a run.
+      </p>
+
       <Card>
         <CardHeader>
           <CardTitle>Run history</CardTitle>
@@ -277,11 +282,19 @@ export function BacktestDetailPage() {
               </div>
             </div>
           ) : (
-            <BacktestRunHistory
-              runs={runs}
-              selectedRunId={selectedRun?.id}
-              onSelectRun={setSelectedRun}
-            />
+            <div className="space-y-4">
+              <BacktestRunHistory
+                runs={runs}
+                selectedRunId={selectedRun?.id}
+                onSelectRun={setSelectedRun}
+              />
+              {!selectedRun ? (
+                <div className="space-y-3 rounded-lg border border-dashed border-border py-10 text-center" data-testid="backtest-run-selection-empty">
+                  <p className="text-sm font-medium text-foreground">Select a run to inspect metrics</p>
+                  <p className="text-sm text-muted-foreground">Choose any run from the table above to load its metrics and trade log.</p>
+                </div>
+              ) : null}
+            </div>
           )}
         </CardContent>
       </Card>

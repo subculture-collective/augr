@@ -9,7 +9,53 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { apiClient } from '@/lib/api/client'
-import type { BacktestConfigCreateRequest } from '@/lib/api/types'
+import type { BacktestConfig, BacktestConfigCreateRequest, BacktestLatestRunSummary } from '@/lib/api/types'
+
+function toNumber(value: number | string): number | null {
+  if (typeof value === 'number') return value
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function formatPct(value: number | string): string {
+  const n = toNumber(value)
+  if (n == null) return '—'
+  return `${(n * 100).toFixed(2)}%`
+}
+
+function formatRatio(value: number | string): string {
+  const n = toNumber(value)
+  if (n == null) return '—'
+  return n.toFixed(2)
+}
+
+function formatLastRunSummary(run: BacktestLatestRunSummary): string {
+  return [
+    `total return ${formatPct(run.metrics.total_return)}`,
+    `max drawdown ${formatPct(run.metrics.max_drawdown)}`,
+    `sharpe ratio ${formatRatio(run.metrics.sharpe_ratio)}`,
+  ].join(' • ')
+}
+
+function BacktestLastRunSummary({ config }: { config: BacktestConfig }) {
+  const lastRun = config.latest_run_summary
+
+  return (
+    <div className="rounded-lg border border-border bg-background/60 p-3" data-testid={`backtest-last-run-${config.id}`}>
+      {lastRun ? (
+        <div className="space-y-1.5">
+          <p className="text-sm font-medium text-foreground">Latest run result</p>
+          <p className="text-xs text-muted-foreground">
+            Ran {new Date(lastRun.run_timestamp).toLocaleString()}
+          </p>
+          <p className="text-xs text-muted-foreground">{formatLastRunSummary(lastRun)}</p>
+        </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">No runs yet</p>
+      )}
+    </div>
+  )
+}
 
 export function BacktestsPage() {
   const [createOpen, setCreateOpen] = useState(false)
@@ -49,7 +95,7 @@ export function BacktestsPage() {
     <div className="space-y-4" data-testid="backtests-page">
       <PageHeader
         title="Backtests"
-        description="Create and run historical backtests against your strategies."
+        description="Backtest configuration inventory. Runs are generated per config and reviewed from the config cards below."
         actions={(
           <Button onClick={() => setCreateOpen(true)} data-testid="create-backtest-button">
             <Plus className="mr-2 size-4" />
@@ -60,9 +106,11 @@ export function BacktestsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>All backtest configs</CardTitle>
+          <CardTitle>Configuration inventory</CardTitle>
           <CardDescription>
-            {data != null ? `${data.total ?? data.data?.length ?? 0} total configs` : 'Loading...'}
+            {data != null
+              ? `${data.total ?? data.data?.length ?? 0} config${(data.total ?? data.data?.length ?? 0) === 1 ? '' : 's'}; runs are generated per config.`
+              : 'Loading configuration inventory...'}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -123,6 +171,12 @@ export function BacktestsPage() {
                               capital ${config.simulation.initial_capital.toLocaleString()}
                             </span>
                             <span>updated {new Date(config.updated_at).toLocaleDateString()}</span>
+                          </div>
+                          <div className="mt-3">
+                            <p className="mb-2 text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">
+                              Last run summary
+                            </p>
+                            <BacktestLastRunSummary config={config} />
                           </div>
                         </div>
                       </div>
