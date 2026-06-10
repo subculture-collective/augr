@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -222,6 +223,18 @@ func TestFormatSignalEmbed(t *testing.T) {
 		t.Errorf("Reasoning field = %v, want empty string", fields[3]["value"])
 	}
 
+	embed = FormatSignalEmbed("Momentum", "NVDA", domain.PipelineSignalBuy, 0, "no confidence", runID, ts)
+	fields = embed["fields"].([]map[string]any)
+	if fields[2]["value"] != "n/a" {
+		t.Errorf("Confidence field = %v, want n/a", fields[2]["value"])
+	}
+
+	embed = FormatSignalEmbed("Momentum", "NVDA", domain.PipelineSignalBuy, math.NaN(), "unknown confidence", runID, ts)
+	fields = embed["fields"].([]map[string]any)
+	if fields[2]["value"] != "n/a" {
+		t.Errorf("Confidence field with NaN = %v, want n/a", fields[2]["value"])
+	}
+
 	longReasoning := strings.Repeat("A", 2000)
 	embed = FormatSignalEmbed("Momentum", "MSFT", domain.PipelineSignalBuy, 0.9, longReasoning, runID, ts)
 	reasoningField := embed["fields"].([]map[string]any)[3]["value"].(string)
@@ -271,6 +284,15 @@ func TestFormatDecisionEmbed(t *testing.T) {
 	}
 	if embed["timestamp"] != "2026-04-01T11:30:00Z" {
 		t.Errorf("timestamp = %v, want 2026-04-01T11:30:00Z", embed["timestamp"])
+	}
+
+	embed = FormatDecisionEmbed("Analyst", "execution", "done", "", 0, runID, ts)
+	fields = embed["fields"].([]map[string]any)
+	if fields[1]["value"] != "n/a" {
+		t.Errorf("blank model = %v, want n/a", fields[1]["value"])
+	}
+	if fields[2]["value"] != "n/a" {
+		t.Errorf("zero latency = %v, want n/a", fields[2]["value"])
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -536,6 +537,7 @@ func defaultSignal() execution.FinalSignal {
 func defaultPlan() execution.TradingPlan {
 	return execution.TradingPlan{
 		Action:     domain.PipelineSignalBuy,
+		MarketType: domain.MarketTypeStock,
 		Ticker:     "AAPL",
 		EntryType:  "market",
 		EntryPrice: 150.0,
@@ -1109,6 +1111,7 @@ func TestProcessSignal_SellSignal(t *testing.T) {
 		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
 		execution.TradingPlan{
 			Action:     domain.PipelineSignalSell,
+			MarketType: domain.MarketTypeStock,
 			Ticker:     "TSLA",
 			EntryType:  "market",
 			EntryPrice: 200.0,
@@ -1151,8 +1154,9 @@ func TestProcessSignal_SellSignalWithoutOpenLongPositionSkipped(t *testing.T) {
 	positionRepo := &mockPositionRepo{}
 	tradeRepo := &mockTradeRepo{}
 	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
 
-	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
 
 	err := mgr.ProcessSignal(
 		context.Background(),
@@ -1180,6 +1184,104 @@ func TestProcessSignal_SellSignalWithoutOpenLongPositionSkipped(t *testing.T) {
 	}
 	if len(positionRepo.positions) != 0 {
 		t.Fatalf("expected 0 positions, got %d", len(positionRepo.positions))
+	}
+	if len(recorder.decisions) != 1 {
+		t.Fatalf("expected 1 rejected decision, got %d", len(recorder.decisions))
+	}
+	decision := recorder.decisions[0]
+	if decision.Side != domain.OrderSideSell {
+		t.Fatalf("decision side = %s, want sell", decision.Side)
+	}
+	if decision.Status != domain.TradeDecisionStatusRejected {
+		t.Fatalf("decision status = %s, want %s", decision.Status, domain.TradeDecisionStatusRejected)
+	}
+	if decision.RiskStatus != domain.RiskDecisionRejected {
+		t.Fatalf("decision risk status = %s, want %s", decision.RiskStatus, domain.RiskDecisionRejected)
+	}
+	if decision.ProposedSize != 0 || decision.ApprovedSize != 0 {
+		t.Fatalf("decision sizes = (%v,%v), want (0,0)", decision.ProposedSize, decision.ApprovedSize)
+	}
+	if !slices.Contains(decision.RiskReasons, "unowned_sell_no_open_long") {
+		t.Fatalf("decision risk reasons = %v, want unowned_sell_no_open_long", decision.RiskReasons)
+	}
+	if !strings.Contains(string(decision.Evidence), "unowned_sell_no_open_long") {
+		t.Fatalf("decision evidence = %s, want reason metadata", string(decision.Evidence))
+	}
+}
+
+func TestProcessSignal_NonStockSellWithoutOpenLongIsNotStockGuarded(t *testing.T) {
+	broker := &mockBroker{}
+	riskEng := &mockRiskEngine{}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
+
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
+
+	err := mgr.ProcessSignal(
+		context.Background(),
+		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
+		execution.TradingPlan{
+			Action:     domain.PipelineSignalSell,
+			MarketType: domain.MarketTypeCrypto,
+			Ticker:     "BTCUSD",
+			EntryType:  "market",
+			EntryPrice: 100,
+		},
+		uuid.New(),
+		uuid.New(),
+	)
+	if err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("expected non-stock sell to continue to order path, got %d orders", len(orderRepo.orders))
+	}
+	for _, decision := range recorder.decisions {
+		if decision.Status == domain.TradeDecisionStatusRejected && slices.Contains(decision.RiskReasons, "unowned_sell_no_open_long") {
+			t.Fatalf("expected no stock-ownership rejection decision for non-stock sell, got %+v", decision)
+		}
+	}
+}
+
+func TestProcessSignal_StockSellRequiresTickerForOwnershipCheck(t *testing.T) {
+	broker := &mockBroker{
+		submitOrderFn: func(ctx context.Context, order *domain.Order) (string, error) {
+			t.Fatal("SubmitOrder should not be called when stock sell ticker is empty")
+			return "", nil
+		},
+	}
+	riskEng := &mockRiskEngine{}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
+
+	err := mgr.ProcessSignal(
+		context.Background(),
+		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
+		execution.TradingPlan{
+			Action:     domain.PipelineSignalSell,
+			MarketType: domain.MarketTypeStock,
+			Ticker:     " ",
+			EntryType:  "market",
+			EntryPrice: 100,
+		},
+		uuid.New(),
+		uuid.New(),
+	)
+	if err == nil {
+		t.Fatal("ProcessSignal() error = nil, want ticker ownership error")
+	}
+	if !strings.Contains(err.Error(), "requires ticker") {
+		t.Fatalf("ProcessSignal() error = %v, want requires ticker", err)
+	}
+	if len(orderRepo.orders) != 0 {
+		t.Fatalf("expected no orders when ticker is empty, got %d", len(orderRepo.orders))
 	}
 }
 

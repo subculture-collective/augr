@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -228,6 +229,27 @@ func signalColor(signal domain.PipelineSignal) int {
 	}
 }
 
+func formatSignalConfidence(confidence float64) string {
+	if confidence <= 0 || math.IsNaN(confidence) {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.1f%%", confidence*100)
+}
+
+func formatDecisionModel(llmModel string) string {
+	if strings.TrimSpace(llmModel) == "" {
+		return "n/a"
+	}
+	return llmModel
+}
+
+func formatDecisionLatency(latencyMS int) string {
+	if latencyMS <= 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%dms", latencyMS)
+}
+
 // alertSeverityColor maps a severity string to a Discord embed color.
 func alertSeverityColor(severity string) int {
 	switch strings.ToLower(severity) {
@@ -248,7 +270,7 @@ func FormatSignalEmbed(strategyName, ticker string, signal domain.PipelineSignal
 		"fields": []map[string]any{
 			{"name": "Strategy", "value": strategyName, "inline": true},
 			{"name": "Ticker", "value": ticker, "inline": true},
-			{"name": "Confidence", "value": fmt.Sprintf("%.1f%%", confidence*100), "inline": true},
+			{"name": "Confidence", "value": formatSignalConfidence(confidence), "inline": true},
 			{"name": "Reasoning", "value": truncate(reasoning, 1024), "inline": false},
 		},
 		"footer":    map[string]any{"text": fmt.Sprintf("Run %s", runID.String()[:8])},
@@ -263,8 +285,8 @@ func FormatDecisionEmbed(agentRole, phase, outputSummary, llmModel string, laten
 		"color": 0x3498DB,
 		"fields": []map[string]any{
 			{"name": "Phase", "value": phase, "inline": true},
-			{"name": "Model", "value": llmModel, "inline": true},
-			{"name": "Latency", "value": fmt.Sprintf("%dms", latencyMS), "inline": true},
+			{"name": "Model", "value": formatDecisionModel(llmModel), "inline": true},
+			{"name": "Latency", "value": formatDecisionLatency(latencyMS), "inline": true},
 			{"name": "Output", "value": truncate(outputSummary, 1024), "inline": false},
 		},
 		"footer":    map[string]any{"text": fmt.Sprintf("Run %s", runID.String()[:8])},

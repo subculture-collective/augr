@@ -184,10 +184,6 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	if planTicker == "" {
 		planTicker = strategy.Ticker
 	}
-	signal, err = normalizeUnownedSellSignal(ctx, r.positionRepo, strategy, planTicker, signal, r.logger)
-	if err != nil {
-		return nil, err
-	}
 
 	update := repository.PipelineRunStatusUpdate{
 		Status:       run.Status,
@@ -225,6 +221,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		},
 		execution.TradingPlan{
 			Action:       signal,
+			MarketType:   strategy.MarketType.Normalize(),
 			Ticker:       planTicker,
 			EntryType:    result.State.TradingPlan.EntryType,
 			EntryPrice:   result.State.TradingPlan.EntryPrice,

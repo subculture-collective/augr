@@ -34,6 +34,7 @@ type FinalSignal struct {
 // TradingPlan stores the structured output produced by the trader phase.
 type TradingPlan struct {
 	Action       domain.PipelineSignal `json:"action,omitempty"`
+	MarketType   domain.MarketType     `json:"market_type,omitempty"`
 	Ticker       string                `json:"ticker,omitempty"`
 	EntryType    string                `json:"entry_type,omitempty"`
 	EntryPrice   float64               `json:"entry_price,omitempty"`
@@ -194,16 +195,40 @@ func (m *OrderManager) ProcessSignal(
 		return nil
 	}
 
-	// A SELL signal only makes sense as an exit for a position this strategy
-	// already owns. Do not turn discovery sell signals for unowned symbols into
-	// broker orders; Alpaca will reject them and they are not actionable trades.
-	if signal.Signal == domain.PipelineSignalSell {
+	// A stock SELL signal only makes sense as an exit for a position this
+	// strategy already owns. Do not turn discovery sell signals for unowned stock
+	// symbols into broker orders; Alpaca will reject them and they are not
+	// actionable trades. Non-stock markets have different SELL semantics and are
+	// intentionally left to their market-specific execution/risk paths.
+	if signal.Signal == domain.PipelineSignalSell && planMarketType(plan) == domain.MarketTypeStock {
 		owned, err := m.hasOpenLongPosition(ctx, strategyID, plan.Ticker)
 		if err != nil {
 			return err
 		}
 		if !owned {
 			m.logger.InfoContext(ctx, "sell signal has no open long position, skipping order", "ticker", plan.Ticker, "strategy_id", strategyID)
+
+			decision := m.newTradeDecision(
+				strategyID,
+				runID,
+				plan,
+				domain.MarketTypeStock,
+				string(domain.OrderSideSell),
+				0,
+				0,
+				domain.RiskDecisionRejected,
+				[]string{"unowned_sell_no_open_long"},
+				domain.TradeDecisionStatusRejected,
+			)
+			decision.Evidence, _ = json.Marshal(map[string]any{
+				"reason":          "unowned_sell_no_open_long",
+				"has_open_long":   false,
+				"ticker":          plan.Ticker,
+				"strategy_id":     strategyID.String(),
+				"pipeline_run_id": runID.String(),
+				"pipeline_signal": signal.Signal,
+			})
+			m.recordTradeDecision(ctx, decision)
 
 			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
 				"ticker":      plan.Ticker,
@@ -511,6 +536,14 @@ func (m *OrderManager) ProcessSignal(
 	}
 }
 
+func planMarketType(plan TradingPlan) domain.MarketType {
+	marketType := plan.MarketType.Normalize()
+	if marketType == "" {
+		return domain.MarketTypeStock
+	}
+	return marketType
+}
+
 func (m *OrderManager) newTradeDecision(
 	strategyID, runID uuid.UUID,
 	plan TradingPlan,
@@ -565,6 +598,11 @@ func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, decisionID,
 }
 
 func (m *OrderManager) hasOpenLongPosition(ctx context.Context, strategyID uuid.UUID, ticker string) (bool, error) {
+	ticker = strings.TrimSpace(ticker)
+	if ticker == "" {
+		return false, fmt.Errorf("order_manager: open long ownership check requires ticker")
+	}
+
 	positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{
 		Ticker: ticker,
 		Side:   domain.PositionSideLong,
