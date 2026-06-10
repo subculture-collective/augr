@@ -12,7 +12,7 @@ import { Input } from '@/components/ui/input'
 import { apiClient } from '@/lib/api/client'
 import { useAddPolymarketWatched, usePolymarketAccounts, usePolymarketDiscoveryLast, usePolymarketJobsStatus, usePolymarketRecentSignals, usePolymarketRecentTrades, usePolymarketWatched, useRemovePolymarketWatched, useRunPolymarketDiscovery, useSetPolymarketAccountTracked, useSetPolymarketWatchedEnabled } from '@/hooks/use-polymarket'
 import { useWebSocketClient } from '@/hooks/use-websocket-client'
-import type { ResearchOpportunity, TradeDecisionRiskStatus, TradeDecisionStatus } from '@/lib/api/types'
+import type { ResearchOpportunity, StoredSignal, TradeDecisionRiskStatus, TradeDecisionStatus } from '@/lib/api/types'
 
 function formatRelativeTime(iso?: string): string {
   if (!iso) return '--'
@@ -57,6 +57,152 @@ const marketUrl = (slug: string) => `https://polymarket.com/market/${encodeURICo
 const eventUrl = (slug: string) => `https://polymarket.com/event/${encodeURIComponent(slug)}`
 const profileUrl = (address: string) => `https://polymarket.com/profile/${encodeURIComponent(address)}`
 type AccountSort = 'consistency_score' | 'bayesian_win_rate' | 'resolved_markets' | 'win_rate' | 'volume' | 'last_active' | 'trades'
+
+type ScannerMode = 'preset' | 'manual'
+
+type ScannerPreset = {
+  id: string
+  label: string
+  note: string
+  draft: {
+    slug?: string
+    tokenId?: string
+    outcome?: string
+    probability?: string
+    bestBid?: string
+    bestAsk?: string
+    askDepthUsd?: string
+    askSize?: string
+    strategyId?: string
+  }
+}
+
+const SCANNER_PRESETS: ScannerPreset[] = [
+  {
+    id: 'liquid-tail',
+    label: 'Liquid tail',
+    note: 'Cheap contract with enough depth to paper first.',
+    draft: { probability: '0.18', bestBid: '0.14', bestAsk: '0.19', askDepthUsd: '7500', askSize: '250' },
+  },
+  {
+    id: 'event-momentum',
+    label: 'Event momentum',
+    note: 'Near-fair pricing with room for a quick move.',
+    draft: { outcome: 'Yes', probability: '0.54', bestBid: '0.51', bestAsk: '0.56', askSize: '150' },
+  },
+  {
+    id: 'strategy-filter',
+    label: 'Strategy filter',
+    note: 'Narrow to a single strategy and shared signal field.',
+    draft: { probability: '0.63', bestBid: '0.60', bestAsk: '0.66' },
+  },
+]
+
+const WATCHED_MARKET_SUGGESTIONS = [
+  {
+    id: 'fed-cut',
+    slug: 'fed-rate-cut-december-2026',
+    note: 'Macro catalyst with frequent repricing around CPI and FOMC data.',
+  },
+  {
+    id: 'btc-150k',
+    slug: 'bitcoin-above-150k-2026',
+    note: 'High-beta crypto slug that tends to move with headlines.',
+  },
+  {
+    id: 'election-control',
+    slug: 'us-house-control-2026',
+    note: 'Election control market with persistent event-driven flow.',
+  },
+]
+
+function formatScheduleDisplay(schedule: string) {
+  return schedule.trim() || 'Unscheduled'
+}
+
+function safeJsonPreview(value: unknown, maxLength = 180) {
+  if (value == null) return '—'
+  try {
+    const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+    if (!text) return '—'
+    return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text
+  } catch {
+    return '—'
+  }
+}
+
+function ScannerPresetButton({ preset, watched }: { preset: ScannerPreset; watched: boolean }) {
+  return (
+    <div className="border border-border bg-muted/30 p-3 text-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="font-medium">{preset.label}</div>
+          <div className="text-xs text-muted-foreground">{preset.note}</div>
+        </div>
+        {watched ? <Badge variant="secondary">watched</Badge> : <Badge variant="outline">preset</Badge>}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
+        {preset.draft.slug ? <Badge variant="outline">slug</Badge> : null}
+        {preset.draft.tokenId ? <Badge variant="outline">token</Badge> : null}
+        {preset.draft.outcome ? <Badge variant="outline">outcome</Badge> : null}
+        {preset.draft.probability ? <Badge variant="outline">p={preset.draft.probability}</Badge> : null}
+        {preset.draft.bestBid ? <Badge variant="outline">bid={preset.draft.bestBid}</Badge> : null}
+        {preset.draft.bestAsk ? <Badge variant="outline">ask={preset.draft.bestAsk}</Badge> : null}
+      </div>
+    </div>
+  )
+}
+
+function SignalCard({ signal }: { signal: StoredSignal }) {
+  const metadata = signal.metadata
+  const affectedStrategyIds = signal.affected_strategy_ids ?? []
+
+  return (
+    <article className="space-y-3 border border-border bg-panel p-4" data-testid={`polymarket-signal-${signal.id}`}>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="text-xs uppercase tracking-[0.18em] text-muted-foreground">{signal.source}</div>
+          <div className="mt-1 font-medium">{signal.title}</div>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <Badge variant="outline">Urgency {signal.urgency}</Badge>
+          <Badge variant="secondary">{affectedStrategyIds.length} strategies</Badge>
+        </div>
+      </div>
+
+      {signal.summary ? (
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Summary</div>
+          <p className="mt-1 text-sm text-foreground/90">{signal.summary}</p>
+        </div>
+      ) : null}
+
+      {signal.body ? (
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Body</div>
+          <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{signal.body}</p>
+        </div>
+      ) : null}
+
+      {signal.recommended_action ? (
+        <div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Recommended action</div>
+          <p className="mt-1 text-sm">{signal.recommended_action}</p>
+        </div>
+      ) : null}
+
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>Received {safeDateLabel(signal.received_at)}</span>
+        {signal.urgency >= 4 ? <Badge variant="destructive">high urgency</Badge> : signal.urgency >= 2 ? <Badge variant="warning">elevated</Badge> : <Badge variant="outline">monitor</Badge>}
+      </div>
+
+      <div className="border border-border bg-muted/30 p-2 text-xs">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Metadata preview</div>
+        <pre className="mt-1 overflow-hidden whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">{safeJsonPreview(metadata)}</pre>
+      </div>
+    </article>
+  )
+}
 
 const decisionStatusVariants: Record<TradeDecisionStatus, 'secondary' | 'outline' | 'success' | 'warning' | 'destructive'> = {
   candidate: 'outline',
@@ -143,6 +289,8 @@ export function PolymarketPage() {
   const [scannerAskDepthUsdDraft, setScannerAskDepthUsdDraft] = useState('')
   const [scannerAskSizeDraft, setScannerAskSizeDraft] = useState('')
   const [scannerStrategyIdDraft, setScannerStrategyIdDraft] = useState('')
+  const [scannerMode, setScannerMode] = useState<ScannerMode | null>(null)
+  const [scannerPresetLabel, setScannerPresetLabel] = useState('')
 
   const [scannerSlug, setScannerSlug] = useState('')
   const [scannerTokenId, setScannerTokenId] = useState('')
@@ -178,6 +326,29 @@ export function PolymarketPage() {
   const discoveryLast = usePolymarketDiscoveryLast()
   const runDiscovery = useRunPolymarketDiscovery()
 
+  const resetScanner = () => {
+    setScannerSlugDraft('')
+    setScannerTokenIdDraft('')
+    setScannerOutcomeDraft('')
+    setScannerProbabilityDraft('')
+    setScannerBestBidDraft('')
+    setScannerBestAskDraft('')
+    setScannerAskDepthUsdDraft('')
+    setScannerAskSizeDraft('')
+    setScannerStrategyIdDraft('')
+    setScannerSlug('')
+    setScannerTokenId('')
+    setScannerOutcome('')
+    setScannerProbability(undefined)
+    setScannerBestBid(undefined)
+    setScannerBestAsk(undefined)
+    setScannerAskDepthUsd(undefined)
+    setScannerAskSize(undefined)
+    setScannerStrategyId('')
+    setScannerMode(null)
+    setScannerPresetLabel('')
+  }
+
   const commitScanner = () => {
     setScannerSlug(scannerSlugDraft.trim())
     setScannerTokenId(scannerTokenIdDraft.trim())
@@ -188,6 +359,21 @@ export function PolymarketPage() {
     setScannerAskDepthUsd(parseOptionalNumber(scannerAskDepthUsdDraft))
     setScannerAskSize(parseOptionalNumber(scannerAskSizeDraft))
     setScannerStrategyId(scannerStrategyIdDraft.trim())
+    setScannerMode(scannerPresetLabel ? 'preset' : 'manual')
+  }
+
+  const applyScannerPreset = (preset: ScannerPreset) => {
+    setScannerSlugDraft(preset.draft.slug ?? '')
+    setScannerTokenIdDraft(preset.draft.tokenId ?? '')
+    setScannerOutcomeDraft(preset.draft.outcome ?? '')
+    setScannerProbabilityDraft(preset.draft.probability ?? '')
+    setScannerBestBidDraft(preset.draft.bestBid ?? '')
+    setScannerBestAskDraft(preset.draft.bestAsk ?? '')
+    setScannerAskDepthUsdDraft(preset.draft.askDepthUsd ?? '')
+    setScannerAskSizeDraft(preset.draft.askSize ?? '')
+    setScannerStrategyIdDraft(preset.draft.strategyId ?? '')
+    setScannerMode('preset')
+    setScannerPresetLabel(preset.label)
   }
 
   const hasScannerInputs = Boolean(
@@ -266,6 +452,19 @@ export function PolymarketPage() {
   const jobsData = jobs.data ?? []
   const strategiesData = (strategies.data?.data ?? []).filter((strategy) => strategy.market_type === 'polymarket')
   const scannerOpps = scannerQuery.data?.data ?? []
+  const watchedSlugSet = new Set(watchedData.map((market) => market.slug))
+
+  const addSuggestedMarket = async (slugValue: string, note?: string) => {
+    setErr('')
+    setSlug(slugValue)
+    if (watchedSlugSet.has(slugValue)) return
+    try {
+      await add.mutateAsync({ slug: slugValue, note })
+      setSlug('')
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : 'Failed')
+    }
+  }
 
   const scannerStatus = !hasScannerInputs
     ? 'Scanner not configured'
@@ -278,6 +477,11 @@ export function PolymarketPage() {
         : scannerOpps.length === 0
           ? 'No opportunities met the paper-first filters.'
           : `${scannerOpps.length} opportunities`
+  const scannerModeCopy = scannerMode === 'preset'
+    ? `Preset draft: ${scannerPresetLabel}; submit to scan`
+    : !hasScannerInputs
+      ? 'No scan configured yet'
+      : 'Manual scan from form inputs'
 
   return (
     <div className="space-y-5" data-testid="polymarket-page">
@@ -301,30 +505,53 @@ export function PolymarketPage() {
         <HudSection label="Research scanner" note="Paper-first market scanning and opportunity review" />
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <HudBadge tone={hasScannerInputs ? 'confirm' : 'caution'}>{scannerStatus}</HudBadge>
+          <span>{scannerModeCopy}</span>
           {scannerSlug ? <span>· {scannerSlug}</span> : null}
           {scannerTokenId ? <span>· token {scannerTokenId}</span> : null}
           {scannerOutcome ? <span>· {scannerOutcome}</span> : null}
         </div>
-          <form
-            className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4"
-            onSubmit={(event) => {
-              event.preventDefault()
-              commitScanner()
-            }}
-          >
-            <Input value={scannerSlugDraft} onChange={(event) => setScannerSlugDraft(event.target.value)} placeholder="slug" aria-label="Market slug" />
-            <Input value={scannerTokenIdDraft} onChange={(event) => setScannerTokenIdDraft(event.target.value)} placeholder="token id" aria-label="Token ID" />
-            <Input value={scannerOutcomeDraft} onChange={(event) => setScannerOutcomeDraft(event.target.value)} placeholder="outcome" aria-label="Outcome" />
-            <Input value={scannerStrategyIdDraft} onChange={(event) => setScannerStrategyIdDraft(event.target.value)} placeholder="strategy id" aria-label="Strategy ID" />
-            <Input value={scannerProbabilityDraft} onChange={(event) => setScannerProbabilityDraft(event.target.value)} inputMode="decimal" placeholder="probability" aria-label="Probability" />
-            <Input value={scannerBestBidDraft} onChange={(event) => setScannerBestBidDraft(event.target.value)} inputMode="decimal" placeholder="best bid" aria-label="Best bid" />
-            <Input value={scannerBestAskDraft} onChange={(event) => setScannerBestAskDraft(event.target.value)} inputMode="decimal" placeholder="best ask" aria-label="Best ask" />
-            <Input value={scannerAskDepthUsdDraft} onChange={(event) => setScannerAskDepthUsdDraft(event.target.value)} inputMode="decimal" placeholder="ask depth usd" aria-label="Ask depth USD" />
-            <Input value={scannerAskSizeDraft} onChange={(event) => setScannerAskSizeDraft(event.target.value)} inputMode="decimal" placeholder="ask size" aria-label="Ask size" />
-            <div className="flex items-end">
-              <Button type="submit" className="w-full">Scan</Button>
-            </div>
-          </form>
+
+        <div className="grid gap-2 md:grid-cols-3">
+          {SCANNER_PRESETS.map((preset) => (
+            <button
+              key={preset.id}
+              type="button"
+              className="text-left"
+              onClick={() => applyScannerPreset(preset)}
+              data-testid={`polymarket-scanner-preset-${preset.id}`}
+            >
+              <ScannerPresetButton preset={preset} watched={false} />
+            </button>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={resetScanner} data-testid="polymarket-scanner-reset">
+            Clear scanner
+          </Button>
+          <span className="text-xs text-muted-foreground">Preset chips seed the draft only; submit the form to run the scanner.</span>
+        </div>
+
+        <form
+          className="grid gap-3 lg:grid-cols-2 xl:grid-cols-4"
+          onSubmit={(event) => {
+            event.preventDefault()
+            commitScanner()
+          }}
+        >
+          <Input value={scannerSlugDraft} onChange={(event) => setScannerSlugDraft(event.target.value)} placeholder="slug" aria-label="Market slug" />
+          <Input value={scannerTokenIdDraft} onChange={(event) => setScannerTokenIdDraft(event.target.value)} placeholder="token id" aria-label="Token ID" />
+          <Input value={scannerOutcomeDraft} onChange={(event) => setScannerOutcomeDraft(event.target.value)} placeholder="outcome" aria-label="Outcome" />
+          <Input value={scannerStrategyIdDraft} onChange={(event) => setScannerStrategyIdDraft(event.target.value)} placeholder="strategy id" aria-label="Strategy ID" />
+          <Input value={scannerProbabilityDraft} onChange={(event) => setScannerProbabilityDraft(event.target.value)} inputMode="decimal" placeholder="probability" aria-label="Probability" />
+          <Input value={scannerBestBidDraft} onChange={(event) => setScannerBestBidDraft(event.target.value)} inputMode="decimal" placeholder="best bid" aria-label="Best bid" />
+          <Input value={scannerBestAskDraft} onChange={(event) => setScannerBestAskDraft(event.target.value)} inputMode="decimal" placeholder="best ask" aria-label="Best ask" />
+          <Input value={scannerAskDepthUsdDraft} onChange={(event) => setScannerAskDepthUsdDraft(event.target.value)} inputMode="decimal" placeholder="ask depth usd" aria-label="Ask depth USD" />
+          <Input value={scannerAskSizeDraft} onChange={(event) => setScannerAskSizeDraft(event.target.value)} inputMode="decimal" placeholder="ask size" aria-label="Ask size" />
+          <div className="flex items-end">
+            <Button type="submit" className="w-full">Scan</Button>
+          </div>
+        </form>
 
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           {scannerProbability != null ? <span>· p={scannerProbability}</span> : null}
@@ -421,19 +648,47 @@ export function PolymarketPage() {
           <CardTitle>Polymarket Jobs</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {jobsData.map((job) => (
-              <div key={job.name} className="rounded-md border border-border p-3 text-xs">
-                <div className="font-medium">{job.name}</div>
-                <div>{job.schedule}</div>
-                <div>Last: {formatRelativeTime(job.last_run)}</div>
-                <Badge variant={job.running ? 'success' : 'secondary'}>{job.running ? 'running' : job.enabled ? 'enabled' : 'idle'}</Badge>
-                <Button size="sm" variant="outline" onClick={() => { void apiClient.runAutomationJob(job.name).then(() => qc.invalidateQueries({ queryKey: ['polymarket-jobs'] })) }}>
-                  Run now
-                </Button>
-              </div>
-            ))}
-          </div>
+          {jobsData.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No Polymarket jobs are configured yet.</p>
+          ) : (
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {jobsData.map((job) => {
+                const hasError = Boolean(job.last_error) || job.error_count > 0
+                const stateTone: 'success' | 'outline' | 'warning' | 'secondary' = job.running ? 'success' : !job.enabled ? 'outline' : hasError ? 'warning' : 'secondary'
+                return (
+                  <article key={job.name} className="space-y-2 border border-border bg-panel p-3 text-sm" data-testid={`polymarket-job-${job.name}`}>
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-medium">{job.name}</div>
+                        <div className="text-xs text-muted-foreground">{job.description}</div>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        <Badge variant={stateTone}>{job.running ? 'running' : job.enabled ? 'enabled' : 'disabled'}</Badge>
+                        {hasError ? <Badge variant="warning">error</Badge> : <Badge variant="secondary">stable</Badge>}
+                      </div>
+                    </div>
+
+                    <div className="text-xs text-muted-foreground">
+                      <div>{formatScheduleDisplay(job.schedule)}</div>
+                      <div className="font-mono text-[11px]">Backend schedule description</div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div><span className="text-muted-foreground">Run count</span><div className="font-medium">{job.run_count}</div></div>
+                      <div><span className="text-muted-foreground">Error count</span><div className="font-medium">{job.error_count}</div></div>
+                      <div className="col-span-2"><span className="text-muted-foreground">Last run</span><div className="font-medium">{job.last_run ? `${safeDateLabel(job.last_run)} · ${formatRelativeTime(job.last_run)}` : 'Never run'}</div></div>
+                      <div className="col-span-2"><span className="text-muted-foreground">Last result</span><div className="font-medium">{job.last_result || '—'}</div></div>
+                      {job.last_error ? <div className="col-span-2 text-destructive"><span className="text-muted-foreground">Last error</span><div className="font-medium">{job.last_error}</div></div> : null}
+                    </div>
+
+                    <Button size="sm" variant="outline" onClick={() => { void apiClient.runAutomationJob(job.name).then(() => qc.invalidateQueries({ queryKey: ['polymarket-jobs'] })) }}>
+                      Run now
+                    </Button>
+                  </article>
+                )
+              })}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -442,24 +697,53 @@ export function PolymarketPage() {
           <CardTitle>Watched Markets</CardTitle>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 grid gap-3 md:grid-cols-3">
+            {WATCHED_MARKET_SUGGESTIONS.map((suggestion) => {
+              const alreadyWatched = watchedSlugSet.has(suggestion.slug)
+              return (
+                <button
+                  key={suggestion.id}
+                  type="button"
+                  className="text-left"
+                  data-testid={`polymarket-watched-suggestion-${suggestion.id}`}
+                  onClick={() => void addSuggestedMarket(suggestion.slug, suggestion.note)}
+                >
+                  <div className="border border-border bg-muted/30 p-3 text-sm">
+                    <div className="flex items-start justify-between gap-2">
+                      <div>
+                        <div className="font-medium">{suggestion.slug}</div>
+                        <div className="text-xs text-muted-foreground">{suggestion.note}</div>
+                      </div>
+                      <Badge variant={alreadyWatched ? 'secondary' : 'outline'}>{alreadyWatched ? 'watched' : 'suggested'}</Badge>
+                    </div>
+                  </div>
+                </button>
+              )
+            })}
+          </div>
           <div className="mb-3 flex gap-2">
             <Input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="market slug" />
             <Button onClick={doAdd}>Add</Button>
           </div>
           {err ? <p className="text-sm text-destructive">{err}</p> : null}
-          <table className="w-full text-sm">
-            <tbody>
-              {watchedData.map((market) => (
-                <tr key={market.slug}>
-                  <td><a href={marketUrl(market.slug)} target="_blank" rel="noreferrer">{market.slug}</a></td>
-                  <td><input type="checkbox" checked={market.enabled} onChange={(e) => enable.mutate({ slug: market.slug, enabled: e.target.checked })} /></td>
-                  <td>{formatRelativeTime(market.added_at)}</td>
-                  <td>{market.note ?? '--'}</td>
-                  <td><Button size="sm" variant="outline" onClick={() => remove.mutate(market.slug)}>Remove</Button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <p className="mb-2 text-xs text-muted-foreground">Watched market tags/note fields are ingestion-provided.</p>
+          {watchedData.length === 0 ? (
+            <p className="text-sm text-muted-foreground" data-testid="polymarket-watched-empty">No watched markets yet. Use a suggestion above or add a slug manually.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <tbody>
+                {watchedData.map((market) => (
+                  <tr key={market.slug}>
+                    <td><a href={marketUrl(market.slug)} target="_blank" rel="noreferrer">{market.slug}</a></td>
+                    <td><input type="checkbox" checked={market.enabled} onChange={(e) => enable.mutate({ slug: market.slug, enabled: e.target.checked })} /></td>
+                    <td>{formatRelativeTime(market.added_at)}</td>
+                    <td>{market.note ?? '--'}</td>
+                    <td><Button size="sm" variant="outline" onClick={() => remove.mutate(market.slug)}>Remove</Button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </CardContent>
       </Card>
 
@@ -485,45 +769,54 @@ export function PolymarketPage() {
             </select>
             <span className="text-xs text-muted-foreground">score = adjusted win rate × sample size</span>
           </div>
-          <table className="w-full text-sm">
-            <thead>
-              <tr>
-                <th>address</th><th>score</th><th>adj win</th><th>raw win</th><th>won/lost</th><th>volume</th><th>max_position</th><th>last_active</th><th>tracked</th><th>tags</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accountsData.map((account) => (
-                <tr key={account.address}>
-                  <td>
-                    <div className="flex flex-col">
-                      <Link to={`/polymarket/accounts/${account.address}`}>{shortAddress(account.address)}</Link>
-                      <a className="text-xs text-muted-foreground" href={profileUrl(account.address)} target="_blank" rel="noreferrer">profile</a>
-                    </div>
-                  </td>
-                  <td>{(account.consistency_score ?? 0).toFixed(3)}</td>
-                  <td>{((account.bayesian_win_rate ?? 0) * 100).toFixed(1)}%</td>
-                  <td>{(account.win_rate * 100).toFixed(1)}%</td>
-                  <td>{`${account.markets_won}/${account.markets_lost} (${account.resolved_markets ?? account.markets_won + account.markets_lost})`}</td>
-                  <td>{money.format(account.total_volume)}</td>
-                  <td>{money.format(account.max_position)}</td>
-                  <td>{formatRelativeTime(account.last_active)}</td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={account.tracked}
-                      onChange={(e) =>
-                        track.mutate(
-                          { address: account.address, tracked: e.target.checked },
-                          { onSuccess: () => qc.invalidateQueries({ queryKey: ['polymarket-account', account.address] }) },
-                        )
-                      }
-                    />
-                  </td>
-                  <td>{account.tags?.join(', ') || '--'}</td>
+          <p className="mb-2 text-xs text-muted-foreground">Tags are ingestion-provided; there is no tag editor in this view.</p>
+          {accountsData.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No wallets match the current filters yet.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr>
+                  <th>address</th><th>score</th><th>adj win</th><th>raw win</th><th>won/lost</th><th>volume</th><th>max_position</th><th>last_active</th><th>tracked</th><th>tags</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {accountsData.map((account) => (
+                  <tr key={account.address}>
+                    <td>
+                      <div className="flex flex-col">
+                        <Link to={`/polymarket/accounts/${account.address}`}>{shortAddress(account.address)}</Link>
+                        <a className="text-xs text-muted-foreground" href={profileUrl(account.address)} target="_blank" rel="noreferrer">profile</a>
+                      </div>
+                    </td>
+                    <td>{(account.consistency_score ?? 0).toFixed(3)}</td>
+                    <td>{((account.bayesian_win_rate ?? 0) * 100).toFixed(1)}%</td>
+                    <td>{(account.win_rate * 100).toFixed(1)}%</td>
+                    <td>{`${account.markets_won}/${account.markets_lost} (${account.resolved_markets ?? account.markets_won + account.markets_lost})`}</td>
+                    <td>{money.format(account.total_volume)}</td>
+                    <td>{money.format(account.max_position)}</td>
+                    <td>{formatRelativeTime(account.last_active)}</td>
+                    <td>
+                      <input
+                        type="checkbox"
+                        checked={account.tracked}
+                        onChange={(e) =>
+                          track.mutate(
+                            { address: account.address, tracked: e.target.checked },
+                            { onSuccess: () => qc.invalidateQueries({ queryKey: ['polymarket-account', account.address] }) },
+                          )
+                        }
+                      />
+                    </td>
+                    <td>
+                      <div className="flex flex-wrap gap-1.5">
+                        {account.tags?.length ? account.tags.map((tag) => <Badge key={tag} variant="outline">{tag}</Badge>) : <span className="text-muted-foreground">No tags</span>}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
           <div className="mt-3 flex gap-2">
             <Button
               size="sm"
@@ -554,30 +847,34 @@ export function PolymarketPage() {
             <span className={ws.status === 'open' ? 'size-2 rounded-full bg-emerald-400' : 'size-2 rounded-full bg-zinc-500'} />
             {ws.status}
           </div>
-          <table className="w-full text-sm">
-            <tbody>
-              {(trades.data?.data ?? []).map((trade) => (
-                <tr key={trade.id}>
-                  <td>{formatRelativeTime(trade.timestamp)}</td>
-                  <td>
-                    <div className="flex flex-col">
-                      <Link to={`/polymarket/accounts/${trade.account_address}`}>{shortAddress(trade.account_address)}</Link>
-                      <a className="text-xs text-muted-foreground" href={profileUrl(trade.account_address)} target="_blank" rel="noreferrer">profile</a>
-                    </div>
-                  </td>
-                  <td>
-                    <div className="flex flex-col">
-                      <a href={marketUrl(trade.market_slug)} target="_blank" rel="noreferrer">{trade.market_slug}</a>
-                      <a className="text-xs text-muted-foreground" href={eventUrl(trade.market_slug)} target="_blank" rel="noreferrer">event</a>
-                    </div>
-                  </td>
-                  <td><Badge variant={String(trade.side).toUpperCase() === 'YES' ? 'success' : 'destructive'}>{trade.side}</Badge></td>
-                  <td>{money2.format(trade.size_usdc)}</td>
-                  <td>{trade.price.toFixed(3)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          {(trades.data?.data ?? []).length === 0 ? (
+            <p className="text-sm text-muted-foreground">No whale trades recorded yet. When they arrive, they will appear here.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <tbody>
+                {(trades.data?.data ?? []).map((trade) => (
+                  <tr key={trade.id}>
+                    <td>{formatRelativeTime(trade.timestamp)}</td>
+                    <td>
+                      <div className="flex flex-col">
+                        <Link to={`/polymarket/accounts/${trade.account_address}`}>{shortAddress(trade.account_address)}</Link>
+                        <a className="text-xs text-muted-foreground" href={profileUrl(trade.account_address)} target="_blank" rel="noreferrer">profile</a>
+                      </div>
+                    </td>
+                    <td>
+                      <div className="flex flex-col">
+                        <a href={marketUrl(trade.market_slug)} target="_blank" rel="noreferrer">{trade.market_slug}</a>
+                        <a className="text-xs text-muted-foreground" href={eventUrl(trade.market_slug)} target="_blank" rel="noreferrer">event</a>
+                      </div>
+                    </td>
+                    <td><Badge variant={String(trade.side).toUpperCase() === 'YES' ? 'success' : 'destructive'}>{trade.side}</Badge></td>
+                    <td>{money2.format(trade.size_usdc)}</td>
+                    <td>{trade.price.toFixed(3)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </CardContent>
       </Card>
 
@@ -586,15 +883,15 @@ export function PolymarketPage() {
           <CardTitle>Recent Polymarket Signals</CardTitle>
         </CardHeader>
         <CardContent>
-          {signalsData.map((signal) => (
-            <div key={signal.id} className="flex justify-between border-b border-border py-2">
-              <div>
-                {formatRelativeTime(signal.received_at)} · {signal.title}
-              </div>
-              <Badge>{signal.source}</Badge>
-              <div>{signal.urgency}</div>
+          {signalsData.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No recent signals yet.</p>
+          ) : (
+            <div className="space-y-3">
+              {signalsData.map((signal) => (
+                <SignalCard key={signal.id} signal={signal} />
+              ))}
             </div>
-          ))}
+          )}
         </CardContent>
       </Card>
 

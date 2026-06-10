@@ -999,8 +999,12 @@ export interface JobStatus {
   last_run?: ISODateString;
   last_result: string;
   last_error?: string;
+  last_error_at?: ISODateString;
+  last_summary?: Record<string, number>;
   run_count: number;
   error_count: number;
+  consecutive_failures?: number;
+  stuck_for?: number;
   running: boolean;
   enabled: boolean;
 }
