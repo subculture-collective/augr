@@ -38,6 +38,64 @@ const baseMemory = {
 }
 
 describe('MemoriesPage', () => {
+  it('explains the empty state when no memories have been generated yet', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [], limit: 11, offset: 0 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<MemoriesPage />, { wrapper: Wrapper })
+
+    const emptyState = await screen.findByTestId('memories-empty')
+    expect(emptyState).toHaveTextContent('No memories have been generated yet')
+    expect(emptyState).toHaveTextContent('position closes')
+  })
+
+  it('explains when filters hide all memories', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [baseMemory], limit: 11, offset: 0 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ data: [], limit: 11, offset: 0 }),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<MemoriesPage />, { wrapper: Wrapper })
+
+    expect(await screen.findByText(/Momentum was weakening/i)).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/search memories/i), {
+      target: { value: 'unmatched query' },
+    })
+    fireEvent.click(screen.getByTestId('apply-memory-filters'))
+
+    const emptyState = await screen.findByTestId('memories-empty')
+    expect(emptyState).toHaveTextContent('No memories match the current search')
+    expect(emptyState).toHaveTextContent('Clear filters')
+  })
+
+  it('shows an explicit API error when memories cannot load', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 501,
+      json: async () => ({ error: 'Memories not configured', code: 'NOT_CONFIGURED' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<MemoriesPage />, { wrapper: Wrapper })
+
+    const errorState = await screen.findByTestId('memories-error')
+    expect(errorState).toHaveTextContent('Memory storage is not configured on this deployment')
+  })
+
   it('renders the memory list and detail view on successful fetch', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

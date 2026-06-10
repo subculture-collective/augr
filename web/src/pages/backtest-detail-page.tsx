@@ -19,8 +19,36 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { apiClient } from '@/lib/api/client'
+import { ApiClientError, apiClient } from '@/lib/api/client'
 import type { BacktestRun } from '@/lib/api/types'
+
+function backtestRunsEmptyCopy() {
+  return {
+    title: 'No backtest runs yet',
+    body:
+      'This configuration has not produced a run. Use Run backtest to generate the first result and populate the history.',
+  }
+}
+
+function backtestRunsErrorCopy(error: unknown) {
+  if (error instanceof ApiClientError && error.status === 501) {
+    return {
+      title: 'Run history unavailable',
+      body:
+        'Backtest runs are not configured on this deployment yet. Enable the backtest run API before expecting history here.',
+      unavailable: true,
+    }
+  }
+
+  return {
+    title: 'Unable to load run history',
+    body:
+      error instanceof Error && error.message.trim()
+        ? error.message
+        : 'The run history request failed. Retry after checking the API service.',
+    unavailable: false,
+  }
+}
 
 export function BacktestDetailPage() {
   const { id } = useParams<{ id: string }>()
@@ -47,7 +75,13 @@ export function BacktestDetailPage() {
     enabled: !!id,
   })
 
-  const { data: runsData } = useQuery({
+  const {
+    data: runsData,
+    isError: runsIsError,
+    isLoading: runsIsLoading,
+    error: runsError,
+    refetch: refetchRuns,
+  } = useQuery({
     queryKey: ['backtest-runs', { config_id: id }],
     queryFn: () => apiClient.listBacktestRuns({ backtest_config_id: id }),
     enabled: !!id,
@@ -202,11 +236,53 @@ export function BacktestDetailPage() {
           <CardDescription>Click a run to view its metrics and equity curve</CardDescription>
         </CardHeader>
         <CardContent>
-          <BacktestRunHistory
-            runs={runs}
-            selectedRunId={selectedRun?.id}
-            onSelectRun={setSelectedRun}
-          />
+          {runsIsLoading ? (
+            <div className="h-24 animate-pulse rounded-lg border border-border bg-muted/40" data-testid="backtest-runs-loading" />
+          ) : runsIsError ? (
+            (() => {
+              const { title, body, unavailable } = backtestRunsErrorCopy(runsError)
+
+              return (
+                <div
+                  className="space-y-3 text-center"
+                  data-testid={unavailable ? 'backtest-runs-unavailable' : 'backtest-runs-error'}
+                >
+                  <p className="text-sm font-medium text-foreground">{title}</p>
+                  <p className="text-sm text-muted-foreground">{body}</p>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => void refetchRuns()}>
+                      Retry
+                    </Button>
+                    {unavailable ? (
+                      <Button type="button" variant="secondary" size="sm" onClick={() => runMutation.mutate()}>
+                        Run backtest
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })()
+          ) : runs.length === 0 ? (
+            <div className="space-y-3 text-center" data-testid="backtest-runs-empty">
+              <p className="text-sm font-medium text-foreground">{backtestRunsEmptyCopy().title}</p>
+              <p className="text-sm text-muted-foreground">{backtestRunsEmptyCopy().body}</p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Button type="button" variant="secondary" size="sm" onClick={() => runMutation.mutate()} data-testid="empty-run-backtest-button">
+                  <Play className="mr-2 size-4" />
+                  Run backtest
+                </Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => void refetchRuns()}>
+                  Refresh
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <BacktestRunHistory
+              runs={runs}
+              selectedRunId={selectedRun?.id}
+              onSelectRun={setSelectedRun}
+            />
+          )}
         </CardContent>
       </Card>
 

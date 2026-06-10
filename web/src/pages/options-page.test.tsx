@@ -5,7 +5,8 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { OptionsPage } from '@/pages/options-page'
-import type { OptionSnapshot } from '@/lib/api/types'
+import { ApiClientError } from '@/lib/api/client'
+import type { OptionSnapshot, ResearchOpportunity } from '@/lib/api/types'
 
 const mockOptionsChain = vi.hoisted((): OptionSnapshot[] => [
   {
@@ -44,13 +45,44 @@ const mockOptionsChain = vi.hoisted((): OptionSnapshot[] => [
   },
 ])
 
+const mockOpportunities = vi.hoisted((): ResearchOpportunity[] => [
+  {
+    decision: {
+      id: 'opp-1',
+      market_type: 'options',
+      instrument_key: 'TSLA260619C00100000',
+      side: 'buy',
+      fair_value: 11.25,
+      executable_price: 10.25,
+      spread: 0.3,
+      depth: 1234,
+      gross_ev: 18.2,
+      updated_at: '2026-06-10T12:00:00Z',
+      net_ev: 14.5,
+      kelly_fraction: 0.08,
+      proposed_size: 5,
+      approved_size: 3,
+      risk_status: 'approved',
+      status: 'candidate',
+      risk_reasons: ['good edge'],
+      regime_tags: ['options-scanner'],
+      created_at: '2026-06-10T11:55:00Z',
+    },
+  },
+])
+
 const apiClientMock = vi.hoisted(() => ({
-  getOptionsChain: vi.fn().mockResolvedValue(mockOptionsChain),
+  getOptionsChain: vi.fn(),
+  listOptionsOpportunities: vi.fn(),
 }))
 
-vi.mock('@/lib/api/client', () => ({
-  apiClient: apiClientMock,
-}))
+vi.mock('@/lib/api/client', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/api/client')>('@/lib/api/client')
+  return {
+    ...actual,
+    apiClient: apiClientMock,
+  }
+})
 
 function renderAt(search = '') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -77,6 +109,9 @@ describe('OptionsPage', () => {
   })
 
   it('seeds ticker input from ?ticker= URL param and loads chain', async () => {
+    apiClientMock.getOptionsChain.mockResolvedValueOnce(mockOptionsChain)
+    apiClientMock.listOptionsOpportunities.mockResolvedValueOnce({ data: mockOpportunities })
+
     renderAt('?ticker=TSLA')
 
     await waitFor(() => {
@@ -94,6 +129,9 @@ describe('OptionsPage', () => {
 
   it('loads and displays contracts after submit', async () => {
     const user = userEvent.setup()
+    apiClientMock.getOptionsChain.mockResolvedValueOnce(mockOptionsChain)
+    apiClientMock.listOptionsOpportunities.mockResolvedValueOnce({ data: mockOpportunities })
+
     renderAt()
 
     await user.type(screen.getByRole('textbox', { name: /underlying ticker/i }), 'tsla')
@@ -109,5 +147,50 @@ describe('OptionsPage', () => {
     expect(await screen.findByText('Expiry 2026-06-19')).toBeInTheDocument()
     expect(screen.getByText('put')).toBeInTheDocument()
     expect(screen.getByText('95.00')).toBeInTheDocument()
+    expect(await screen.findByText('1 opportunities')).toBeInTheDocument()
+  })
+
+  it('explains when the provider returns no contracts', async () => {
+    const user = userEvent.setup()
+    apiClientMock.getOptionsChain.mockResolvedValueOnce([])
+    apiClientMock.listOptionsOpportunities.mockResolvedValueOnce({ data: [] })
+
+    renderAt()
+
+    await user.type(screen.getByRole('textbox', { name: /underlying ticker/i }), 'tsla')
+    await user.click(screen.getByRole('button', { name: /load chain/i }))
+
+    expect(await screen.findByTestId('options-empty-contracts')).toHaveTextContent('No contracts returned for this ticker.')
+    expect(await screen.findByTestId('options-opportunities-empty')).toHaveTextContent('No opportunities because no contracts were returned for this ticker.')
+  })
+
+  it('explains when filters or defaults reject all opportunities', async () => {
+    const user = userEvent.setup()
+    apiClientMock.getOptionsChain.mockResolvedValueOnce(mockOptionsChain)
+    apiClientMock.listOptionsOpportunities.mockResolvedValueOnce({ data: [] })
+
+    renderAt()
+
+    await user.type(screen.getByRole('textbox', { name: /underlying ticker/i }), 'tsla')
+    await user.type(screen.getByLabelText(/expiry date filter/i), '2026-06-19')
+    await user.click(screen.getByRole('button', { name: /load chain/i }))
+
+    expect(await screen.findByTestId('options-opportunities-empty')).toHaveTextContent(
+      'No opportunities matched the selected expiry/type filters or scanner defaults.',
+    )
+  })
+
+  it('shows a configured-provider message when the chain endpoint is not available', async () => {
+    const user = userEvent.setup()
+    apiClientMock.getOptionsChain.mockRejectedValueOnce(new ApiClientError('options data provider not configured', 501))
+    apiClientMock.listOptionsOpportunities.mockResolvedValueOnce({ data: [] })
+
+    renderAt()
+
+    await user.type(screen.getByRole('textbox', { name: /underlying ticker/i }), 'tsla')
+    await user.click(screen.getByRole('button', { name: /load chain/i }))
+
+    expect(await screen.findByTestId('options-error')).toHaveTextContent('Options provider not configured on this deployment.')
+    expect(screen.getByTestId('options-opportunities-unavailable')).toHaveTextContent('Options provider not configured on this deployment.')
   })
 })

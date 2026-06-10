@@ -7,10 +7,23 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { apiClient } from '@/lib/api/client'
+import { ApiClientError, apiClient } from '@/lib/api/client'
 import type { StoredSignal, StoredTrigger, WatchTerm } from '@/lib/api/types'
 
 type Tab = 'evaluated' | 'triggers' | 'watchlist'
+
+function signalEndpointMessage(error: unknown, fallback: string) {
+  if (error instanceof ApiClientError) {
+    if (error.status === 501) return 'Signal intelligence is not configured on this deployment.'
+    if (error.status === 404) return 'The signal endpoint is unavailable on this deployment.'
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message
+  }
+
+  return fallback
+}
 
 function urgencyVariant(u: number): 'destructive' | 'warning' | 'secondary' | 'outline' {
   if (u >= 5) return 'destructive'
@@ -30,13 +43,17 @@ function actionBadge(action: string) {
 
 function EvaluatedTab() {
   const [minUrgency, setMinUrgency] = useState(1)
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['signal-events', minUrgency],
     queryFn: () => apiClient.listEvaluatedSignals({ min_urgency: minUrgency, limit: 100 }),
     refetchInterval: 10_000,
   })
 
   const events: StoredSignal[] = data?.data ?? []
+  const emptyMessage =
+    minUrgency > 1
+      ? `No evaluated signals at U${minUrgency}+ yet. Lower the urgency filter or wait for the signal stack to evaluate new events; this in-memory buffer resets on restart.`
+      : 'No evaluated signals yet. This in-memory buffer can be empty after a restart or before the signal stack has run for the first time.'
 
   return (
     <div className="space-y-4">
@@ -59,10 +76,27 @@ function EvaluatedTab() {
 
       {isLoading ? (
         <div className="h-32 animate-pulse rounded-lg border bg-muted" />
+      ) : isError ? (
+        <Card data-testid="signals-evaluated-error">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">Evaluated signals unavailable</CardTitle>
+            <CardDescription>
+              {signalEndpointMessage(error, 'Unable to load evaluated signals right now.')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button type="button" variant="outline" size="dense" onClick={() => void refetch()}>
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
       ) : events.length === 0 ? (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No evaluated signals yet. Signals appear here when the SignalHub processes events with urgency ≥ {minUrgency}.
+        <Card data-testid="signals-evaluated-empty">
+          <CardContent className="space-y-2 py-8 text-center text-sm text-muted-foreground">
+            <p>{emptyMessage}</p>
+            {minUrgency > 1 ? (
+              <p>Signals below the current filter are hidden from this tab.</p>
+            ) : null}
           </CardContent>
         </Card>
       ) : (
@@ -101,7 +135,7 @@ function EvaluatedTab() {
 }
 
 function TriggersTab() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['trigger-log'],
     queryFn: () => apiClient.listTriggerLog({ limit: 100 }),
     refetchInterval: 10_000,
@@ -113,10 +147,25 @@ function TriggersTab() {
     <div className="space-y-2">
       {isLoading ? (
         <div className="h-32 animate-pulse rounded-lg border bg-muted" />
+      ) : isError ? (
+        <Card data-testid="signals-triggers-error">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">Trigger log unavailable</CardTitle>
+            <CardDescription>
+              {signalEndpointMessage(error, 'Unable to load the trigger log right now.')}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button type="button" variant="outline" size="dense" onClick={() => void refetch()}>
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
       ) : triggers.length === 0 ? (
-        <Card>
-          <CardContent className="py-8 text-center text-sm text-muted-foreground">
-            No triggers fired yet. Triggers fire when a signal exceeds urgency 3.
+        <Card data-testid="signals-triggers-empty">
+          <CardContent className="space-y-2 py-8 text-center text-sm text-muted-foreground">
+            <p>No triggers fired yet. The trigger log is in-memory, so it can be empty after a restart or before the signal stack evaluates a high-urgency event.</p>
+            <p>Triggers fire when a signal exceeds urgency 3.</p>
           </CardContent>
         </Card>
       ) : (
@@ -151,7 +200,7 @@ function WatchlistTab() {
   const queryClient = useQueryClient()
   const [newTerm, setNewTerm] = useState('')
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['watchlist'],
     queryFn: () => apiClient.listWatchTerms(),
   })
@@ -205,7 +254,21 @@ function WatchlistTab() {
       </Card>
 
       {/* Manual terms */}
-      {manual.length > 0 && (
+      {isError ? (
+        <Card data-testid="signals-watchlist-error">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">Watchlist unavailable</CardTitle>
+            <CardDescription>{signalEndpointMessage(error, 'Unable to load the signal watchlist right now.')}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button type="button" variant="outline" size="dense" onClick={() => void refetch()}>
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {manual.length > 0 && !isError && (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Manual terms ({manual.length})</CardTitle>
@@ -233,9 +296,9 @@ function WatchlistTab() {
       )}
 
       {/* Auto-derived terms */}
-      {isLoading ? (
+      {isLoading && !isError ? (
         <div className="h-32 animate-pulse rounded-lg border bg-muted" />
-      ) : auto.length > 0 ? (
+      ) : auto.length > 0 && !isError ? (
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Auto-derived terms ({auto.length})</CardTitle>
@@ -257,7 +320,7 @@ function WatchlistTab() {
         </Card>
       ) : null}
 
-      {!isLoading && terms.length === 0 && (
+      {!isLoading && !isError && terms.length === 0 && (
         <Card>
           <CardContent className="py-8 text-center text-sm text-muted-foreground">
             No watch terms yet. Add a manual term above, or create strategies with active theses.

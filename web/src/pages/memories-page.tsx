@@ -16,7 +16,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { apiClient } from '@/lib/api/client';
+import { ApiClientError, apiClient } from '@/lib/api/client';
 import type { AgentMemory, AgentRole } from '@/lib/api/types';
 import { AGENT_ROLE_OPTIONS, formatAgentRole } from '@/lib/agent-roles';
 
@@ -43,6 +43,19 @@ function summarize(text: string, maxLength = 160) {
   return `${text.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
+function memoriesErrorMessage(error: unknown) {
+  if (error instanceof ApiClientError) {
+    if (error.status === 501) return 'Memory storage is not configured on this deployment.';
+    if (error.status === 404) return 'The memories endpoint is unavailable on this deployment.';
+  }
+
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+
+  return 'Unable to load memories right now.';
+}
+
 export function MemoriesPage() {
   const queryClient = useQueryClient();
   const [draftQuery, setDraftQuery] = useState('');
@@ -52,7 +65,7 @@ export function MemoriesPage() {
   const [offset, setOffset] = useState(0);
   const [selectedMemory, setSelectedMemory] = useState<AgentMemory | null>(null);
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['memories', query, agentRole, offset],
     queryFn: () =>
       apiClient.listMemories({
@@ -77,6 +90,7 @@ export function MemoriesPage() {
   const visibleCount = visibleMemories.length;
   const hasNextPage = (data?.data?.length ?? 0) > PAGE_SIZE;
   const pageLabel = useMemo(() => Math.floor(offset / PAGE_SIZE) + 1, [offset]);
+  const hasAppliedFilters = Boolean(query || agentRole);
 
   function applyFilters() {
     setOffset(0);
@@ -197,19 +211,51 @@ export function MemoriesPage() {
               ))}
             </div>
           ) : isError ? (
-            <p className="text-sm text-muted-foreground" data-testid="memories-error">
-              Unable to load memories right now. Start the API server to browse stored agent
-              context.
-            </p>
+            <div className="space-y-3 rounded-lg border border-border bg-background p-4" data-testid="memories-error">
+              <div className="space-y-1">
+                <p className="text-sm font-medium text-foreground">Memories unavailable</p>
+                <p className="text-sm text-muted-foreground">{memoriesErrorMessage(error)}</p>
+              </div>
+              <Button type="button" variant="outline" size="dense" onClick={() => void refetch()}>
+                Retry
+              </Button>
+            </div>
           ) : !visibleMemories.length ? (
             <div
               className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-background py-10 text-center"
               data-testid="memories-empty"
             >
               <Brain className="size-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">
-                No memories matched the current search. Memories are generated after a position is closed and reflected on by the agent.
-              </p>
+              <div className="space-y-2">
+                {hasAppliedFilters ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      No memories match the current search. Clear the search or agent filter to broaden the results.
+                    </p>
+                    <Button type="button" variant="outline" size="dense" onClick={clearFilters}>
+                      Clear filters
+                    </Button>
+                  </>
+                ) : offset > 0 ? (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      No memories on this page. Go back to an earlier page, or clear filters if you narrowed the results.
+                    </p>
+                    <Button type="button" variant="outline" size="dense" onClick={() => setOffset(0)}>
+                      Back to first page
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm text-muted-foreground">
+                      No memories have been generated yet. Memories are written after a position closes and the agent completes reflection.
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Open and close a position, then let the reflection job run to seed the store.
+                    </p>
+                  </>
+                )}
+              </div>
             </div>
           ) : (
             <ul className="space-y-3" data-testid="memories-list">

@@ -7,7 +7,7 @@ import { PageHeader } from '@/components/layout/page-header'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ConsolePanel, HudBadge, HudRow, HudSection, StatusLed } from '@/components/ui/hud'
-import { apiClient } from '@/lib/api/client'
+import { ApiClientError, apiClient } from '@/lib/api/client'
 import type {
   EngineStatus,
   MarketType,
@@ -94,6 +94,42 @@ function riskBannerLabel(status?: EngineStatus) {
   if (!status) return 'Loading safety state…'
   const killSwitch = status.kill_switch.active ? 'kill switch active' : 'kill switch clear'
   return `${status.risk_status} · ${status.circuit_breaker.state} · ${killSwitch}`
+}
+
+function journalEmptyStateCopy(hasActiveFilters: boolean) {
+  if (hasActiveFilters) {
+    return {
+      title: 'No decisions matched these filters',
+      body:
+        'The journal is responding, but the current market type or status filters hide every row. Clear filters to widen the search.',
+    }
+  }
+
+  return {
+    title: 'No decisions recorded yet',
+    body:
+      'Once the recorder writes a paper or live decision, it will appear here. If you expected history already, confirm the journal recorder and API are enabled.',
+  }
+}
+
+function journalErrorCopy(error: unknown) {
+  if (error instanceof ApiClientError && error.status === 501) {
+    return {
+      title: 'Decision journal unavailable',
+      body:
+        'The journal endpoint is not configured on this deployment. Enable the journal API or recorder before expecting rows here.',
+      unavailable: true,
+    }
+  }
+
+  return {
+    title: 'Unable to load decision journal',
+    body:
+      error instanceof Error && error.message.trim()
+        ? error.message
+        : 'The journal request failed. Retry after checking the API service and network connection.',
+    unavailable: false,
+  }
 }
 
 function DecisionRow({ decision }: { decision: TradeDecision }) {
@@ -238,6 +274,7 @@ function DecisionCard({ decision }: { decision: TradeDecision }) {
 export function DecisionJournalPage() {
   const [marketType, setMarketType] = useState<'' | MarketType>('')
   const [status, setStatus] = useState<'' | TradeDecisionStatus>('')
+  const hasActiveFilters = Boolean(marketType || status)
 
   const query = useMemo(
     () => ({
@@ -367,16 +404,63 @@ export function DecisionJournalPage() {
               ))}
             </div>
           ) : decisionsQuery.isError ? (
-            <div className="space-y-3 text-sm" data-testid="decision-journal-error">
-              <p className="text-muted-foreground">Unable to load decision journal.</p>
-              <Button type="button" variant="outline" size="sm" onClick={() => void decisionsQuery.refetch()}>
-                Retry
-              </Button>
-            </div>
+            (() => {
+              const { title, body, unavailable } = journalErrorCopy(decisionsQuery.error)
+
+              return (
+                <div
+                  className="flex flex-col items-center gap-3 py-10 text-center text-sm"
+                  data-testid={unavailable ? 'decision-journal-unavailable' : 'decision-journal-error'}
+                >
+                  <CircleAlert className="size-8 text-muted-foreground" />
+                  <div className="space-y-1.5">
+                    <p className="font-medium text-foreground">{title}</p>
+                    <p className="max-w-xl text-muted-foreground">{body}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    {unavailable ? (
+                      <Button type="button" variant="outline" size="sm" asChild>
+                        <Link to="/risk">Check risk controls</Link>
+                      </Button>
+                    ) : null}
+                    <Button type="button" variant="secondary" size="sm" onClick={() => void decisionsQuery.refetch()}>
+                      Retry
+                    </Button>
+                  </div>
+                </div>
+              )
+            })()
           ) : decisions.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-10 text-center" data-testid="decision-journal-empty">
+            <div
+              className="flex flex-col items-center gap-3 py-10 text-center"
+              data-testid={hasActiveFilters ? 'decision-journal-empty-filters' : 'decision-journal-empty'}
+            >
               <FileText className="size-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">No decisions match the current filters.</p>
+              <div className="space-y-1.5">
+                <p className="text-sm font-medium text-foreground">{journalEmptyStateCopy(hasActiveFilters).title}</p>
+                <p className="max-w-xl text-sm text-muted-foreground">{journalEmptyStateCopy(hasActiveFilters).body}</p>
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {hasActiveFilters ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setMarketType('')
+                      setStatus('')
+                    }}
+                  >
+                    Clear filters
+                  </Button>
+                ) : null}
+                <Button type="button" variant="secondary" size="sm" onClick={() => void decisionsQuery.refetch()}>
+                  Refresh
+                </Button>
+                <Button type="button" variant="outline" size="sm" asChild>
+                  <Link to="/risk">Open risk engine</Link>
+                </Button>
+              </div>
             </div>
           ) : (
             <>

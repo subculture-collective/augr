@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { ConsolePanel, HudBadge, HudSection, StatusLed } from '@/components/ui/hud'
 import { Input } from '@/components/ui/input'
-import { apiClient } from '@/lib/api/client'
+import { ApiClientError, apiClient } from '@/lib/api/client'
 import type { ResearchOpportunity, TradeDecisionStatus, TradeDecisionRiskStatus } from '@/lib/api/types'
 
 type OptionTypeFilter = '' | 'call' | 'put'
@@ -57,6 +57,20 @@ function safeNumberLabel(value: unknown, maximumFractionDigits = 0) {
 function splitReasons(reasons?: string[] | null) {
   if (!Array.isArray(reasons) || reasons.length === 0) return []
   return reasons.map((reason) => reason.trim()).filter(Boolean)
+}
+
+function getApiStatus(error: unknown) {
+  return error instanceof ApiClientError ? error.status : (error as { status?: number } | null | undefined)?.status
+}
+
+function isNotConfiguredError(error: unknown) {
+  return getApiStatus(error) === 501
+}
+
+function optionScannerEmptyMessage(hasChainData: boolean, hasFilters: boolean) {
+  if (!hasChainData) return 'No opportunities because no contracts were returned for this ticker.'
+  if (hasFilters) return 'No opportunities matched the selected expiry/type filters or scanner defaults.'
+  return 'No opportunities met the scanner defaults for this chain.'
 }
 
 function OpportunityRow({ opportunity }: { opportunity: ResearchOpportunity }) {
@@ -153,7 +167,7 @@ export function OptionsPage() {
 
   const urlTicker = searchParams.get('ticker')?.trim().toUpperCase() ?? ''
 
-  const { data, isLoading, isError, isFetched, refetch } = useQuery({
+  const { data, error: chainError, isLoading, isError, isFetched, refetch } = useQuery({
     queryKey: ['options-chain', ticker, expiry, optionType],
     queryFn: () =>
       apiClient.getOptionsChain(ticker, {
@@ -204,19 +218,24 @@ export function OptionsPage() {
   }, [urlTicker])
 
   const opportunities = opportunitiesQuery.data?.data ?? []
+  const chainContracts = data ?? []
+  const hasScannerFilters = Boolean(expiry || optionType)
+  const chainProviderUnavailable = isNotConfiguredError(chainError)
   const opportunitiesStatus = !ticker
-    ? 'Scanner not configured'
+    ? 'Search a ticker above to enable the paper-first scanner.'
+    : chainProviderUnavailable
+      ? 'Options provider not configured on this deployment.'
     : opportunitiesQuery.isLoading
       ? 'Loading opportunities…'
       : opportunitiesQuery.isError
-        ? (opportunitiesQuery.error as { status?: number } | null | undefined)?.status === 501
+        ? isNotConfiguredError(opportunitiesQuery.error)
           ? 'Scanner not configured'
           : 'Unable to load opportunities'
         : opportunities.length === 0
-          ? 'No opportunities met the paper-first filters.'
+          ? optionScannerEmptyMessage(chainContracts.length > 0, hasScannerFilters)
           : `${opportunities.length} opportunities`
 
-  const opportunityScannerUnavailable = (opportunitiesQuery.error as { status?: number } | null | undefined)?.status === 501
+  const opportunityScannerUnavailable = isNotConfiguredError(opportunitiesQuery.error)
 
   return (
     <div className="space-y-5" data-testid="options-page">
@@ -276,7 +295,12 @@ export function OptionsPage() {
           {!ticker ? (
             <div className="flex flex-col items-center gap-2 py-8 text-center">
               <TrendingUp className="size-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">Scanner not configured.</p>
+              <p className="text-sm text-muted-foreground">Search a ticker above to enable the scanner.</p>
+            </div>
+          ) : chainProviderUnavailable ? (
+            <div className="flex flex-col items-center gap-2 py-8 text-center" data-testid="options-opportunities-unavailable">
+              <TrendingUp className="size-8 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">Options provider not configured on this deployment.</p>
             </div>
           ) : opportunitiesQuery.isLoading ? (
             <div className="space-y-3" data-testid="options-opportunities-loading">
@@ -288,7 +312,7 @@ export function OptionsPage() {
             opportunityScannerUnavailable ? (
               <div className="flex flex-col items-center gap-2 py-8 text-center">
                 <TrendingUp className="size-8 text-muted-foreground" />
-                <p className="text-sm text-muted-foreground">Scanner not configured.</p>
+                <p className="text-sm text-muted-foreground">Scanner not configured on this deployment.</p>
               </div>
             ) : (
               <div className="space-y-3 text-sm" data-testid="options-opportunities-error">
@@ -301,7 +325,7 @@ export function OptionsPage() {
           ) : opportunities.length === 0 ? (
             <div className="flex flex-col items-center gap-2 py-8 text-center" data-testid="options-opportunities-empty">
               <TrendingUp className="size-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">No opportunities met the paper-first filters.</p>
+              <p className="text-sm text-muted-foreground">{opportunitiesStatus}</p>
             </div>
           ) : (
             <>
@@ -343,10 +367,12 @@ export function OptionsPage() {
             {isLoading
               ? 'Loading chain...'
               : isError
-                ? 'Failed to load options chain'
+                ? chainProviderUnavailable
+                  ? 'Options provider not configured on this deployment.'
+                  : 'Failed to load options chain'
                 : !isFetched
                   ? 'Enter a ticker above to get started'
-                  : `${data?.length ?? 0} contracts loaded`}
+                  : `${chainContracts.length} contracts loaded`}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -364,11 +390,23 @@ export function OptionsPage() {
           ) : isError ? (
             <div className="space-y-3" data-testid="options-error">
               <p className="text-sm text-muted-foreground">
-                Unable to load options chain. Ensure the API server is running.
+                {chainProviderUnavailable
+                  ? 'Options provider not configured on this deployment.'
+                  : 'Unable to load options chain. Ensure the API server is running.'}
               </p>
-              <Button type="button" variant="outline" size="sm" onClick={() => void refetch()}>
-                Retry
-              </Button>
+              {chainProviderUnavailable ? null : (
+                <Button type="button" variant="outline" size="sm" onClick={() => void refetch()}>
+                  Retry
+                </Button>
+              )}
+            </div>
+          ) : isFetched && chainContracts.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-8 text-center" data-testid="options-empty-contracts">
+              <TrendingUp className="size-8 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">No contracts returned for this ticker.</p>
+              <p className="text-xs text-muted-foreground">
+                The provider returned an empty chain, so the scanner has nothing to evaluate yet.
+              </p>
             </div>
           ) : !isFetched ? (
             <div className="flex flex-col items-center gap-2 py-8 text-center" data-testid="options-empty">
