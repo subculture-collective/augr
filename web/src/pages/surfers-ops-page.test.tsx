@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -42,7 +42,14 @@ describe('SurfersOpsPage', () => {
 
     render(<SurfersOpsPage />)
 
-    expect(await screen.findByTestId('surfers-status-disabled')).toHaveTextContent('Feed disabled or not configured')
+    const statusPanel = await screen.findByTestId('surfers-status-panel')
+    expect(within(statusPanel).getByText('Summary')).toBeInTheDocument()
+    expect(within(statusPanel).getByText('Why no data')).toBeInTheDocument()
+    expect(within(statusPanel).getByText('Last known state')).toBeInTheDocument()
+    expect(within(statusPanel).getByText('Current status')).toBeInTheDocument()
+    const disabledStatus = await screen.findByTestId('surfers-status-disabled')
+    expect(disabledStatus).toHaveTextContent('Feed is disabled')
+    expect(disabledStatus).not.toHaveTextContent('not configured')
     expect(screen.getByText('No tripped breakers.')).toBeInTheDocument()
 
     await user.type(screen.getByLabelText(/strategy id/i), 'strategy-123')
@@ -52,6 +59,9 @@ describe('SurfersOpsPage', () => {
       expect(apiClientMock.getBacktestDivergence).toHaveBeenCalledWith('strategy-123')
     })
 
+    const divergencePanel = await screen.findByTestId('surfers-divergence-panel')
+    expect(within(divergencePanel).getByText('404 means this strategy has no divergence record yet.')).toBeInTheDocument()
+    expect(within(divergencePanel).getByText('Last known state')).toBeInTheDocument()
     expect(await screen.findByTestId('surfers-divergence-empty')).toHaveTextContent('No divergence data exists for this strategy.')
   })
 
@@ -65,7 +75,12 @@ describe('SurfersOpsPage', () => {
 
     render(<SurfersOpsPage />)
 
+    const statusPanel = await screen.findByTestId('surfers-status-panel')
+    expect(within(statusPanel).getByText('The backend returned 501/503, or this deployment does not expose the feed endpoint.')).toBeInTheDocument()
     expect(await screen.findByTestId('surfers-status-unavailable')).toHaveTextContent('Polymarket feed is not configured on this deployment.')
+
+    const breakersPanel = await screen.findByTestId('surfers-breakers-panel')
+    expect(within(breakersPanel).getByText('A 501/503 response means the breaker service is not configured on this deployment.')).toBeInTheDocument()
     expect(screen.getByTestId('surfers-breakers-unavailable')).toHaveTextContent('Risk breaker service is not configured on this deployment.')
   })
 
@@ -78,13 +93,20 @@ describe('SurfersOpsPage', () => {
 
     render(<SurfersOpsPage />)
 
+    const statusPanel = await screen.findByTestId('surfers-status-panel')
+    expect(within(statusPanel).getByText('The API returned a non-configuration error, so this is not an empty state.')).toBeInTheDocument()
     expect(await screen.findByTestId('surfers-status-error')).toHaveTextContent('Unable to load Polymarket feed status')
+
+    const breakersPanel = await screen.findByTestId('surfers-breakers-panel')
+    expect(within(breakersPanel).getByText('The API returned an unexpected error, so the breaker state is not empty — it is unavailable.')).toBeInTheDocument()
     expect(screen.getByTestId('surfers-breakers-error')).toHaveTextContent('Unable to load risk breaker state')
     expect(screen.queryByText('No tripped breakers.')).not.toBeInTheDocument()
 
     await user.type(screen.getByLabelText(/strategy id/i), 'strategy-500')
     await user.click(screen.getByRole('button', { name: /load/i }))
 
+    const divergencePanel = await screen.findByTestId('surfers-divergence-panel')
+    expect(within(divergencePanel).getByText('A non-configuration API error prevented the divergence lookup.')).toBeInTheDocument()
     expect(await screen.findByTestId('surfers-divergence-error')).toHaveTextContent('Unable to load divergence for this strategy')
     expect(screen.queryByText('Load a strategy to inspect divergence.')).not.toBeInTheDocument()
   })

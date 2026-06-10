@@ -37,18 +37,54 @@ function loadingBlock(testId: string) {
   return <div data-testid={testId} className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />
 }
 
+function PanelNarrative({
+  summary,
+  whyNoData,
+  lastKnownState,
+  currentStatus,
+}: {
+  summary: string
+  whyNoData: string
+  lastKnownState: string
+  currentStatus: string
+}) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-2 text-sm">
+      <div className="rounded-none border border-border bg-background p-3">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Summary</div>
+        <div className="mt-1">{summary}</div>
+      </div>
+      <div className="rounded-none border border-border bg-background p-3">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Why no data</div>
+        <div className="mt-1">{whyNoData}</div>
+      </div>
+      <div className="rounded-none border border-border bg-background p-3">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Last known state</div>
+        <div className="mt-1">{lastKnownState}</div>
+      </div>
+      <div className="rounded-none border border-border bg-background p-3">
+        <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Current status</div>
+        <div className="mt-1 font-medium">{currentStatus}</div>
+      </div>
+    </div>
+  )
+}
+
 export function SurfersOpsPage() {
   const [status, setStatus] = useState<PolymarketStatus | null>(null)
+  const [lastStatus, setLastStatus] = useState<PolymarketStatus | null>(null)
   const [statusError, setStatusError] = useState<unknown>(null)
   const [statusLoading, setStatusLoading] = useState(true)
 
   const [breakers, setBreakers] = useState<RiskBreakerState[]>([])
+  const [lastBreakers, setLastBreakers] = useState<RiskBreakerState[] | null>(null)
   const [breakersError, setBreakersError] = useState<unknown>(null)
   const [breakersLoading, setBreakersLoading] = useState(true)
 
   const [strategyDraft, setStrategyDraft] = useState('')
   const [strategyId, setStrategyId] = useState('')
   const [divergence, setDivergence] = useState<DivergenceResponse | null>(null)
+  const [lastDivergence, setLastDivergence] = useState<DivergenceResponse | null>(null)
   const [divergenceError, setDivergenceError] = useState<unknown>(null)
   const [divergenceLoading, setDivergenceLoading] = useState(false)
 
@@ -70,6 +106,7 @@ export function SurfersOpsPage() {
 
       if (statusResult.status === 'fulfilled') {
         setStatus(statusResult.value)
+        setLastStatus(statusResult.value)
       } else {
         setStatus(null)
         setStatusError(statusResult.reason)
@@ -77,6 +114,7 @@ export function SurfersOpsPage() {
 
       if (breakersResult.status === 'fulfilled') {
         setBreakers(breakersResult.value.tripped)
+        setLastBreakers(breakersResult.value.tripped)
       } else {
         setBreakers([])
         setBreakersError(breakersResult.reason)
@@ -100,6 +138,7 @@ export function SurfersOpsPage() {
 
     if (!strategyId) {
       setDivergence(null)
+      setLastDivergence(null)
       setDivergenceError(null)
       setDivergenceLoading(false)
       return () => {
@@ -115,6 +154,7 @@ export function SurfersOpsPage() {
         const result = await apiClient.getBacktestDivergence(strategyId)
         if (!alive) return
         setDivergence(result)
+        setLastDivergence(result)
       } catch (error) {
         if (!alive) return
         setDivergence(null)
@@ -140,8 +180,7 @@ export function SurfersOpsPage() {
   const statusFailed = Boolean(statusError) && !statusUnavailable
   const breakersFailed = Boolean(breakersError) && !breakersUnavailable
   const divergenceFailed = Boolean(divergenceError) && !divergenceUnavailable && !divergenceMissing
-
-  const feedLabel = statusLoading
+  const statusCurrent = statusLoading
     ? 'Loading market feed…'
     : statusUnavailable
       ? 'Feed not configured'
@@ -151,16 +190,56 @@ export function SurfersOpsPage() {
           ? 'Feed enabled'
           : 'Feed disabled'
 
+  const breakersCurrent = breakersLoading
+    ? 'Loading breaker state…'
+    : breakersUnavailable
+      ? 'Risk breaker service not configured'
+      : breakersFailed
+        ? 'Unable to load breaker state'
+        : breakers.length
+          ? `${breakers.length} active`
+          : 'No current incidents'
+
+  const divergenceCurrent = strategyId
+    ? divergenceLoading
+      ? 'Loading divergence…'
+      : divergenceUnavailable
+        ? 'Divergence source not configured'
+        : divergenceFailed
+          ? 'Unable to load divergence'
+          : divergenceMissing
+            ? 'No divergence data found for this strategy'
+            : divergence
+              ? 'Divergence loaded'
+              : 'Ready to load'
+    : 'Enter a strategy_id to compare live vs backtest divergence'
+
   return (
     <div className="space-y-4" data-testid="surfers-ops-page">
       <PageHeader title="Surfers Ops" description="Polymarket feed, recorder lag, breakers, and divergence" />
 
-      <Card>
+      <Card data-testid="surfers-status-panel">
         <CardHeader>
           <CardTitle>WS Pool Health</CardTitle>
-          <CardDescription>{feedLabel}</CardDescription>
+          <CardDescription>{statusCurrent}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          <PanelNarrative
+            summary="Live Polymarket feed health, connection count, jitter, and recorder lag."
+            whyNoData={
+              statusUnavailable
+                ? 'The backend returned 501/503, or this deployment does not expose the feed endpoint.'
+                : statusFailed
+                  ? 'The API returned a non-configuration error, so this is not an empty state.'
+                  : 'Data is available from the latest feed response.'
+            }
+            lastKnownState={
+              lastStatus
+                ? `${lastStatus.enabled ? 'Enabled' : 'Disabled'}, ${lastStatus.ws_connections} connections, lag ${lastStatus.recorder_lag_seconds.toFixed(2)} s`
+                : 'No cached feed snapshot yet.'
+            }
+            currentStatus={statusCurrent}
+          />
           {statusLoading ? (
             loadingBlock('surfers-status-loading')
           ) : statusUnavailable ? (
@@ -200,7 +279,7 @@ export function SurfersOpsPage() {
               </div>
               {!status.enabled ? (
                 <p className="text-muted-foreground" data-testid="surfers-status-disabled">
-                  Feed disabled or not configured; no live market data will arrive until the dependency is enabled.
+                  Feed is disabled; no live market data will arrive until the dependency is enabled.
                 </p>
               ) : status.ws_connections === 0 && status.ready_slugs.length === 0 ? (
                 <p className="text-muted-foreground">Feed is enabled, but no markets are connected yet.</p>
@@ -210,7 +289,7 @@ export function SurfersOpsPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card data-testid="surfers-breakers-panel">
         <CardHeader>
           <CardTitle>Tripped Breakers</CardTitle>
           <CardDescription>
@@ -226,6 +305,22 @@ export function SurfersOpsPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          <PanelNarrative
+            summary="Current tripped risk breakers and reset timing."
+            whyNoData={
+              breakersUnavailable
+                ? 'A 501/503 response means the breaker service is not configured on this deployment.'
+                : breakersFailed
+                  ? 'The API returned an unexpected error, so the breaker state is not empty — it is unavailable.'
+                  : 'The latest breaker response is available.'
+            }
+            lastKnownState={
+              lastBreakers
+                ? `${lastBreakers.length} breaker${lastBreakers.length !== 1 ? 's' : ''} last reported`
+                : 'No cached breaker snapshot yet.'
+            }
+            currentStatus={breakersCurrent}
+          />
           {breakersLoading ? (
             loadingBlock('surfers-breakers-loading')
           ) : breakersUnavailable ? (
@@ -254,26 +349,34 @@ export function SurfersOpsPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card data-testid="surfers-divergence-panel">
         <CardHeader>
           <CardTitle>Divergence Status</CardTitle>
           <CardDescription>
-            {strategyId
-              ? divergenceLoading
-                ? 'Loading divergence…'
-                : divergenceUnavailable
-                  ? 'Divergence source not configured'
-                  : divergenceFailed
-                    ? 'Unable to load divergence'
-                    : divergenceMissing
-                      ? 'No divergence data found for this strategy'
-                      : divergence
-                        ? 'Divergence loaded'
-                        : 'Ready to load'
-              : 'Enter a strategy_id to compare live vs backtest divergence'}
+            {divergenceCurrent}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
+          <PanelNarrative
+            summary="Live vs backtest divergence for a selected strategy."
+            whyNoData={
+              divergenceMissing
+                ? '404 means this strategy has no divergence record yet.'
+                : divergenceUnavailable
+                  ? 'A 501/503 response means the divergence source is not configured.'
+                  : divergenceFailed
+                    ? 'A non-configuration API error prevented the divergence lookup.'
+                    : strategyId
+                      ? 'The latest divergence response is available.'
+                      : 'No strategy ID has been loaded yet.'
+            }
+            lastKnownState={
+              lastDivergence
+                ? `${lastDivergence.status} at tolerance ${lastDivergence.tolerance.toFixed(2)}`
+                : 'No cached divergence snapshot yet.'
+            }
+            currentStatus={divergenceCurrent}
+          />
           <form
             className="flex flex-wrap gap-2"
             onSubmit={(event) => {

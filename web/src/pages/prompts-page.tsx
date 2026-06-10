@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertCircle, Check, RotateCcw, Save, Sparkles, SlidersHorizontal } from 'lucide-react';
+import { AlertCircle, Check, RotateCcw, Save, Sparkles, SlidersHorizontal, Undo2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { PageHeader } from '@/components/layout/page-header';
@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { ConsolePanel, HudBadge, HudSection, StatusLed } from '@/components/ui/hud';
 import { ApiClientError, apiClient } from '@/lib/api/client';
 import type { PromptDefinition, PromptSettings, PromptSettingsUpdateRequest } from '@/lib/api/types';
 import { cn } from '@/lib/utils';
@@ -30,6 +31,72 @@ function getDirtyKeys(draft: Record<string, string>, saved: Record<string, strin
   return Array.from(new Set([...Object.keys(draft), ...Object.keys(saved)])).filter(
     (key) => draft[key] !== saved[key],
   );
+}
+
+function getPromptSuffix(key: string) {
+  const parts = key.split(/[._-]/g).filter(Boolean);
+  return parts.at(-1) ?? key;
+}
+
+function getPromptNamespace(key: string, category: string) {
+  const parts = key.split(/[._-]/g).filter(Boolean);
+  return parts[0] ?? category;
+}
+
+function getPromptTags(prompt: PromptDefinition, hasDraftChange: boolean) {
+  const tags = [formatCategory(prompt.category), getPromptNamespace(prompt.key, prompt.category), getPromptSuffix(prompt.key)];
+
+  if (prompt.overridden) {
+    tags.push('saved override');
+  } else {
+    tags.push('default');
+  }
+
+  if (hasDraftChange) {
+    tags.push('draft changed');
+  }
+
+  return Array.from(new Set(tags));
+}
+
+function summarizePromptText(text: string) {
+  const trimmed = text.trim();
+
+  if (!trimmed) {
+    return {
+      excerpt: '<empty>',
+      lineCount: 0,
+      charCount: 0,
+    };
+  }
+
+  const lines = trimmed
+    .split(/\r?\n/g)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const excerpt = lines.slice(0, 4).join(' ');
+
+  return {
+    excerpt: excerpt.length > 240 ? `${excerpt.slice(0, 240).trimEnd()}…` : excerpt,
+    lineCount: lines.length,
+    charCount: trimmed.length,
+  };
+}
+
+function buildMockPreview(prompt: PromptDefinition, effectiveText: string, previewMode: string) {
+  const summary = summarizePromptText(effectiveText);
+
+  return {
+    sampleRequest: prompt.description || `Sample request for ${prompt.label}`,
+    promptExcerpt: summary.excerpt,
+    lineCount: summary.lineCount,
+    charCount: summary.charCount,
+    mockResponse:
+      summary.excerpt === '<empty>'
+        ? 'Local preview only: no effective instructions are available yet.'
+        : `Local preview only: this ${previewMode} would shape a response for ${prompt.label} without calling the backend or an LLM.`,
+  };
 }
 
 function DetailTile({ label, value }: { label: string; value: string }) {
@@ -55,6 +122,22 @@ function PromptBody({ title, text, badge }: { title: string; text: string; badge
       <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-muted-foreground">
         {displayText}
       </pre>
+    </div>
+  );
+}
+
+function PromptTags({ tags }: { tags: string[] }) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {tags.map((tag) => (
+        <Badge
+          key={tag}
+          variant={tag === 'draft changed' ? 'warning' : tag === 'saved override' ? 'success' : 'outline'}
+          className="text-[10px] uppercase tracking-[0.16em]"
+        >
+          {tag}
+        </Badge>
+      ))}
     </div>
   );
 }
@@ -91,6 +174,7 @@ export function PromptsPage() {
 
   const savedOverrides = useMemo(() => extractOverrides(prompts), [prompts]);
   const dirtyKeys = useMemo(() => getDirtyKeys(draftOverrides, savedOverrides), [draftOverrides, savedOverrides]);
+  const dirtyKeySet = useMemo(() => new Set(dirtyKeys), [dirtyKeys]);
   const isDirty = dirtyKeys.length > 0;
 
   useEffect(() => {
@@ -149,26 +233,24 @@ export function PromptsPage() {
     setSaveError(null);
   }
 
-  function resetSelectedPrompt() {
-    if (!selectedPrompt) {
-      return;
-    }
-
-    setDraftOverrides((current) => {
-      const next = { ...current };
-      if (Object.prototype.hasOwnProperty.call(savedOverrides, selectedPrompt.key)) {
-        next[selectedPrompt.key] = savedOverrides[selectedPrompt.key];
-      } else {
-        delete next[selectedPrompt.key];
-      }
-      return next;
-    });
+  function resetAllPrompts() {
+    setDraftOverrides(savedOverrides);
     setSaveMessage(null);
     setSaveError(null);
   }
 
-  function resetAllPrompts() {
-    setDraftOverrides(savedOverrides);
+  function resetPromptDraft(key: string) {
+    setDraftOverrides((current) => {
+      const next = { ...current };
+
+      if (Object.prototype.hasOwnProperty.call(savedOverrides, key)) {
+        next[key] = savedOverrides[key];
+      } else {
+        delete next[key];
+      }
+
+      return next;
+    });
     setSaveMessage(null);
     setSaveError(null);
   }
@@ -228,6 +310,13 @@ export function PromptsPage() {
   const selectedPromptDirty = selectedPrompt
     ? currentOverride !== savedOverride || hasCurrentOverride !== hasSavedOverride
     : false;
+  const selectedPreviewMode = selectedPromptDirty
+    ? 'draft override'
+    : hasCurrentOverride
+      ? 'saved override'
+      : 'default prompt';
+  const selectedPromptTags = selectedPrompt ? getPromptTags(selectedPrompt, selectedPromptDirty) : [];
+  const selectedPromptPreview = selectedPrompt ? buildMockPreview(selectedPrompt, currentEffectiveText, selectedPreviewMode) : null;
 
   return (
     <div className="relative space-y-6" data-testid="prompts-page">
@@ -253,25 +342,31 @@ export function PromptsPage() {
               data-testid="prompts-save-button"
             >
               <Save className="size-4" />
-              {saveMutation.isPending ? 'Saving…' : 'Save'}
+              {saveMutation.isPending ? 'Saving…' : 'Save changes'}
             </Button>
             <Button
               type="button"
               variant="outline"
-              onClick={resetSelectedPrompt}
+              onClick={() => {
+                if (selectedPrompt) {
+                  resetPromptDraft(selectedPrompt.key);
+                }
+              }}
               disabled={!selectedPrompt || !selectedPromptDirty || saveMutation.isPending}
+              data-testid="prompts-revert-button"
             >
               <RotateCcw className="size-4" />
-              Reset selected
+              Revert selected draft
             </Button>
             <Button
               type="button"
               variant="outline"
               onClick={resetAllPrompts}
               disabled={!isDirty || saveMutation.isPending}
+              data-testid="prompts-reset-all-button"
             >
               <Sparkles className="size-4" />
-              Reset all
+              Revert all drafts
             </Button>
           </div>
         )}
@@ -331,35 +426,66 @@ export function PromptsPage() {
               <div className="space-y-2">
                 {filteredPrompts.map((prompt) => {
                   const isSelected = prompt.key === selectedPrompt?.key;
+                  const promptDirty = dirtyKeySet.has(prompt.key);
+                  const promptTags = getPromptTags(prompt, promptDirty);
 
                   return (
-                    <button
+                    <div
                       key={prompt.key}
-                      type="button"
-                      onClick={() => setSelectedKey(prompt.key)}
+                      data-testid={`prompt-card-${prompt.key}`}
                       className={cn(
-                        'w-full rounded-xl border px-3 py-3 text-left transition-all',
+                        'rounded-xl border px-3 py-3 transition-all',
                         isSelected
                           ? 'border-primary/40 bg-primary/8 shadow-sm shadow-primary/5'
                           : 'border-border bg-background/70 hover:border-primary/20 hover:bg-accent/45',
                       )}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium text-foreground">{prompt.label}</p>
-                          <p className="mt-1 truncate font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                            {prompt.key}
-                          </p>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedKey(prompt.key)}
+                        className="w-full text-left"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1 space-y-2">
+                            <div className="flex items-start gap-2">
+                              <p className="truncate text-sm font-medium text-foreground">{prompt.label}</p>
+                              {isSelected ? <Badge variant="success">selected</Badge> : null}
+                            </div>
+                            <p className="truncate font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                              {prompt.key}
+                            </p>
+                            <PromptTags tags={promptTags} />
+                          </div>
+                          <Badge variant={prompt.overridden ? 'success' : 'outline'}>
+                            {prompt.overridden ? 'saved' : 'default'}
+                          </Badge>
                         </div>
-                        <Badge variant={prompt.overridden ? 'success' : 'outline'}>
-                          {prompt.overridden ? 'override' : 'default'}
-                        </Badge>
+                        <p className="mt-3 text-sm leading-6 text-muted-foreground">{prompt.description}</p>
+                      </button>
+
+                      <div className="mt-3 flex items-center justify-between gap-3 border-t border-border/60 pt-3 text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+                        <span>{promptDirty ? 'Local draft changed' : 'Ready to edit'}</span>
+                        {promptDirty ? (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => resetPromptDraft(prompt.key)}
+                            data-testid={`prompt-undo-${prompt.key}`}
+                          >
+                            <Undo2 className="size-4" />
+                            Undo
+                          </Button>
+                        ) : prompt.key === selectedPrompt?.key ? (
+                          <span className="flex items-center gap-1.5 text-primary">
+                            <Check className="size-3.5" />
+                            Open
+                          </span>
+                        ) : (
+                          <span>Open</span>
+                        )}
                       </div>
-                      <div className="mt-3 flex items-center justify-between gap-2 text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                        <span>{formatCategory(prompt.category)}</span>
-                        {prompt.key === selectedPrompt?.key ? <Check className="size-3.5 text-primary" /> : <span>select</span>}
-                      </div>
-                    </button>
+                    </div>
                   );
                 })}
 
@@ -388,12 +514,15 @@ export function PromptsPage() {
             </div>
 
             {selectedPrompt ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant="outline">{formatCategory(selectedPrompt.category)}</Badge>
-                <Badge variant={selectedPrompt.overridden ? 'success' : 'outline'}>
-                  {selectedPrompt.overridden ? 'saved override' : 'using default'}
-                </Badge>
-                {selectedPromptDirty ? <Badge variant="warning">draft changed</Badge> : null}
+              <div className="flex flex-wrap items-center gap-2" data-testid="selected-prompt-tags">
+                {selectedPromptTags.map((tag) => (
+                  <Badge
+                    key={tag}
+                    variant={tag === 'draft changed' ? 'warning' : tag === 'saved override' ? 'success' : 'outline'}
+                  >
+                    {tag}
+                  </Badge>
+                ))}
               </div>
             ) : null}
           </CardHeader>
@@ -417,22 +546,71 @@ export function PromptsPage() {
                       placeholder="Write a replacement prompt here…"
                     />
                     <p className="text-xs text-muted-foreground">
-                      Save to persist this override. Reset selected restores the saved value for just this prompt.
+                      Revert selected draft restores the last saved snapshot for this prompt; save when you want to write the new draft back.
                     </p>
                   </div>
 
                   <div className="space-y-4">
-                    <PromptBody title="Default prompt" text={selectedPrompt.default_text} />
-                    <PromptBody
-                      title="Effective preview"
-                      text={currentEffectiveText}
-                      badge={hasCurrentOverride ? 'draft' : 'saved'}
-                    />
-                    <PromptBody
-                      title="Saved override"
-                      text={hasSavedOverride ? savedOverride : 'No saved override'}
-                      badge={selectedPrompt.overridden ? 'active' : 'empty'}
-                    />
+                    <ConsolePanel className="border-border/80 bg-panel/90 p-4 shadow-lg shadow-black/10" data-testid="prompt-preview-panel">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <StatusLed
+                            state={selectedPromptDirty ? 'warn' : selectedPrompt.overridden ? 'sync' : 'ok'}
+                            label="local preview"
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Deterministic sample only. No backend or LLM call is made here.
+                          </p>
+                        </div>
+                        <HudBadge tone={selectedPromptDirty ? 'caution' : selectedPrompt.overridden ? 'pulse' : 'ink'}>
+                          {selectedPromptDirty ? 'draft active' : selectedPrompt.overridden ? 'saved override' : 'default text'}
+                        </HudBadge>
+                      </div>
+
+                      {selectedPromptPreview ? (
+                        <div className="mt-4 space-y-4">
+                          <div className="grid gap-4 md:grid-cols-2">
+                            <div className="space-y-2">
+                              <HudSection label="Sample request" note="mock input" />
+                              <p className="rounded-xl border border-border bg-background/70 px-4 py-3 text-sm leading-6 text-foreground">
+                                {selectedPromptPreview.sampleRequest}
+                              </p>
+                            </div>
+
+                            <div className="space-y-2">
+                              <HudSection
+                                label="Prompt excerpt"
+                                note={`${selectedPromptPreview.lineCount} lines · ${selectedPromptPreview.charCount} chars`}
+                              />
+                              <pre className="max-h-44 overflow-auto rounded-xl border border-border bg-background/70 px-4 py-3 whitespace-pre-wrap break-words font-mono text-[12px] leading-6 text-muted-foreground">
+                                {selectedPromptPreview.promptExcerpt}
+                              </pre>
+                            </div>
+                          </div>
+
+                          <div className="rounded-xl border border-border bg-background/70 px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <HudBadge tone="signal">mock output</HudBadge>
+                              <span className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                                local only
+                              </span>
+                            </div>
+                            <p className="mt-3 text-sm leading-6 text-foreground">
+                              {selectedPromptPreview.mockResponse}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                    </ConsolePanel>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <PromptBody title="Default prompt" text={selectedPrompt.default_text} />
+                      <PromptBody
+                        title="Saved override"
+                        text={hasSavedOverride ? savedOverride : 'No saved override'}
+                        badge={selectedPrompt.overridden ? 'active' : 'empty'}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>

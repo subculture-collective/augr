@@ -47,6 +47,7 @@ export function AppRoutes() {
         <Route path="calendar" element={<CalendarPage />} />
         <Route path="universe" element={<UniversePage />} />
         <Route path="glossary" element={<GlossaryPage />} />
+        <Route path="glossary/:slug" element={<GlossaryPage />} />
 
         <Route element={<ProtectedRoute />}>
           <Route index element={<DashboardPage />} />
