@@ -44,6 +44,18 @@ const denseSelectClassName =
   'flex h-9 w-full rounded-md border border-input bg-card px-3 py-1 text-sm text-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring';
 
 type FeedItem = AgentEvent & { live?: boolean };
+type FeedGroup = {
+  key: string;
+  pipelineRunId?: string;
+  strategyId?: string;
+  events: FeedItem[];
+  latestEvent: FeedItem;
+  eventCount: number;
+  live: boolean;
+  agentRoles: AgentRole[];
+  eventKinds: string[];
+  standalone: boolean;
+};
 type ChatSelectionSource = 'event' | 'manual' | 'creating';
 type ChatContext = { pipelineRunId: string; agentRole: AgentRole };
 
@@ -141,6 +153,47 @@ function sortEvents(events: FeedItem[]) {
   return [...events].sort(
     (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
+}
+
+function getFeedGroupKey(event: FeedItem) {
+  return event.pipeline_run_id ?? event.id;
+}
+
+function uniqueDefined<T extends string>(values: Array<T | undefined>) {
+  return [...new Set(values.filter((value): value is T => Boolean(value)))];
+}
+
+function groupFeedItems(events: FeedItem[]) {
+  const groups = new Map<string, FeedItem[]>();
+
+  for (const event of events) {
+    const key = getFeedGroupKey(event);
+    const existing = groups.get(key) ?? [];
+    existing.push(event);
+    groups.set(key, existing);
+  }
+
+  return Array.from(groups.entries())
+    .map(([key, groupedEvents]) => {
+      const sortedEvents = sortEvents(groupedEvents);
+      const latestEvent = sortedEvents[0];
+
+      return {
+        key,
+        pipelineRunId: latestEvent.pipeline_run_id,
+        strategyId: latestEvent.strategy_id,
+        events: sortedEvents,
+        latestEvent,
+        eventCount: sortedEvents.length,
+        live: sortedEvents.some((event) => event.live),
+        agentRoles: uniqueDefined(sortedEvents.map((event) => event.agent_role)),
+        eventKinds: uniqueDefined(sortedEvents.map((event) => event.event_kind)),
+        standalone: !latestEvent.pipeline_run_id,
+      } satisfies FeedGroup;
+    })
+    .sort(
+      (a, b) => new Date(b.latestEvent.created_at).getTime() - new Date(a.latestEvent.created_at).getTime(),
+    );
 }
 
 function sortConversations(conversations: Conversation[]) {
@@ -257,11 +310,20 @@ function buildEventContextMessage(event: FeedItem, conversation?: Conversation) 
   return `Context note (UI only, not saved to the conversation): discussing ${agentLabel} event "${event.title}" for ${ticker}.`;
 }
 
+function buildRunContextNote(group: FeedGroup) {
+  const phaseLabels = group.eventKinds.map(eventLabel).join(' · ');
+  const agentLabels = group.agentRoles.map(formatAgentRole).join(' · ');
+  const currentEvent = group.latestEvent.title;
+
+  return `Context note (UI only, not saved to the conversation): run ${group.pipelineRunId ?? group.latestEvent.id} has ${group.eventCount} event${group.eventCount === 1 ? '' : 's'}${phaseLabels ? ` across ${phaseLabels}` : ''}${agentLabels ? ` with ${agentLabels}` : ''}. Current event: ${currentEvent}.`;
+}
+
 export function RealtimePage() {
   const queryClient = useQueryClient();
   const [liveEvents, setLiveEvents] = useState<FeedItem[]>([]);
   const [eventKindFilter, setEventKindFilter] = useState('');
-  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const [selectedChildEventId, setSelectedChildEventId] = useState<string | null>(null);
   const [userSelectedEventId, setUserSelectedEventId] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -327,10 +389,22 @@ export function RealtimePage() {
     return events.filter((event) => event.event_kind.toLowerCase().includes(lowerFilter));
   }, [events, eventKindFilter]);
 
-  const selectedEvent = useMemo(
-    () => events.find((event) => event.id === selectedEventId) ?? null,
-    [events, selectedEventId],
+  const groupedEvents = useMemo(() => groupFeedItems(filteredEvents), [filteredEvents]);
+
+  const selectedGroup = useMemo(
+    () => groupedEvents.find((group) => group.key === selectedGroupKey) ?? null,
+    [groupedEvents, selectedGroupKey],
   );
+
+  const selectedEvent = useMemo(() => {
+    if (!selectedGroup) {
+      return null;
+    }
+
+    return (
+      selectedGroup.events.find((event) => event.id === selectedChildEventId) ?? selectedGroup.latestEvent
+    );
+  }, [selectedChildEventId, selectedGroup]);
 
   const eventChatContext = useMemo(
     () => toChatContext(selectedEvent?.pipeline_run_id, selectedEvent?.agent_role),
@@ -360,16 +434,33 @@ export function RealtimePage() {
   );
 
   useEffect(() => {
-    if (!selectedEventId && events.length > 0) {
-      setSelectedEventId(events[events.length - 1]?.id ?? null);
+    if (groupedEvents.length === 0) {
+      if (selectedGroupKey !== null || selectedChildEventId !== null) {
+        setSelectedGroupKey(null);
+        setSelectedChildEventId(null);
+      }
+      return;
     }
-  }, [events, selectedEventId]);
+
+    const visibleSelectedGroup = groupedEvents.find((group) => group.key === selectedGroupKey);
+    const nextGroup = visibleSelectedGroup ?? groupedEvents[0];
+    const nextEvent =
+      nextGroup.events.find((event) => event.id === selectedChildEventId) ?? nextGroup.latestEvent;
+
+    if (nextGroup.key !== selectedGroupKey) {
+      setSelectedGroupKey(nextGroup.key);
+    }
+
+    if (nextEvent.id !== selectedChildEventId) {
+      setSelectedChildEventId(nextEvent.id);
+    }
+  }, [groupedEvents, selectedChildEventId, selectedGroupKey]);
 
   useEffect(() => {
     setChatSelectionSource('event');
     setConversationId(null);
     setChatError(null);
-  }, [selectedEventId]);
+  }, [selectedChildEventId, selectedGroupKey]);
 
   useEffect(() => {
     if (chatSelectionSource !== 'event') {
@@ -392,7 +483,7 @@ export function RealtimePage() {
       return;
     }
 
-    if (selectedEventId !== userSelectedEventId) {
+    if (selectedChildEventId !== userSelectedEventId) {
       setConversationId(null);
       setIsResolvingEventConversation(false);
       return;
@@ -442,7 +533,7 @@ export function RealtimePage() {
     conversations,
     eventChatContext,
     queryClient,
-    selectedEventId,
+    selectedChildEventId,
     userSelectedEventId,
   ]);
 
@@ -503,6 +594,14 @@ export function RealtimePage() {
     selectedConversation,
     selectedEvent,
   ]);
+
+  const runContextMessage = useMemo(() => {
+    if (!selectedGroup || !selectedEvent?.agent_role) {
+      return null;
+    }
+
+    return buildRunContextNote(selectedGroup);
+  }, [selectedEvent?.agent_role, selectedGroup]);
 
   const visibleChatMessages = useMemo(
     () => (eventContextMessage ? [eventContextMessage, ...chatMessages] : chatMessages),
@@ -771,6 +870,12 @@ export function RealtimePage() {
         </div>
       ) : null}
 
+      {runContextMessage ? (
+        <p className="text-xs text-muted-foreground" data-testid="run-context-note">
+          {runContextMessage}
+        </p>
+      ) : null}
+
       {selectedConversationOutsideEventContext ? (
         <p className="text-xs text-muted-foreground" data-testid="conversation-context-note">
           Viewing conversation outside selected event context.
@@ -927,7 +1032,7 @@ export function RealtimePage() {
             className="flex-1 space-y-2 overflow-y-auto pr-1"
             data-testid="realtime-feed"
           >
-            {isLoading && filteredEvents.length === 0 ? (
+            {isLoading && groupedEvents.length === 0 ? (
               <div className="space-y-2" data-testid="realtime-loading">
                 {Array.from({ length: 4 }).map((_, index) => (
                   <div
@@ -936,20 +1041,20 @@ export function RealtimePage() {
                   />
                 ))}
               </div>
-            ) : filteredEvents.length === 0 ? (
+            ) : groupedEvents.length === 0 ? (
               <div className="flex h-full min-h-48 items-center justify-center rounded-lg border border-dashed border-border bg-background">
                 <p className="text-sm text-muted-foreground" data-testid="realtime-empty">
                   {eventKindFilter ? 'No events match filter.' : 'No events yet.'}
                 </p>
               </div>
             ) : (
-              filteredEvents.map((event) => {
-                const Icon = eventIcon(event.event_kind);
-                const isSelected = selectedEventId === event.id;
+              groupedEvents.map((group) => {
+                const Icon = eventIcon(group.latestEvent.event_kind);
+                const isSelected = selectedGroup?.key === group.key;
 
                 return (
                   <button
-                    key={event.id}
+                    key={group.key}
                     type="button"
                     className={cn(
                       'flex w-full flex-col gap-3 rounded-lg border border-border bg-background p-3 text-left transition-colors hover:border-primary/15 hover:bg-accent/45',
@@ -957,10 +1062,11 @@ export function RealtimePage() {
                         'border-primary/40 bg-accent/55 shadow-[0_0_0_1px_rgba(96,165,250,0.22)]',
                     )}
                     onClick={() => {
-                      setUserSelectedEventId(event.id);
-                      setSelectedEventId(event.id);
+                      setSelectedGroupKey(group.key);
+                      setSelectedChildEventId(group.latestEvent.id);
+                      setUserSelectedEventId(group.latestEvent.id);
                     }}
-                    data-testid={`event-card-${event.id}`}
+                    data-testid={`run-card-${group.key}`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex min-w-0 items-center gap-2">
@@ -968,33 +1074,45 @@ export function RealtimePage() {
                           <Icon className="size-4" />
                         </div>
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <Badge variant={eventVariant(event.event_kind)}>
-                            {eventLabel(event.event_kind)}
+                          <Badge variant={eventVariant(group.latestEvent.event_kind)}>
+                            {eventLabel(group.latestEvent.event_kind)}
                           </Badge>
-                          {event.agent_role ? (
-                            <Badge variant="outline">{event.agent_role}</Badge>
-                          ) : null}
-                          {event.live ? <Badge variant="success">live</Badge> : null}
+                          {group.live ? <Badge variant="success">live</Badge> : null}
+                          <Badge variant="outline">{group.eventCount} events</Badge>
+                          {group.standalone ? <Badge variant="outline">standalone</Badge> : null}
                         </div>
                       </div>
                       <time
                         className="shrink-0 font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground"
-                        dateTime={event.created_at}
+                        dateTime={group.latestEvent.created_at}
                       >
-                        {relativeTime(event.created_at)}
+                        {relativeTime(group.latestEvent.created_at)}
                       </time>
                     </div>
                     <div>
-                      <p className="font-medium text-foreground">{event.title}</p>
-                      {event.summary ? (
+                      <p className="font-medium text-foreground">{group.latestEvent.title}</p>
+                      {group.latestEvent.summary ? (
                         <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">
-                          {event.summary}
+                          {group.latestEvent.summary}
                         </p>
                       ) : null}
                     </div>
+                    <div className="flex flex-wrap gap-2">
+                      {group.eventKinds.slice(0, 4).map((kind) => (
+                        <Badge key={kind} variant="outline">
+                          {eventLabel(kind)}
+                        </Badge>
+                      ))}
+                      {group.agentRoles.slice(0, 4).map((role) => (
+                        <Badge key={role} variant="outline">
+                          {role}
+                        </Badge>
+                      ))}
+                    </div>
                     <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                      <span>run · {event.pipeline_run_id ?? 'none'}</span>
-                      <span>strategy · {event.strategy_id ?? 'none'}</span>
+                      <span>run · {group.pipelineRunId ?? group.latestEvent.id}</span>
+                      <span>strategy · {group.strategyId ?? 'none'}</span>
+                      <span>latest · {eventLabel(group.latestEvent.event_kind)}</span>
                     </div>
                   </button>
                 );
@@ -1005,10 +1123,10 @@ export function RealtimePage() {
 
         {/* Viewer/chat panel — first on mobile, second (right) on xl */}
         <div className="order-1 flex min-h-115 w-full flex-1 flex-col rounded-lg border border-border bg-card p-4 xl:order-2 xl:min-h-0">
-          {selectedEvent ? (
+          {selectedGroup && selectedEvent ? (
             <div
               className="flex min-h-0 flex-1 flex-col space-y-4"
-              data-testid="selected-event-panel"
+              data-testid="selected-run-panel"
             >
               <div className="space-y-3 rounded-lg border border-border bg-background p-4">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1019,12 +1137,44 @@ export function RealtimePage() {
                     <Badge variant="outline">{selectedEvent.agent_role}</Badge>
                   ) : null}
                   {selectedEvent.live ? <Badge variant="success">live</Badge> : null}
+                  <Badge variant="outline">{selectedGroup.eventCount} events</Badge>
                 </div>
                 <div className="space-y-1">
-                  <h3 className="text-lg font-semibold text-foreground">{selectedEvent.title}</h3>
+                  <h3 className="text-lg font-semibold text-foreground">{selectedGroup.pipelineRunId ?? selectedEvent.id}</h3>
                   <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-                    {new Date(selectedEvent.created_at).toLocaleString()}
+                    Latest update · {new Date(selectedGroup.latestEvent.created_at).toLocaleString()}
                   </p>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="run-phase-selector">Phase / event</Label>
+                    <select
+                      id="run-phase-selector"
+                      value={selectedEvent.id}
+                      onChange={(event) => {
+                        setSelectedChildEventId(event.target.value);
+                        setUserSelectedEventId(event.target.value);
+                      }}
+                      className={denseSelectClassName}
+                      data-testid="run-phase-selector"
+                    >
+                      {selectedGroup.events.map((event) => (
+                        <option key={event.id} value={event.id} data-testid={`run-phase-option-${event.id}`}>
+                          {eventLabel(event.event_kind)} · {event.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="rounded-md border border-border bg-background p-3">
+                    <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+                      Current event
+                    </p>
+                    <p className="mt-2 font-medium text-foreground">{selectedEvent.title}</p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {eventLabel(selectedEvent.event_kind)} · {relativeTime(selectedEvent.created_at)}
+                    </p>
+                  </div>
                 </div>
 
                 {selectedEvent.summary ? (
@@ -1042,7 +1192,7 @@ export function RealtimePage() {
                       Pipeline run
                     </dt>
                     <dd className="mt-2 font-mono text-[13px] font-medium text-foreground">
-                      {selectedEvent.pipeline_run_id ?? '—'}
+                      {selectedGroup.pipelineRunId ?? '—'}
                     </dd>
                   </div>
                   <div className="rounded-md border border-border bg-background p-3">
@@ -1050,7 +1200,7 @@ export function RealtimePage() {
                       Strategy
                     </dt>
                     <dd className="mt-2 font-mono text-[13px] font-medium text-foreground">
-                      {selectedEvent.strategy_id ?? '—'}
+                      {selectedGroup.strategyId ?? '—'}
                     </dd>
                   </div>
                 </dl>

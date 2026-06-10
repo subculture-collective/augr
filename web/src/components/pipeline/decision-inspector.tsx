@@ -1,4 +1,5 @@
 import { X } from 'lucide-react';
+import Markdown from 'react-markdown';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -22,6 +23,9 @@ const roleLabels: Record<string, string> = {
   conservative_risk: 'Conservative Risk',
   neutral_risk: 'Neutral Risk',
 };
+
+const markdownClassName =
+  'text-sm leading-6 [&_p]:mb-2 [&_p:last-child]:mb-0 [&_ul]:mb-2 [&_ul]:ml-4 [&_ul]:list-disc [&_ol]:mb-2 [&_ol]:ml-4 [&_ol]:list-decimal [&_li]:mb-0.5 [&_h1]:mb-2 [&_h1]:text-base [&_h1]:font-semibold [&_h2]:mb-1.5 [&_h2]:text-sm [&_h2]:font-semibold [&_h3]:mb-1 [&_h3]:text-sm [&_h3]:font-medium [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[11px] [&_pre]:overflow-auto [&_pre]:rounded-md [&_pre]:border [&_pre]:border-border [&_pre]:bg-background [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_blockquote]:border-l-2 [&_blockquote]:border-primary/40 [&_blockquote]:pl-3 [&_blockquote]:text-muted-foreground [&_strong]:font-semibold [&_a]:text-primary [&_a:hover]:underline';
 
 interface DecisionInspectorProps {
   decision: AgentDecision | null;
@@ -88,12 +92,12 @@ export function DecisionInspector({ decision, onClose }: DecisionInspectorProps)
               <h4 className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                 Full Prompt
               </h4>
-              <pre
-                className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-background p-3 font-mono text-[12px] leading-5 text-muted-foreground"
+              <div
+                className={`max-h-64 overflow-y-auto rounded-md border border-border bg-background p-3 text-muted-foreground ${markdownClassName}`}
                 data-testid="inspector-prompt-text"
               >
-                {decision.prompt_text}
-              </pre>
+                <Markdown>{decision.prompt_text}</Markdown>
+              </div>
             </section>
           )}
 
@@ -102,12 +106,12 @@ export function DecisionInspector({ decision, onClose }: DecisionInspectorProps)
               <h4 className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                 Prompt Summary
               </h4>
-              <pre
-                className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-background p-3 font-mono text-[12px] leading-5 text-muted-foreground"
+              <div
+                className={`max-h-64 overflow-y-auto rounded-md border border-border bg-background p-3 text-muted-foreground ${markdownClassName}`}
                 data-testid="inspector-prompt"
               >
-                {decision.input_summary}
-              </pre>
+                <Markdown>{decision.input_summary}</Markdown>
+              </div>
             </section>
           )}
 
@@ -115,12 +119,12 @@ export function DecisionInspector({ decision, onClose }: DecisionInspectorProps)
             <h4 className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
               LLM Response
             </h4>
-            <pre
-              className="overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-background p-3 font-mono text-[12px] leading-5 text-foreground"
+            <div
+              className={`overflow-y-auto rounded-md border border-border bg-background p-3 text-foreground ${markdownClassName}`}
               data-testid="inspector-response"
             >
-              {decision.output_text}
-            </pre>
+              <Markdown>{decision.output_text}</Markdown>
+            </div>
           </section>
 
           {decision.output_structured != null && (

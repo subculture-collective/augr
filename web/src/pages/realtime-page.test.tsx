@@ -91,6 +91,17 @@ const secondaryEvent = {
   created_at: '2025-01-01T00:01:00Z',
 }
 
+const phaseEvent = {
+  id: 'evt-3',
+  pipeline_run_id: 'run-1',
+  strategy_id: 'strategy-1',
+  agent_role: 'trader' as const,
+  event_kind: 'phase_started',
+  title: 'Phase started',
+  summary: 'Second phase in the run',
+  created_at: '2025-01-01T00:00:30Z',
+}
+
 const traderConversation = {
   id: 'conv-1',
   pipeline_run_id: 'run-1',
@@ -150,7 +161,7 @@ describe('RealtimePage', () => {
 
     render(<RealtimePage />, { wrapper: Wrapper })
 
-    expect(await screen.findByTestId('event-card-evt-1')).toBeInTheDocument()
+    expect(await screen.findByTestId('run-card-run-1')).toBeInTheDocument()
     expect(screen.getAllByText('Signal emitted').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Buy signal generated').length).toBeGreaterThan(0)
     expect(screen.getAllByText('trader').length).toBeGreaterThan(0)
@@ -164,15 +175,86 @@ describe('RealtimePage', () => {
 
     render(<RealtimePage />, { wrapper: Wrapper })
 
-    const card = await screen.findByTestId('event-card-evt-1')
+    const card = await screen.findByTestId('run-card-run-1')
     fireEvent.click(card)
 
-    const panel = await screen.findByTestId('selected-event-panel')
+    const panel = await screen.findByTestId('selected-run-panel')
     expect(within(panel).getByText('Signal emitted')).toBeInTheDocument()
     expect(within(panel).getByText('Buy signal generated')).toBeInTheDocument()
-    expect(within(panel).getByText('run-1')).toBeInTheDocument()
+    expect(panel).toHaveTextContent('run-1')
     expect(within(panel).getByText('strategy-1')).toBeInTheDocument()
     expect(screen.getByTestId('selected-event-metadata')).toHaveTextContent('confidence')
+    expect(screen.getByTestId('run-phase-selector')).toHaveValue('evt-1')
+  })
+
+  it('groups run events into one card and keeps the selected phase stable during live updates', async () => {
+    stubFetch(
+      jsonResponse(listResponse([baseEvent, phaseEvent, secondaryEvent], 50)),
+      jsonResponse(listResponse([], 50)),
+      jsonResponse({
+        id: 'conv-3',
+        pipeline_run_id: 'run-1',
+        agent_role: 'trader',
+        title: 'Chat with Trader — AAPL',
+        created_at: '2025-01-01T00:00:00Z',
+        updated_at: '2025-01-01T00:00:00Z',
+      }, 201),
+    )
+
+    render(<RealtimePage />, { wrapper: Wrapper })
+
+    expect(await screen.findByTestId('run-card-run-1')).toBeInTheDocument()
+    expect(screen.getByTestId('run-card-run-1')).toHaveTextContent('2 events')
+
+    fireEvent.click(screen.getByTestId('run-card-run-1'))
+    expect(await screen.findByTestId('run-phase-selector')).toHaveValue('evt-3')
+
+    fireEvent.change(screen.getByTestId('run-phase-selector'), { target: { value: 'evt-1' } })
+    expect(screen.getByTestId('selected-run-panel')).toHaveTextContent('Signal emitted')
+
+    act(() => {
+      MockWebSocket.instances[0]?.open()
+      MockWebSocket.instances[0]?.emitMessage({
+        type: 'phase_started',
+        strategy_id: 'strategy-2',
+        run_id: 'run-2',
+        timestamp: '2025-01-01T00:02:00Z',
+        data: { agent_role: 'risk_manager' },
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByTestId('run-phase-selector')).toHaveValue('evt-1')
+    })
+    expect(screen.getByTestId('selected-run-panel')).toHaveTextContent('Signal emitted')
+  })
+
+  it('does not force feed scroll back to the top when auto-scroll is disabled', async () => {
+    stubFetch(
+      jsonResponse(listResponse([baseEvent], 50)),
+      jsonResponse(listResponse([], 50)),
+    )
+
+    render(<RealtimePage />, { wrapper: Wrapper })
+
+    const feed = await screen.findByTestId('realtime-feed')
+    Object.defineProperty(feed, 'scrollTop', { value: 96, writable: true })
+    fireEvent.scroll(feed)
+
+    expect(await screen.findByTestId('realtime-resume-scroll')).toBeInTheDocument()
+
+    act(() => {
+      MockWebSocket.instances[0]?.open()
+      MockWebSocket.instances[0]?.emitMessage({
+        type: 'signal',
+        strategy_id: 'strategy-2',
+        run_id: 'run-2',
+        timestamp: '2025-01-01T00:02:00Z',
+        data: { agent_role: 'risk_manager' },
+      })
+    })
+
+    expect(feed.scrollTop).toBe(96)
   })
 
   it('appends live websocket events to the feed', async () => {
@@ -197,7 +279,7 @@ describe('RealtimePage', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByText('run-live')).toBeInTheDocument()
+      expect(screen.getByTestId('run-card-run-live')).toBeInTheDocument()
     })
     expect(screen.getAllByText('trader').length).toBeGreaterThan(0)
   })
@@ -269,7 +351,7 @@ describe('RealtimePage', () => {
     render(<RealtimePage />, { wrapper: Wrapper })
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    fireEvent.click(await screen.findByTestId('event-card-evt-1'))
+    fireEvent.click(await screen.findByTestId('run-card-run-1'))
     await waitFor(() => expect(screen.getByTestId('conversation-selector')).toHaveValue('conv-1'))
     await waitFor(
       () => expect(screen.getByText('Existing conversation answer.')).toBeInTheDocument(),
@@ -312,15 +394,15 @@ describe('RealtimePage', () => {
     render(<RealtimePage />, { wrapper: Wrapper })
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    fireEvent.click(await screen.findByTestId('event-card-evt-1'))
+    fireEvent.click(await screen.findByTestId('run-card-run-1'))
     await waitFor(() => expect(screen.getByTestId('conversation-selector')).toHaveValue('conv-1'))
     await waitFor(
       () => expect(screen.getByText('Existing conversation answer.')).toBeInTheDocument(),
       { timeout: 3_000 },
     )
-    fireEvent.click(screen.getByTestId('event-card-evt-2'))
+    fireEvent.click(screen.getByTestId('run-card-run-2'))
 
-    expect(screen.getByTestId('selected-event-panel')).toHaveTextContent('Pipeline failed')
+    expect(screen.getByTestId('selected-run-panel')).toHaveTextContent('Pipeline failed')
     expect(screen.getByTestId('typing-indicator')).toBeInTheDocument()
 
     resolveCreateConversation?.(
@@ -377,12 +459,12 @@ describe('RealtimePage', () => {
     render(<RealtimePage />, { wrapper: Wrapper })
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
-    await user.click(await screen.findByTestId('event-card-evt-1'))
+    await user.click(await screen.findByTestId('run-card-run-1'))
     await user.selectOptions(screen.getByTestId('conversation-selector'), 'conv-1')
-    await user.click(screen.getByTestId('event-card-evt-2'))
+    await user.click(screen.getByTestId('run-card-run-2'))
     await user.selectOptions(screen.getByTestId('conversation-selector'), 'conv-2')
 
-    expect(screen.getByTestId('selected-event-panel')).toHaveTextContent('Pipeline failed')
+    expect(screen.getByTestId('selected-run-panel')).toHaveTextContent('Pipeline failed')
     expect(screen.getByTestId('conversation-selector')).toHaveValue('conv-2')
   })
 
@@ -420,7 +502,7 @@ describe('RealtimePage', () => {
     fireEvent.change(screen.getByTestId('conversation-selector'), { target: { value: 'conv-2' } })
 
     expect(await screen.findByText('Risk manager answer.')).toBeInTheDocument()
-    expect(screen.getByTestId('selected-event-panel')).toHaveTextContent('Signal emitted')
+    expect(screen.getByTestId('selected-run-panel')).toHaveTextContent('Signal emitted')
     expect(screen.getByTestId('conversation-context-note')).toHaveTextContent('Viewing conversation outside selected event context.')
     expect(fetchMock).toHaveBeenNthCalledWith(
       4,
@@ -519,7 +601,7 @@ describe('RealtimePage', () => {
 
     expect(await screen.findByText('Do you still like the setup?')).toBeInTheDocument()
     expect(await screen.findByText('Momentum still supports the long.')).toBeInTheDocument()
-    expect(screen.getByTestId('selected-event-panel')).toHaveTextContent('Signal emitted')
+    expect(screen.getByTestId('selected-run-panel')).toHaveTextContent('Signal emitted')
 
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
@@ -558,6 +640,6 @@ describe('RealtimePage', () => {
 
     expect(await screen.findByText('LLM completion failed')).toBeInTheDocument()
     expect(screen.queryByText('Why is the model hesitant?')).not.toBeInTheDocument()
-    expect(screen.getByTestId('selected-event-panel')).toHaveTextContent('Buy signal generated')
+    expect(screen.getByTestId('selected-run-panel')).toHaveTextContent('Buy signal generated')
   })
 })
