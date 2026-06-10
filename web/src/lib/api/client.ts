@@ -82,6 +82,7 @@ import type {
   ResearchOpportunity,
   PromptSettings,
   PromptSettingsUpdateRequest,
+  AuditLogListParams,
 } from '@/lib/api/types';
 
 interface ApiClientConfig {
@@ -329,7 +330,7 @@ export class ApiClient {
     });
   }
 
-  async listAuditLog(params: PaginationParams = {}) {
+  async listAuditLog(params: AuditLogListParams & PaginationParams = {}) {
     return this.requestList<AuditLogEntry>('/api/v1/audit-log', { query: toQueryParams(params) });
   }
 

@@ -22,6 +22,7 @@ import type { LucideIcon } from 'lucide-react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 
 import { HudBadge, StatusLed } from '@/components/ui/hud';
+import { getApiBaseUrl } from '@/lib/config';
 import { isAuthenticated } from '@/lib/auth';
 import { cn } from '@/lib/utils';
 
@@ -86,6 +87,15 @@ const navigationItems: NavItem[] = [
 export function AppShell() {
   const location = useLocation();
   const authenticated = isAuthenticated();
+  const runtimeMode = import.meta.env.MODE;
+  const apiBaseUrl = getApiBaseUrl();
+  const apiHost = (() => {
+    try {
+      return new URL(apiBaseUrl).host;
+    } catch {
+      return apiBaseUrl;
+    }
+  })();
   const locationLabel = (() => {
     if (location.pathname === '/') return 'overview';
 
@@ -105,8 +115,8 @@ export function AppShell() {
       end={to === '/'}
       className={({ isActive }) =>
         cn(
-          'inline-flex items-center gap-2 border px-3 py-2 text-hud font-medium uppercase tracking-[0.1em] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-pulse focus-visible:ring-offset-0',
-          mobile ? 'w-full justify-start' : 'w-full justify-start',
+          'inline-flex items-center gap-2 border font-medium uppercase tracking-[0.1em] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-pulse focus-visible:ring-offset-0',
+          mobile ? 'w-full justify-start px-3 py-2 text-hud' : 'w-full justify-start px-2.5 py-1.5 text-[11px] leading-4',
           isActive
             ? 'border-pulse bg-panel-raised text-ink shadow-[6px_6px_0_0_rgb(0_0_0_/_0.88)]'
             : 'border-border bg-panel text-ink-dim hover:border-border-strong hover:bg-panel-raised hover:text-ink',
@@ -119,10 +129,9 @@ export function AppShell() {
   );
 
   return (
-    <div className="relative mx-auto flex min-h-screen w-full max-w-396 gap-3 bg-void px-3 py-3 text-ink sm:px-4 lg:px-6 hud-scan">
-      <div aria-hidden="true" className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,hsl(var(--panel))_0%,transparent_45%),linear-gradient(to_bottom,hsl(var(--void-900)_/_0.45),transparent_28%)] opacity-75" />
-      <aside className="hidden w-56 shrink-0 lg:block">
-        <div className="hud-panel sticky top-3 flex h-[calc(100vh-1.5rem)] flex-col rounded-none p-3">
+    <div className="relative mx-auto flex h-dvh w-full max-w-396 gap-3 overflow-hidden bg-void px-3 py-3 text-ink sm:px-4 lg:px-6 hud-scan">
+      <aside className="hidden h-full w-56 shrink-0 lg:block">
+        <div className="hud-panel flex h-full flex-col rounded-none p-3">
           <div className="border-b border-border-faint pb-3">
             <div className="flex items-center justify-between gap-2">
               <p className="font-mono text-[11px] font-bold uppercase tracking-[0.2em] text-signal">
@@ -132,10 +141,10 @@ export function AppShell() {
             </div>
           </div>
 
-          <nav aria-label="Primary" className="mt-3 flex flex-1 flex-col gap-3 overflow-y-auto pr-1">
+          <nav aria-label="Primary" className="hud-scrollbar mt-3 flex flex-1 flex-col gap-2 overflow-y-auto pr-1.5">
             {visibleNavigationItems.map((item) =>
               'items' in item ? (
-                <div key={item.label} className="space-y-1.5 border-t border-border-faint pt-3 first:border-t-0 first:pt-0">
+                <div key={item.label} className="space-y-1 border-t border-border-faint pt-2.5 first:border-t-0 first:pt-0">
                   <div className="px-1 text-[11px] font-bold uppercase tracking-[0.24em] text-ink-dim">
                     {item.label}
                   </div>
@@ -147,8 +156,8 @@ export function AppShell() {
         </div>
       </aside>
 
-      <div className="flex min-h-screen min-w-0 flex-1 flex-col gap-3">
-        <header className="hud-statusbar sticky top-3 z-20 justify-between rounded-none">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-hidden">
+        <header className="hud-statusbar flex-none justify-between rounded-none">
           <div className="flex min-w-0 items-center gap-2 text-sm">
             <span className="font-semibold text-ink">Augr</span>
             <span className="text-ink-dim">/</span>
@@ -174,10 +183,10 @@ export function AppShell() {
 
         </header>
 
-        <nav aria-label="Primary mobile" className="hud-panel space-y-3 rounded-none px-3 py-2.5 lg:hidden">
+        <nav aria-label="Primary mobile" className="hud-panel hud-scrollbar max-h-[35dvh] flex-none space-y-3 overflow-y-auto rounded-none px-3 py-2.5 lg:hidden">
           {visibleNavigationItems.map((item) =>
             'items' in item ? (
-              <div key={item.label} className="space-y-1.5 border-t border-border-faint pt-3 first:border-t-0 first:pt-0">
+              <div key={item.label} className="space-y-1 border-t border-border-faint pt-2.5 first:border-t-0 first:pt-0">
                 <div className="px-1 text-[11px] font-bold uppercase tracking-[0.24em] text-ink-dim">
                   {item.label}
                 </div>
@@ -191,9 +200,36 @@ export function AppShell() {
           )}
         </nav>
 
-        <main className="flex-1 pb-4">
-          <Outlet />
-        </main>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <main className="hud-scrollbar min-h-0 flex-1 overflow-y-auto pb-4 pr-1">
+            <Outlet />
+          </main>
+
+          <footer
+            aria-label="Shell status"
+            className="hud-statusbar flex-none flex-wrap justify-between gap-x-4 gap-y-1 rounded-none border-t border-border-faint border-b-0 px-3 py-2 text-[10px]"
+          >
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="text-ink-dim">
+                env <span className="text-ink">{runtimeMode}</span>
+              </span>
+              <span className="text-ink-dim">
+                auth <span className="text-ink">{authenticated ? 'signed in' : 'guest'}</span>
+              </span>
+              <span className="text-ink-dim">
+                route <span className="text-ink">{locationLabel}</span>
+              </span>
+            </div>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="text-ink-dim">
+                api <span className="text-ink">{apiHost}</span>
+              </span>
+              <span className="text-ink-dim">
+                runtime <span className="text-ink">{import.meta.env.DEV ? 'dev' : 'prod'}</span>
+              </span>
+            </div>
+          </footer>
+        </div>
       </div>
     </div>
   );

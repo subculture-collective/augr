@@ -705,7 +705,6 @@ export interface OrderListParams {
   ticker?: string;
   status?: OrderStatus;
   side?: OrderSide;
-  strategy_id?: UUID;
 }
 
 export interface TradeListParams {
@@ -721,6 +720,15 @@ export interface TradeDecisionListParams {
   status?: TradeDecisionStatus;
   created_after?: ISODateString;
   created_before?: ISODateString;
+}
+
+export interface AuditLogListParams {
+  event_type?: string;
+  entity_type?: string;
+  entity_id?: UUID;
+  actor?: string;
+  after?: ISODateString;
+  before?: ISODateString;
 }
 
 export interface MemoryListParams {

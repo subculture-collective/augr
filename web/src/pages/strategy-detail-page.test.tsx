@@ -66,25 +66,50 @@ function createResponse(body: unknown, status = 200) {
   }
 }
 
+function createListResponse<T>(data: T[]) {
+  return { data, limit: data.length, offset: 0 }
+}
+
 function stubStrategyFetch({
   strategy = createStrategy(),
   pauseResult,
   resumeResult,
   skipResult,
+  deleteResult,
+  orders = [],
+  backtests = [],
 }: {
   strategy?: StrategyFixture
   pauseResult?: MutationStub
   resumeResult?: MutationStub
   skipResult?: MutationStub
+  deleteResult?: MutationStub
+  orders?: Array<{ id: string; ticker: string; side: 'buy' | 'sell'; status: string; created_at: string }>
+  backtests?: Array<{ id: string; name: string; description?: string; start_date: string; end_date: string }>
 } = {}) {
   let currentStrategy = strategy
-  const runs = { data: [], limit: 20, offset: 0 }
+  const runs = createListResponse([])
+  const orderList = createListResponse(orders)
+  const backtestList = createListResponse(backtests)
 
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString()
+
+    if (url.includes(`/api/v1/strategies/${strategyId}`) && init?.method === 'DELETE') {
+      const result = deleteResult ?? { status: 204, body: null }
+      return createResponse(result.body, result.status)
+    }
 
     if (url.includes('/runs')) {
       return createResponse(runs)
+    }
+
+    if (url.includes('/orders')) {
+      return createResponse(orderList)
+    }
+
+    if (url.includes('/backtests/configs')) {
+      return createResponse(backtestList)
     }
 
     if (url.includes(`/api/v1/strategies/${strategyId}/pause`)) {
@@ -124,6 +149,7 @@ function renderPage() {
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
@@ -143,6 +169,11 @@ describe('StrategyDetailPage', () => {
     expect(screen.getByTestId('resume-strategy-button')).toBeDisabled()
     expect(screen.getByTestId('skip-next-button')).toBeEnabled()
     expect(screen.getByTestId('delete-strategy-button')).toBeInTheDocument()
+    expect(screen.getByTestId('pause-strategy-button')).toHaveAttribute('title', 'Pause strategy')
+    expect(screen.getByTestId('resume-strategy-button')).toHaveAttribute(
+      'title',
+      'Resume is unavailable because this strategy is already active.',
+    )
   })
 
   it('renders paused strategies with the correct lifecycle action matrix', async () => {
@@ -154,6 +185,11 @@ describe('StrategyDetailPage', () => {
     expect(screen.getByTestId('pause-strategy-button')).toBeDisabled()
     expect(screen.getByTestId('resume-strategy-button')).toBeEnabled()
     expect(screen.getByTestId('skip-next-button')).toBeDisabled()
+    expect(screen.getByTestId('pause-strategy-button')).toHaveAttribute(
+      'title',
+      'Pause is unavailable because this strategy is already paused.',
+    )
+    expect(screen.getByTestId('resume-strategy-button')).toHaveAttribute('title', 'Resume strategy')
   })
 
   it('renders inactive strategies with all lifecycle actions disabled', async () => {
@@ -236,6 +272,37 @@ describe('StrategyDetailPage', () => {
     expect(await screen.findByTestId('strategy-action-error')).toHaveTextContent('strategy already paused')
   })
 
+  it('asks for confirmation before deleting a strategy', async () => {
+    const fetchMock = stubStrategyFetch()
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    renderPage()
+
+    fireEvent.click(await screen.findByTestId('delete-strategy-button'))
+
+    expect(confirmSpy).toHaveBeenCalledWith('Delete this strategy and all of its history?')
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ pathname: `/api/v1/strategies/${strategyId}` }),
+      expect.objectContaining({ method: 'DELETE' }),
+    )
+  })
+
+  it('shows inline delete error when deletion fails', async () => {
+    stubStrategyFetch({
+      deleteResult: {
+        status: 500,
+        body: { error: 'delete failed' },
+      },
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    renderPage()
+
+    fireEvent.click(await screen.findByTestId('delete-strategy-button'))
+
+    expect(await screen.findByTestId('strategy-action-error')).toHaveTextContent('delete failed')
+  })
+
   it('shows error state when strategy fetch fails', async () => {
     const fetchMock = vi.fn().mockRejectedValue(new Error('Network error'))
     vi.stubGlobal('fetch', fetchMock)
@@ -263,12 +330,47 @@ describe('StrategyDetailPage', () => {
       limit: 20,
       offset: 0,
     }
+    const orders = {
+      data: [
+        {
+          id: '00000000-0000-0000-0000-000000000020',
+          ticker: 'TEST',
+          side: 'buy' as const,
+          status: 'filled',
+          created_at: '2025-01-02T10:00:00Z',
+        },
+      ],
+      limit: 5,
+      offset: 0,
+    }
+    const backtests = {
+      data: [
+        {
+          id: '00000000-0000-0000-0000-000000000030',
+          name: 'TEST breakout',
+          description: 'Linked backtest',
+          start_date: '2024-12-01',
+          end_date: '2024-12-31',
+        },
+      ],
+      limit: 20,
+      offset: 0,
+    }
 
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()
 
       if (url.includes('/runs')) {
         return Promise.resolve(createResponse(runs))
+      }
+
+      if (url.includes('/orders')) {
+        expect(url).toContain('ticker=TEST')
+        return Promise.resolve(createResponse(orders))
+      }
+
+      if (url.includes('/backtests/configs')) {
+        return Promise.resolve(createResponse(backtests))
       }
 
       return Promise.resolve(createResponse(strategy))
@@ -280,5 +382,11 @@ describe('StrategyDetailPage', () => {
     expect(await screen.findByTestId('strategy-run-history')).toBeInTheDocument()
     expect(screen.getByTestId('strategy-config-editor')).toBeInTheDocument()
     expect(await screen.findByTestId('run-history-list')).toBeInTheDocument()
-  })
+    expect(await screen.findByText('Backtests')).toBeInTheDocument()
+    expect(await screen.findByText('Recent Orders')).toBeInTheDocument()
+
+    const backtestsHeading = screen.getByRole('heading', { name: 'Backtests' })
+    const recentOrdersHeading = screen.getByRole('heading', { name: 'Recent Orders' })
+    expect(backtestsHeading.compareDocumentPosition(recentOrdersHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  }, 15_000)
 })

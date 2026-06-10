@@ -29,5 +29,19 @@ describe('AppShell', () => {
     const portfolioLinks = screen.getAllByRole('link', { name: /portfolio/i })
     expect(portfolioLinks.some((link) => link.getAttribute('aria-current') === 'page')).toBe(true)
     expect(screen.getByText('Portfolio page')).toBeInTheDocument()
-  })
+
+    const shellStatus = screen.getByRole('contentinfo', { name: /shell status/i })
+    expect(shellStatus).toHaveTextContent(/env/i)
+    expect(shellStatus).toHaveTextContent(/auth/i)
+    expect(shellStatus).toHaveTextContent(/route/i)
+    expect(shellStatus).toHaveTextContent(/runtime/i)
+
+    const desktopNav = screen.getByRole('navigation', { name: /^primary$/i })
+    expect(desktopNav).toBeInTheDocument()
+    expect(desktopNav).toHaveClass('hud-scrollbar')
+
+    const main = document.querySelector('main')
+    expect(main).toHaveClass('hud-scrollbar')
+    expect(main).toHaveClass('overflow-y-auto')
+  }, 10_000)
 })

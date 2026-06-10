@@ -5,7 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { apiClient } from '@/lib/api/client';
-import type { EngineStatus, KillSwitchStatus, RiskStatus } from '@/lib/api/types';
+import type { EngineStatus, KillSwitchMechanism, KillSwitchStatus, RiskStatus } from '@/lib/api/types';
 import { cn } from '@/lib/utils';
 
 function riskStatusConfig(status: RiskStatus) {
@@ -88,6 +88,19 @@ function PositionLimitsDisplay({ status }: { status: EngineStatus }) {
   );
 }
 
+function formatKillSwitchMechanism(mechanism: KillSwitchMechanism) {
+  switch (mechanism) {
+    case 'api_toggle':
+      return 'API toggle';
+    case 'file_flag':
+      return 'File flag';
+    case 'env_var':
+      return 'Environment variable';
+    case 'unknown':
+      return 'Unknown';
+  }
+}
+
 const MARKET_TYPES = ['stock', 'crypto', 'polymarket'] as const;
 const MARKET_LABELS: Record<string, string> = {
   stock: 'Stocks',
@@ -142,7 +155,7 @@ export function RiskStatusBar() {
     mutationFn: (active: boolean) =>
       apiClient.toggleKillSwitch({
         active,
-        reason: active ? 'All trading halted from dashboard' : 'Trading resumed from dashboard',
+        reason: active ? 'Trading halted from dashboard' : 'Trading resumed from dashboard',
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['risk', 'status'] });
@@ -191,6 +204,9 @@ export function RiskStatusBar() {
 
   const config = riskStatusConfig(data.risk_status);
   const StatusIcon = config.icon;
+  const killSwitchMechanismText = data.kill_switch.mechanisms?.length
+    ? data.kill_switch.mechanisms.map(formatKillSwitchMechanism).join(', ')
+    : '';
 
   return (
     <Card data-testid="risk-status">
@@ -219,12 +235,22 @@ export function RiskStatusBar() {
               <p className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
                 Kill switch
               </p>
-              <p className="mt-1 text-sm text-muted-foreground">
+              <div className="mt-1 flex flex-wrap items-center gap-2">
+                <Badge variant={data.kill_switch.active ? 'destructive' : 'success'}>
+                  {data.kill_switch.active ? 'Trading halted' : 'Trading enabled'}
+                </Badge>
+              </div>
+              <p className="mt-2 text-sm text-muted-foreground">
                 {data.kill_switch.active
                   ? (data.kill_switch.reason && data.kill_switch.reason.trim()) ||
-                    'All trading halted'
-                  : 'Trading is enabled'}
+                    'All orders are blocked.'
+                  : 'The engine can submit orders normally.'}
               </p>
+              {killSwitchMechanismText ? (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Mechanism: {killSwitchMechanismText}
+                </p>
+              ) : null}
             </div>
             <Button
               variant={data.kill_switch.active ? 'outline' : 'destructive'}
@@ -234,7 +260,7 @@ export function RiskStatusBar() {
               data-testid="kill-switch-toggle"
             >
               <Power className="size-4" />
-              {data.kill_switch.active ? 'Resume All' : 'Stop All'}
+              {data.kill_switch.active ? 'Resume Trading' : 'Stop All'}
             </Button>
           </div>
 

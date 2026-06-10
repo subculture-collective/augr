@@ -12,6 +12,7 @@ import { Label } from '@/components/ui/label';
 import { apiClient, ApiClientError } from '@/lib/api/client';
 import type {
   EngineStatus,
+  KillSwitchMechanism,
   LLMProviderSettingsGroup,
   LLMProviderUpdateRequest,
   Settings,
@@ -123,6 +124,19 @@ function formatUptime(totalSeconds: number) {
   return `${Math.max(minutes, 0)}m`;
 }
 
+function formatKillSwitchMechanism(mechanism: KillSwitchMechanism) {
+  switch (mechanism) {
+    case 'api_toggle':
+      return 'API toggle';
+    case 'file_flag':
+      return 'File flag';
+    case 'env_var':
+      return 'Environment variable';
+    case 'unknown':
+      return 'Unknown';
+  }
+}
+
 function RiskStatusSummary({ riskStatus }: { riskStatus: EngineStatus }) {
   const riskVariant =
     riskStatus.risk_status === 'breached'
@@ -208,7 +222,7 @@ export function SettingsPage() {
     mutationFn: (active: boolean) =>
       apiClient.toggleKillSwitch({
         active,
-        reason: active ? 'Activated from settings page' : 'Deactivated from settings page',
+        reason: active ? 'Trading halted from settings page' : 'Trading resumed from settings page',
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['risk', 'status'] });
@@ -659,9 +673,9 @@ export function SettingsPage() {
                 <div className="rounded-lg border border-border bg-background p-4">
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <p className="font-medium">
+                      <Badge variant={riskQuery.data.kill_switch.active ? 'destructive' : 'success'}>
                         {riskQuery.data.kill_switch.active ? 'Trading halted' : 'Trading enabled'}
-                      </p>
+                      </Badge>
                       <p className="mt-1 text-sm text-muted-foreground">
                         {riskQuery.data.kill_switch.active
                           ? (riskQuery.data.kill_switch.reason &&
@@ -669,11 +683,19 @@ export function SettingsPage() {
                             'All orders are blocked.'
                           : 'The engine can submit orders normally.'}
                       </p>
+                      {riskQuery.data.kill_switch.mechanisms?.length ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Mechanism:{' '}
+                          {riskQuery.data.kill_switch.mechanisms
+                            .map(formatKillSwitchMechanism)
+                            .join(', ')}
+                        </p>
+                      ) : null}
                     </div>
 
                     <Button
                       type="button"
-                      variant={riskQuery.data.kill_switch.active ? 'outline' : 'default'}
+                      variant={riskQuery.data.kill_switch.active ? 'outline' : 'destructive'}
                       size="dense"
                       disabled={killSwitchMutation.isPending}
                       onClick={() => killSwitchMutation.mutate(!riskQuery.data.kill_switch.active)}
@@ -682,8 +704,8 @@ export function SettingsPage() {
                       {killSwitchMutation.isPending
                         ? 'Updating…'
                         : riskQuery.data.kill_switch.active
-                          ? 'Deactivate'
-                          : 'Activate'}
+                          ? 'Resume Trading'
+                          : 'Stop All'}
                     </Button>
                   </div>
                 </div>

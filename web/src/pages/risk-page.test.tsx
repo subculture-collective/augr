@@ -115,7 +115,7 @@ describe('RiskPage', () => {
 
     expect(screen.getByTestId('risk-page')).toBeInTheDocument()
     expect(await screen.findByText('Open')).toBeInTheDocument()
-    expect(screen.getByText('Inactive')).toBeInTheDocument()
+    expect(screen.getAllByText('Trading enabled').length).toBeGreaterThan(0)
     expect(screen.getByTestId('kill-switch-toggle')).toHaveTextContent('Stop All')
     expect(await screen.findByText('Cross-flow cockpit')).toBeInTheDocument()
     expect(screen.getByTestId('risk-cockpit-market-stock')).toHaveTextContent('$1,250.00')
@@ -146,7 +146,7 @@ describe('RiskPage', () => {
     expect(screen.getByTestId('audit-log-loading')).toBeInTheDocument()
   })
 
-  it('shows active kill switch with deactivate button', async () => {
+  it('shows trading halted state with a resume button', async () => {
     const activeStatus: EngineStatus = {
       ...mockEngineStatus,
       kill_switch: {
@@ -187,12 +187,12 @@ describe('RiskPage', () => {
 
     render(<RiskPage />, { wrapper: Wrapper })
 
-    expect(await screen.findByText('Active')).toBeInTheDocument()
+    expect((await screen.findAllByText('Trading halted')).length).toBeGreaterThan(0)
     expect(screen.getByText('Emergency halt')).toBeInTheDocument()
-    expect(screen.getByTestId('kill-switch-toggle')).toHaveTextContent('Resume All')
+    expect(screen.getByTestId('kill-switch-toggle')).toHaveTextContent('Resume Trading')
   })
 
-  it('loads more audit entries when requested', async () => {
+  it('filters audit log by event type, actor, and limit', async () => {
     const fetchMock = vi.fn((input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()
       if (url.includes('/api/v1/risk/cockpit')) {
@@ -204,18 +204,40 @@ describe('RiskPage', () => {
       }
       if (url.includes('/api/v1/audit-log')) {
         const parsed = new URL(url)
+        const eventType = parsed.searchParams.get('event_type')
+        const actor = parsed.searchParams.get('actor')
         const limit = Number(parsed.searchParams.get('limit') ?? '10')
+        const entries = [
+          {
+            id: 'audit-0',
+            event_type: 'settings_updated',
+            entity_type: 'settings',
+            actor: 'system',
+            details: { index: 0 },
+            created_at: '2025-01-01T00:00:00Z',
+          },
+          {
+            id: 'audit-1',
+            event_type: 'kill_switch_toggled',
+            entity_type: 'risk',
+            actor: 'dashboard',
+            details: { index: 1 },
+            created_at: '2025-01-01T00:00:00Z',
+          },
+          {
+            id: 'audit-2',
+            event_type: 'kill_switch_toggled',
+            entity_type: 'risk',
+            actor: 'system',
+            details: { index: 2 },
+            created_at: '2025-01-01T00:00:00Z',
+          },
+        ].filter((entry) => (!eventType || entry.event_type === eventType) && (!actor || entry.actor === actor))
         return Promise.resolve({
           ok: true,
           status: 200,
           json: async () => ({
-            data: Array.from({ length: limit }, (_, index) => ({
-              id: `audit-${index}`,
-              event_type: 'kill_switch_toggled',
-              entity_type: 'risk',
-              details: { index },
-              created_at: '2025-01-01T00:00:00Z',
-            })),
+            data: entries.slice(0, limit),
             limit,
             offset: 0,
           }),
@@ -232,15 +254,22 @@ describe('RiskPage', () => {
 
     render(<RiskPage />, { wrapper: Wrapper })
 
-    expect(await screen.findByTestId('load-more-audit')).toBeInTheDocument()
-    fireEvent.click(screen.getByTestId('load-more-audit'))
+    fireEvent.change(await screen.findByLabelText('Event type'), {
+      target: { value: 'kill_switch_toggled' },
+    })
+    fireEvent.change(screen.getByLabelText('Actor'), { target: { value: 'system' } })
+    fireEvent.change(screen.getByLabelText('Limit'), { target: { value: '1' } })
 
     await waitFor(() => {
       const auditCalls = fetchMock.mock.calls
         .map((call) => call[0].toString())
         .filter((url) => url.includes('/api/v1/audit-log'))
-      expect(auditCalls.some((url) => url.includes('limit=20'))).toBe(true)
+      expect(auditCalls.some((url) => url.includes('event_type=kill_switch_toggled'))).toBe(true)
+      expect(auditCalls.some((url) => url.includes('actor=system'))).toBe(true)
+      expect(auditCalls.some((url) => url.includes('limit=1'))).toBe(true)
     })
+
+    expect(await screen.findAllByText('kill_switch_toggled')).toHaveLength(1)
   })
 
   it('shows utilization labels and threshold colors from risk status data', async () => {

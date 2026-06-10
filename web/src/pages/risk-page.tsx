@@ -14,6 +14,7 @@ import type {
   AuditLogEntry,
   CircuitBreakerPhase,
   EngineStatus,
+  KillSwitchMechanism,
   RiskCockpitExposure,
   RiskCockpitSummary,
 } from '@/lib/api/types'
@@ -54,6 +55,19 @@ function formatDateTime(iso?: string) {
 
   const date = new Date(iso)
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
+}
+
+function formatKillSwitchMechanism(mechanism: KillSwitchMechanism) {
+  switch (mechanism) {
+    case 'api_toggle':
+      return 'API toggle'
+    case 'file_flag':
+      return 'File flag'
+    case 'env_var':
+      return 'Environment variable'
+    case 'unknown':
+      return 'Unknown'
+  }
 }
 
 function formatUtilizationValue(value: number) {
@@ -135,6 +149,8 @@ export function RiskPage() {
   const queryClient = useQueryClient()
   const [reason, setReason] = useState('')
   const [showReasonInput, setShowReasonInput] = useState(false)
+  const [auditEventType, setAuditEventType] = useState('')
+  const [auditActor, setAuditActor] = useState('')
   const [auditLimit, setAuditLimit] = useState(10)
 
   const { data, isLoading, isError, error } = useQuery<EngineStatus>({
@@ -159,8 +175,13 @@ export function RiskPage() {
     isLoading: auditLoading,
     isError: auditError,
   } = useQuery({
-    queryKey: ['auditLog', auditLimit],
-    queryFn: () => apiClient.listAuditLog({ limit: auditLimit }),
+    queryKey: ['auditLog', auditEventType.trim(), auditActor.trim(), auditLimit],
+    queryFn: () =>
+      apiClient.listAuditLog({
+        event_type: auditEventType.trim() || undefined,
+        actor: auditActor.trim() || undefined,
+        limit: auditLimit,
+      }),
   })
 
   const toggleMutation = useMutation({
@@ -182,6 +203,10 @@ export function RiskPage() {
   const cockpitExposures = Array.isArray(cockpit?.exposures) ? cockpit.exposures : []
   const cockpitWarnings = Array.isArray(cockpit?.warnings) ? cockpit.warnings : []
   const cockpitExposureByMarket = new Map(cockpitExposures.map((entry) => [entry.market_type, entry]))
+  let killSwitchMechanismText = ''
+  if (killSwitch?.mechanisms?.length) {
+    killSwitchMechanismText = killSwitch.mechanisms.map(formatKillSwitchMechanism).join(', ')
+  }
 
   function handleToggle() {
     if (!killSwitch) return
@@ -237,20 +262,24 @@ export function RiskPage() {
             {isError && <p className="text-sm text-destructive">Failed to load: {(error as Error).message}</p>}
             {killSwitch && (
               <div className="space-y-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">State:</span>
+                <div className="space-y-1">
                   <Badge variant={killSwitch.active ? 'destructive' : 'success'}>
-                    {killSwitch.active ? 'Active' : 'Inactive'}
+                    {killSwitch.active ? 'Trading halted' : 'Trading enabled'}
                   </Badge>
-                </div>
-                {killSwitch.active && killSwitch.reason && (
                   <p className="text-sm text-muted-foreground">
-                    <span className="font-medium">Reason:</span> {killSwitch.reason}
+                    {killSwitch.active
+                      ? (killSwitch.reason && killSwitch.reason.trim()) || 'All orders are blocked.'
+                      : 'The engine can submit orders normally.'}
                   </p>
-                )}
-                <p className="text-sm text-muted-foreground">
-                  <span className="font-medium">Activated at:</span> {formatDateTime(killSwitch.activated_at)}
-                </p>
+                  <p className="text-xs text-muted-foreground">
+                    <span className="font-medium">Updated:</span> {formatDateTime(killSwitch.activated_at)}
+                  </p>
+                  {killSwitchMechanismText ? (
+                    <p className="text-xs text-muted-foreground">
+                      <span className="font-medium">Mechanism:</span> {killSwitchMechanismText}
+                    </p>
+                  ) : null}
+                </div>
 
                 {showReasonInput && !killSwitch.active ? (
                   <div className="space-y-2">
@@ -296,7 +325,7 @@ export function RiskPage() {
                     {toggleMutation.isPending
                       ? 'Processing...'
                       : killSwitch.active
-                        ? 'Resume All'
+                        ? 'Resume Trading'
                         : 'Stop All'}
                   </Button>
                 ) : null}
@@ -333,7 +362,7 @@ export function RiskPage() {
             <>
               <div className="flex flex-wrap items-center gap-2 text-sm">
                 <Badge variant={cockpit.kill_switch_active ? 'destructive' : 'success'}>
-                  Kill switch {cockpit.kill_switch_active ? 'active' : 'clear'}
+                  {cockpit.kill_switch_active ? 'Trading halted' : 'Trading enabled'}
                 </Badge>
                 <Badge variant={cockpit.circuit_breaker ? 'warning' : 'success'}>
                   Circuit breaker {cockpit.circuit_breaker ? 'tripped' : 'clear'}
@@ -400,6 +429,40 @@ export function RiskPage() {
 
       <ConsolePanel className="space-y-4 p-4">
         <HudSection label="Audit log" note="Recent system events" />
+          <div className="grid gap-3 rounded-lg border border-border bg-background p-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_120px]">
+            <div className="space-y-2">
+              <Label htmlFor="audit-event-type">Event type</Label>
+              <Input
+                id="audit-event-type"
+                value={auditEventType}
+                placeholder="kill_switch_toggled"
+                onChange={(event) => setAuditEventType(event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="audit-actor">Actor</Label>
+              <Input
+                id="audit-actor"
+                value={auditActor}
+                placeholder="system"
+                onChange={(event) => setAuditActor(event.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="audit-limit">Limit</Label>
+              <Input
+                id="audit-limit"
+                type="number"
+                min={1}
+                max={100}
+                value={auditLimit}
+                onChange={(event) => {
+                  const parsed = Number.parseInt(event.target.value || '1', 10)
+                  setAuditLimit(Number.isFinite(parsed) ? Math.min(100, Math.max(1, parsed)) : 1)
+                }}
+              />
+            </div>
+          </div>
           {auditLoading ? (
             <div data-testid="audit-log-loading" className="space-y-2">
               {Array.from({ length: 3 }).map((_, index) => (
@@ -454,16 +517,6 @@ export function RiskPage() {
                   </tbody>
                 </table>
               </div>
-              {auditEntries.length >= auditLimit ? (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setAuditLimit((prev) => prev + 10)}
-                  data-testid="load-more-audit"
-                >
-                  Load more
-                </Button>
-              ) : null}
             </div>
           )}
       </ConsolePanel>

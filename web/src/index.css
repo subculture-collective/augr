@@ -251,6 +251,29 @@
   ::-webkit-scrollbar-thumb:hover {
     background: hsl(var(--border-strong));
   }
+
+  .hud-scrollbar {
+    scrollbar-color: hsl(var(--border)) hsl(var(--void-800));
+    scrollbar-width: thin;
+  }
+
+  .hud-scrollbar::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+  }
+
+  .hud-scrollbar::-webkit-scrollbar-track {
+    background: hsl(var(--void-800));
+  }
+
+  .hud-scrollbar::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 1px;
+  }
+
+  .hud-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--border-strong));
+  }
 }
 
 @layer utilities {

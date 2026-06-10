@@ -109,7 +109,8 @@ export function StrategyDetailPage() {
   const pauseMutation = useMutation({
     mutationFn: () => apiClient.pauseStrategy(id!),
     onMutate: () => setActionError(null),
-    onSuccess: () => {
+    onSuccess: (updatedStrategy) => {
+      queryClient.setQueryData(['strategy', id], updatedStrategy)
       queryClient.invalidateQueries({ queryKey: ['strategy', id] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
     },
@@ -119,7 +120,8 @@ export function StrategyDetailPage() {
   const resumeMutation = useMutation({
     mutationFn: () => apiClient.resumeStrategy(id!),
     onMutate: () => setActionError(null),
-    onSuccess: () => {
+    onSuccess: (updatedStrategy) => {
+      queryClient.setQueryData(['strategy', id], updatedStrategy)
       queryClient.invalidateQueries({ queryKey: ['strategy', id] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
     },
@@ -129,18 +131,33 @@ export function StrategyDetailPage() {
   const skipMutation = useMutation({
     mutationFn: () => apiClient.skipNextRun(id!),
     onMutate: () => setActionError(null),
-    onSuccess: () => {
+    onSuccess: (updatedStrategy) => {
+      queryClient.setQueryData(['strategy', id], updatedStrategy)
       queryClient.invalidateQueries({ queryKey: ['strategy', id] })
       queryClient.invalidateQueries({ queryKey: ['strategies'] })
     },
     onError: handleMutationError,
   })
   const isLifecycleActionPending = pauseMutation.isPending || resumeMutation.isPending || skipMutation.isPending
+  const pauseButtonLabel = isLifecycleActionPending
+    ? 'Pause unavailable while another lifecycle action is in progress.'
+    : isStrategyActive
+      ? 'Pause strategy'
+      : isStrategyPaused
+        ? 'Pause is unavailable because this strategy is already paused.'
+        : 'Pause is unavailable until the strategy is active.'
+  const resumeButtonLabel = isLifecycleActionPending
+    ? 'Resume unavailable while another lifecycle action is in progress.'
+    : isStrategyPaused
+      ? 'Resume strategy'
+      : isStrategyActive
+        ? 'Resume is unavailable because this strategy is already active.'
+        : 'Resume is unavailable until the strategy is paused.'
 
   const { data: ordersData } = useQuery({
-    queryKey: ['strategy-orders', id],
-    queryFn: () => apiClient.listOrders({ strategy_id: id, limit: 5 }),
-    enabled: !!id,
+    queryKey: ['strategy-orders', id, strategy?.ticker],
+    queryFn: () => apiClient.listOrders({ ticker: strategy?.ticker, limit: 5 }),
+    enabled: !!strategy?.ticker,
   })
 
   const { data: backtestsData } = useQuery({
@@ -226,6 +243,8 @@ export function StrategyDetailPage() {
               onClick={() => pauseMutation.mutate()}
               disabled={!isStrategyActive || isLifecycleActionPending}
               data-testid="pause-strategy-button"
+              aria-label={pauseButtonLabel}
+              title={pauseButtonLabel}
             >
               <Pause className="mr-2 size-4" />
               {pauseMutation.isPending ? 'Pausing…' : 'Pause'}
@@ -235,6 +254,8 @@ export function StrategyDetailPage() {
               onClick={() => resumeMutation.mutate()}
               disabled={!isStrategyPaused || isLifecycleActionPending}
               data-testid="resume-strategy-button"
+              aria-label={resumeButtonLabel}
+              title={resumeButtonLabel}
             >
               <Play className="mr-2 size-4" />
               {resumeMutation.isPending ? 'Resuming…' : 'Resume'}
@@ -250,12 +271,16 @@ export function StrategyDetailPage() {
             </Button>
             <Button
               variant="destructive"
-              onClick={() => deleteMutation.mutate()}
+              onClick={() => {
+                if (window.confirm('Delete this strategy and all of its history?')) {
+                  deleteMutation.mutate()
+                }
+              }}
               disabled={deleteMutation.isPending}
               data-testid="delete-strategy-button"
             >
               <Trash2 className="mr-2 size-4" />
-              Delete
+              {deleteMutation.isPending ? 'Deleting…' : 'Delete'}
             </Button>
           </>
         )}
@@ -486,11 +511,39 @@ export function StrategyDetailPage() {
         />
       </div>
 
+      {(backtestsData?.data?.length ?? 0) > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Backtests</CardTitle>
+            <CardDescription>Backtest configurations linked to this strategy</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ul className="space-y-2">
+              {backtestsData!.data.map((config) => (
+                <li key={config.id} className="flex items-center justify-between rounded-md border border-border p-3">
+                  <div>
+                    <Link to={`/backtests/${config.id}`} className="text-sm font-medium text-primary hover:underline">
+                      {config.name}
+                    </Link>
+                    {config.description && (
+                      <p className="text-xs text-muted-foreground">{config.description}</p>
+                    )}
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    {new Date(config.start_date).toLocaleDateString()} &ndash; {new Date(config.end_date).toLocaleDateString()}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
+
       {(ordersData?.data?.length ?? 0) > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Recent Orders</CardTitle>
-            <CardDescription>Last 5 orders placed by this strategy</CardDescription>
+            <CardDescription>Last 5 orders for {strategy.ticker}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="overflow-x-auto">
@@ -523,34 +576,6 @@ export function StrategyDetailPage() {
                 </tbody>
               </table>
             </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {(backtestsData?.data?.length ?? 0) > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Backtests</CardTitle>
-            <CardDescription>Backtest configurations linked to this strategy</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <ul className="space-y-2">
-              {backtestsData!.data.map((config) => (
-                <li key={config.id} className="flex items-center justify-between rounded-md border border-border p-3">
-                  <div>
-                    <Link to={`/backtests/${config.id}`} className="text-sm font-medium text-primary hover:underline">
-                      {config.name}
-                    </Link>
-                    {config.description && (
-                      <p className="text-xs text-muted-foreground">{config.description}</p>
-                    )}
-                  </div>
-                  <span className="text-xs text-muted-foreground">
-                    {new Date(config.start_date).toLocaleDateString()} &ndash; {new Date(config.end_date).toLocaleDateString()}
-                  </span>
-                </li>
-              ))}
-            </ul>
           </CardContent>
         </Card>
       )}

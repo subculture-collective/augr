@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { Clock } from 'lucide-react';
+import { Link } from 'react-router-dom';
 
 import { RunSignalBadge, RunStatusBadge } from '@/components/runs/run-badges';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -9,19 +10,25 @@ import { formatRunDate } from '@/lib/run-format';
 
 function RunRow({ run }: { run: PipelineRun }) {
   return (
-    <li className="flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/15 hover:bg-accent/45">
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <p className="truncate text-sm font-medium">{run.ticker}</p>
-          {run.signal ? <RunSignalBadge signal={run.signal} /> : null}
+    <li>
+      <Link
+        to={`/runs/${run.id}`}
+        className="flex items-center gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/15 hover:bg-accent/45 focus-visible:border-primary/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-pulse"
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p className="truncate text-sm font-medium">{run.ticker}</p>
+            {run.signal ? <RunSignalBadge signal={run.signal} /> : null}
+          </div>
+          <p className="flex items-center gap-1 font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
+            <Clock className="size-3" />
+            {formatRunDate(run.started_at)}
+            {run.completed_at ? ` — ${formatRunDate(run.completed_at)}` : ''}
+          </p>
         </div>
-        <p className="flex items-center gap-1 font-mono text-[11px] uppercase tracking-[0.14em] text-muted-foreground">
-          <Clock className="size-3" />
-          {formatRunDate(run.started_at)}
-          {run.completed_at ? ` — ${formatRunDate(run.completed_at)}` : ''}
-        </p>
-      </div>
-      <RunStatusBadge status={run.status} />
+        <span className="text-xs font-medium text-primary">Open run</span>
+        <RunStatusBadge status={run.status} />
+      </Link>
     </li>
   );
 }

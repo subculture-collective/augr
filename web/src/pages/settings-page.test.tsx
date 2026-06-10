@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -143,7 +143,7 @@ describe('SettingsPage', () => {
     expect(screen.getByText('Configured ••••1234')).toBeInTheDocument()
     expect(screen.getByText('v1.2.3')).toBeInTheDocument()
     expect(screen.getByText('1h 30m')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Activate' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Stop All' })).toBeInTheDocument()
   })
 
   it('renders when connected brokers is null', async () => {
@@ -179,7 +179,6 @@ describe('SettingsPage', () => {
   })
 
   it('saves edited settings through the API', async () => {
-    const user = userEvent.setup()
     let currentSettings = structuredClone(settingsResponse)
     let lastUpdateBody: unknown
 
@@ -234,13 +233,13 @@ describe('SettingsPage', () => {
 
     await screen.findByTestId('settings-page')
 
-    await user.clear(screen.getByLabelText('Deep think model'))
-    await user.type(screen.getByLabelText('Deep think model'), 'claude-4-sonnet')
-    await user.clear(screen.getByLabelText('Max open positions'))
-    await user.type(screen.getByLabelText('Max open positions'), '12')
-    await user.type(screen.getByLabelText('API key', { selector: '#openai-api-key' }), 'sk-new-4321')
+    fireEvent.change(screen.getByLabelText('Deep think model'), { target: { value: 'claude-4-sonnet' } })
+    fireEvent.change(screen.getByLabelText('Max open positions'), { target: { value: '12' } })
+    fireEvent.change(screen.getByLabelText('API key', { selector: '#openai-api-key' }), {
+      target: { value: 'sk-new-4321' },
+    })
 
-    await user.click(screen.getByTestId('settings-save-button'))
+    fireEvent.click(screen.getByTestId('settings-save-button'))
 
     await waitFor(() => expect(screen.getByText('Settings saved.')).toBeInTheDocument())
     expect(lastUpdateBody).toMatchObject({
@@ -259,7 +258,6 @@ describe('SettingsPage', () => {
   })
 
   it('clears stale save messaging when fields change and falls back to Configured without last4', async () => {
-    const user = userEvent.setup()
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
 
@@ -306,10 +304,10 @@ describe('SettingsPage', () => {
     expect(within(openAIProvider).getByText('Configured')).toBeInTheDocument()
     expect(within(openAIProvider).queryByText('Configured ••••')).not.toBeInTheDocument()
 
-    await user.click(screen.getByTestId('settings-save-button'))
+    fireEvent.click(screen.getByTestId('settings-save-button'))
     expect(await screen.findByText('Settings saved.')).toBeInTheDocument()
 
-    await user.selectOptions(screen.getByLabelText('Default provider'), 'anthropic')
+    fireEvent.change(screen.getByLabelText('Default provider'), { target: { value: 'anthropic' } })
 
     await waitFor(() => {
       expect(screen.queryByText('Settings saved.')).not.toBeInTheDocument()
@@ -326,7 +324,7 @@ describe('SettingsPage', () => {
       if (url.includes('/api/v1/risk/killswitch')) {
         killSwitchActivated = requestInit?.body === JSON.stringify({
           active: true,
-          reason: 'Activated from settings page',
+          reason: 'Trading halted from settings page',
         })
         return {
           ok: true,
@@ -344,7 +342,7 @@ describe('SettingsPage', () => {
             kill_switch: killSwitchActivated
               ? {
                   active: true,
-                  reason: 'Activated from settings page',
+                  reason: 'Trading halted from settings page',
                   mechanisms: ['api_toggle'],
                   activated_at: '2025-01-01T00:00:00Z',
                 }
@@ -373,7 +371,7 @@ describe('SettingsPage', () => {
           method: 'POST',
           body: JSON.stringify({
             active: true,
-            reason: 'Activated from settings page',
+            reason: 'Trading halted from settings page',
           }),
         }),
       )
