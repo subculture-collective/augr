@@ -47,6 +47,13 @@ type TradeDecision struct {
 	Evidence         json.RawMessage     `json:"evidence,omitempty"`
 	Features         json.RawMessage     `json:"features,omitempty"`
 	RegimeTags       []string            `json:"regime_tags"`
+	PromptText       string              `json:"prompt_text,omitempty"`
+	LLMProvider      string              `json:"llm_provider,omitempty"`
+	LLMModel         string              `json:"llm_model,omitempty"`
+	PromptTokens     *int                `json:"prompt_tokens,omitempty"`
+	CompletionTokens *int                `json:"completion_tokens,omitempty"`
+	LatencyMS        *int                `json:"latency_ms,omitempty"`
+	CostUSD          *float64            `json:"cost_usd,omitempty"`
 	PaperOrderID     *uuid.UUID          `json:"paper_order_id,omitempty"`
 	LiveOrderID      *uuid.UUID          `json:"live_order_id,omitempty"`
 	Status           TradeDecisionStatus `json:"status"`

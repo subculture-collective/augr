@@ -64,6 +64,13 @@ const decisionFixture: TradeDecision = {
   risk_status: 'approved',
   risk_reasons: ['Within limits'],
   regime_tags: ['trend'],
+  prompt_text: 'system: trade carefully',
+  llm_provider: 'openai',
+  llm_model: 'gpt-4.1',
+  prompt_tokens: 123,
+  completion_tokens: 45,
+  latency_ms: 678,
+  cost_usd: 0.0123,
   status: 'candidate',
   created_at: '2025-01-01T10:00:00Z',
   updated_at: '2025-01-01T10:05:00Z',
@@ -111,6 +118,45 @@ describe('DecisionJournalPage', () => {
     expect(await screen.findByTestId('decision-journal-empty-filters')).toBeInTheDocument()
     expect(screen.getByText('No decisions matched these filters')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /clear filters/i })).toBeInTheDocument()
+  })
+
+  it('renders prompt and llm metadata when recorded', async () => {
+    apiClientMock.getRiskStatus.mockResolvedValue(riskStatus)
+    apiClientMock.listTradeDecisions.mockResolvedValue({ data: [decisionFixture] })
+
+    render(<DecisionJournalPage />, { wrapper: Wrapper })
+
+    const metadata = await screen.findAllByTestId('decision-llm-metadata')
+    expect(metadata).toHaveLength(2)
+    metadata.forEach((node) => {
+      expect(node).toHaveTextContent('openai')
+      expect(node).toHaveTextContent('gpt-4.1')
+      expect(node).toHaveTextContent('123 / 45')
+      expect(node).toHaveTextContent('678ms')
+      expect(node).toHaveTextContent('system: trade carefully')
+    })
+  })
+
+  it('shows n/a when prompt and llm metadata are absent', async () => {
+    apiClientMock.getRiskStatus.mockResolvedValue(riskStatus)
+    const decisionWithoutMetadata: TradeDecision = { ...decisionFixture }
+    delete decisionWithoutMetadata.prompt_text
+    delete decisionWithoutMetadata.llm_provider
+    delete decisionWithoutMetadata.llm_model
+    delete decisionWithoutMetadata.prompt_tokens
+    delete decisionWithoutMetadata.completion_tokens
+    delete decisionWithoutMetadata.latency_ms
+    delete decisionWithoutMetadata.cost_usd
+    apiClientMock.listTradeDecisions.mockResolvedValue({ data: [decisionWithoutMetadata] })
+
+    render(<DecisionJournalPage />, { wrapper: Wrapper })
+
+    const metadata = await screen.findAllByTestId('decision-llm-metadata')
+    expect(metadata).toHaveLength(2)
+    metadata.forEach((node) => {
+      expect(node).toHaveTextContent('n/a')
+      expect(node).toHaveTextContent('No prompt text recorded for this decision.')
+    })
   })
 
   it('shows an unavailable state when the journal endpoint is not configured', async () => {

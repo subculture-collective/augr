@@ -114,6 +114,13 @@ func TestScanTradeDecision_RoundTrip(t *testing.T) {
 	updatedAt := createdAt.Add(5 * time.Minute)
 	evidence := json.RawMessage(`{"signals":[1,2,3]}`)
 	features := json.RawMessage(`{"price":1.23}`)
+	promptText := "system: trade carefully\nuser: evaluate AAPL"
+	llmProvider := "openai"
+	llmModel := "gpt-4.1"
+	promptTokens := 123
+	completionTokens := 45
+	latencyMS := 678
+	costUSD := 0.0123
 
 	got, err := scanTradeDecision(fakeTradeDecisionScanner{values: []any{
 		uuid.New(),
@@ -138,6 +145,13 @@ func TestScanTradeDecision_RoundTrip(t *testing.T) {
 		[]byte(evidence),
 		[]byte(features),
 		[]string{"momentum", "high-volume"},
+		&promptText,
+		&llmProvider,
+		&llmModel,
+		&promptTokens,
+		&completionTokens,
+		&latencyMS,
+		&costUSD,
 		&paperOrderID,
 		&liveOrderID,
 		domain.TradeDecisionStatusLive,
@@ -165,6 +179,21 @@ func TestScanTradeDecision_RoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.RiskReasons, []string{"liquidity", "spread"}) || !reflect.DeepEqual(got.RegimeTags, []string{"momentum", "high-volume"}) {
 		t.Fatalf("unexpected array roundtrip: %+v", got)
+	}
+	if got.PromptText != promptText || got.LLMProvider != llmProvider || got.LLMModel != llmModel {
+		t.Fatalf("unexpected LLM string metadata: %+v", got)
+	}
+	if got.PromptTokens == nil || *got.PromptTokens != promptTokens {
+		t.Fatalf("PromptTokens = %v, want %d", got.PromptTokens, promptTokens)
+	}
+	if got.CompletionTokens == nil || *got.CompletionTokens != completionTokens {
+		t.Fatalf("CompletionTokens = %v, want %d", got.CompletionTokens, completionTokens)
+	}
+	if got.LatencyMS == nil || *got.LatencyMS != latencyMS {
+		t.Fatalf("LatencyMS = %v, want %d", got.LatencyMS, latencyMS)
+	}
+	if got.CostUSD == nil || *got.CostUSD != costUSD {
+		t.Fatalf("CostUSD = %v, want %f", got.CostUSD, costUSD)
 	}
 	if got.Status != domain.TradeDecisionStatusLive || got.RiskStatus != domain.RiskDecisionApproved {
 		t.Fatalf("unexpected enum roundtrip: %+v", got)

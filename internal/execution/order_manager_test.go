@@ -867,6 +867,56 @@ func TestProcessSignal_RecordsPaperDecisionAndAttachesOrder(t *testing.T) {
 	}
 }
 
+func TestProcessSignal_RecordsTradeDecisionWithLLMMetadata(t *testing.T) {
+	broker := &mockBroker{}
+	riskEng := &mockRiskEngine{}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
+
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
+
+	promptTokens := 123
+	completionTokens := 45
+	latencyMS := 678
+	costUSD := 0.0
+	plan := defaultPlan()
+	plan.DecisionMetadata = &execution.DecisionMetadata{
+		PromptText:       " system: trade carefully \n",
+		LLMProvider:      " openai ",
+		LLMModel:         " gpt-4.1 ",
+		PromptTokens:     &promptTokens,
+		CompletionTokens: &completionTokens,
+		LatencyMS:        &latencyMS,
+		CostUSD:          &costUSD,
+	}
+
+	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() error = %v", err)
+	}
+	if len(recorder.decisions) == 0 {
+		t.Fatal("expected recorded trade decision")
+	}
+	decision := recorder.decisions[0]
+	if decision.PromptText != " system: trade carefully \n" || decision.LLMProvider != "openai" || decision.LLMModel != "gpt-4.1" {
+		t.Fatalf("unexpected LLM string metadata: %+v", decision)
+	}
+	if decision.PromptTokens == nil || *decision.PromptTokens != promptTokens {
+		t.Fatalf("PromptTokens = %v, want %d", decision.PromptTokens, promptTokens)
+	}
+	if decision.CompletionTokens == nil || *decision.CompletionTokens != completionTokens {
+		t.Fatalf("CompletionTokens = %v, want %d", decision.CompletionTokens, completionTokens)
+	}
+	if decision.LatencyMS == nil || *decision.LatencyMS != latencyMS {
+		t.Fatalf("LatencyMS = %v, want %d", decision.LatencyMS, latencyMS)
+	}
+	if decision.CostUSD == nil || *decision.CostUSD != 0 {
+		t.Fatalf("CostUSD = %v, want %f", decision.CostUSD, costUSD)
+	}
+}
+
 func TestProcessSignal_LiveGateBlocksBrokerSubmission(t *testing.T) {
 	broker := &mockBroker{}
 	riskEng := &mockRiskEngine{}

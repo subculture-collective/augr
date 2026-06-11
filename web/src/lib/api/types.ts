@@ -416,6 +416,13 @@ export interface TradeDecision {
   evidence?: unknown;
   features?: unknown;
   regime_tags: string[];
+  prompt_text?: string;
+  llm_provider?: string;
+  llm_model?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  latency_ms?: number;
+  cost_usd?: number;
   paper_order_id?: UUID;
   live_order_id?: UUID;
   status: TradeDecisionStatus;

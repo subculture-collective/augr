@@ -34,7 +34,9 @@ const tradeDecisionSelectSQL = `SELECT id, strategy_id, pipeline_run_id, market_
 		depth::double precision, gross_ev::double precision, net_ev::double precision,
 		kelly_fraction::double precision, proposed_size::double precision,
 		approved_size::double precision, risk_status, risk_reasons, evidence,
-		features, regime_tags, paper_order_id, live_order_id, status, created_at,
+		features, regime_tags, prompt_text, llm_provider, llm_model,
+		prompt_tokens, completion_tokens, latency_ms, cost_usd::double precision,
+	paper_order_id, live_order_id, status, created_at,
 		updated_at
 	 FROM trade_decisions`
 
@@ -54,11 +56,13 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 			strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
 			side, outcome, fair_value, executable_price, spread, depth, gross_ev,
 			net_ev, kelly_fraction, proposed_size, approved_size, risk_status,
-			risk_reasons, evidence, features, regime_tags, paper_order_id,
-			live_order_id, status
+			risk_reasons, evidence, features, regime_tags, prompt_text, llm_provider,
+			llm_model, prompt_tokens, completion_tokens, latency_ms, cost_usd,
+			paper_order_id, live_order_id, status
 		)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		         $16, $17, $18, $19, $20, $21, $22, $23, $24)
+		         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
+		         $28, $29, $30, $31)
 		 RETURNING id, created_at, updated_at`,
 		decision.StrategyID,
 		decision.PipelineRunID,
@@ -81,6 +85,13 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 		evidence,
 		features,
 		stringSliceOrEmpty(decision.RegimeTags),
+		nullString(decision.PromptText),
+		nullString(decision.LLMProvider),
+		nullString(decision.LLMModel),
+		nullableInt(decision.PromptTokens),
+		nullableInt(decision.CompletionTokens),
+		nullableInt(decision.LatencyMS),
+		nullableFloat(decision.CostUSD),
 		decision.PaperOrderID,
 		decision.LiveOrderID,
 		decision.Status,
@@ -169,17 +180,24 @@ func (r *TradeDecisionJournalRepo) list(ctx context.Context, query string, args 
 
 func scanTradeDecision(sc scanner) (*domain.TradeDecision, error) {
 	var (
-		decision      domain.TradeDecision
-		strategyID    *uuid.UUID
-		pipelineRunID *uuid.UUID
-		externalID    *string
-		outcome       *string
-		riskReasons   []string
-		evidence      []byte
-		features      []byte
-		regimeTags    []string
-		paperOrderID  *uuid.UUID
-		liveOrderID   *uuid.UUID
+		decision         domain.TradeDecision
+		strategyID       *uuid.UUID
+		pipelineRunID    *uuid.UUID
+		externalID       *string
+		outcome          *string
+		promptText       *string
+		llmProvider      *string
+		llmModel         *string
+		promptTokens     *int
+		completionTokens *int
+		latencyMS        *int
+		costUSD          *float64
+		riskReasons      []string
+		evidence         []byte
+		features         []byte
+		regimeTags       []string
+		paperOrderID     *uuid.UUID
+		liveOrderID      *uuid.UUID
 	)
 
 	if err := sc.Scan(
@@ -205,6 +223,13 @@ func scanTradeDecision(sc scanner) (*domain.TradeDecision, error) {
 		&evidence,
 		&features,
 		&regimeTags,
+		&promptText,
+		&llmProvider,
+		&llmModel,
+		&promptTokens,
+		&completionTokens,
+		&latencyMS,
+		&costUSD,
 		&paperOrderID,
 		&liveOrderID,
 		&decision.Status,
@@ -226,6 +251,19 @@ func scanTradeDecision(sc scanner) (*domain.TradeDecision, error) {
 	decision.Evidence = json.RawMessage(evidence)
 	decision.Features = json.RawMessage(features)
 	decision.RegimeTags = regimeTags
+	if promptText != nil {
+		decision.PromptText = *promptText
+	}
+	if llmProvider != nil {
+		decision.LLMProvider = *llmProvider
+	}
+	if llmModel != nil {
+		decision.LLMModel = *llmModel
+	}
+	decision.PromptTokens = promptTokens
+	decision.CompletionTokens = completionTokens
+	decision.LatencyMS = latencyMS
+	decision.CostUSD = costUSD
 	decision.PaperOrderID = paperOrderID
 	decision.LiveOrderID = liveOrderID
 
@@ -304,4 +342,18 @@ func stringSliceOrEmpty(values []string) []string {
 		return []string{}
 	}
 	return values
+}
+
+func nullableInt(value *int) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableFloat(value *float64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }

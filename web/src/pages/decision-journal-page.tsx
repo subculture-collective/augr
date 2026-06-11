@@ -65,6 +65,25 @@ function safeMoneyLabel(value: unknown) {
   }).format(parsed)
 }
 
+function safeNumberLabel(value?: number | null) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString() : 'n/a'
+}
+
+function safeLatencyLabel(value?: number | null) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? `${value}ms` : 'n/a'
+}
+
+function safeCostLabel(value?: number | null) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? new Intl.NumberFormat('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 4,
+        maximumFractionDigits: 4,
+      }).format(value)
+    : 'n/a'
+}
+
 function splitReasons(reasons?: string[] | null) {
   if (!Array.isArray(reasons) || reasons.length === 0) return []
   return reasons.map((reason) => reason.trim()).filter(Boolean)
@@ -88,6 +107,47 @@ function marketLabel(marketType: MarketType) {
 
 function statusLabel(status: TradeDecisionStatus) {
   return DECISION_STATUSES.find((option) => option.value === status)?.label ?? status
+}
+
+function DecisionLLMMetadata({ decision }: { decision: TradeDecision }) {
+  const provider = decision.llm_provider?.trim() || 'n/a'
+  const model = decision.llm_model?.trim() || 'n/a'
+  const prompt = decision.prompt_text?.trim()
+
+  return (
+    <div className="mt-3 border border-border bg-muted/20 p-3 text-xs text-muted-foreground" data-testid="decision-llm-metadata">
+      <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Prompt / LLM</div>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <div>
+          <div className="uppercase tracking-[0.16em]">Provider</div>
+          <div className="font-medium text-foreground">{provider}</div>
+        </div>
+        <div>
+          <div className="uppercase tracking-[0.16em]">Model</div>
+          <div className="font-medium text-foreground">{model}</div>
+        </div>
+        <div>
+          <div className="uppercase tracking-[0.16em]">Tokens</div>
+          <div className="font-medium text-foreground">
+            {safeNumberLabel(decision.prompt_tokens)} / {safeNumberLabel(decision.completion_tokens)}
+          </div>
+        </div>
+        <div>
+          <div className="uppercase tracking-[0.16em]">Latency / Cost</div>
+          <div className="font-medium text-foreground">
+            {safeLatencyLabel(decision.latency_ms)} · {safeCostLabel(decision.cost_usd)}
+          </div>
+        </div>
+      </div>
+      {prompt ? (
+        <pre className="mt-3 max-h-32 overflow-auto whitespace-pre-wrap border border-border bg-background/60 p-2 font-mono text-[11px] text-foreground">
+          {prompt}
+        </pre>
+      ) : (
+        <p className="mt-3">No prompt text recorded for this decision.</p>
+      )}
+    </div>
+  )
 }
 
 function riskBannerLabel(status?: EngineStatus) {
@@ -183,6 +243,7 @@ function DecisionRow({ decision }: { decision: TradeDecision }) {
           <Badge variant={decisionStatusVariants[decision.status]}>{statusLabel(decision.status)}</Badge>
         </div>
         <p className="mt-2 max-w-[24rem] text-xs leading-5 text-muted-foreground">{riskReasonsLabel}</p>
+        <DecisionLLMMetadata decision={decision} />
       </td>
       <td className="px-3 py-3 align-top text-sm text-muted-foreground">
         <div className="space-y-2">
@@ -244,6 +305,8 @@ function DecisionCard({ decision }: { decision: TradeDecision }) {
           <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Risk reasons</div>
           <div className="mt-1 text-muted-foreground">{reasons.length > 0 ? reasons.join(' · ') : 'No risk reasons recorded'}</div>
         </div>
+
+        <DecisionLLMMetadata decision={decision} />
 
         <div className="grid grid-cols-2 gap-3 text-xs text-muted-foreground">
           <div>

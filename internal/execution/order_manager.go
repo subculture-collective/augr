@@ -33,19 +33,31 @@ type FinalSignal struct {
 
 // TradingPlan stores the structured output produced by the trader phase.
 type TradingPlan struct {
-	Action       domain.PipelineSignal `json:"action,omitempty"`
-	MarketType   domain.MarketType     `json:"market_type,omitempty"`
-	Ticker       string                `json:"ticker,omitempty"`
-	EntryType    string                `json:"entry_type,omitempty"`
-	EntryPrice   float64               `json:"entry_price,omitempty"`
-	PositionSize float64               `json:"position_size,omitempty"`
-	StopLoss     float64               `json:"stop_loss,omitempty"`
-	TakeProfit   float64               `json:"take_profit,omitempty"`
-	TimeHorizon  string                `json:"time_horizon,omitempty"`
-	Confidence   float64               `json:"confidence,omitempty"`
-	Rationale    string                `json:"rationale,omitempty"`
-	RiskReward   float64               `json:"risk_reward,omitempty"`
-	Side         string                `json:"side,omitempty"`
+	Action           domain.PipelineSignal `json:"action,omitempty"`
+	MarketType       domain.MarketType     `json:"market_type,omitempty"`
+	Ticker           string                `json:"ticker,omitempty"`
+	EntryType        string                `json:"entry_type,omitempty"`
+	EntryPrice       float64               `json:"entry_price,omitempty"`
+	PositionSize     float64               `json:"position_size,omitempty"`
+	StopLoss         float64               `json:"stop_loss,omitempty"`
+	TakeProfit       float64               `json:"take_profit,omitempty"`
+	TimeHorizon      string                `json:"time_horizon,omitempty"`
+	Confidence       float64               `json:"confidence,omitempty"`
+	Rationale        string                `json:"rationale,omitempty"`
+	RiskReward       float64               `json:"risk_reward,omitempty"`
+	Side             string                `json:"side,omitempty"`
+	DecisionMetadata *DecisionMetadata     `json:"decision_metadata,omitempty"`
+}
+
+// DecisionMetadata captures prompt and LLM usage details for a trading decision.
+type DecisionMetadata struct {
+	PromptText       string   `json:"prompt_text,omitempty"`
+	LLMProvider      string   `json:"llm_provider,omitempty"`
+	LLMModel         string   `json:"llm_model,omitempty"`
+	PromptTokens     *int     `json:"prompt_tokens,omitempty"`
+	CompletionTokens *int     `json:"completion_tokens,omitempty"`
+	LatencyMS        *int     `json:"latency_ms,omitempty"`
+	CostUSD          *float64 `json:"cost_usd,omitempty"`
 }
 
 // SizingConfig holds the parameters used to size positions.
@@ -570,7 +582,32 @@ func (m *OrderManager) newTradeDecision(
 		CreatedAt:       m.currentTime(),
 		UpdatedAt:       m.currentTime(),
 	}
+	if plan.DecisionMetadata != nil {
+		decision.PromptText = plan.DecisionMetadata.PromptText
+		decision.LLMProvider = strings.TrimSpace(plan.DecisionMetadata.LLMProvider)
+		decision.LLMModel = strings.TrimSpace(plan.DecisionMetadata.LLMModel)
+		decision.PromptTokens = cloneIntPtr(plan.DecisionMetadata.PromptTokens)
+		decision.CompletionTokens = cloneIntPtr(plan.DecisionMetadata.CompletionTokens)
+		decision.LatencyMS = cloneIntPtr(plan.DecisionMetadata.LatencyMS)
+		decision.CostUSD = cloneFloatPtr(plan.DecisionMetadata.CostUSD)
+	}
 	return decision
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneFloatPtr(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func (m *OrderManager) recordTradeDecision(ctx context.Context, decision *domain.TradeDecision) {

@@ -213,6 +213,8 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		}
 	}
 
+	decisionMetadata := r.executionDecisionMetadata(ctx, run.ID)
+
 	if err := orderManager.ProcessSignal(
 		ctx,
 		execution.FinalSignal{
@@ -220,19 +222,20 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 			Confidence: result.State.FinalSignal.Confidence,
 		},
 		execution.TradingPlan{
-			Action:       signal,
-			MarketType:   strategy.MarketType.Normalize(),
-			Ticker:       planTicker,
-			EntryType:    result.State.TradingPlan.EntryType,
-			EntryPrice:   result.State.TradingPlan.EntryPrice,
-			PositionSize: result.State.TradingPlan.PositionSize,
-			StopLoss:     result.State.TradingPlan.StopLoss,
-			TakeProfit:   result.State.TradingPlan.TakeProfit,
-			TimeHorizon:  result.State.TradingPlan.TimeHorizon,
-			Confidence:   result.State.TradingPlan.Confidence,
-			Rationale:    result.State.TradingPlan.Rationale,
-			RiskReward:   result.State.TradingPlan.RiskReward,
-			Side:         result.State.TradingPlan.Side,
+			Action:           signal,
+			MarketType:       strategy.MarketType.Normalize(),
+			Ticker:           planTicker,
+			EntryType:        result.State.TradingPlan.EntryType,
+			EntryPrice:       result.State.TradingPlan.EntryPrice,
+			PositionSize:     result.State.TradingPlan.PositionSize,
+			StopLoss:         result.State.TradingPlan.StopLoss,
+			TakeProfit:       result.State.TradingPlan.TakeProfit,
+			TimeHorizon:      result.State.TradingPlan.TimeHorizon,
+			Confidence:       result.State.TradingPlan.Confidence,
+			Rationale:        result.State.TradingPlan.Rationale,
+			RiskReward:       result.State.TradingPlan.RiskReward,
+			Side:             result.State.TradingPlan.Side,
+			DecisionMetadata: decisionMetadata,
 		},
 		strategy.ID,
 		run.ID,
@@ -259,6 +262,57 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		Orders:    orders,
 		Positions: positions,
 	}, nil
+}
+
+func (r *realStrategyRunner) executionDecisionMetadata(ctx context.Context, runID uuid.UUID) *execution.DecisionMetadata {
+	return executionDecisionMetadata(ctx, r.decisionRepo, r.logger, runID)
+}
+
+func executionDecisionMetadata(ctx context.Context, decisionRepo repository.AgentDecisionRepository, logger *slog.Logger, runID uuid.UUID) *execution.DecisionMetadata {
+	if decisionRepo == nil || runID == uuid.Nil {
+		return nil
+	}
+
+	decisions, err := decisionRepo.GetByRun(ctx, runID, repository.AgentDecisionFilter{
+		AgentRole: domain.AgentRoleTrader,
+		Phase:     domain.PhaseTrading,
+	}, 1, 0)
+	if err != nil || len(decisions) == 0 {
+		if err != nil && logger != nil {
+			logger.WarnContext(ctx, "load trader decision metadata", "error", err, "run_id", runID)
+		}
+		return nil
+	}
+
+	decision := decisions[0]
+	hasLLMProvenance := strings.TrimSpace(decision.PromptText) != "" ||
+		strings.TrimSpace(decision.LLMProvider) != "" ||
+		strings.TrimSpace(decision.LLMModel) != "" ||
+		decision.PromptTokens > 0 || decision.CompletionTokens > 0 || decision.LatencyMS > 0
+	if !hasLLMProvenance {
+		return nil
+	}
+	metadata := &execution.DecisionMetadata{
+		PromptText:  decision.PromptText,
+		LLMProvider: decision.LLMProvider,
+		LLMModel:    decision.LLMModel,
+	}
+	if decision.PromptTokens > 0 {
+		value := decision.PromptTokens
+		metadata.PromptTokens = &value
+	}
+	if decision.CompletionTokens > 0 {
+		value := decision.CompletionTokens
+		metadata.CompletionTokens = &value
+	}
+	if decision.LatencyMS > 0 {
+		value := decision.LatencyMS
+		metadata.LatencyMS = &value
+	}
+	value := decision.CostUSD
+	metadata.CostUSD = &value
+
+	return metadata
 }
 
 func normalizePolymarketStrategySide(side string) (string, error) {
