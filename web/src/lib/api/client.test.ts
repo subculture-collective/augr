@@ -26,6 +26,24 @@ describe('ApiClient', () => {
     expect(new Headers(requestInit.headers).get('Authorization')).toBe('Bearer jwt-token')
   })
 
+  it('serializes order market type filters', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [], limit: 25, offset: 0 }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new ApiClient({ baseUrl: 'http://localhost:8080' })
+    await client.listOrders({ market_type: 'crypto', ticker: 'BTCUSD', limit: 25 })
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    const [requestUrl] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(requestUrl.toString()).toBe(
+      'http://localhost:8080/api/v1/orders?market_type=crypto&ticker=BTCUSD&limit=25',
+    )
+  })
+
   it('supports research scanner endpoints with query params', async () => {
     const fetchMock = vi
       .fn()

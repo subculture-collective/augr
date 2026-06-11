@@ -15,6 +15,9 @@ func (s *Server) handleListOrders(w http.ResponseWriter, r *http.Request) {
 		Broker: q.Get("broker"),
 	}
 
+	if !ParseEnumParam(w, q, "market_type", &filter.MarketType) {
+		return
+	}
 	if !ParseEnumParam(w, q, "status", &filter.Status) {
 		return
 	}

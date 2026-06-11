@@ -86,6 +86,7 @@ type AgentEventFilter struct {
 type OrderFilter struct {
 	Ticker          string
 	Broker          string
+	MarketType      domain.MarketType
 	Side            domain.OrderSide
 	OrderType       domain.OrderType
 	Status          domain.OrderStatus

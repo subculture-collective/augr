@@ -201,6 +201,8 @@ func (m *OrderManager) ProcessSignal(
 	plan TradingPlan,
 	strategyID, runID uuid.UUID,
 ) error {
+	marketType := planMarketType(plan)
+
 	// Ignore hold signals — nothing to execute.
 	if signal.Signal == domain.PipelineSignalHold {
 		m.logger.InfoContext(ctx, "hold signal received, skipping order", "ticker", plan.Ticker)
@@ -212,7 +214,7 @@ func (m *OrderManager) ProcessSignal(
 	// symbols into broker orders; Alpaca will reject them and they are not
 	// actionable trades. Non-stock markets have different SELL semantics and are
 	// intentionally left to their market-specific execution/risk paths.
-	if signal.Signal == domain.PipelineSignalSell && planMarketType(plan) == domain.MarketTypeStock {
+	if signal.Signal == domain.PipelineSignalSell && marketType == domain.MarketTypeStock {
 		owned, err := m.hasOpenLongPosition(ctx, strategyID, plan.Ticker)
 		if err != nil {
 			return err
@@ -224,7 +226,7 @@ func (m *OrderManager) ProcessSignal(
 				strategyID,
 				runID,
 				plan,
-				domain.MarketTypeStock,
+				marketType,
 				string(domain.OrderSideSell),
 				0,
 				0,
@@ -286,7 +288,7 @@ func (m *OrderManager) ProcessSignal(
 				strategyID,
 				runID,
 				plan,
-				domain.MarketTypeStock,
+				marketType,
 				strings.ToUpper(strings.TrimSpace(plan.Side)),
 				0,
 				0,
@@ -346,7 +348,7 @@ func (m *OrderManager) ProcessSignal(
 			strategyID,
 			runID,
 			plan,
-			domain.MarketTypeStock,
+			marketType,
 			strings.ToUpper(strings.TrimSpace(plan.Side)),
 			quantity,
 			0,
@@ -378,7 +380,7 @@ func (m *OrderManager) ProcessSignal(
 		StrategyID:     &strategyID,
 		PipelineRunID:  &runID,
 		Ticker:         plan.Ticker,
-		MarketType:     domain.MarketTypeStock,
+		MarketType:     marketType,
 		Side:           side,
 		OrderType:      orderType,
 		Quantity:       quantity,

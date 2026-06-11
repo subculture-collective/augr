@@ -1365,6 +1365,7 @@ func TestListOrdersRejectsBadEnums(t *testing.T) {
 		param string
 		value string
 	}{
+		{"market_type", "futures"},
 		{"status", "notastatus"},
 		{"side", "sideways"},
 		{"order_type", "weird"},
@@ -1382,7 +1383,7 @@ func TestListOrdersAcceptsValidFilters(t *testing.T) {
 	srv := newTestServer(t)
 
 	// Valid enum values should return 200, not 400.
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/orders?ticker=AAPL&status=filled&side=buy&broker=alpaca&order_type=market", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/orders?ticker=AAPL&status=filled&side=buy&broker=alpaca&order_type=market&market_type=stock", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}

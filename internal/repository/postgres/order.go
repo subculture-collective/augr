@@ -31,18 +31,25 @@ func NewOrderRepo(pool *pgxpool.Pool) *OrderRepo {
 // Create inserts a new order and populates the generated ID and CreatedAt on
 // the provided struct.
 func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	marketType := order.MarketType.Normalize()
+	if marketType == "" {
+		marketType = domain.MarketTypeStock
+	}
+	order.MarketType = marketType
+
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO orders (
-			strategy_id, pipeline_run_id, external_id, ticker, side, order_type,
+			strategy_id, pipeline_run_id, external_id, ticker, market_type, side, order_type,
 			quantity, limit_price, stop_price, filled_quantity, filled_avg_price,
 			status, broker, submitted_at, filled_at
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
 		nullString(order.ExternalID),
 		order.Ticker,
+		marketType,
 		order.Side,
 		order.OrderType,
 		order.Quantity,
@@ -87,29 +94,37 @@ func (r *OrderRepo) List(ctx context.Context, filter repository.OrderFilter, lim
 // Update persists changes to an existing order. It returns ErrNotFound when no
 // row matches the order ID.
 func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
+	marketType := order.MarketType.Normalize()
+	if marketType == "" {
+		marketType = domain.MarketTypeStock
+	}
+	order.MarketType = marketType
+
 	row := r.pool.QueryRow(ctx,
 		`UPDATE orders
 		 SET strategy_id = $1,
 		     pipeline_run_id = $2,
 		     external_id = $3,
 		     ticker = $4,
-		     side = $5,
-		     order_type = $6,
-		     quantity = $7,
-		     limit_price = $8,
-		     stop_price = $9,
-		     filled_quantity = $10,
-		     filled_avg_price = $11,
-		     status = $12,
-		     broker = $13,
-		     submitted_at = $14,
-		     filled_at = $15
-		 WHERE id = $16
+		     market_type = $5,
+		     side = $6,
+		     order_type = $7,
+		     quantity = $8,
+		     limit_price = $9,
+		     stop_price = $10,
+		     filled_quantity = $11,
+		     filled_avg_price = $12,
+		     status = $13,
+		     broker = $14,
+		     submitted_at = $15,
+		     filled_at = $16
+		 WHERE id = $17
 		 RETURNING id`,
 		order.StrategyID,
 		order.PipelineRunID,
 		nullString(order.ExternalID),
 		order.Ticker,
+		marketType,
 		order.Side,
 		order.OrderType,
 		order.Quantity,
@@ -163,7 +178,7 @@ func (r *OrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter reposi
 	return r.list(ctx, query, args, "get orders by run")
 }
 
-const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, external_id, ticker, side,
+const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, external_id, ticker, market_type, side,
 		order_type, quantity::double precision, limit_price::double precision,
 		stop_price::double precision, filled_quantity::double precision,
 		filled_avg_price::double precision, status, broker, submitted_at,
@@ -202,6 +217,7 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 		strategyID     *uuid.UUID
 		pipelineRunID  *uuid.UUID
 		externalID     *string
+		marketType     *string
 		limitPrice     *float64
 		stopPrice      *float64
 		filledAvgPrice *float64
@@ -216,6 +232,7 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 		&pipelineRunID,
 		&externalID,
 		&order.Ticker,
+		&marketType,
 		&order.Side,
 		&order.OrderType,
 		&order.Quantity,
@@ -243,6 +260,11 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 
 	if externalID != nil {
 		order.ExternalID = *externalID
+	}
+	if marketType == nil || strings.TrimSpace(*marketType) == "" {
+		order.MarketType = domain.MarketTypeStock
+	} else {
+		order.MarketType = domain.MarketType(strings.TrimSpace(*marketType)).Normalize()
 	}
 	if broker != nil {
 		order.Broker = *broker
@@ -279,6 +301,9 @@ func buildOrderCountQuery(filter repository.OrderFilter) (string, []any) {
 	}
 	if filter.Broker != "" {
 		conditions = append(conditions, "broker = "+nextArg(filter.Broker))
+	}
+	if filter.MarketType != "" {
+		conditions = append(conditions, "market_type = "+nextArg(filter.MarketType.Normalize()))
 	}
 	if filter.Side != "" {
 		conditions = append(conditions, "side = "+nextArg(filter.Side))
@@ -335,6 +360,10 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 
 	if filter.Broker != "" {
 		conditions = append(conditions, "broker = "+nextArg(filter.Broker))
+	}
+
+	if filter.MarketType != "" {
+		conditions = append(conditions, "market_type = "+nextArg(filter.MarketType.Normalize()))
 	}
 
 	if filter.Side != "" {

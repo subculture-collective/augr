@@ -573,10 +573,12 @@ func TestProcessSignal_HappyPath(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypeCrypto
 	err := mgr.ProcessSignal(
 		context.Background(),
 		defaultSignal(),
-		defaultPlan(),
+		plan,
 		uuid.New(),
 		uuid.New(),
 	)
@@ -735,13 +737,17 @@ func TestProcessSignal_KillSwitchActive(t *testing.T) {
 	positionRepo := &mockPositionRepo{}
 	tradeRepo := &mockTradeRepo{}
 	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
 
-	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypeCrypto
 
 	err := mgr.ProcessSignal(
 		context.Background(),
 		defaultSignal(),
-		defaultPlan(),
+		plan,
 		uuid.New(),
 		uuid.New(),
 	)
@@ -775,13 +781,17 @@ func TestProcessSignal_RiskCheckRejection(t *testing.T) {
 	positionRepo := &mockPositionRepo{}
 	tradeRepo := &mockTradeRepo{}
 	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
 
-	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
+	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypeCrypto
 
 	err := mgr.ProcessSignal(
 		context.Background(),
 		defaultSignal(),
-		defaultPlan(),
+		plan,
 		uuid.New(),
 		uuid.New(),
 	)
@@ -811,6 +821,12 @@ func TestProcessSignal_RiskCheckRejection(t *testing.T) {
 
 	if reason, ok := details["reason"].(string); !ok || reason != "exceeds max position size" {
 		t.Errorf("expected reason 'exceeds max position size', got %v", details["reason"])
+	}
+	if len(recorder.decisions) == 0 {
+		t.Fatal("expected recorded trade decision")
+	}
+	if recorder.decisions[0].MarketType != domain.MarketTypeCrypto {
+		t.Fatalf("decision market type = %s, want crypto", recorder.decisions[0].MarketType)
 	}
 }
 
@@ -932,7 +948,9 @@ func TestProcessSignal_LiveGateBlocksBrokerSubmission(t *testing.T) {
 		WithLiveTrading(true).
 		WithLiveGate(execution.LiveGateConfig{EnableLiveTrading: true, AllowedStrategies: map[uuid.UUID]bool{}, AllowedBrokers: map[string]bool{}})
 
-	err := mgr.ProcessSignal(context.Background(), defaultSignal(), defaultPlan(), strategyID, uuid.New())
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypeCrypto
+	err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, strategyID, uuid.New())
 	if err == nil {
 		t.Fatal("expected live gate error")
 	}
@@ -941,6 +959,9 @@ func TestProcessSignal_LiveGateBlocksBrokerSubmission(t *testing.T) {
 	}
 	if len(recorder.decisions) != 1 {
 		t.Fatalf("expected 1 recorded decision, got %d", len(recorder.decisions))
+	}
+	if recorder.decisions[0].MarketType != domain.MarketTypeCrypto {
+		t.Fatalf("decision market type = %s, want crypto", recorder.decisions[0].MarketType)
 	}
 	if recorder.decisions[0].Status != domain.TradeDecisionStatusRejected {
 		t.Fatalf("decision status = %s, want %s", recorder.decisions[0].Status, domain.TradeDecisionStatusRejected)
@@ -1288,6 +1309,15 @@ func TestProcessSignal_NonStockSellWithoutOpenLongIsNotStockGuarded(t *testing.T
 	}
 	if len(orderRepo.orders) != 1 {
 		t.Fatalf("expected non-stock sell to continue to order path, got %d orders", len(orderRepo.orders))
+	}
+	if orderRepo.orders[0].MarketType != domain.MarketTypeCrypto {
+		t.Fatalf("order market type = %s, want crypto", orderRepo.orders[0].MarketType)
+	}
+	if len(recorder.decisions) == 0 {
+		t.Fatal("expected recorded decision")
+	}
+	if recorder.decisions[0].MarketType != domain.MarketTypeCrypto {
+		t.Fatalf("decision market type = %s, want crypto", recorder.decisions[0].MarketType)
 	}
 	for _, decision := range recorder.decisions {
 		if decision.Status == domain.TradeDecisionStatusRejected && slices.Contains(decision.RiskReasons, "unowned_sell_no_open_long") {

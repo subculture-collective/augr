@@ -41,6 +41,7 @@ func TestBuildOrderListQuery_AllFilters(t *testing.T) {
 	query, args := buildOrderListQuery(repository.OrderFilter{
 		Ticker:          "AAPL",
 		Broker:          "alpaca",
+		MarketType:      domain.MarketTypeCrypto,
 		Side:            domain.OrderSideBuy,
 		OrderType:       domain.OrderTypeLimit,
 		Status:          domain.OrderStatusSubmitted,
@@ -48,18 +49,19 @@ func TestBuildOrderListQuery_AllFilters(t *testing.T) {
 		SubmittedBefore: &submittedBefore,
 	}, 25, 50)
 
-	if len(args) != 9 {
-		t.Fatalf("expected 9 args, got %d: %v", len(args), args)
+	if len(args) != 10 {
+		t.Fatalf("expected 10 args, got %d: %v", len(args), args)
 	}
 
 	assertContains(t, query, "ticker = $1")
 	assertContains(t, query, "broker = $2")
-	assertContains(t, query, "side = $3")
-	assertContains(t, query, "order_type = $4")
-	assertContains(t, query, "status = $5")
-	assertContains(t, query, "submitted_at >= $6")
-	assertContains(t, query, "submitted_at <= $7")
-	assertContains(t, query, "LIMIT $8 OFFSET $9")
+	assertContains(t, query, "market_type = $3")
+	assertContains(t, query, "side = $4")
+	assertContains(t, query, "order_type = $5")
+	assertContains(t, query, "status = $6")
+	assertContains(t, query, "submitted_at >= $7")
+	assertContains(t, query, "submitted_at <= $8")
+	assertContains(t, query, "LIMIT $9 OFFSET $10")
 }
 
 func TestBuildOrderScopedListQuery_StrategyScopeAndPartialFilters(t *testing.T) {
@@ -100,6 +102,7 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 		PipelineRunID: &runID,
 		ExternalID:    "broker-123",
 		Ticker:        "AAPL",
+		MarketType:    domain.MarketTypeCrypto,
 		Side:          domain.OrderSideBuy,
 		OrderType:     domain.OrderTypeLimit,
 		Quantity:      10,
@@ -136,6 +139,9 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	if got.Broker != order.Broker {
 		t.Errorf("expected Broker %q, got %q", order.Broker, got.Broker)
 	}
+	if got.MarketType != domain.MarketTypeCrypto {
+		t.Fatalf("expected MarketType crypto, got %q", got.MarketType)
+	}
 	if got.LimitPrice == nil || *got.LimitPrice != limitPrice {
 		t.Fatalf("expected LimitPrice %.2f, got %v", limitPrice, got.LimitPrice)
 	}
@@ -160,6 +166,9 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	}
 	if updated.Status != domain.OrderStatusFilled {
 		t.Errorf("expected filled status, got %q", updated.Status)
+	}
+	if updated.MarketType != domain.MarketTypeCrypto {
+		t.Fatalf("expected updated MarketType crypto, got %q", updated.MarketType)
 	}
 	if updated.FilledQuantity != 10 {
 		t.Errorf("expected filled quantity 10, got %v", updated.FilledQuantity)
@@ -202,6 +211,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 		StrategyID:    &strategyA,
 		PipelineRunID: &runA,
 		Ticker:        "AAPL",
+		MarketType:    domain.MarketTypeStock,
 		Side:          domain.OrderSideBuy,
 		OrderType:     domain.OrderTypeLimit,
 		Quantity:      10,
@@ -213,6 +223,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 		StrategyID:    &strategyA,
 		PipelineRunID: &runA,
 		Ticker:        "AAPL",
+		MarketType:    domain.MarketTypeCrypto,
 		Side:          domain.OrderSideBuy,
 		OrderType:     domain.OrderTypeLimit,
 		Quantity:      5,
@@ -224,6 +235,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 		StrategyID:    &strategyB,
 		PipelineRunID: &runB,
 		Ticker:        "MSFT",
+		MarketType:    domain.MarketTypePolymarket,
 		Side:          domain.OrderSideSell,
 		OrderType:     domain.OrderTypeMarket,
 		Quantity:      7,
@@ -248,6 +260,14 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	}
 	if len(listed) != 2 {
 		t.Fatalf("expected 2 AAPL/alpaca orders, got %d", len(listed))
+	}
+
+	cryptoOrders, err := repo.List(ctx, repository.OrderFilter{MarketType: domain.MarketTypeCrypto}, 10, 0)
+	if err != nil {
+		t.Fatalf("List() crypto filter error = %v", err)
+	}
+	if len(cryptoOrders) != 1 || cryptoOrders[0].ID != orderB.ID {
+		t.Fatalf("expected only crypto orderB, got %+v", cryptoOrders)
 	}
 
 	strategyOrders, err := repo.GetByStrategy(ctx, strategyA, repository.OrderFilter{

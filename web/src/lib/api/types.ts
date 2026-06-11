@@ -361,6 +361,7 @@ export interface Order {
   pipeline_run_id?: UUID;
   external_id?: string;
   ticker: string;
+  market_type?: MarketType;
   side: OrderSide;
   order_type: OrderType;
   quantity: number;
@@ -721,6 +722,7 @@ export interface PositionListParams {
 
 export interface OrderListParams {
   ticker?: string;
+  market_type?: MarketType;
   status?: OrderStatus;
   side?: OrderSide;
 }
