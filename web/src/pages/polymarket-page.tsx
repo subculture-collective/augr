@@ -120,6 +120,14 @@ function formatScheduleDisplay(schedule: string) {
   return schedule.trim() || 'Unscheduled'
 }
 
+function hasActiveJobFailure(job: { last_error?: string | null; consecutive_failures?: number | null }) {
+  return Boolean(job.last_error?.trim()) || (job.consecutive_failures ?? 0) > 0
+}
+
+function hasHistoricalJobFailures(job: { error_count: number }) {
+  return job.error_count > 0
+}
+
 function safeJsonPreview(value: unknown, maxLength = 180) {
   if (value == null) return '—'
   try {
@@ -653,8 +661,9 @@ export function PolymarketPage() {
           ) : (
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {jobsData.map((job) => {
-                const hasError = Boolean(job.last_error) || job.error_count > 0
-                const stateTone: 'success' | 'outline' | 'warning' | 'secondary' = job.running ? 'success' : !job.enabled ? 'outline' : hasError ? 'warning' : 'secondary'
+                const hasActiveFailure = hasActiveJobFailure(job)
+                const hasHistoricalFailures = hasHistoricalJobFailures(job)
+                const stateTone: 'success' | 'outline' | 'warning' | 'secondary' = job.running ? 'success' : !job.enabled ? 'outline' : hasActiveFailure ? 'warning' : 'secondary'
                 return (
                   <article key={job.name} className="space-y-2 border border-border bg-panel p-3 text-sm" data-testid={`polymarket-job-${job.name}`}>
                     <div className="flex items-start justify-between gap-2">
@@ -664,7 +673,7 @@ export function PolymarketPage() {
                       </div>
                       <div className="flex flex-wrap justify-end gap-1.5">
                         <Badge variant={stateTone}>{job.running ? 'running' : job.enabled ? 'enabled' : 'disabled'}</Badge>
-                        {hasError ? <Badge variant="warning">error</Badge> : <Badge variant="secondary">stable</Badge>}
+                        {hasActiveFailure ? <Badge variant="warning">active failure</Badge> : <Badge variant="secondary">stable</Badge>}
                       </div>
                     </div>
 
@@ -676,6 +685,7 @@ export function PolymarketPage() {
                     <div className="grid grid-cols-2 gap-2 text-xs">
                       <div><span className="text-muted-foreground">Run count</span><div className="font-medium">{job.run_count}</div></div>
                       <div><span className="text-muted-foreground">Error count</span><div className="font-medium">{job.error_count}</div></div>
+                      {hasHistoricalFailures && !hasActiveFailure ? <div className="col-span-2 text-muted-foreground">Historical errors: {job.error_count}. Latest state is not failing.</div> : null}
                       <div className="col-span-2"><span className="text-muted-foreground">Last run</span><div className="font-medium">{job.last_run ? `${safeDateLabel(job.last_run)} · ${formatRelativeTime(job.last_run)}` : 'Never run'}</div></div>
                       <div className="col-span-2"><span className="text-muted-foreground">Last result</span><div className="font-medium">{job.last_result || '—'}</div></div>
                       {job.last_error ? <div className="col-span-2 text-destructive"><span className="text-muted-foreground">Last error</span><div className="font-medium">{job.last_error}</div></div> : null}

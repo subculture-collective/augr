@@ -164,8 +164,33 @@ it('job state details render', async () => {
   expect(within(jobCard).getByText('Every 20 minutes')).toBeInTheDocument()
   expect(within(jobCard).getByText('Backend schedule description')).toBeInTheDocument()
   expect(within(jobCard).getByText('enabled')).toBeInTheDocument()
-  expect(within(jobCard).getByText('error')).toBeInTheDocument()
+  expect(within(jobCard).getByText('active failure')).toBeInTheDocument()
   expect(within(jobCard).getByText('partial success')).toBeInTheDocument()
   expect(within(jobCard).getByText('12')).toBeInTheDocument()
   expect(within(jobCard).getByText('3')).toBeInTheDocument()
+})
+
+it('does not mark historical job errors as active failures', async () => {
+  mockBaseResponses()
+  apiMocks.getPolymarketJobsStatus.mockResolvedValue([
+    {
+      name: 'polymarket_profiles',
+      description: 'Refresh tracked wallet profiles',
+      schedule: 'Every 20 minutes',
+      last_run: '2025-01-02T00:00:00Z',
+      last_result: 'success',
+      run_count: 12,
+      error_count: 3,
+      consecutive_failures: 0,
+      running: false,
+      enabled: true,
+    },
+  ])
+
+  render(<PolymarketPage />, { wrapper: Wrapper })
+
+  const jobCard = await screen.findByTestId('polymarket-job-polymarket_profiles')
+  expect(within(jobCard).queryByText('active failure')).not.toBeInTheDocument()
+  expect(within(jobCard).getByText('stable')).toBeInTheDocument()
+  expect(within(jobCard).getByText(/Historical errors: 3/i)).toBeInTheDocument()
 })
