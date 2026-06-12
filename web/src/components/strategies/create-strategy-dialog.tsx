@@ -42,7 +42,6 @@ export function CreateStrategyDialog({
   const [description, setDescription] = useState('');
   const [ticker, setTicker] = useState('');
   const [marketType, setMarketType] = useState<MarketType>('stock');
-  const [scheduleCron, setScheduleCron] = useState('');
   const [isPaper, setIsPaper] = useState(true);
   const [isActive, setIsActive] = useState(true);
   const [configForm, setConfigForm] = useState<StrategyConfigForm>(() =>
@@ -81,7 +80,6 @@ export function CreateStrategyDialog({
     setDescription('');
     setTicker('');
     setMarketType('stock');
-    setScheduleCron('');
     setIsPaper(true);
     setIsActive(true);
     setConfigForm(strategyConfigBoundary.load(null));
@@ -109,7 +107,7 @@ export function CreateStrategyDialog({
       description: description || undefined,
       ticker: marketType === 'polymarket' ? ticker.toLowerCase() : ticker.toUpperCase(),
       market_type: marketType,
-      schedule_cron: scheduleCron || undefined,
+      schedule_cron: result.scheduleCron,
       config: result.config,
       status: isActive ? 'active' : 'inactive',
       is_paper: isPaper,
@@ -195,12 +193,12 @@ export function CreateStrategyDialog({
               <Label htmlFor="strategy-schedule">Schedule (cron)</Label>
               <Input
                 id="strategy-schedule"
-                value={scheduleCron}
-                onChange={(e) => setScheduleCron(e.target.value)}
+                value={configForm.scheduleCron}
+                onChange={(e) => setConfigForm((prev) => ({ ...prev, scheduleCron: e.target.value }))}
                 placeholder="0 9 * * 1-5"
               />
-              {scheduleCron && (
-                <p className="text-xs text-muted-foreground mt-1">{describeCron(scheduleCron)}</p>
+              {configForm.scheduleCron && (
+                <p className="text-xs text-muted-foreground mt-1">{describeCron(configForm.scheduleCron)}</p>
               )}
             </div>
           </div>

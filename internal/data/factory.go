@@ -19,17 +19,6 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-const (
-	cacheProviderStockChain   = "stock-chain"
-	cacheProviderCryptoChain  = "crypto-chain"
-	cacheDataTypeOHLCV        = "ohlcv"
-	cacheDataTypeFundamentals = "fundamentals"
-	cacheDataTypeNews         = "news"
-	cacheDataTypeSocial       = "social_sentiment"
-)
-
-var ErrUnsupportedMarketType = errors.New("data: unsupported market type")
-
 var ErrHistoricalOHLCVUnavailable = errors.New("data: historical ohlcv repository unavailable")
 
 const historicalOHLCVEmptyCoverageMaxAge = 72 * time.Hour
@@ -58,6 +47,7 @@ func NewProviderRegistry() *ProviderRegistry {
 
 // DataService wraps market-data provider chains with cache lookups and writes.
 type DataService struct {
+	selection       SelectionPolicy
 	stockChain      DataProvider
 	cryptoChain     DataProvider
 	polymarketChain DataProvider
@@ -68,8 +58,6 @@ type DataService struct {
 	nowMu           sync.RWMutex
 	now             func() time.Time
 }
-
-const cacheProviderSocialAgg = "social-agg"
 
 // SocialTriageConfig holds optional LLM dependencies for social sentiment
 // providers that require LLM-based triage (e.g. Reddit RSS).
@@ -86,66 +74,15 @@ func NewDataService(cfg config.Config, reg *ProviderRegistry, cacheRepo reposito
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if reg == nil {
-		reg = &ProviderRegistry{}
-	}
-
-	// Stock provider chain: Yahoo first (unlimited, free, reliable for OHLCV),
-	// then Polygon (rate-limited but has snapshots/options). Finnhub, FMP, and
-	// AlphaVantage are registered for non-OHLCV use (news, fundamentals) but
-	// their free tiers cannot handle bulk OHLCV downloads reliably:
-	//   - Finnhub free: 403 on US stock candles
-	//   - FMP free: legacy endpoint deprecated
-	//   - AlphaVantage free: 25 req/day, rejects outputsize=full
-	stockProviders := make([]DataProvider, 0, 5)
-	if reg.Yahoo != nil {
-		stockProviders = append(stockProviders, reg.Yahoo(ProviderConfig{Logger: logger}))
-	}
-	if apiKey := strings.TrimSpace(cfg.DataProviders.Polygon.APIKey); apiKey != "" && reg.Polygon != nil {
-		stockProviders = append(stockProviders, reg.Polygon(ProviderConfig{APIKey: apiKey, Logger: logger}))
-	}
-	if apiKey := strings.TrimSpace(cfg.DataProviders.Finnhub.APIKey); apiKey != "" && reg.Finnhub != nil {
-		stockProviders = append(stockProviders, reg.Finnhub(ProviderConfig{APIKey: apiKey, RateLimitPerMinute: cfg.DataProviders.Finnhub.RateLimitPerMinute, Logger: logger}))
-	}
-	if apiKey := strings.TrimSpace(cfg.DataProviders.FMP.APIKey); apiKey != "" && reg.FMP != nil {
-		stockProviders = append(stockProviders, reg.FMP(ProviderConfig{APIKey: apiKey, RateLimitPerMinute: cfg.DataProviders.FMP.RateLimitPerMinute, Logger: logger}))
-	}
-	if apiKey := strings.TrimSpace(cfg.DataProviders.AlphaVantage.APIKey); apiKey != "" && reg.AlphaVantage != nil {
-		stockProviders = append(stockProviders, reg.AlphaVantage(ProviderConfig{APIKey: apiKey, RateLimitPerMinute: cfg.DataProviders.AlphaVantage.RateLimitPerMinute, Logger: logger}))
-	}
-	if apiKey := strings.TrimSpace(cfg.DataProviders.NewsAPI.APIKey); apiKey != "" && reg.NewsAPI != nil {
-		stockProviders = append(stockProviders, reg.NewsAPI(ProviderConfig{APIKey: apiKey, Logger: logger}))
-	}
-
-	cryptoProviders := make([]DataProvider, 0, 1)
-	if reg.Binance != nil {
-		cryptoProviders = append(cryptoProviders, reg.Binance(ProviderConfig{Logger: logger}))
-	}
-
-	polymarketProviders := make([]DataProvider, 0, 1)
-	if reg.Polymarket != nil && strings.TrimSpace(cfg.Brokers.Polymarket.CLOBURL) != "" {
-		polymarketProviders = append(polymarketProviders, reg.Polymarket(ProviderConfig{BaseURL: cfg.Brokers.Polymarket.CLOBURL, Logger: logger}))
-	}
-
-	// Social sentiment providers: aggregated across all available sources.
-	// These are separate from the OHLCV/news chains — they only implement
-	// GetSocialSentiment; all other methods return ErrNotImplemented.
-	socialProviders := make([]DataProvider, 0, 3)
-	if apiKey := strings.TrimSpace(cfg.DataProviders.Finnhub.APIKey); apiKey != "" && reg.Finnhub != nil {
-		socialProviders = append(socialProviders, reg.Finnhub(ProviderConfig{APIKey: apiKey, RateLimitPerMinute: cfg.DataProviders.Finnhub.RateLimitPerMinute, Logger: logger}))
-	}
-	if reg.StockTwits != nil {
-		socialProviders = append(socialProviders, reg.StockTwits(ProviderConfig{Logger: logger}))
-	}
-	if reg.Reddit != nil && socialTriage != nil && socialTriage.Provider != nil {
-		socialProviders = append(socialProviders, reg.Reddit(ProviderConfig{Logger: logger, LLMProvider: socialTriage.Provider, LLMModel: socialTriage.Model}))
-	}
+	selection := SelectionPolicy{}
+	chains := selection.BuildProviderChains(cfg, reg, logger, socialTriage)
 
 	return &DataService{
-		stockChain:      NewProviderChain(logger, stockProviders...),
-		cryptoChain:     NewProviderChain(logger, cryptoProviders...),
-		polymarketChain: NewProviderChain(logger, polymarketProviders...),
-		socialProviders: socialProviders,
+		selection:       selection,
+		stockChain:      NewProviderChain(logger, chains.Stock...),
+		cryptoChain:     NewProviderChain(logger, chains.Crypto...),
+		polymarketChain: NewProviderChain(logger, chains.Polymarket...),
+		socialProviders: chains.Social,
 		cacheRepo:       cacheRepo,
 		historyRepo:     historicalOHLCVRepo(cacheRepo),
 		logger:          logger,
@@ -158,7 +95,11 @@ func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType
 	fromUTC := from.UTC()
 	toUTC := to.UTC()
 
-	providerName, chain, err := s.resolveChain(marketType)
+	_, chain, err := s.resolveChain(marketType)
+	if err != nil {
+		return nil, err
+	}
+	cacheSelection, err := s.selection.CacheSelection(marketType, cacheDataTypeOHLCV)
 	if err != nil {
 		return nil, err
 	}
@@ -169,15 +110,17 @@ func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType
 	cacheTo := truncateForTimeframe(timeframe, toUTC)
 	key := repository.MarketDataCacheKey{
 		Ticker:    ticker,
-		Provider:  providerName,
+		Provider:  cacheSelection.Provider,
 		DataType:  cacheDataTypeOHLCV,
 		Timeframe: ohlcvCacheTimeframe(timeframe, fromUTC, toUTC),
 		DateFrom:  &cacheFrom,
 		DateTo:    &cacheTo,
 	}
 
-	if cached, ok := s.loadCachedOHLCV(ctx, key); ok {
-		return cached, nil
+	if cacheSelection.Enabled {
+		if cached, ok := s.loadCachedOHLCV(ctx, key); ok {
+			return cached, nil
+		}
 	}
 
 	bars, err := chain.GetOHLCV(ctx, ticker, timeframe, from, to)
@@ -185,26 +128,34 @@ func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType
 		return nil, err
 	}
 
-	s.storeCached(ctx, key, bars, ttlForOHLCV(timeframe))
+	if cacheSelection.Enabled {
+		s.storeCached(ctx, key, bars, ttlForOHLCV(timeframe))
+	}
 
 	return bars, nil
 }
 
 // GetFundamentals returns fundamentals using the market-type chain and caches results.
 func (s *DataService) GetFundamentals(ctx context.Context, marketType domain.MarketType, ticker string) (Fundamentals, error) {
-	providerName, chain, err := s.resolveChain(marketType)
+	_, chain, err := s.resolveChain(marketType)
+	if err != nil {
+		return Fundamentals{}, err
+	}
+	cacheSelection, err := s.selection.CacheSelection(marketType, cacheDataTypeFundamentals)
 	if err != nil {
 		return Fundamentals{}, err
 	}
 
 	key := repository.MarketDataCacheKey{
 		Ticker:   ticker,
-		Provider: providerName,
+		Provider: cacheSelection.Provider,
 		DataType: cacheDataTypeFundamentals,
 	}
 
-	if cached, ok := s.loadCachedFundamentals(ctx, key); ok {
-		return cached, nil
+	if cacheSelection.Enabled {
+		if cached, ok := s.loadCachedFundamentals(ctx, key); ok {
+			return cached, nil
+		}
 	}
 
 	fundamentals, err := chain.GetFundamentals(ctx, ticker)
@@ -212,7 +163,9 @@ func (s *DataService) GetFundamentals(ctx context.Context, marketType domain.Mar
 		return Fundamentals{}, err
 	}
 
-	s.storeCached(ctx, key, fundamentals, 6*time.Hour)
+	if cacheSelection.Enabled {
+		s.storeCached(ctx, key, fundamentals, 6*time.Hour)
+	}
 
 	return fundamentals, nil
 }
@@ -222,22 +175,28 @@ func (s *DataService) GetNews(ctx context.Context, marketType domain.MarketType,
 	fromUTC := from.UTC()
 	toUTC := to.UTC()
 
-	providerName, chain, err := s.resolveChain(marketType)
+	_, chain, err := s.resolveChain(marketType)
+	if err != nil {
+		return nil, err
+	}
+	cacheSelection, err := s.selection.CacheSelection(marketType, cacheDataTypeNews)
 	if err != nil {
 		return nil, err
 	}
 
 	key := repository.MarketDataCacheKey{
 		Ticker:    ticker,
-		Provider:  providerName,
+		Provider:  cacheSelection.Provider,
 		DataType:  cacheDataTypeNews,
 		Timeframe: newsCacheWindow(fromUTC, toUTC),
 		DateFrom:  &fromUTC,
 		DateTo:    &toUTC,
 	}
 
-	if cached, ok := s.loadCachedNews(ctx, key); ok {
-		return normalizeNewsArticles(cached, fromUTC, toUTC), nil
+	if cacheSelection.Enabled {
+		if cached, ok := s.loadCachedNews(ctx, key); ok {
+			return normalizeNewsArticles(cached, fromUTC, toUTC), nil
+		}
 	}
 
 	articles, err := chain.GetNews(ctx, ticker, from, to)
@@ -249,7 +208,9 @@ func (s *DataService) GetNews(ctx context.Context, marketType domain.MarketType,
 	}
 	articles = normalizeNewsArticles(articles, fromUTC, toUTC)
 
-	s.storeCached(ctx, key, articles, 30*time.Minute)
+	if cacheSelection.Enabled {
+		s.storeCached(ctx, key, articles, 30*time.Minute)
+	}
 
 	return articles, nil
 }
@@ -340,27 +301,33 @@ func (s *DataService) DownloadHistoricalOHLCV(
 // GetSocialSentiment aggregates social sentiment from all configured social
 // providers (Finnhub, StockTwits, Reddit) concurrently, merges raw counts,
 // and caches the combined result.
-func (s *DataService) GetSocialSentiment(ctx context.Context, _ domain.MarketType, ticker string, from, to time.Time) ([]SocialSentiment, error) {
+func (s *DataService) GetSocialSentiment(ctx context.Context, marketType domain.MarketType, ticker string, from, to time.Time) ([]SocialSentiment, error) {
 	fromUTC := from.UTC()
 	toUTC := to.UTC()
+	cacheSelection, err := s.selection.CacheSelection(marketType, cacheDataTypeSocial)
+	if err != nil {
+		return nil, err
+	}
 
 	key := repository.MarketDataCacheKey{
 		Ticker:    ticker,
-		Provider:  cacheProviderSocialAgg,
+		Provider:  cacheSelection.Provider,
 		DataType:  cacheDataTypeSocial,
 		Timeframe: newsCacheWindow(fromUTC, toUTC),
 		DateFrom:  &fromUTC,
 		DateTo:    &toUTC,
 	}
 
-	if cached, ok := s.loadCachedSocialSentiment(ctx, key); ok {
-		return normalizeSocialSentiment(cached, fromUTC, toUTC), nil
+	if cacheSelection.Enabled {
+		if cached, ok := s.loadCachedSocialSentiment(ctx, key); ok {
+			return normalizeSocialSentiment(cached, fromUTC, toUTC), nil
+		}
 	}
 
 	snapshots := s.aggregateSocialSentiment(ctx, ticker, from, to)
 	snapshots = normalizeSocialSentiment(snapshots, fromUTC, toUTC)
 
-	if len(snapshots) > 0 {
+	if cacheSelection.Enabled && len(snapshots) > 0 {
 		s.storeCached(ctx, key, snapshots, 30*time.Minute)
 	}
 
@@ -516,19 +483,8 @@ func (s *DataService) ListHistoricalOHLCV(
 	return result, nil
 }
 
-const cacheProviderPolymarketChain = "polymarket-chain"
-
 func (s *DataService) resolveChain(marketType domain.MarketType) (string, DataProvider, error) {
-	switch normalizeMarketType(marketType) {
-	case domain.MarketTypeStock:
-		return cacheProviderStockChain, s.stockChain, nil
-	case domain.MarketTypeCrypto:
-		return cacheProviderCryptoChain, s.cryptoChain, nil
-	case domain.MarketTypePolymarket:
-		return cacheProviderPolymarketChain, s.polymarketChain, nil
-	default:
-		return "", nil, fmt.Errorf("%w: %s", ErrUnsupportedMarketType, marketType)
-	}
+	return s.selection.ResolveMarketChain(marketType, s.stockChain, s.cryptoChain, s.polymarketChain)
 }
 
 func (s *DataService) loadCachedOHLCV(ctx context.Context, key repository.MarketDataCacheKey) ([]domain.OHLCV, bool) {
@@ -660,10 +616,6 @@ func ttlForOHLCV(timeframe Timeframe) time.Duration {
 	}
 
 	return 24 * time.Hour
-}
-
-func normalizeMarketType(marketType domain.MarketType) domain.MarketType {
-	return domain.MarketType(strings.ToLower(strings.TrimSpace(marketType.String())))
 }
 
 func historicalOHLCVRepo(cacheRepo repository.MarketDataCacheRepository) repository.HistoricalOHLCVRepository {

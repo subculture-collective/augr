@@ -2,7 +2,6 @@ package data
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -15,6 +14,7 @@ import (
 type OptionsProviderChain struct {
 	providers []OptionsDataProvider
 	logger    *slog.Logger
+	fallback  FallbackPolicy
 }
 
 // NewOptionsProviderChain constructs a chain from an ordered list of providers.
@@ -22,7 +22,7 @@ func NewOptionsProviderChain(logger *slog.Logger, providers ...OptionsDataProvid
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &OptionsProviderChain{providers: providers, logger: logger}
+	return &OptionsProviderChain{providers: providers, logger: logger, fallback: optionsChainFallback}
 }
 
 func (c *OptionsProviderChain) GetOptionsChain(ctx context.Context, underlying string, expiry time.Time, optionType domain.OptionType) ([]domain.OptionSnapshot, error) {
@@ -32,14 +32,13 @@ func (c *OptionsProviderChain) GetOptionsChain(ctx context.Context, underlying s
 		if err == nil {
 			return result, nil
 		}
-		if errors.Is(err, ErrNotImplemented) {
-			continue
+		if c.fallback.shouldRecord(err) {
+			c.logger.Warn("options chain provider failed, trying next",
+				slog.String("underlying", underlying),
+				slog.Any("error", err),
+			)
+			lastErr = err
 		}
-		c.logger.Warn("options chain provider failed, trying next",
-			slog.String("underlying", underlying),
-			slog.Any("error", err),
-		)
-		lastErr = err
 	}
 	if lastErr != nil {
 		return nil, lastErr
@@ -54,14 +53,13 @@ func (c *OptionsProviderChain) GetOptionsOHLCV(ctx context.Context, occSymbol st
 		if err == nil {
 			return result, nil
 		}
-		if errors.Is(err, ErrNotImplemented) {
-			continue
+		if c.fallback.shouldRecord(err) {
+			c.logger.Warn("options OHLCV provider failed, trying next",
+				slog.String("symbol", occSymbol),
+				slog.Any("error", err),
+			)
+			lastErr = err
 		}
-		c.logger.Warn("options OHLCV provider failed, trying next",
-			slog.String("symbol", occSymbol),
-			slog.Any("error", err),
-		)
-		lastErr = err
 	}
 	if lastErr != nil {
 		return nil, lastErr

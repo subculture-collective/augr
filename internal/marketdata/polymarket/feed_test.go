@@ -47,4 +47,33 @@ func TestFeedLifecycleAndRouting(t *testing.T) {
 		f.Close()
 	}()
 	wg.Wait()
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected tick subscriber to be closed after feed shutdown")
+		}
+	default:
+		t.Fatal("expected closed tick subscriber to be readable immediately")
+	}
+	if got := f.Stats().Subscribers; got != 0 {
+		t.Fatalf("Subscribers = %d, want 0 after shutdown", got)
+	}
+	lateTick := f.Ticks("slug-b")
+	select {
+	case _, ok := <-lateTick:
+		if ok {
+			t.Fatal("expected late tick subscriber to be closed")
+		}
+	default:
+		t.Fatal("expected late tick subscriber to be readable immediately")
+	}
+	lateBook := f.Books("slug-b")
+	select {
+	case _, ok := <-lateBook:
+		if ok {
+			t.Fatal("expected late book subscriber to be closed")
+		}
+	default:
+		t.Fatal("expected late book subscriber to be readable immediately")
+	}
 }

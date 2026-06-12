@@ -272,6 +272,7 @@ type CapitalLadderRepository interface {
 // PipelineRunRepository provides access to pipeline runs.
 type PipelineRunRepository interface {
 	Create(ctx context.Context, run *domain.PipelineRun) error
+	GetByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error)
 	Get(ctx context.Context, id uuid.UUID, tradeDate time.Time) (*domain.PipelineRun, error)
 	List(ctx context.Context, filter PipelineRunFilter, limit, offset int) ([]domain.PipelineRun, error)
 	// Count returns the total number of pipeline runs matching the filter (ignoring pagination).

@@ -134,6 +134,7 @@ type JobOrchestrator struct {
 	rssAggregator *rss.Aggregator
 	metrics       AutomationJobMetrics
 	reportMetrics ReportWorkerMetrics
+	reportWorker  *ReportWorker
 }
 
 // NewJobOrchestrator constructs a new orchestrator.

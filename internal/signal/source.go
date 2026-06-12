@@ -15,7 +15,7 @@ type RawSignalEvent struct {
 	ReceivedAt time.Time
 }
 
-// SignalSource is implemented by all signal source adapters.
+// SignalSource is the adapter boundary for signal sources.
 type SignalSource interface {
 	// Name returns a stable, human-readable identifier for this source.
 	Name() string

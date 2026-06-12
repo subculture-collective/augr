@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -656,8 +657,8 @@ func TestProcessSignal_BuildsPortfolioForRiskChecks(t *testing.T) {
 	aaplPrice := 160.0
 	balance := execution.Balance{Currency: "USD", Cash: 7_400, BuyingPower: 7_400, Equity: equity}
 	openPositions := []domain.Position{
-		{Ticker: "AAPL", Quantity: 10, AvgEntry: 150, CurrentPrice: &aaplPrice},
-		{Ticker: "MSFT", Quantity: 20, AvgEntry: 50},
+		{Ticker: "AAPL", MarketType: domain.MarketTypeStock, Quantity: 10, AvgEntry: 150, CurrentPrice: &aaplPrice},
+		{Ticker: "MSFT", MarketType: domain.MarketTypeStock, Quantity: 20, AvgEntry: 50},
 	}
 
 	broker := &mockBroker{
@@ -712,6 +713,9 @@ func TestProcessSignal_BuildsPortfolioForRiskChecks(t *testing.T) {
 	if got := checkPositionPortfolio.PositionExposureBySymbol["MSFT"]; got != 0.10 {
 		t.Fatalf("checkPositionPortfolio.PositionExposureBySymbol[MSFT] = %v, want 0.10", got)
 	}
+	if got := checkPositionPortfolio.MarketExposurePct[domain.MarketTypeStock]; got != 0.28 {
+		t.Fatalf("checkPositionPortfolio.MarketExposurePct[stock] = %v, want 0.28", got)
+	}
 	if preTradePortfolio.ConcurrentPositions != checkPositionPortfolio.ConcurrentPositions {
 		t.Fatalf("preTradePortfolio.ConcurrentPositions = %d, want %d", preTradePortfolio.ConcurrentPositions, checkPositionPortfolio.ConcurrentPositions)
 	}
@@ -723,6 +727,104 @@ func TestProcessSignal_BuildsPortfolioForRiskChecks(t *testing.T) {
 	}
 	if got := preTradePortfolio.PositionExposureBySymbol["MSFT"]; got != checkPositionPortfolio.PositionExposureBySymbol["MSFT"] {
 		t.Fatalf("preTradePortfolio.PositionExposureBySymbol[MSFT] = %v, want %v", got, checkPositionPortfolio.PositionExposureBySymbol["MSFT"])
+	}
+	if got := preTradePortfolio.MarketExposurePct[domain.MarketTypeStock]; got != checkPositionPortfolio.MarketExposurePct[domain.MarketTypeStock] {
+		t.Fatalf("preTradePortfolio.MarketExposurePct[stock] = %v, want %v", got, checkPositionPortfolio.MarketExposurePct[domain.MarketTypeStock])
+	}
+}
+
+func TestProcessSignal_RejectsWhenPerMarketExposureWouldExceedLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		market    domain.MarketType
+		positions []domain.Position
+		plan      execution.TradingPlan
+	}{
+		{
+			name:   "stock",
+			market: domain.MarketTypeStock,
+			positions: []domain.Position{
+				{Ticker: "MSFT", MarketType: domain.MarketTypeStock, Quantity: 10, AvgEntry: 190},
+				{Ticker: "NVDA", MarketType: domain.MarketTypeStock, Quantity: 10, AvgEntry: 150},
+				{Ticker: "IBM", MarketType: domain.MarketTypeStock, Quantity: 15, AvgEntry: 100},
+			},
+			plan: defaultPlan(),
+		},
+		{
+			name:   "polymarket",
+			market: domain.MarketTypePolymarket,
+			positions: []domain.Position{
+				{Ticker: "POLY-1", MarketType: domain.MarketTypePolymarket, Quantity: 4, AvgEntry: 100},
+			},
+			plan: func() execution.TradingPlan {
+				p := defaultPlan()
+				p.MarketType = domain.MarketTypePolymarket
+				p.Ticker = "POLY-2"
+				return p
+			}(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			broker := &mockBroker{}
+			broker.getAccountBalanceFn = func(context.Context) (execution.Balance, error) {
+				return execution.Balance{Currency: "USD", Cash: 10_000, BuyingPower: 10_000, Equity: 10_000}, nil
+			}
+			positionRepo := &mockPositionRepo{
+				getOpenFn: func(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
+					return tc.positions, nil
+				},
+			}
+			orderRepo := &mockOrderRepo{}
+			tradeRepo := &mockTradeRepo{}
+			auditRepo := &mockAuditLogRepo{}
+
+			realRiskEng := risk.NewRiskEngine(risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slog.Default())
+			realRiskEng.SetFileExistsFunc(func(string) bool { return false })
+			realRiskEng.SetGetEnvFunc(func(string) string { return "" })
+
+			var captured risk.Portfolio
+			riskEng := &mockRiskEngine{
+				checkPositionLimitsFn: func(ctx context.Context, ticker string, quantity float64, portfolio risk.Portfolio) (bool, string, error) {
+					captured = portfolio
+					return realRiskEng.CheckPositionLimits(ctx, ticker, quantity, portfolio)
+				},
+				checkPreTradeFn: func(ctx context.Context, order *domain.Order, portfolio risk.Portfolio) (bool, string, error) {
+					return realRiskEng.CheckPreTrade(ctx, order, portfolio)
+				},
+			}
+
+			mgr := execution.NewOrderManager(
+				broker,
+				"paper",
+				riskEng,
+				positionRepo,
+				orderRepo,
+				tradeRepo,
+				auditRepo,
+				nil,
+				execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: 0.02},
+				slog.Default(),
+			)
+
+			err := mgr.ProcessSignal(context.Background(), defaultSignal(), tc.plan, uuid.New(), uuid.New())
+			if err == nil {
+				t.Fatalf("ProcessSignal() expected error when per-market exposure would exceed limit; captured=%v", captured.MarketExposurePct)
+			}
+			if got := captured.MarketExposurePct[tc.market]; got <= 0.05 && tc.market == domain.MarketTypePolymarket {
+				t.Fatalf("expected captured polymarket exposure to exceed limit, got %v", got)
+			}
+			if got := captured.MarketExposurePct[tc.market]; got <= 0.50 && tc.market == domain.MarketTypeStock {
+				t.Fatalf("expected captured stock exposure to exceed limit, got %v", got)
+			}
+			if len(orderRepo.orders) != 0 {
+				t.Fatalf("expected 0 orders, got %d", len(orderRepo.orders))
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "market exposure") {
+				t.Fatalf("expected market exposure rejection, got %v", err)
+			}
+		})
 	}
 }
 
@@ -1881,6 +1983,63 @@ func TestProcessSignal_ZeroPositionSize(t *testing.T) {
 	// No order should be created.
 	if len(orderRepo.orders) != 0 {
 		t.Errorf("expected 0 orders, got %d", len(orderRepo.orders))
+	}
+}
+
+func TestProcessSignal_KellySizingUsesUnitsAndExposure(t *testing.T) {
+	t.Parallel()
+
+	var capturedExposure float64
+	riskEng := &mockRiskEngine{
+		checkPositionLimitsFn: func(_ context.Context, _ string, exposurePct float64, _ risk.Portfolio) (bool, string, error) {
+			capturedExposure = exposurePct
+			return true, "", nil
+		},
+	}
+	broker := &mockBroker{
+		getAccountBalanceFn: func(_ context.Context) (execution.Balance, error) {
+			return execution.Balance{Currency: "USD", Cash: 100000, BuyingPower: 100000, Equity: 100000}, nil
+		},
+	}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+
+	mgr := execution.NewOrderManager(
+		broker,
+		"paper",
+		riskEng,
+		positionRepo,
+		orderRepo,
+		tradeRepo,
+		auditRepo,
+		nil,
+		execution.SizingConfig{
+			Method:       execution.PositionSizingMethodKelly,
+			WinRate:      0.60,
+			WinLossRatio: 2,
+			HalfKelly:    false,
+		},
+		slog.Default(),
+	)
+
+	plan := defaultPlan()
+	plan.EntryPrice = 50
+	plan.StopLoss = 45
+
+	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("expected 1 order created, got %d", len(orderRepo.orders))
+	}
+	if got := orderRepo.orders[0].Quantity; got != 800 {
+		t.Fatalf("order quantity = %v, want 800", got)
+	}
+	if math.Abs(capturedExposure-0.4) > 1e-9 {
+		t.Fatalf("exposure = %v, want 0.4", capturedExposure)
 	}
 }
 

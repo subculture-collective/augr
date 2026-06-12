@@ -1209,6 +1209,7 @@ func TestExecuteRiskDebatePhase_FinalSignalExtractedFromRiskManager(t *testing.T
 // mockPipelineRunRepo is a test double for repository.PipelineRunRepository.
 type mockPipelineRunRepo struct {
 	createFn       func(ctx context.Context, run *domain.PipelineRun) error
+	getByIDFn      func(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error)
 	updateStatusFn func(ctx context.Context, id uuid.UUID, tradeDate time.Time, update repository.PipelineRunStatusUpdate) error
 }
 
@@ -1337,6 +1338,13 @@ func (m *mockPipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRu
 }
 
 func (m *mockPipelineRunRepo) Get(_ context.Context, _ uuid.UUID, _ time.Time) (*domain.PipelineRun, error) {
+	return nil, nil
+}
+
+func (m *mockPipelineRunRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
+	if m.getByIDFn != nil {
+		return m.getByIDFn(ctx, id)
+	}
 	return nil, nil
 }
 
@@ -2247,6 +2255,108 @@ func TestPipelineConfig(t *testing.T) {
 			t.Errorf("RiskDebateRounds = %d, want default 3", got.RiskDebateRounds)
 		}
 	})
+}
+
+// TestExecuteStrategy_LegacyAdapterKeepsPipelineConfigAndSkipsRisk verifies the
+// legacy strategy adapter resolves config on a throwaway copy, keeps the caller's
+// Pipeline config unchanged, and still skips the risk-debate phase.
+func TestExecuteStrategy_LegacyAdapterKeepsPipelineConfigAndSkipsRisk(t *testing.T) {
+	riskRuns := atomic.Int32{}
+	pipeline := NewPipeline(
+		PipelineConfig{
+			PipelineTimeout:      15 * time.Second,
+			PhaseTimeout:         2 * time.Second,
+			ResearchDebateRounds: 1,
+			RiskDebateRounds:     1,
+			SkipPhases: map[Phase]bool{
+				PhaseTrading: true,
+			},
+		},
+		NoopPersister{}, nil, slog.Default(),
+	)
+	pipeline.RegisterNode(&mockAnalystNode{
+		name: "market_analyst",
+		role: AgentRoleMarketAnalyst,
+		execute: func(_ context.Context, state *PipelineState) error {
+			state.SetAnalystReport(AgentRoleMarketAnalyst, "trend")
+			return nil
+		},
+	})
+	pipeline.RegisterNode(&mockDebateNode{
+		name: "bull_researcher",
+		role: AgentRoleBullResearcher,
+		execute: func(_ context.Context, state *PipelineState) error {
+			state.ResearchDebate.Rounds[len(state.ResearchDebate.Rounds)-1].Contributions[AgentRoleBullResearcher] = "bull"
+			return nil
+		},
+	})
+	pipeline.RegisterNode(&mockDebateNode{
+		name: "bear_researcher",
+		role: AgentRoleBearResearcher,
+		execute: func(_ context.Context, state *PipelineState) error {
+			state.ResearchDebate.Rounds[len(state.ResearchDebate.Rounds)-1].Contributions[AgentRoleBearResearcher] = "bear"
+			return nil
+		},
+	})
+	pipeline.RegisterNode(&mockDebateNode{
+		name: "invest_judge",
+		role: AgentRoleInvestJudge,
+		execute: func(_ context.Context, state *PipelineState) error {
+			state.ResearchDebate.InvestmentPlan = "hold"
+			return nil
+		},
+	})
+	pipeline.RegisterNode(&mockTradingNode{
+		name: "trader",
+		role: AgentRoleTrader,
+		execute: func(_ context.Context, state *PipelineState) error {
+			state.TradingPlan = TradingPlan{Action: PipelineSignalBuy, Ticker: state.Ticker}
+			return nil
+		},
+	})
+	for _, node := range []struct {
+		name string
+		role AgentRole
+	}{
+		{name: "aggressive_analyst", role: AgentRoleAggressiveAnalyst},
+		{name: "conservative_analyst", role: AgentRoleConservativeAnalyst},
+		{name: "neutral_analyst", role: AgentRoleNeutralAnalyst},
+		{name: "risk_manager", role: AgentRoleRiskManager},
+	} {
+		node := node
+		pipeline.RegisterNode(&mockRiskDebateNode{
+			name: node.name,
+			role: node.role,
+			execute: func(_ context.Context, _ *PipelineState) error {
+				riskRuns.Add(1)
+				return nil
+			},
+		})
+	}
+
+	strategy := strategyWithDebateRounds(t, "AAPL", 2)
+	state, err := pipeline.ExecuteStrategy(context.Background(), strategy, GlobalSettings{})
+	if err != nil {
+		t.Fatalf("ExecuteStrategy() error = %v", err)
+	}
+	if got := riskRuns.Load(); got != 0 {
+		t.Fatalf("risk debate nodes ran %d times, want 0", got)
+	}
+	if got := len(state.ResearchDebate.Rounds); got != 2 {
+		t.Fatalf("research rounds = %d, want 2", got)
+	}
+	if got := len(state.RiskDebate.Rounds); got != 0 {
+		t.Fatalf("risk rounds = %d, want 0", got)
+	}
+	if got := pipeline.Config(); got.PipelineTimeout != 15*time.Second || got.PhaseTimeout != 2*time.Second || got.ResearchDebateRounds != 1 || got.RiskDebateRounds != 1 {
+		t.Fatalf("pipeline config mutated: %+v", got)
+	}
+	if got := pipeline.Config().SkipPhases; len(got) != 1 || !got[PhaseTrading] || got[PhaseRiskDebate] {
+		t.Fatalf("pipeline skip phases mutated: %+v", got)
+	}
+	if pipeline.configSnapshot != nil {
+		t.Fatal("pipeline configSnapshot mutated by ExecuteStrategy")
+	}
 }
 
 // TestPipelineNodes verifies that Nodes() returns registered nodes grouped by

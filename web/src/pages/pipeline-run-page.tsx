@@ -8,131 +8,23 @@ import { AnalystCards } from '@/components/pipeline/analyst-cards';
 import { DebateView } from '@/components/pipeline/debate-view';
 import { DecisionInspector } from '@/components/pipeline/decision-inspector';
 import { FinalSignal } from '@/components/pipeline/final-signal';
-import { type PhaseInfo, PhaseProgress } from '@/components/pipeline/phase-progress';
+import { PhaseProgress } from '@/components/pipeline/phase-progress';
 import { TraderPlan } from '@/components/pipeline/trader-plan';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { apiClient } from '@/lib/api/client';
-import type {
-  AgentDecision,
-  AgentRole,
-  WebSocketMessage,
-  WebSocketServerMessage,
-} from '@/lib/api/types';
+import type { AgentDecision, WebSocketServerMessage } from '@/lib/api/types';
+import {
+  PIPELINE_DEBATE_ROLES,
+  PIPELINE_RISK_ROLES,
+  buildPipelineRunViewModel,
+  getPipelineRunInvalidationKeys,
+} from '@/lib/pipeline/run-view';
 import { useWebSocketClient } from '@/hooks/use-websocket-client';
 
-const analysisRoles: AgentRole[] = [
-  'market_analyst',
-  'fundamentals_analyst',
-  'news_analyst',
-  'social_media_analyst',
-];
-const debateRoles: AgentRole[] = ['bull_researcher', 'bear_researcher'];
-const riskDebateRoles: AgentRole[] = [
-  'aggressive_analyst',
-  'conservative_analyst',
-  'neutral_analyst',
-];
-
-const legacyRiskRoleMap: Partial<Record<AgentRole, AgentRole>> = {
-  aggressive_risk: 'aggressive_analyst',
-  conservative_risk: 'conservative_analyst',
-  neutral_risk: 'neutral_analyst',
-};
-
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function normalizeAgentRole(role: AgentRole): AgentRole {
-  return legacyRiskRoleMap[role] ?? role;
-}
-
-function normalizeDecision(decision: AgentDecision): AgentDecision {
-  const normalizedRole = normalizeAgentRole(decision.agent_role);
-  if (normalizedRole === decision.agent_role) {
-    return decision;
-  }
-
-  return {
-    ...decision,
-    agent_role: normalizedRole,
-  };
-}
-
-function getLatestDecision(
-  decisions: AgentDecision[],
-  roles: AgentRole[],
-): AgentDecision | undefined {
-  for (let i = decisions.length - 1; i >= 0; i--) {
-    if (roles.includes(decisions[i].agent_role)) {
-      return decisions[i];
-    }
-  }
-  return undefined;
-}
-
-function computePhases(
-  decisions: AgentDecision[],
-  isCompleted: boolean,
-  hasSignal: boolean,
-): PhaseInfo[] {
-  const analysisDecisions = decisions.filter((d) => analysisRoles.includes(d.agent_role));
-  const debateDecisions = decisions.filter((d) => debateRoles.includes(d.agent_role));
-  const traderDecision = getLatestDecision(decisions, ['trader']);
-  const riskDecisions = decisions.filter((d) => riskDebateRoles.includes(d.agent_role));
-  const signalDecision = getLatestDecision(decisions, ['risk_manager']);
-
-  function phaseLatency(phaseDecisions: AgentDecision[]): number | undefined {
-    if (phaseDecisions.length === 0) return undefined;
-    return Math.max(...phaseDecisions.map((d) => d.latency_ms ?? 0));
-  }
-
-  function status(done: boolean, hasAny: boolean): PhaseInfo['status'] {
-    if (done || (isCompleted && hasAny)) return 'completed';
-    if (hasAny) return 'active';
-    return 'pending';
-  }
-
-  const analysisDone =
-    new Set(analysisDecisions.map((d) => d.agent_role)).size >= analysisRoles.length;
-  const debateDone = new Set(debateDecisions.map((d) => d.agent_role)).size >= debateRoles.length;
-  const traderDone = !!traderDecision;
-  const riskDone = new Set(riskDecisions.map((d) => d.agent_role)).size >= riskDebateRoles.length;
-  const signalDone = !!signalDecision || hasSignal;
-
-  return [
-    {
-      label: 'Analysis',
-      status: status(analysisDone, analysisDecisions.length > 0),
-      latencyMs: phaseLatency(analysisDecisions),
-    },
-    {
-      label: 'Debate',
-      status: status(debateDone, debateDecisions.length > 0),
-      latencyMs: phaseLatency(debateDecisions),
-    },
-    {
-      label: 'Trading',
-      status: status(traderDone, traderDone),
-      latencyMs: traderDecision?.latency_ms,
-    },
-    {
-      label: 'Risk',
-      status: status(riskDone, riskDecisions.length > 0),
-      latencyMs: phaseLatency(riskDecisions),
-    },
-    {
-      label: 'Signal',
-      status: status(signalDone, signalDone),
-      latencyMs: signalDecision?.latency_ms,
-    },
-  ];
-}
-
-function isWebSocketMessage(msg: WebSocketServerMessage): msg is WebSocketMessage {
-  return 'type' in msg && !('status' in msg);
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 export function PipelineRunPage() {
@@ -165,17 +57,20 @@ export function PipelineRunPage() {
   });
 
   const decisions = useMemo(
-    () => (Array.isArray(decisionsData?.data) ? decisionsData.data.map(normalizeDecision) : []),
+    () => (Array.isArray(decisionsData?.data) ? decisionsData.data : []),
     [decisionsData],
+  );
+
+  const runView = useMemo(
+    () => (run ? buildPipelineRunViewModel(run, decisions) : null),
+    [decisions, run],
   );
 
   const handleWebSocketMessage = useCallback(
     (msg: WebSocketServerMessage) => {
-      if (!isWebSocketMessage(msg)) return;
-      if (msg.run_id !== id) return;
-
-      queryClient.invalidateQueries({ queryKey: ['run', id] });
-      queryClient.invalidateQueries({ queryKey: ['run-decisions', id] });
+      for (const queryKey of getPipelineRunInvalidationKeys(msg, id!)) {
+        queryClient.invalidateQueries({ queryKey });
+      }
     },
     [id, queryClient],
   );
@@ -204,15 +99,6 @@ export function PipelineRunPage() {
       queryClient.invalidateQueries({ queryKey: ['run-decisions', id] });
     },
   });
-
-  const traderDecision = useMemo(() => getLatestDecision(decisions, ['trader']), [decisions]);
-
-  const signalDecision = useMemo(() => getLatestDecision(decisions, ['risk_manager']), [decisions]);
-
-  const phases = useMemo(
-    () => computePhases(decisions, run?.status === 'completed', Boolean(run?.signal)),
-    [decisions, run?.signal, run?.status],
-  );
   const phaseTimings = isRecord(run?.phase_timings) ? run.phase_timings : null;
   const configSnapshot = run?.config_snapshot;
 
@@ -302,7 +188,7 @@ export function PipelineRunPage() {
         }
       />
 
-      <PhaseProgress phases={phases} />
+      <PhaseProgress phases={runView?.phases ?? []} />
 
       {run.status === 'failed' && run.error_message && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
@@ -348,32 +234,32 @@ export function PipelineRunPage() {
 
       <div className="space-y-6">
         <AnalystCards
-          decisions={decisions}
+          decisions={runView?.analysisDecisions ?? []}
           onSelectDecision={setSelectedDecision}
           isCompleted={run.status === 'completed'}
         />
 
         <DebateView
           title="Phase 2 — Bull vs Bear Debate"
-          roles={debateRoles}
-          decisions={decisions}
+          roles={PIPELINE_DEBATE_ROLES}
+          decisions={runView?.debateDecisions ?? []}
           onSelectDecision={setSelectedDecision}
           isCompleted={run.status === 'completed'}
         />
 
-        <TraderPlan decision={traderDecision} onSelectDecision={setSelectedDecision} />
+        <TraderPlan decision={runView?.traderDecision} onSelectDecision={setSelectedDecision} />
 
         <DebateView
           title="Phase 4 — Risk Assessment"
-          roles={riskDebateRoles}
-          decisions={decisions}
+          roles={PIPELINE_RISK_ROLES}
+          decisions={runView?.riskDecisions ?? []}
           onSelectDecision={setSelectedDecision}
           isCompleted={run.status === 'completed'}
         />
 
         <FinalSignal
           signal={run.signal}
-          signalDecision={signalDecision}
+          signalDecision={runView?.signalDecision}
           onSelectDecision={setSelectedDecision}
         />
       </div>

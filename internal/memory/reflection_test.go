@@ -58,6 +58,10 @@ type mockPipelineRunRepo struct {
 
 func (m *mockPipelineRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
+func (m *mockPipelineRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
+	return nil, nil
+}
+
 func (m *mockPipelineRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
 	return nil, nil
 }

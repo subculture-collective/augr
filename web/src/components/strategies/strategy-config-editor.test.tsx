@@ -25,6 +25,7 @@ const mockStrategy: Strategy = {
     },
     risk_config: {
       position_size_pct: 20,
+      use_kelly_sizing: true,
       stop_loss_multiplier: 1.5,
       take_profit_multiplier: 2.5,
       min_confidence: 0.7,
@@ -108,6 +109,7 @@ describe('StrategyConfigEditor', () => {
     expect(screen.getByLabelText('Provider')).toHaveValue('anthropic')
     expect(screen.getByLabelText('Deep Think Model')).toHaveValue('claude-3-opus')
     expect(screen.getByLabelText('Quick Think Model')).toHaveValue('gpt-4o-mini')
+    expect(screen.getByLabelText('Schedule (cron)')).toHaveValue('0 9 * * 1-5')
     expect(screen.getByLabelText('Debate Rounds')).toHaveValue(4)
     expect(screen.getByLabelText('Analysis Timeout (seconds)')).toHaveValue(120)
     expect(screen.getByLabelText('Debate Timeout (seconds)')).toHaveValue(600)
@@ -115,6 +117,7 @@ describe('StrategyConfigEditor', () => {
     expect(screen.getByLabelText('Stop Loss ATR Multiplier')).toHaveValue(1.5)
     expect(screen.getByLabelText('Take Profit ATR Multiplier')).toHaveValue(2.5)
     expect(screen.getByLabelText('Min Confidence Threshold')).toHaveValue(0.7)
+    expect(screen.getByLabelText('Kelly sizing opt-in')).toBeChecked()
   })
 
   it('defaults all analysts to checked when no config is present', () => {
@@ -167,6 +170,7 @@ describe('StrategyConfigEditor', () => {
     fireEvent.change(screen.getByLabelText('Stop Loss ATR Multiplier'), { target: { value: '1.8' } })
     fireEvent.change(screen.getByLabelText('Take Profit ATR Multiplier'), { target: { value: '2.8' } })
     fireEvent.change(screen.getByLabelText('Min Confidence Threshold'), { target: { value: '0.75' } })
+    fireEvent.click(screen.getByLabelText('Kelly sizing opt-in'))
 
     fireEvent.click(screen.getByLabelText('fundamentals analyst'))
     fireEvent.click(screen.getByLabelText('social media analyst'))
@@ -201,6 +205,7 @@ describe('StrategyConfigEditor', () => {
         },
         risk_config: {
           position_size_pct: 25,
+          use_kelly_sizing: false,
           stop_loss_multiplier: 1.8,
           take_profit_multiplier: 2.8,
           min_confidence: 0.75,

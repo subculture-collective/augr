@@ -196,7 +196,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	}
 	run.Signal = signal
 
-	orderManager, err := r.newOrderManager(strategy, prepared.Config)
+	orderManager, err := r.newOrderManager(ctx, strategy, prepared.Config, strategyConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -347,11 +347,11 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 		globals.PromptOverrides = mergePromptOverrides(globals.PromptOverrides, r.promptOverrides.Overrides())
 	}
 	resolved := agent.ResolveConfig(strategyConfig, globals)
-	provider, err := newLLMProviderForSelection(r.cfg.LLM, resolved.LLMConfig.Provider, resolved.LLMConfig.QuickThinkModel, r.logger)
+	provider, err := runtimeLLMComposer.BuildProviderForSelection(r.cfg.LLM, resolved.LLMConfig.Provider, resolved.LLMConfig.QuickThinkModel, r.logger)
 	if err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, fmt.Errorf("build llm provider for strategy %s: %w", strategy.Name, err)
 	}
-	provider = wrapProviderChain(provider, r.cfg.LLM, r.metrics, r.logger, r.llmBudget)
+	provider = runtimeLLMComposer.WrapProviderChain(provider, r.cfg.LLM, r.metrics, r.logger, r.llmBudget)
 
 	definition, err := buildRunnerDefinition(provider, resolved.LLMConfig.Provider, resolved, r.cfg.LLM.Timeout, r.metrics, r.logger)
 	if err != nil {
@@ -755,7 +755,7 @@ func globalSettingsFromConfig(cfg config.Config) agent.GlobalSettings {
 	}
 }
 
-func (r *realStrategyRunner) newOrderManager(strategy domain.Strategy, resolved agent.ResolvedConfig) (*execution.OrderManager, error) {
+func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig, strategyConfig *agent.StrategyConfig) (*execution.OrderManager, error) {
 	broker, brokerName, err := r.newBrokerForStrategy(strategy)
 	if err != nil {
 		return nil, err
@@ -775,10 +775,7 @@ func (r *realStrategyRunner) newOrderManager(strategy domain.Strategy, resolved 
 		r.tradeRepo,
 		r.auditLogRepo,
 		r.eventRepo,
-		execution.SizingConfig{
-			Method:      execution.PositionSizingMethodFixedFractional,
-			FractionPct: resolved.RiskConfig.PositionSizePct / 100.0,
-		},
+		sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger),
 		r.logger,
 	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper), nil
 }
@@ -1092,32 +1089,12 @@ func (r *realStrategyRunner) dispatchNotifications(ctx context.Context, strategy
 }
 
 func (r *realStrategyRunner) findRun(ctx context.Context, runID uuid.UUID) (*domain.PipelineRun, error) {
-	tradeDate := time.Now().UTC().Truncate(24 * time.Hour)
-	run, err := r.runRepo.Get(ctx, runID, tradeDate)
+	run, err := r.runRepo.GetByID(ctx, runID)
 	if err == nil {
 		return run, nil
 	}
-	if !errors.Is(err, repository.ErrNotFound) {
-		return nil, err
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil, fmt.Errorf("run %s: %w", runID, repository.ErrNotFound)
 	}
-
-	const pageSize = 100
-	for offset := 0; ; offset += pageSize {
-		runs, err := r.runRepo.List(ctx, repository.PipelineRunFilter{}, pageSize, offset)
-		if err != nil {
-			return nil, err
-		}
-		if len(runs) == 0 {
-			break
-		}
-		for i := range runs {
-			if runs[i].ID == runID {
-				return &runs[i], nil
-			}
-		}
-		if len(runs) < pageSize {
-			break
-		}
-	}
-	return nil, fmt.Errorf("run %s: %w", runID, repository.ErrNotFound)
+	return nil, err
 }

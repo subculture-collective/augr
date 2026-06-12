@@ -17,6 +17,7 @@ var ErrNoProviders = errors.New("data: no providers in chain")
 type ProviderChain struct {
 	providers []DataProvider
 	logger    *slog.Logger
+	fallback  FallbackPolicy
 }
 
 // NewProviderChain constructs a ProviderChain from an ordered list of providers.
@@ -28,6 +29,7 @@ func NewProviderChain(logger *slog.Logger, providers ...DataProvider) *ProviderC
 	return &ProviderChain{
 		providers: providers,
 		logger:    logger,
+		fallback:  providerChainFallback,
 	}
 }
 
@@ -46,12 +48,14 @@ func tryChain[T any](c *ProviderChain, method, ticker string, fn func(DataProvid
 			return result, nil
 		}
 
-		c.logger.Warn("data provider failed, trying next",
-			slog.String("method", method),
-			slog.String("ticker", ticker),
-			slog.Any("error", err),
-		)
-		lastErr = err
+		if c.fallback.shouldRecord(err) {
+			c.logger.Warn("data provider failed, trying next",
+				slog.String("method", method),
+				slog.String("ticker", ticker),
+				slog.Any("error", err),
+			)
+			lastErr = err
+		}
 	}
 
 	return zero, lastErr

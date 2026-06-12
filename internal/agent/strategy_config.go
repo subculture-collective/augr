@@ -93,6 +93,8 @@ type StrategyPipelineConfig struct {
 type StrategyRiskConfig struct {
 	// PositionSizePct is the fraction of portfolio to allocate (0–100, percent).
 	PositionSizePct *float64 `json:"position_size_pct,omitempty"`
+	// UseKellySizing explicitly opts the strategy into Kelly sizing when eligible.
+	UseKellySizing *bool `json:"use_kelly_sizing,omitempty"`
 	// StopLossMultiplier scales the default stop-loss distance (must be > 0 if set).
 	StopLossMultiplier *float64 `json:"stop_loss_multiplier,omitempty"`
 	// TakeProfitMultiplier scales the default take-profit distance (must be > 0 if set).

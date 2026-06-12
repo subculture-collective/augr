@@ -193,6 +193,22 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 		}
 	}
 
+	byID1, err := repo.GetByID(ctx, run1.ID)
+	if err != nil {
+		t.Fatalf("GetByID() run1 error = %v", err)
+	}
+	if byID1.ID != run1.ID || byID1.TradeDate.Format("2006-01-02") != run1.TradeDate.Format("2006-01-02") {
+		t.Fatalf("GetByID() run1 returned unexpected row: %+v", byID1)
+	}
+
+	byID2, err := repo.GetByID(ctx, run2.ID)
+	if err != nil {
+		t.Fatalf("GetByID() run2 error = %v", err)
+	}
+	if byID2.ID != run2.ID || byID2.TradeDate.Format("2006-01-02") != run2.TradeDate.Format("2006-01-02") {
+		t.Fatalf("GetByID() run2 returned unexpected row: %+v", byID2)
+	}
+
 	got, err := repo.Get(ctx, run1.ID, run1.TradeDate)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -272,6 +288,55 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	}
 }
 
+func TestPipelineRunRepoIntegration_GetByIDUsesRunIDOnly(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+
+	repo := NewPipelineRunRepo(pool)
+	sharedID := uuid.New()
+	tradeDate1 := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
+	tradeDate2 := time.Date(2027, time.January, 3, 0, 0, 0, 0, time.UTC)
+	startedAt1 := time.Date(2026, time.March, 14, 9, 30, 0, 0, time.UTC)
+	startedAt2 := time.Date(2027, time.January, 3, 11, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		tradeDate time.Time
+		ticker    string
+		status    domain.PipelineStatus
+		startedAt time.Time
+	}{
+		{tradeDate: tradeDate1, ticker: "AAPL", status: domain.PipelineStatusRunning, startedAt: startedAt1},
+		{tradeDate: tradeDate2, ticker: "MSFT", status: domain.PipelineStatusFailed, startedAt: startedAt2},
+	} {
+		if _, err := pool.Exec(ctx, `INSERT INTO pipeline_runs (
+			id, strategy_id, ticker, trade_date, status, signal, started_at, error_message
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			sharedID,
+			uuid.New(),
+			tc.ticker,
+			tc.tradeDate,
+			tc.status,
+			"",
+			tc.startedAt,
+			"",
+		); err != nil {
+			t.Fatalf("failed to seed duplicate id rows: %v", err)
+		}
+	}
+
+	got, err := repo.GetByID(ctx, sharedID)
+	if err != nil {
+		t.Fatalf("GetByID() error = %v", err)
+	}
+
+	if got.Ticker != "MSFT" || got.TradeDate.Format("2006-01-02") != tradeDate2.Format("2006-01-02") {
+		t.Fatalf("expected GetByID() to return the newest row for shared ID, got %+v", got)
+	}
+}
+
 func TestPipelineRunRepoIntegration_NotFound(t *testing.T) {
 	t.Helper()
 
@@ -283,8 +348,12 @@ func TestPipelineRunRepoIntegration_NotFound(t *testing.T) {
 	missingID := uuid.New()
 
 	missingTradeDate := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
+	_, err := repo.GetByID(ctx, missingID)
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected GetByID() ErrNotFound, got %v", err)
+	}
 
-	_, err := repo.Get(ctx, missingID, missingTradeDate)
+	_, err = repo.Get(ctx, missingID, missingTradeDate)
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected Get() ErrNotFound, got %v", err)
 	}

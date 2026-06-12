@@ -55,6 +55,7 @@ func NewPosition(ticker string, side PositionSide, quantity, avgEntry float64) (
 type Position struct {
 	ID            uuid.UUID    `json:"id"`
 	StrategyID    *uuid.UUID   `json:"strategy_id,omitempty"`
+	MarketType    MarketType   `json:"market_type,omitempty"`
 	Ticker        string       `json:"ticker"`
 	Side          PositionSide `json:"side"`
 	Quantity      float64      `json:"quantity"`

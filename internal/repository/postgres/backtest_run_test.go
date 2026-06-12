@@ -185,7 +185,7 @@ func createTestBacktestConfig(t *testing.T, ctx context.Context, pool *pgxpool.P
 
 	repo := NewBacktestConfigRepo(pool)
 	config := &domain.BacktestConfig{
-		StrategyID:  createTestPositionStrategy(t, ctx, pool),
+		StrategyID:  createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock),
 		Name:        "Backtest config for run persistence",
 		Description: "Used by backtest run repository integration tests",
 		StartDate:   time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),

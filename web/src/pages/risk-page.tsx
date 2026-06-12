@@ -10,29 +10,19 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ApiClientError, apiClient } from '@/lib/api/client'
 import { formatCurrency } from '@/lib/format'
+import {
+  RISK_COCKPIT_MARKET_ORDER,
+  getCircuitBreakerSummaryDisplay,
+  getCircuitBreakerDisplay,
+  getCockpitMarketLabel,
+  getKillSwitchDisplay,
+} from '@/lib/risk/presentation'
 import type {
   AuditLogEntry,
-  CircuitBreakerPhase,
   EngineStatus,
-  KillSwitchMechanism,
   RiskCockpitExposure,
   RiskCockpitSummary,
 } from '@/lib/api/types'
-
-const circuitBreakerBadge: Record<CircuitBreakerPhase, { label: string; variant: 'success' | 'destructive' | 'warning' }> = {
-  open: { label: 'Open', variant: 'success' },
-  tripped: { label: 'Tripped', variant: 'destructive' },
-  cooldown: { label: 'Cooldown', variant: 'warning' },
-}
-
-const cockpitMarketOrder: RiskCockpitExposure['market_type'][] = ['stock', 'crypto', 'options', 'polymarket']
-
-const cockpitMarketLabels: Record<RiskCockpitExposure['market_type'], string> = {
-  stock: 'Stock',
-  crypto: 'Crypto',
-  options: 'Options',
-  polymarket: 'Polymarket',
-}
 
 function formatDetails(details?: unknown) {
   if (details == null) {
@@ -55,19 +45,6 @@ function formatDateTime(iso?: string) {
 
   const date = new Date(iso)
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString()
-}
-
-function formatKillSwitchMechanism(mechanism: KillSwitchMechanism) {
-  switch (mechanism) {
-    case 'api_toggle':
-      return 'API toggle'
-    case 'file_flag':
-      return 'File flag'
-    case 'env_var':
-      return 'Environment variable'
-    case 'unknown':
-      return 'Unknown'
-  }
 }
 
 function formatUtilizationValue(value: number) {
@@ -124,7 +101,7 @@ function CockpitMarketCard({ exposure, marketType }: { exposure?: RiskCockpitExp
     <ConsolePanel className="space-y-3 p-3" data-testid={`risk-cockpit-market-${marketType}`}>
       <div className="flex items-start justify-between gap-3">
         <div>
-          <HudSection label={cockpitMarketLabels[marketType]} note={marketType} />
+          <HudSection label={getCockpitMarketLabel(marketType)} note={marketType} />
         </div>
         <HudBadge tone={exposure ? 'confirm' : 'caution'}>{exposure ? 'Live' : 'Missing'}</HudBadge>
       </div>
@@ -203,10 +180,10 @@ export function RiskPage() {
   const cockpitExposures = Array.isArray(cockpit?.exposures) ? cockpit.exposures : []
   const cockpitWarnings = Array.isArray(cockpit?.warnings) ? cockpit.warnings : []
   const cockpitExposureByMarket = new Map(cockpitExposures.map((entry) => [entry.market_type, entry]))
-  let killSwitchMechanismText = ''
-  if (killSwitch?.mechanisms?.length) {
-    killSwitchMechanismText = killSwitch.mechanisms.map(formatKillSwitchMechanism).join(', ')
-  }
+  const circuitBreakerDisplay = circuitBreaker ? getCircuitBreakerDisplay(circuitBreaker) : null
+  const killSwitchDisplay = killSwitch ? getKillSwitchDisplay(killSwitch) : null
+  const cockpitKillSwitchDisplay = cockpit ? getKillSwitchDisplay({ active: cockpit.kill_switch_active }) : null
+  const cockpitCircuitBreakerDisplay = cockpit ? getCircuitBreakerSummaryDisplay(cockpit.circuit_breaker) : null
 
   function handleToggle() {
     if (!killSwitch) return
@@ -241,42 +218,40 @@ export function RiskPage() {
           <HudSection label="Circuit breaker" note="Current state of the circuit breaker" />
             {isLoading && <div data-testid="circuit-breaker-loading" className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />}
             {isError && <p className="text-sm text-destructive">Failed to load: {(error as Error).message}</p>}
-            {circuitBreaker && (
+            {circuitBreaker && circuitBreakerDisplay ? (
               <div className="space-y-3">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-medium">State:</span>
-                  <Badge variant={circuitBreakerBadge[circuitBreaker.state].variant}>
-                    {circuitBreakerBadge[circuitBreaker.state].label}
+                  <Badge variant={circuitBreakerDisplay.variant}>
+                    {circuitBreakerDisplay.label}
                   </Badge>
                 </div>
                 <HudRow label="Reason" value={circuitBreaker.reason || '—'} />
                 <HudRow label="Tripped at" value={formatDateTime(circuitBreaker.tripped_at)} />
                 <HudRow label="Cooldown ends" value={formatDateTime(circuitBreaker.cooldown_end)} />
               </div>
-            )}
+            ) : null}
         </ConsolePanel>
 
         <ConsolePanel className="space-y-4 p-4">
           <HudSection label="Kill switch" note="Emergency trading halt" />
             {isLoading && <div data-testid="kill-switch-loading" className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />}
             {isError && <p className="text-sm text-destructive">Failed to load: {(error as Error).message}</p>}
-            {killSwitch && (
+            {killSwitch && killSwitchDisplay ? (
               <div className="space-y-4">
                 <div className="space-y-1">
-                  <Badge variant={killSwitch.active ? 'destructive' : 'success'}>
-                    {killSwitch.active ? 'Trading halted' : 'Trading enabled'}
+                  <Badge variant={killSwitchDisplay.badgeVariant}>
+                    {killSwitchDisplay.badgeLabel}
                   </Badge>
                   <p className="text-sm text-muted-foreground">
-                    {killSwitch.active
-                      ? (killSwitch.reason && killSwitch.reason.trim()) || 'All orders are blocked.'
-                      : 'The engine can submit orders normally.'}
+                    {killSwitchDisplay.description}
                   </p>
                   <p className="text-xs text-muted-foreground">
                     <span className="font-medium">Updated:</span> {formatDateTime(killSwitch.activated_at)}
                   </p>
-                  {killSwitchMechanismText ? (
+                  {killSwitchDisplay.mechanismText ? (
                     <p className="text-xs text-muted-foreground">
-                      <span className="font-medium">Mechanism:</span> {killSwitchMechanismText}
+                      <span className="font-medium">Mechanism:</span> {killSwitchDisplay.mechanismText}
                     </p>
                   ) : null}
                 </div>
@@ -330,7 +305,7 @@ export function RiskPage() {
                   </Button>
                 ) : null}
               </div>
-            )}
+            ) : null}
         </ConsolePanel>
       </div>
 
@@ -361,11 +336,11 @@ export function RiskPage() {
           ) : cockpit ? (
             <>
               <div className="flex flex-wrap items-center gap-2 text-sm">
-                <Badge variant={cockpit.kill_switch_active ? 'destructive' : 'success'}>
-                  {cockpit.kill_switch_active ? 'Trading halted' : 'Trading enabled'}
+                <Badge variant={cockpitKillSwitchDisplay?.badgeVariant ?? 'secondary'}>
+                  {cockpitKillSwitchDisplay?.badgeLabel ?? 'Unknown'}
                 </Badge>
-                <Badge variant={cockpit.circuit_breaker ? 'warning' : 'success'}>
-                  Circuit breaker {cockpit.circuit_breaker ? 'tripped' : 'clear'}
+                <Badge variant={cockpitCircuitBreakerDisplay?.badgeVariant ?? 'secondary'}>
+                  {cockpitCircuitBreakerDisplay?.badgeLabel ?? 'Unknown'}
                 </Badge>
                 <span className="text-muted-foreground">Generated {formatDateTime(cockpit.generated_at)}</span>
               </div>
@@ -377,7 +352,7 @@ export function RiskPage() {
               ) : null}
 
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                {cockpitMarketOrder.map((marketType) => (
+                {RISK_COCKPIT_MARKET_ORDER.map((marketType) => (
                   <CockpitMarketCard key={marketType} marketType={marketType} exposure={cockpitExposureByMarket.get(marketType)} />
                 ))}
               </div>

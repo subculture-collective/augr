@@ -1,42 +1,14 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/service"
 )
-
-// findRunByID looks up a pipeline run by ID. The PipelineRunRepository.Get
-// method requires a tradeDate which is not available from the URL, so we
-// list runs in pages and scan for a match.
-func (s *Server) findRunByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
-	offset := 0
-	for {
-		runs, err := s.runs.List(ctx, repository.PipelineRunFilter{}, maxLimit, offset)
-		if err != nil {
-			return nil, err
-		}
-		if len(runs) == 0 {
-			return nil, nil
-		}
-		for i := range runs {
-			if runs[i].ID == id {
-				return &runs[i], nil
-			}
-		}
-		if len(runs) < maxLimit {
-			return nil, nil
-		}
-		offset += maxLimit
-	}
-}
 
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	limit, offset := parsePagination(r)
@@ -80,8 +52,12 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
 	}
-	run, err := s.findRunByID(r.Context(), id)
+	run, err := s.runs.GetByID(r.Context(), id)
 	if err != nil {
+		if isNotFound(err) {
+			respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to get run", ErrCodeInternal)
 		return
 	}

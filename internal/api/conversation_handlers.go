@@ -123,8 +123,12 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	run, err := s.findRunByID(r.Context(), body.PipelineRunID)
+	run, err := s.runs.GetByID(r.Context(), body.PipelineRunID)
 	if err != nil {
+		if isNotFound(err) {
+			respondError(w, http.StatusBadRequest, "pipeline_run_id does not reference an existing run", ErrCodeValidation)
+			return
+		}
 		respondError(w, http.StatusInternalServerError, "failed to verify pipeline run", ErrCodeInternal)
 		return
 	}

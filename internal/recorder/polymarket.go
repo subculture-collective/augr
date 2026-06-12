@@ -30,17 +30,15 @@ func (noopRecorderMetrics) ObserveLagSeconds(string, float64) {}
 func (noopRecorderMetrics) IncDropped(string, int)            {}
 
 type Recorder struct {
-	feed    polymarketFeed
-	repo    repository.PolymarketMarketDataRepository
-	cfg     RecorderConfig
-	log     *slog.Logger
-	metrics RecorderMetrics
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	tickBuf []domain.PolymarketTick
-	bookBuf []domain.PolymarketBookSnapshot
+	feed      polymarketFeed
+	repo      repository.PolymarketMarketDataRepository
+	cfg       RecorderConfig
+	log       *slog.Logger
+	metrics   RecorderMetrics
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	lifecycle *polymarketLifecycle
 }
 
 type polymarketFeed interface {
@@ -58,11 +56,12 @@ func New(feed polymarketFeed, repo repository.PolymarketMarketDataRepository, cf
 	if metrics == nil {
 		metrics = noopRecorderMetrics{}
 	}
-	return &Recorder{feed: feed, repo: repo, cfg: cfg, log: log, metrics: metrics}
+	return &Recorder{feed: feed, repo: repo, cfg: cfg, log: log, metrics: metrics, lifecycle: newPolymarketLifecycle(repo, cfg, metrics)}
 }
 
 func (r *Recorder) Start(ctx context.Context) {
 	r.ctx, r.cancel = context.WithCancel(ctx)
+	r.lifecycle.Start()
 	for _, slug := range r.cfg.Slugs {
 		r.wg.Add(2)
 		go r.runTicks(slug)
@@ -75,14 +74,12 @@ func (r *Recorder) Close() {
 		r.cancel()
 	}
 	r.wg.Wait()
-	r.flushAll()
+	r.lifecycle.Close()
 }
 
 func (r *Recorder) runTicks(slug string) {
 	defer r.wg.Done()
 	ch := r.feed.Ticks(slug)
-	t := time.NewTicker(r.cfg.FlushInterval)
-	defer t.Stop()
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -91,9 +88,7 @@ func (r *Recorder) runTicks(slug string) {
 			if !ok {
 				return
 			}
-			r.addTick(domain.PolymarketTick{Slug: tk.Slug, Side: tk.Side, Price: tk.Price, Size: tk.Size, ReceivedAt: tk.ReceivedAt, SeqHint: int64(tk.SeqHint), ConnID: tk.ConnID})
-		case <-t.C:
-			r.flushTicks()
+			r.lifecycle.SubmitTick(domain.PolymarketTick{Slug: tk.Slug, Side: tk.Side, Price: tk.Price, Size: tk.Size, ReceivedAt: tk.ReceivedAt, SeqHint: int64(tk.SeqHint), ConnID: tk.ConnID})
 		}
 	}
 }
@@ -101,8 +96,6 @@ func (r *Recorder) runTicks(slug string) {
 func (r *Recorder) runBooks(slug string) {
 	defer r.wg.Done()
 	ch := r.feed.Books(slug)
-	t := time.NewTicker(r.cfg.FlushInterval)
-	defer t.Stop()
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -111,9 +104,7 @@ func (r *Recorder) runBooks(slug string) {
 			if !ok {
 				return
 			}
-			r.addBook(domain.PolymarketBookSnapshot{Slug: bs.Slug, BestBid: bs.BestBid, BestAsk: bs.BestAsk, Bids: convertLevels(bs.Bids), Asks: convertLevels(bs.Asks), ReceivedAt: bs.ReceivedAt, ConnID: bs.ConnID})
-		case <-t.C:
-			r.flushBooks()
+			r.lifecycle.SubmitBook(domain.PolymarketBookSnapshot{Slug: bs.Slug, BestBid: bs.BestBid, BestAsk: bs.BestAsk, Bids: convertLevels(bs.Bids), Asks: convertLevels(bs.Asks), ReceivedAt: bs.ReceivedAt, ConnID: bs.ConnID})
 		}
 	}
 }
@@ -124,68 +115,4 @@ func convertLevels(in []polymarket.Level) []domain.PolymarketBookLevel {
 		out[i] = domain.PolymarketBookLevel{Price: v.Price, Size: v.Size}
 	}
 	return out
-}
-
-func (r *Recorder) addTick(t domain.PolymarketTick) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.tickBuf) >= r.cfg.BatchSize {
-		r.metrics.IncDropped("tick", 1)
-		return
-	}
-	r.tickBuf = append(r.tickBuf, t)
-	if len(r.tickBuf) >= r.cfg.BatchSize {
-		r.flushTicksUnlocked()
-	}
-}
-
-func (r *Recorder) addBook(b domain.PolymarketBookSnapshot) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.bookBuf) >= r.cfg.BatchSize {
-		r.metrics.IncDropped("book", 1)
-		return
-	}
-	r.bookBuf = append(r.bookBuf, b)
-	if len(r.bookBuf) >= r.cfg.BatchSize {
-		r.flushBooksUnlocked()
-	}
-}
-
-func (r *Recorder) flushAll() { r.flushTicks(); r.flushBooks() }
-
-func (r *Recorder) flushTicks() {
-	r.mu.Lock()
-	r.flushTicksUnlocked()
-	r.mu.Unlock()
-}
-
-func (r *Recorder) flushBooks() {
-	r.mu.Lock()
-	r.flushBooksUnlocked()
-	r.mu.Unlock()
-}
-
-func (r *Recorder) flushTicksUnlocked() {
-	batch := append([]domain.PolymarketTick(nil), r.tickBuf...)
-	r.tickBuf = nil
-	if len(batch) == 0 {
-		return
-	}
-	r.mu.Unlock()
-	_ = r.repo.InsertTicks(context.Background(), batch)
-	r.metrics.IncInserted("tick", len(batch))
-	r.mu.Lock()
-}
-
-func (r *Recorder) flushBooksUnlocked() {
-	batch := append([]domain.PolymarketBookSnapshot(nil), r.bookBuf...)
-	r.bookBuf = nil
-	if len(batch) == 0 {
-		return
-	}
-	r.mu.Unlock()
-	_ = r.repo.InsertBookSnapshots(context.Background(), batch)
-	r.metrics.IncInserted("book", len(batch))
-	r.mu.Lock()
 }

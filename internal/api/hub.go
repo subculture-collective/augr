@@ -16,24 +16,43 @@ type EventType string
 //
 // Translation chain: Go agent.PipelineEventType (internal/agent/event.go)
 // is mapped to API EventType (this file) which is sent over WebSocket and
-// consumed by the TypeScript WebSocketEventType (web/src/lib/api/types.ts).
-// All three vocabularies must stay in sync; see
-// TestEventTypeVocabularyConsistency in event_consistency_test.go.
+// consumed by the TypeScript WebSocketEventType vocabulary.
 const (
-	EventPipelineStart   EventType = "pipeline_start"
-	EventAgentDecision   EventType = "agent_decision"
-	EventDebateRound     EventType = "debate_round"
-	EventSignal          EventType = "signal"
-	EventOrderSubmitted  EventType = "order_submitted"
-	EventOrderFilled     EventType = "order_filled"
-	EventPositionUpdate  EventType = "position_update"
-	EventCircuitBreaker  EventType = "circuit_breaker"
-	EventError           EventType = "error"
-	EventPipelineHealth  EventType = "pipeline_health"
+	EventPipelineStart        EventType = "pipeline_start"
+	EventAgentDecision        EventType = "agent_decision"
+	EventDebateRound          EventType = "debate_round"
+	EventSignal               EventType = "signal"
+	EventOrderSubmitted       EventType = "order_submitted"
+	EventOrderFilled          EventType = "order_filled"
+	EventPositionUpdate       EventType = "position_update"
+	EventCircuitBreaker       EventType = "circuit_breaker"
+	EventError                EventType = "error"
+	EventPipelineHealth       EventType = "pipeline_health"
 	EventPolymarketWhaleTrade EventType = "polymarket_whale_trade"
 	EventPolymarketPriceMove  EventType = "polymarket_price_move"
 	EventPolymarketAccount    EventType = "polymarket_account_tracked"
 )
+
+// WebSocketEventTypes returns the canonical wire vocabulary used by API events.
+func WebSocketEventTypes() []EventType {
+	return append([]EventType(nil), websocketEventTypes...)
+}
+
+var websocketEventTypes = []EventType{
+	EventPipelineStart,
+	EventAgentDecision,
+	EventDebateRound,
+	EventSignal,
+	EventOrderSubmitted,
+	EventOrderFilled,
+	EventPositionUpdate,
+	EventCircuitBreaker,
+	EventError,
+	EventPipelineHealth,
+	EventPolymarketWhaleTrade,
+	EventPolymarketPriceMove,
+	EventPolymarketAccount,
+}
 
 // WSMessage is the envelope for every WebSocket event sent to clients.
 type WSMessage struct {

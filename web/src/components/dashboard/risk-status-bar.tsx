@@ -1,50 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CheckCircle2, Power, Shield, StopCircle, XCircle } from 'lucide-react';
+import { Power, Shield, StopCircle } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { apiClient } from '@/lib/api/client';
-import type { EngineStatus, KillSwitchMechanism, KillSwitchStatus, RiskStatus } from '@/lib/api/types';
+import type { EngineStatus, KillSwitchStatus, MarketType } from '@/lib/api/types';
+import {
+  RISK_MARKET_KILL_SWITCH_ORDER,
+  getCircuitBreakerDisplay,
+  getKillSwitchDisplay,
+  getMarketKillSwitchLabel,
+  getRiskStatusDisplay,
+} from '@/lib/risk/presentation';
 import { cn } from '@/lib/utils';
-
-function riskStatusConfig(status: RiskStatus) {
-  switch (status) {
-    case 'normal':
-      return {
-        icon: CheckCircle2,
-        label: 'Normal',
-        variant: 'success' as const,
-      };
-    case 'warning':
-      return {
-        icon: AlertTriangle,
-        label: 'Warning',
-        variant: 'warning' as const,
-      };
-    case 'breached':
-      return {
-        icon: XCircle,
-        label: 'Breached',
-        variant: 'destructive' as const,
-      };
-  }
-}
 
 function CircuitBreakerDisplay({ status }: { status: EngineStatus }) {
   const { circuit_breaker: cb } = status;
-
-  const stateLabels: Record<string, string> = {
-    open: 'Open',
-    tripped: 'Tripped',
-    cooldown: 'Cooldown',
-  };
-
-  const stateVariants: Record<string, 'success' | 'destructive' | 'warning'> = {
-    open: 'success',
-    tripped: 'destructive',
-    cooldown: 'warning',
-  };
+  const display = getCircuitBreakerDisplay(cb);
 
   return (
     <div className="rounded-lg border border-border p-3">
@@ -52,8 +25,8 @@ function CircuitBreakerDisplay({ status }: { status: EngineStatus }) {
         <p className="font-mono text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
           Circuit breaker
         </p>
-        <Badge variant={stateVariants[cb.state] ?? 'secondary'}>
-          {stateLabels[cb.state] ?? cb.state}
+        <Badge variant={display.variant}>
+          {display.label}
         </Badge>
       </div>
       {cb.reason ? <p className="mt-2 text-sm text-muted-foreground">{cb.reason}</p> : null}
@@ -88,33 +61,13 @@ function PositionLimitsDisplay({ status }: { status: EngineStatus }) {
   );
 }
 
-function formatKillSwitchMechanism(mechanism: KillSwitchMechanism) {
-  switch (mechanism) {
-    case 'api_toggle':
-      return 'API toggle';
-    case 'file_flag':
-      return 'File flag';
-    case 'env_var':
-      return 'Environment variable';
-    case 'unknown':
-      return 'Unknown';
-  }
-}
-
-const MARKET_TYPES = ['stock', 'crypto', 'polymarket'] as const;
-const MARKET_LABELS: Record<string, string> = {
-  stock: 'Stocks',
-  crypto: 'Crypto',
-  polymarket: 'Polymarket',
-};
-
 function MarketKillSwitchCard({
   marketType,
   status,
   onToggle,
   isPending,
 }: {
-  marketType: string;
+  marketType: MarketType;
   status: KillSwitchStatus | undefined;
   onToggle: (active: boolean) => void;
   isPending: boolean;
@@ -123,7 +76,7 @@ function MarketKillSwitchCard({
   return (
     <div className="flex items-center justify-between rounded border border-border px-3 py-2">
       <div>
-        <p className="text-xs font-medium">{MARKET_LABELS[marketType] ?? marketType}</p>
+        <p className="text-xs font-medium">{getMarketKillSwitchLabel(marketType)}</p>
         {isActive && status?.reason ? (
           <p className="mt-0.5 text-[11px] text-destructive">{status.reason}</p>
         ) : null}
@@ -202,11 +155,9 @@ export function RiskStatusBar() {
     );
   }
 
-  const config = riskStatusConfig(data.risk_status);
+  const config = getRiskStatusDisplay(data.risk_status);
   const StatusIcon = config.icon;
-  const killSwitchMechanismText = data.kill_switch.mechanisms?.length
-    ? data.kill_switch.mechanisms.map(formatKillSwitchMechanism).join(', ')
-    : '';
+  const killSwitchDisplay = getKillSwitchDisplay(data.kill_switch);
 
   return (
     <Card data-testid="risk-status">
@@ -236,19 +187,16 @@ export function RiskStatusBar() {
                 Kill switch
               </p>
               <div className="mt-1 flex flex-wrap items-center gap-2">
-                <Badge variant={data.kill_switch.active ? 'destructive' : 'success'}>
-                  {data.kill_switch.active ? 'Trading halted' : 'Trading enabled'}
+                <Badge variant={killSwitchDisplay.badgeVariant}>
+                  {killSwitchDisplay.badgeLabel}
                 </Badge>
               </div>
               <p className="mt-2 text-sm text-muted-foreground">
-                {data.kill_switch.active
-                  ? (data.kill_switch.reason && data.kill_switch.reason.trim()) ||
-                    'All orders are blocked.'
-                  : 'The engine can submit orders normally.'}
+                {killSwitchDisplay.description}
               </p>
-              {killSwitchMechanismText ? (
+              {killSwitchDisplay.mechanismText ? (
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Mechanism: {killSwitchMechanismText}
+                  Mechanism: {killSwitchDisplay.mechanismText}
                 </p>
               ) : null}
             </div>
@@ -268,7 +216,7 @@ export function RiskStatusBar() {
             <p className="font-mono text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
               Per-market
             </p>
-            {MARKET_TYPES.map((mt) => (
+            {RISK_MARKET_KILL_SWITCH_ORDER.map((mt) => (
               <MarketKillSwitchCard
                 key={mt}
                 marketType={mt}

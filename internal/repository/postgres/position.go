@@ -61,7 +61,7 @@ func (r *PositionRepo) Create(ctx context.Context, position *domain.Position) er
 
 // Get retrieves a position by ID. It returns ErrNotFound when no row matches.
 func (r *PositionRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Position, error) {
-	row := r.pool.QueryRow(ctx, positionSelectSQL+` WHERE id = $1`, id)
+	row := r.pool.QueryRow(ctx, positionSelectSQL+` WHERE p.id = $1`, id)
 
 	position, err := scanPosition(row)
 	if err != nil {
@@ -147,16 +147,17 @@ func (r *PositionRepo) GetOpen(ctx context.Context, filter repository.PositionFi
 // GetByStrategy returns positions for the given strategy with optional
 // filtering and pagination.
 func (r *PositionRepo) GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
-	query, args := buildPositionScopedQuery("strategy_id", strategyID, filter, limit, offset)
+	query, args := buildPositionScopedQuery("p.strategy_id", strategyID, filter, limit, offset)
 	return r.list(ctx, query, args, "get positions by strategy")
 }
 
-const positionSelectSQL = `SELECT id, strategy_id, ticker, side,
-		quantity::double precision, avg_entry::double precision,
-		current_price::double precision, unrealized_pnl::double precision,
-		realized_pnl::double precision, stop_loss::double precision,
-		take_profit::double precision, opened_at, closed_at
-	 FROM positions`
+const positionSelectSQL = `SELECT p.id, p.strategy_id, s.market_type, p.ticker, p.side,
+		p.quantity::double precision, p.avg_entry::double precision,
+		p.current_price::double precision, p.unrealized_pnl::double precision,
+		p.realized_pnl::double precision, p.stop_loss::double precision,
+		p.take_profit::double precision, p.opened_at, p.closed_at
+	 FROM positions p
+	 LEFT JOIN strategies s ON s.id = p.strategy_id`
 
 func (r *PositionRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.Position, error) {
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -188,6 +189,7 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	var (
 		position      domain.Position
 		strategyID    *uuid.UUID
+		marketType    *string
 		currentPrice  *float64
 		unrealizedPnL *float64
 		stopLoss      *float64
@@ -198,6 +200,7 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	err := sc.Scan(
 		&position.ID,
 		&strategyID,
+		&marketType,
 		&position.Ticker,
 		&position.Side,
 		&position.Quantity,
@@ -215,6 +218,9 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	}
 
 	position.StrategyID = strategyID
+	if marketType != nil {
+		position.MarketType = domain.MarketType(strings.TrimSpace(*marketType)).Normalize()
+	}
 	position.CurrentPrice = currentPrice
 	position.UnrealizedPnL = unrealizedPnL
 	position.StopLoss = stopLoss
@@ -338,23 +344,23 @@ func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filte
 	}
 
 	if openOnly {
-		conditions = append(conditions, "closed_at IS NULL")
+		conditions = append(conditions, "p.closed_at IS NULL")
 	}
 
 	if filter.Ticker != "" {
-		conditions = append(conditions, "ticker = "+nextArg(filter.Ticker))
+		conditions = append(conditions, "p.ticker = "+nextArg(filter.Ticker))
 	}
 
 	if filter.Side != "" {
-		conditions = append(conditions, "side = "+nextArg(filter.Side))
+		conditions = append(conditions, "p.side = "+nextArg(filter.Side))
 	}
 
 	if filter.OpenedAfter != nil {
-		conditions = append(conditions, "opened_at >= "+nextArg(*filter.OpenedAfter))
+		conditions = append(conditions, "p.opened_at >= "+nextArg(*filter.OpenedAfter))
 	}
 
 	if filter.OpenedBefore != nil {
-		conditions = append(conditions, "opened_at <= "+nextArg(*filter.OpenedBefore))
+		conditions = append(conditions, "p.opened_at <= "+nextArg(*filter.OpenedBefore))
 	}
 
 	query := positionSelectSQL
@@ -362,7 +368,7 @@ func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filte
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 
-	query += " ORDER BY opened_at DESC, id DESC"
+	query += " ORDER BY p.opened_at DESC, p.id DESC"
 	query += fmt.Sprintf(" LIMIT %s OFFSET %s", nextArg(limit), nextArg(offset))
 
 	return query, args

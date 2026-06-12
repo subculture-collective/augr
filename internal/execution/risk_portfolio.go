@@ -42,6 +42,7 @@ func BuildRiskPortfolioSnapshotFromBalance(ctx context.Context, balance Balance,
 	portfolio := risk.Portfolio{
 		ConcurrentPositions:      len(positions),
 		PositionExposureBySymbol: make(map[string]float64, len(positions)),
+		MarketExposurePct:        make(map[domain.MarketType]float64, len(positions)),
 	}
 	if len(positions) == 0 {
 		return portfolio, nil
@@ -58,6 +59,9 @@ func BuildRiskPortfolioSnapshotFromBalance(ctx context.Context, balance Balance,
 		exposure := notional / balance.Equity
 		portfolio.TotalExposurePct += exposure
 		portfolio.PositionExposureBySymbol[position.Ticker] += exposure
+		if position.MarketType != "" {
+			portfolio.MarketExposurePct[position.MarketType] += exposure
+		}
 	}
 
 	return portfolio, nil

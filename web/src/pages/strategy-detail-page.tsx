@@ -13,6 +13,7 @@ import { useWebSocketClient } from '@/hooks/use-websocket-client'
 import { ApiClientError, apiClient } from '@/lib/api/client'
 import type { PipelineErrorData, StrategyStatus, StrategyUpdateRequest } from '@/lib/api/types'
 import { describeCron } from '@/lib/cron-describe'
+import { strategyConfigBoundary } from '@/lib/strategy-config/boundary'
 
 function resolveStrategyStatus(strategy: { status?: StrategyStatus; is_active?: boolean }): StrategyStatus {
   if (strategy.status) {
@@ -31,139 +32,6 @@ function statusBadgeVariant(status: StrategyStatus): 'success' | 'warning' | 'se
     default:
       return 'secondary'
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function getRulesEngine(config: unknown): Record<string, unknown> | null {
-  if (!isRecord(config)) return null
-
-  const rulesEngine = config.rules_engine
-  return isRecord(rulesEngine) ? rulesEngine : null
-}
-
-function toDisplayValue(value: unknown): string {
-  if (value == null) return '—'
-  if (Array.isArray(value)) return value.map((item) => toDisplayValue(item)).join(', ')
-  if (typeof value === 'object') {
-    try {
-      return JSON.stringify(value)
-    } catch {
-      return String(value)
-    }
-  }
-
-  return String(value)
-}
-
-function formatMaybeNumber(value: unknown, fractionDigits = 2): string {
-  const num = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(num) ? num.toFixed(fractionDigits) : toDisplayValue(value)
-}
-
-function collectRuleRows(rulesEngine: Record<string, unknown> | null) {
-  const rows: Array<{ group: string; field: string; operator: string; value: string; explanation: string }> = []
-
-  for (const [group, label] of [
-    ['entry', 'Entry'],
-    ['exit', 'Exit'],
-  ] as const) {
-    const section = rulesEngine && isRecord(rulesEngine[group]) ? rulesEngine[group] : null
-    const conditions = Array.isArray(section?.conditions) ? section.conditions : []
-
-    for (const condition of conditions) {
-      if (!isRecord(condition)) continue
-
-      const field = toDisplayValue(condition.field)
-      const operator = toDisplayValue(condition.op ?? condition.operator)
-      const valueSource = condition.value ?? condition.ref ?? condition.reference
-      const explanation =
-        typeof condition.explanation === 'string' && condition.explanation.trim().length > 0
-          ? condition.explanation
-          : typeof condition.description === 'string' && condition.description.trim().length > 0
-            ? condition.description
-            : `${label} condition`
-
-      rows.push({
-        group: label,
-        field,
-        operator,
-        value: toDisplayValue(valueSource),
-        explanation,
-      })
-    }
-  }
-
-  return rows
-}
-
-function summarizeRules(rulesEngine: Record<string, unknown> | null, rows: Array<{ group: string }>) {
-  if (!rulesEngine) return 'No rules engine configuration is available.'
-
-  const entryCount = rows.filter((row) => row.group === 'Entry').length
-  const exitCount = rows.filter((row) => row.group === 'Exit').length
-  const hints: string[] = []
-
-  if (isRecord(rulesEngine.position_sizing)) hints.push('position sizing')
-  if (isRecord(rulesEngine.stop_loss)) hints.push('stop loss')
-  if (isRecord(rulesEngine.take_profit)) hints.push('take profit')
-  if (isRecord(rulesEngine.filters)) hints.push('filters')
-
-  const hintText = hints.length > 0 ? ` Risk controls: ${hints.join(', ')}.` : ''
-
-  return `Entry rules: ${entryCount}; exit rules: ${exitCount}.${hintText}`
-}
-
-function summarizeRiskHints(rulesEngine: Record<string, unknown> | null) {
-  if (!rulesEngine) return []
-
-  const hints: string[] = []
-  const positionSizing = isRecord(rulesEngine.position_sizing) ? rulesEngine.position_sizing : null
-  const stopLoss = isRecord(rulesEngine.stop_loss) ? rulesEngine.stop_loss : null
-  const takeProfit = isRecord(rulesEngine.take_profit) ? rulesEngine.take_profit : null
-  const filters = isRecord(rulesEngine.filters) ? rulesEngine.filters : null
-
-  if (positionSizing) {
-    const parts = [
-      typeof positionSizing.method === 'string' ? positionSizing.method : null,
-      positionSizing.fraction_pct != null ? `${toDisplayValue(positionSizing.fraction_pct)}%` : null,
-      positionSizing.risk_per_trade_pct != null
-        ? `${formatMaybeNumber(Number(positionSizing.risk_per_trade_pct) * 100, 1)}% risk/trade`
-        : null,
-      positionSizing.atr_multiplier != null ? `ATR × ${formatMaybeNumber(positionSizing.atr_multiplier, 2)}` : null,
-    ].filter(Boolean)
-    if (parts.length > 0) hints.push(`Position sizing: ${parts.join(' • ')}`)
-  }
-
-  if (stopLoss) {
-    const parts = [
-      typeof stopLoss.method === 'string' ? stopLoss.method : null,
-      stopLoss.pct != null ? `${toDisplayValue(stopLoss.pct)}%` : null,
-      stopLoss.atr_multiplier != null ? `ATR × ${formatMaybeNumber(stopLoss.atr_multiplier, 2)}` : null,
-    ].filter(Boolean)
-    if (parts.length > 0) hints.push(`Stop loss: ${parts.join(' • ')}`)
-  }
-
-  if (takeProfit) {
-    const parts = [
-      typeof takeProfit.method === 'string' ? takeProfit.method : null,
-      takeProfit.ratio != null ? `R:R ${formatMaybeNumber(takeProfit.ratio, 2)}` : null,
-      takeProfit.atr_multiplier != null ? `ATR × ${formatMaybeNumber(takeProfit.atr_multiplier, 2)}` : null,
-    ].filter(Boolean)
-    if (parts.length > 0) hints.push(`Take profit: ${parts.join(' • ')}`)
-  }
-
-  if (filters) {
-    const parts = [
-      filters.min_volume != null ? `min volume ${toDisplayValue(filters.min_volume)}` : null,
-      filters.min_atr != null ? `min ATR ${toDisplayValue(filters.min_atr)}` : null,
-    ].filter(Boolean)
-    if (parts.length > 0) hints.push(`Filters: ${parts.join(' • ')}`)
-  }
-
-  return hints
 }
 
 export function StrategyDetailPage() {
@@ -299,14 +167,11 @@ export function StrategyDetailPage() {
     enabled: !!id,
   })
 
-  const rulesEngine = useMemo(() => getRulesEngine(strategy?.config), [strategy?.config])
-  const ruleRows = useMemo(() => collectRuleRows(rulesEngine), [rulesEngine])
-  const rulesSummary = useMemo(() => summarizeRules(rulesEngine, ruleRows), [rulesEngine, ruleRows])
-  const riskHints = useMemo(() => summarizeRiskHints(rulesEngine), [rulesEngine])
-  const positionSizing = rulesEngine && isRecord(rulesEngine.position_sizing) ? rulesEngine.position_sizing : null
-  const stopLoss = rulesEngine && isRecord(rulesEngine.stop_loss) ? rulesEngine.stop_loss : null
-  const takeProfit = rulesEngine && isRecord(rulesEngine.take_profit) ? rulesEngine.take_profit : null
-  const filters = rulesEngine && isRecord(rulesEngine.filters) ? rulesEngine.filters : null
+  const strategyConfigView = useMemo(
+    () => strategyConfigBoundary.view(strategy?.config, strategy?.schedule_cron),
+    [strategy?.config, strategy?.schedule_cron],
+  )
+  const rulesEngineView = strategyConfigView.rulesEngine
 
   if (isLoading) {
     return (
@@ -484,9 +349,9 @@ export function StrategyDetailPage() {
 
           <div className="space-y-2">
             <p className="text-sm font-medium">Risk / parameter hints</p>
-            {riskHints.length > 0 ? (
+            {rulesEngineView?.riskHints.length ? (
               <ul className="space-y-1 text-sm text-muted-foreground">
-                {riskHints.map((hint) => (
+                {rulesEngineView.riskHints.map((hint) => (
                   <li key={hint}>{hint}</li>
                 ))}
               </ul>
@@ -494,6 +359,76 @@ export function StrategyDetailPage() {
               <p className="text-sm text-muted-foreground">No rules-engine hints available.</p>
             )}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card data-testid="strategy-config-summary">
+        <CardHeader>
+          <CardTitle>Strategy config</CardTitle>
+          <CardDescription>Typed view of the editable config payload</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div>
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Schedule</dt>
+              <dd className="mt-1 text-sm font-medium">
+                {strategyConfigView.scheduleCron ? describeCron(strategyConfigView.scheduleCron) : 'Manual only'}
+                {strategyConfigView.scheduleCron ? (
+                  <span className="ml-2 font-mono text-[11px] text-muted-foreground">{strategyConfigView.scheduleCron}</span>
+                ) : null}
+              </dd>
+            </div>
+            <div>
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Analysts</dt>
+              <dd className="mt-1 text-sm font-medium">
+                {strategyConfigView.analysts.labels.length > 0
+                  ? strategyConfigView.analysts.labels.join(', ')
+                  : 'Default analysts'}
+              </dd>
+            </div>
+            <div>
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Prompt overrides</dt>
+              <dd className="mt-1 text-sm font-medium">
+                {strategyConfigView.promptOverrideCount > 0
+                  ? `${strategyConfigView.promptOverrideCount} override${strategyConfigView.promptOverrideCount === 1 ? '' : 's'}`
+                  : 'No overrides'}
+              </dd>
+            </div>
+            <div>
+              <dt className="font-mono text-[11px] uppercase tracking-[0.16em] text-muted-foreground">Kelly sizing</dt>
+              <dd className="mt-1 flex items-center gap-2 text-sm font-medium">
+                {strategyConfigView.risk.useKellySizing ? <Badge variant="warning">opted in</Badge> : <Badge variant="secondary">off</Badge>}
+              </dd>
+            </div>
+          </dl>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-md border border-border p-3">
+              <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">LLM</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {strategyConfigView.llm.provider || 'global default'}
+                {strategyConfigView.llm.deepThinkModel ? ` • deep ${strategyConfigView.llm.deepThinkModel}` : ''}
+                {strategyConfigView.llm.quickThinkModel ? ` • quick ${strategyConfigView.llm.quickThinkModel}` : ''}
+              </p>
+            </div>
+            <div className="rounded-md border border-border p-3">
+              <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Pipeline</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {strategyConfigView.pipeline.debateRounds || '—'} debate rounds • analysis {strategyConfigView.pipeline.analysisTimeoutSeconds || '—'}s • debate {strategyConfigView.pipeline.debateTimeoutSeconds || '—'}s
+              </p>
+            </div>
+          </div>
+
+          {strategyConfigView.risk.hints.length > 0 ? (
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Risk hints</p>
+              <ul className="space-y-1 text-sm text-muted-foreground">
+                {strategyConfigView.risk.hints.map((hint) => (
+                  <li key={hint}>{hint}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -558,23 +493,21 @@ export function StrategyDetailPage() {
         </Card>
       )}
 
-      {rulesEngine ? (
+      {rulesEngineView ? (
         <Card data-testid="strategy-rules-table">
           <CardHeader>
             <CardTitle>Rules engine</CardTitle>
-            <CardDescription>{rulesSummary}</CardDescription>
+            <CardDescription>{rulesEngineView.summary}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {(typeof rulesEngine.name === 'string' || typeof rulesEngine.description === 'string') && (
+            {(rulesEngineView.name || rulesEngineView.description) && (
               <div className="space-y-1">
-                {typeof rulesEngine.name === 'string' ? <p className="font-medium">{rulesEngine.name}</p> : null}
-                {typeof rulesEngine.description === 'string' ? (
-                  <p className="text-sm text-muted-foreground">{rulesEngine.description}</p>
-                ) : null}
+                {rulesEngineView.name ? <p className="font-medium">{rulesEngineView.name}</p> : null}
+                {rulesEngineView.description ? <p className="text-sm text-muted-foreground">{rulesEngineView.description}</p> : null}
               </div>
             )}
 
-            {ruleRows.length > 0 ? (
+            {rulesEngineView.rows.length > 0 ? (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -587,7 +520,7 @@ export function StrategyDetailPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {ruleRows.map((row, index) => (
+                    {rulesEngineView.rows.map((row, index) => (
                       <tr key={`${row.group}-${row.field}-${row.operator}-${index}`} className="border-b border-border last:border-0">
                         <td className="py-2 text-xs font-medium uppercase tracking-[0.16em] text-muted-foreground">{row.group}</td>
                         <td className="py-2 font-mono text-[13px]">{row.field}</td>
@@ -604,57 +537,12 @@ export function StrategyDetailPage() {
             )}
 
             <div className="grid gap-3 sm:grid-cols-2">
-              {positionSizing ? (
-                <div className="rounded-md border border-border p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Position sizing</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {typeof positionSizing.method === 'string' ? positionSizing.method : '—'}
-                    {positionSizing.fraction_pct != null ? ` • ${toDisplayValue(positionSizing.fraction_pct)}%` : ''}
-                    {positionSizing.risk_per_trade_pct != null
-                      ? ` • ${formatMaybeNumber(Number(positionSizing.risk_per_trade_pct) * 100, 1)}% risk/trade`
-                      : ''}
-                    {positionSizing.atr_multiplier != null
-                      ? ` • ATR × ${formatMaybeNumber(positionSizing.atr_multiplier, 2)}`
-                      : ''}
-                  </p>
+              {rulesEngineView.details.map((detail) => (
+                <div key={detail.label} className="rounded-md border border-border p-3">
+                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">{detail.label}</p>
+                  <p className="mt-1 text-sm text-muted-foreground">{detail.text}</p>
                 </div>
-              ) : null}
-
-              {stopLoss ? (
-                <div className="rounded-md border border-border p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Stop loss</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {typeof stopLoss.method === 'string' ? stopLoss.method : '—'}
-                    {stopLoss.pct != null ? ` • ${toDisplayValue(stopLoss.pct)}%` : ''}
-                    {stopLoss.atr_multiplier != null
-                      ? ` • ATR × ${formatMaybeNumber(stopLoss.atr_multiplier, 2)}`
-                      : ''}
-                  </p>
-                </div>
-              ) : null}
-
-              {takeProfit ? (
-                <div className="rounded-md border border-border p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Take profit</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {typeof takeProfit.method === 'string' ? takeProfit.method : '—'}
-                    {takeProfit.ratio != null ? ` • R:R ${formatMaybeNumber(takeProfit.ratio, 2)}` : ''}
-                    {takeProfit.atr_multiplier != null
-                      ? ` • ATR × ${formatMaybeNumber(takeProfit.atr_multiplier, 2)}`
-                      : ''}
-                  </p>
-                </div>
-              ) : null}
-
-              {filters ? (
-                <div className="rounded-md border border-border p-3">
-                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Filters</p>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {filters.min_volume != null ? `Min volume ${toDisplayValue(filters.min_volume)}` : 'No volume floor'}
-                    {filters.min_atr != null ? ` • Min ATR ${toDisplayValue(filters.min_atr)}` : ''}
-                  </p>
-                </div>
-              ) : null}
+              ))}
             </div>
           </CardContent>
         </Card>

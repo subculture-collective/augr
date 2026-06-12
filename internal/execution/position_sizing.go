@@ -55,6 +55,8 @@ func FixedFractionalSize(accountValue, fractionPct, pricePerShare float64) float
 }
 
 // CalculatePositionSize dispatches to the configured position sizing method.
+// Kelly returns a unit quantity by converting the dollar allocation using the
+// provided price per share.
 func CalculatePositionSize(method PositionSizingMethod, params PositionSizingParams) float64 {
 	switch method {
 	case PositionSizingMethodATR:
@@ -62,10 +64,14 @@ func CalculatePositionSize(method PositionSizingMethod, params PositionSizingPar
 	case PositionSizingMethodKelly:
 		size := KellyPositionSize(params.AccountValue, params.WinRate, params.WinLossRatio)
 		if params.HalfKelly {
-			return size * 0.5
+			size *= 0.5
 		}
 
-		return size
+		if params.PricePerShare <= 0 {
+			return 0
+		}
+
+		return size / params.PricePerShare
 	case PositionSizingMethodFixedFractional:
 		return FixedFractionalSize(params.AccountValue, params.FractionPct, params.PricePerShare)
 	default:

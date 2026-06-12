@@ -10,6 +10,12 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+// StrategyProvider is the adapter that supplies active strategies and
+// thesis-derived watch terms to the signal lifecycle.
+type StrategyProvider interface {
+	ListActiveWithThesis(ctx context.Context) ([]StrategyWithThesis, error)
+}
+
 // repositoryStrategyProvider adapts repository.StrategyRepository to StrategyProvider.
 // It lists all active strategies and enriches each with thesis watch terms.
 type repositoryStrategyProvider struct {
@@ -67,7 +73,7 @@ func NewStrategyProviderWithCache(provider StrategyProvider, ttl time.Duration) 
 func (c *cachedStrategyProvider) ListActiveWithThesis(ctx context.Context) ([]StrategyWithThesis, error) {
 	c.mu.RLock()
 	if c.cached != nil && time.Since(c.builtAt) < c.ttl {
-		result := c.cached
+		result := cloneStrategyWithThesisSlice(c.cached)
 		c.mu.RUnlock()
 		return result, nil
 	}
@@ -77,9 +83,24 @@ func (c *cachedStrategyProvider) ListActiveWithThesis(ctx context.Context) ([]St
 	if err != nil {
 		return nil, err
 	}
+	cloned := cloneStrategyWithThesisSlice(result)
 	c.mu.Lock()
-	c.cached = result
+	c.cached = cloned
 	c.builtAt = time.Now()
 	c.mu.Unlock()
-	return result, nil
+	return cloneStrategyWithThesisSlice(cloned), nil
+}
+
+func cloneStrategyWithThesisSlice(in []StrategyWithThesis) []StrategyWithThesis {
+	if in == nil {
+		return nil
+	}
+	out := make([]StrategyWithThesis, len(in))
+	for i := range in {
+		out[i] = in[i]
+		if in[i].WatchTerms != nil {
+			out[i].WatchTerms = append([]string(nil), in[i].WatchTerms...)
+		}
+	}
+	return out
 }

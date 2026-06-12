@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math"
 	"os"
 	"sync"
 	"time"
@@ -12,15 +11,6 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
-
-// defaultKillSwitchFilePath is the default file path checked for the kill switch file flag.
-const defaultKillSwitchFilePath = "/tmp/tradingagent_kill"
-
-// killSwitchEnvVar is the environment variable checked for the kill switch.
-const killSwitchEnvVar = "TRADING_AGENT_KILL"
-
-// polymarketMaxExposurePct is the stricter per-market limit for Polymarket.
-const polymarketMaxExposurePct = 0.05
 
 // DefaultPositionLimits returns the default position limits.
 func DefaultPositionLimits() PositionLimits {
@@ -100,37 +90,6 @@ func NewRiskEngine(limits PositionLimits, cbConfig CircuitBreakerConfig, positio
 // Call this after NewRiskEngine before the engine handles any requests.
 func (e *RiskEngineImpl) WithPolymarketLimits(limits PolymarketLimits) *RiskEngineImpl {
 	e.pmLimits = limits
-	return e
-}
-
-// WithStatePersister attaches a StatePersister and immediately loads any
-// previously persisted kill-switch state. An operator-activated kill-switch
-// will be restored so it survives process restarts. Returns the receiver for
-// chaining.
-func (e *RiskEngineImpl) WithStatePersister(ctx context.Context, p StatePersister) *RiskEngineImpl {
-	e.persister = p
-	state, err := p.Load(ctx)
-	if err != nil {
-		e.logger.Warn("risk: failed to load persisted state, starting clean",
-			slog.String("error", err.Error()))
-		return e
-	}
-
-	e.state.mu.Lock()
-	defer e.state.mu.Unlock()
-	if state.KillSwitch.Active {
-		e.state.ks = state.KillSwitch
-		e.logger.Warn("risk: restored active kill switch from persistent state",
-			slog.String("reason", state.KillSwitch.Reason))
-	}
-	for mt, mks := range state.MarketKillSwitches {
-		if mks.Active {
-			e.state.mks[mt] = mks
-			e.logger.Warn("risk: restored active market kill switch from persistent state",
-				slog.String("market_type", string(mt)),
-				slog.String("reason", mks.Reason))
-		}
-	}
 	return e
 }
 
@@ -254,30 +213,6 @@ func (e *RiskEngineImpl) tripLocked(reason string) bool {
 	return true
 }
 
-// isKillSwitchActiveUnlocked checks all three kill switch mechanisms:
-// API toggle, file flag, and environment variable. The caller must pass the
-// current API toggle state (read under proper locking). Returns whether any
-// mechanism is active and the list of active mechanisms.
-func (e *RiskEngineImpl) isKillSwitchActiveUnlocked(apiKS KillSwitchStatus) (bool, []KillSwitchMechanism) {
-	var mechanisms []KillSwitchMechanism
-	if apiKS.Active {
-		mechanisms = append(mechanisms, KillSwitchMechanismAPI)
-	}
-
-	e.ksMu.RLock()
-	fileExists := e.fileExistsFunc
-	getEnv := e.getEnvFunc
-	e.ksMu.RUnlock()
-
-	if fileExists(e.killSwitchFilePath) {
-		mechanisms = append(mechanisms, KillSwitchMechanismFile)
-	}
-	if getEnv(killSwitchEnvVar) == "true" {
-		mechanisms = append(mechanisms, KillSwitchMechanismEnvVar)
-	}
-	return len(mechanisms) > 0, mechanisms
-}
-
 // CheckPreTrade evaluates whether an order should be allowed before submission.
 func (e *RiskEngineImpl) CheckPreTrade(ctx context.Context, order *domain.Order, _ Portfolio) (bool, string, error) {
 	e.state.mu.Lock()
@@ -301,9 +236,7 @@ func (e *RiskEngineImpl) CheckPreTrade(ctx context.Context, order *domain.Order,
 
 	// Per-market kill switch check.
 	if order != nil && order.MarketType != "" {
-		e.state.mu.RLock()
-		mks, hasMKS := e.state.mks[order.MarketType]
-		e.state.mu.RUnlock()
+		mks, hasMKS := e.activeMarketKillSwitchSnapshot(order.MarketType)
 		if hasMKS && mks.Active {
 			reason := mks.Reason
 			if reason == "" {
@@ -338,63 +271,9 @@ func (e *RiskEngineImpl) CheckPreTrade(ctx context.Context, order *domain.Order,
 // The quantity parameter represents the additional position exposure as a fraction of
 // the portfolio (e.g. 0.10 = 10%).
 func (e *RiskEngineImpl) CheckPositionLimits(ctx context.Context, ticker string, quantity float64, portfolio Portfolio) (bool, string, error) {
-	if ticker == "" {
-		return false, "ticker is required", nil
-	}
-	if quantity <= 0 || math.IsNaN(quantity) || math.IsInf(quantity, 0) {
-		return false, "quantity must be a positive finite number", nil
-	}
-
-	e.state.mu.RLock()
-	limits := e.limits
-	e.state.mu.RUnlock()
-
-	// Check max per-position size.
-	currentExposure := portfolio.PositionExposureBySymbol[ticker]
-	if currentExposure+quantity > limits.MaxPerPositionPct {
-		return false, fmt.Sprintf(
-			"position size %.2f%% for %s exceeds max %.2f%%",
-			(currentExposure+quantity)*100, ticker, limits.MaxPerPositionPct*100,
-		), nil
-	}
-
-	// Check max total exposure.
-	if portfolio.TotalExposurePct+quantity > limits.MaxTotalPct {
-		return false, fmt.Sprintf(
-			"total exposure %.2f%% exceeds max %.2f%%",
-			(portfolio.TotalExposurePct+quantity)*100, limits.MaxTotalPct*100,
-		), nil
-	}
-
-	// Check max concurrent positions (only if opening a new position).
-	if _, exists := portfolio.PositionExposureBySymbol[ticker]; !exists {
-		if portfolio.ConcurrentPositions >= limits.MaxConcurrent {
-			return false, fmt.Sprintf(
-				"concurrent positions %d reached max %d",
-				portfolio.ConcurrentPositions, limits.MaxConcurrent,
-			), nil
-		}
-	}
-
-	// Check per-market exposure limits.
-	// MarketExposurePct values are expected to reflect post-trade exposure
-	// as computed by the caller, since the ticker-to-market mapping is not
-	// available within this function.
-	for market, exposure := range portfolio.MarketExposurePct {
-		limit := limits.MaxPerMarketPct
-		if market == domain.MarketTypePolymarket {
-			if e.pmLimits.MaxSingleMarketExposurePct > 0 {
-				limit = e.pmLimits.MaxSingleMarketExposurePct
-			} else {
-				limit = polymarketMaxExposurePct
-			}
-		}
-		if exposure > limit {
-			return false, fmt.Sprintf(
-				"%s market exposure %.2f%% exceeds max %.2f%%",
-				market, exposure*100, limit*100,
-			), nil
-		}
+	allowed, reason := newMarketExposurePolicy(e.limits, e.pmLimits).check(ticker, quantity, portfolio)
+	if !allowed {
+		return false, reason, nil
 	}
 
 	e.logger.InfoContext(ctx, "position limits check passed",
@@ -417,50 +296,17 @@ func (e *RiskEngineImpl) GetStatus(ctx context.Context) (EngineStatus, error) {
 	portfolioSnapshotFunc := e.portfolioSnapshotFunc
 	e.portfolioSnapshotMu.RUnlock()
 
+	var portfolioSnapshot *Portfolio
 	if portfolioSnapshotFunc != nil {
 		portfolio, err := portfolioSnapshotFunc(ctx)
 		if err != nil {
 			return EngineStatus{}, fmt.Errorf("risk: portfolio snapshot: %w", err)
 		}
-		openPositions := portfolio.ConcurrentPositions
-		totalExposure := portfolio.TotalExposurePct
-		limits.CurrentOpenPositions = &openPositions
-		limits.CurrentTotalExposurePct = &totalExposure
+		portfolioSnapshot = &portfolio
 	}
 
-	ksActive, mechanisms := e.isKillSwitchActiveUnlocked(apiKS)
-	ks := KillSwitchStatus{
-		Active:      ksActive,
-		Reason:      apiKS.Reason,
-		Mechanisms:  mechanisms,
-		ActivatedAt: apiKS.ActivatedAt,
-	}
-	if ksActive && ks.Reason == "" {
-		ks.Reason = "external mechanism"
-	}
-
-	status := domain.RiskStatusNormal
-	if cb.State == CircuitBreakerPhaseTripped {
-		status = domain.RiskStatusBreached
-	} else if ksActive {
-		status = domain.RiskStatusWarning
-	}
-
-	e.state.mu.RLock()
-	mksSnapshot := make(map[domain.MarketType]KillSwitchStatus, len(e.state.mks))
-	for mt, mks := range e.state.mks {
-		mksSnapshot[mt] = mks
-	}
-	e.state.mu.RUnlock()
-
-	es := EngineStatus{
-		RiskStatus:         status,
-		CircuitBreaker:     cb,
-		KillSwitch:         ks,
-		MarketKillSwitches: mksSnapshot,
-		PositionLimits:     limits,
-		UpdatedAt:          e.currentTime(),
-	}
+	ks := e.buildKillSwitchStatus(apiKS)
+	es := projectEngineStatus(e.currentTime(), limits, cb, ks, e.snapshotMarketKillSwitches(), portfolioSnapshot)
 
 	if cooldownReset {
 		e.logger.InfoContext(ctx, "circuit breaker auto-reset after cooldown")
@@ -512,14 +358,8 @@ func (e *RiskEngineImpl) IsKillSwitchActive(_ context.Context) (bool, error) {
 
 // ActivateKillSwitch activates the kill switch via the API toggle mechanism.
 func (e *RiskEngineImpl) ActivateKillSwitch(ctx context.Context, reason string) error {
-	now := e.currentTime()
 	e.state.mu.Lock()
-	e.state.ks = KillSwitchStatus{
-		Active:      true,
-		Reason:      reason,
-		Mechanisms:  []KillSwitchMechanism{KillSwitchMechanismAPI},
-		ActivatedAt: &now,
-	}
+	e.activateKillSwitchLocked(reason)
 	snapshot := e.buildPersistedStateLocked()
 	e.state.mu.Unlock()
 
@@ -535,7 +375,7 @@ func (e *RiskEngineImpl) ActivateKillSwitch(ctx context.Context, reason string) 
 // Note: file flag and env var mechanisms are not affected by this call.
 func (e *RiskEngineImpl) DeactivateKillSwitch(ctx context.Context) error {
 	e.state.mu.Lock()
-	e.state.ks = KillSwitchStatus{Active: false}
+	e.deactivateKillSwitchLocked()
 	snapshot := e.buildPersistedStateLocked()
 	e.state.mu.Unlock()
 
@@ -549,23 +389,15 @@ func (e *RiskEngineImpl) DeactivateKillSwitch(ctx context.Context) error {
 // IsMarketKillSwitchActive returns whether the kill switch is active for the
 // given market type.
 func (e *RiskEngineImpl) IsMarketKillSwitchActive(_ context.Context, marketType domain.MarketType) (bool, error) {
-	e.state.mu.RLock()
-	mks, ok := e.state.mks[marketType]
-	e.state.mu.RUnlock()
+	mks, ok := e.activeMarketKillSwitchSnapshot(marketType)
 	return ok && mks.Active, nil
 }
 
 // ActivateMarketKillSwitch activates the kill switch for a specific market type,
 // halting all new orders for that market while leaving other markets unaffected.
 func (e *RiskEngineImpl) ActivateMarketKillSwitch(ctx context.Context, marketType domain.MarketType, reason string) error {
-	now := e.currentTime()
 	e.state.mu.Lock()
-	e.state.mks[marketType] = KillSwitchStatus{
-		Active:      true,
-		Reason:      reason,
-		Mechanisms:  []KillSwitchMechanism{KillSwitchMechanismAPI},
-		ActivatedAt: &now,
-	}
+	e.activateMarketKillSwitchLocked(marketType, reason)
 	snapshot := e.buildPersistedStateLocked()
 	e.state.mu.Unlock()
 
@@ -580,7 +412,7 @@ func (e *RiskEngineImpl) ActivateMarketKillSwitch(ctx context.Context, marketTyp
 // DeactivateMarketKillSwitch clears the kill switch for the given market type.
 func (e *RiskEngineImpl) DeactivateMarketKillSwitch(ctx context.Context, marketType domain.MarketType) error {
 	e.state.mu.Lock()
-	delete(e.state.mks, marketType)
+	e.deactivateMarketKillSwitchLocked(marketType)
 	snapshot := e.buildPersistedStateLocked()
 	e.state.mu.Unlock()
 
@@ -589,32 +421,6 @@ func (e *RiskEngineImpl) DeactivateMarketKillSwitch(ctx context.Context, marketT
 	)
 	e.saveState(ctx, snapshot)
 	return nil
-}
-
-// buildPersistedStateLocked snapshots the current API-toggle kill-switch state.
-// Must be called with e.state.mu held.
-func (e *RiskEngineImpl) buildPersistedStateLocked() PersistedRiskState {
-	mks := make(map[domain.MarketType]KillSwitchStatus, len(e.state.mks))
-	for k, v := range e.state.mks {
-		mks[k] = v
-	}
-	return PersistedRiskState{
-		KillSwitch:         e.state.ks,
-		MarketKillSwitches: mks,
-	}
-}
-
-// saveState writes the risk state to the persister if one is configured.
-// Errors are logged but not returned — persistence is best-effort and must
-// not block the safety path.
-func (e *RiskEngineImpl) saveState(ctx context.Context, state PersistedRiskState) {
-	if e.persister == nil {
-		return
-	}
-	if err := e.persister.Save(ctx, state); err != nil {
-		e.logger.Error("risk: failed to persist kill switch state",
-			slog.String("error", err.Error()))
-	}
 }
 
 // UpdateMetrics evaluates post-trade metrics and auto-trips the circuit breaker

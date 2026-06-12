@@ -90,6 +90,11 @@ func (f *Feed) dispatchBooks() {
 func (f *Feed) Ticks(slug string) <-chan Tick {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		ch := make(chan Tick)
+		close(ch)
+		return ch
+	}
 	if ch := f.tickSubs[slug]; ch != nil {
 		return ch
 	}
@@ -101,6 +106,11 @@ func (f *Feed) Ticks(slug string) <-chan Tick {
 func (f *Feed) Books(slug string) <-chan BookSnapshot {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		ch := make(chan BookSnapshot)
+		close(ch)
+		return ch
+	}
 	if ch := f.bookSubs[slug]; ch != nil {
 		return ch
 	}
@@ -132,4 +142,14 @@ func (f *Feed) Close() {
 	f.cleaner.Close()
 	f.pool.Close()
 	f.wg.Wait()
+	f.mu.Lock()
+	for slug, ch := range f.tickSubs {
+		close(ch)
+		delete(f.tickSubs, slug)
+	}
+	for slug, ch := range f.bookSubs {
+		close(ch)
+		delete(f.bookSubs, slug)
+	}
+	f.mu.Unlock()
 }

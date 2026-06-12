@@ -412,13 +412,10 @@ func (p *Pipeline) executeRiskDebatePhase(ctx context.Context, state *PipelineSt
 	})
 }
 
-// ExecuteStrategy runs the full pipeline for the given strategy, resolving
-// the strategy's JSON config against the provided global settings before
-// execution begins. The resolved config overrides debate rounds, timeouts,
-// and LLM selections. A JSON snapshot of the resolved config is stored in
-// the pipeline run for auditability.
-//
-// Callers that do not need config resolution can continue using Execute directly.
+// ExecuteStrategy is the legacy strategy-config adapter for Pipeline.Execute.
+// It resolves strategy JSON config, applies the historical risk-debate skip,
+// and executes on a throwaway Pipeline copy so the caller's Pipeline config is
+// not mutated. New callers should prefer Runner + Prepare for immutable plans.
 func (p *Pipeline) ExecuteStrategy(ctx context.Context, strategy domain.Strategy, globals GlobalSettings) (*PipelineState, error) {
 	// Parse the strategy's JSONB config into a typed StrategyConfig.
 	var stratCfg *StrategyConfig
@@ -431,38 +428,34 @@ func (p *Pipeline) ExecuteStrategy(ctx context.Context, strategy domain.Strategy
 	}
 
 	resolved := ResolveConfig(stratCfg, globals)
-
-	// Save original config values and restore them when done so that resolved
-	// strategy config does not leak into subsequent runs.
-	origResearchDebateRounds := p.config.ResearchDebateRounds
-	origRiskDebateRounds := p.config.RiskDebateRounds
-	origPhaseTimeout := p.config.PhaseTimeout
-	defer func() {
-		p.config.ResearchDebateRounds = origResearchDebateRounds
-		p.config.RiskDebateRounds = origRiskDebateRounds
-		p.config.PhaseTimeout = origPhaseTimeout
-		p.configSnapshot = nil
-	}()
-
-	// Apply resolved pipeline config to the pipeline's runtime config.
-	p.config.ResearchDebateRounds = resolved.PipelineConfig.DebateRounds
-	p.config.RiskDebateRounds = resolved.PipelineConfig.DebateRounds
-	// Skip the risk debate phase — the research debate + trader already
-	// incorporate risk assessment, and this phase doubles the pipeline time.
-	if p.config.SkipPhases == nil {
-		p.config.SkipPhases = make(map[Phase]bool)
+	legacy := &Pipeline{
+		nodes:     p.nodes,
+		persister: p.persister,
+		events:    p.events,
+		logger:    p.logger,
+		config:    p.config,
+		now:       p.now,
 	}
-	p.config.SkipPhases[PhaseRiskDebate] = true
+	legacy.config.ResearchDebateRounds = resolved.PipelineConfig.DebateRounds
+	legacy.config.RiskDebateRounds = resolved.PipelineConfig.DebateRounds
+	legacy.config.SkipPhases = cloneSkipPhases(legacy.config.SkipPhases)
+	if legacy.config.SkipPhases == nil {
+		legacy.config.SkipPhases = make(map[Phase]bool)
+	}
+	// Skip the risk debate phase — this is the historical behavior of the
+	// legacy trading pipeline path.
+	legacy.config.SkipPhases[PhaseRiskDebate] = true
 	if resolved.PipelineConfig.AnalysisTimeoutSeconds > 0 {
-		p.config.PhaseTimeout = time.Duration(resolved.PipelineConfig.AnalysisTimeoutSeconds) * time.Second
+		legacy.config.PhaseTimeout = time.Duration(resolved.PipelineConfig.AnalysisTimeoutSeconds) * time.Second
 	}
+	legacy.helper = newPhaseHelper(legacy.persister, legacy.events, legacy.logger, legacy.currentTime)
 
-	// Snapshot the resolved config for auditability and store it so Execute
-	// can attach it to the PipelineRun.
+	// Snapshot the resolved config for auditability and store it so Execute can
+	// attach it to the PipelineRun copy.
 	configSnapshot, _ := json.Marshal(resolved)
-	p.configSnapshot = configSnapshot
+	legacy.configSnapshot = configSnapshot
 
-	return p.Execute(ctx, strategy.ID, strategy.Ticker)
+	return legacy.Execute(ctx, strategy.ID, strategy.Ticker)
 }
 
 // Execute runs the full pipeline for the given strategy and ticker. It creates
@@ -707,4 +700,16 @@ func cloneRoundNumber(roundNumber *int) *int {
 
 	value := *roundNumber
 	return &value
+}
+
+func cloneSkipPhases(src map[Phase]bool) map[Phase]bool {
+	if len(src) == 0 {
+		return nil
+	}
+
+	dst := make(map[Phase]bool, len(src))
+	for phase, skipped := range src {
+		dst[phase] = skipped
+	}
+	return dst
 }

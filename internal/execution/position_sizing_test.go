@@ -101,11 +101,12 @@ func TestCalculatePositionSize(t *testing.T) {
 			name:   "kelly",
 			method: execution.PositionSizingMethodKelly,
 			params: execution.PositionSizingParams{
-				AccountValue: 100000,
-				WinRate:      0.60,
-				WinLossRatio: 2,
+				AccountValue:  100000,
+				WinRate:       0.60,
+				WinLossRatio:  2,
+				PricePerShare: 50,
 			},
-			want: 40000,
+			want: 800,
 		},
 		{
 			name:   "fixed fractional",
@@ -121,12 +122,13 @@ func TestCalculatePositionSize(t *testing.T) {
 			name:   "half kelly",
 			method: execution.PositionSizingMethodKelly,
 			params: execution.PositionSizingParams{
-				AccountValue: 100000,
-				WinRate:      0.60,
-				WinLossRatio: 2,
-				HalfKelly:    true,
+				AccountValue:  100000,
+				WinRate:       0.60,
+				WinLossRatio:  2,
+				PricePerShare: 50,
+				HalfKelly:     true,
 			},
-			want: 20000,
+			want: 400,
 		},
 	}
 
@@ -167,20 +169,33 @@ func TestCalculatePositionSize_BoundariesAndUnknownMethod(t *testing.T) {
 			name:   "kelly full win rate allocates full account",
 			method: execution.PositionSizingMethodKelly,
 			params: execution.PositionSizingParams{
-				AccountValue: 100000,
-				WinRate:      1,
-				WinLossRatio: 2,
+				AccountValue:  100000,
+				WinRate:       1,
+				WinLossRatio:  2,
+				PricePerShare: 100,
 			},
-			want: 100000,
+			want: 1000,
 		},
 		{
 			name:   "kelly zero edge only halves positive sizes",
 			method: execution.PositionSizingMethodKelly,
 			params: execution.PositionSizingParams{
-				AccountValue: 100000,
-				WinRate:      0.5,
-				WinLossRatio: 1,
-				HalfKelly:    true,
+				AccountValue:  100000,
+				WinRate:       0.5,
+				WinLossRatio:  1,
+				PricePerShare: 50,
+				HalfKelly:     true,
+			},
+			want: 0,
+		},
+		{
+			name:   "kelly with non-positive price returns zero",
+			method: execution.PositionSizingMethodKelly,
+			params: execution.PositionSizingParams{
+				AccountValue:  100000,
+				WinRate:       0.60,
+				WinLossRatio:  2,
+				PricePerShare: 0,
 			},
 			want: 0,
 		},
@@ -206,18 +221,20 @@ func TestPositionSizingProperties(t *testing.T) {
 			accountValue := float64(account%1_000_000) + 1
 			winRate := float64(winRatePct%101) / 100
 			ratio := float64(winLossRatio%20) + 1
+			price := float64((account % 5000) + 1)
 
 			full := execution.KellyPositionSize(accountValue, winRate, ratio)
 			half := execution.CalculatePositionSize(execution.PositionSizingMethodKelly, execution.PositionSizingParams{
-				AccountValue: accountValue,
-				WinRate:      winRate,
-				WinLossRatio: ratio,
-				HalfKelly:    true,
+				AccountValue:  accountValue,
+				WinRate:       winRate,
+				WinLossRatio:  ratio,
+				PricePerShare: price,
+				HalfKelly:     true,
 			})
 
 			return full >= 0 &&
 				full <= accountValue &&
-				math.Abs(half-full*0.5) <= 1e-9
+				math.Abs(half-(full/price)*0.5) <= 1e-9
 		}, cfg)
 		if err != nil {
 			t.Fatal(err)

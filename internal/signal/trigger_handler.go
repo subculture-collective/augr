@@ -27,8 +27,8 @@ type ThesisLoader interface {
 	GetThesisRaw(ctx context.Context, strategyID uuid.UUID) (json.RawMessage, error)
 }
 
-// TriggerHandler consumes TriggerEvents from the SignalHub and dispatches them
-// according to their urgency:
+// TriggerHandler is the adapter that consumes TriggerEvents and dispatches
+// them according to their urgency:
 //
 //	Urgency 1-2: logged, no action (hub normally drops these, but handler guards).
 //	Urgency 3-4: queue pipeline run via StrategyTriggerer.

@@ -30,7 +30,7 @@ func TestBuildPositionListQuery_NoFilters(t *testing.T) {
 	}
 
 	assertContains(t, query, "FROM positions")
-	assertContains(t, query, "ORDER BY opened_at DESC, id DESC")
+	assertContains(t, query, "ORDER BY p.opened_at DESC, p.id DESC")
 	assertContains(t, query, "LIMIT $1 OFFSET $2")
 	assertNotContains(t, query, "WHERE")
 }
@@ -50,10 +50,10 @@ func TestBuildPositionListQuery_AllFilters(t *testing.T) {
 		t.Fatalf("expected 6 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "ticker = $1")
-	assertContains(t, query, "side = $2")
-	assertContains(t, query, "opened_at >= $3")
-	assertContains(t, query, "opened_at <= $4")
+	assertContains(t, query, "p.ticker = $1")
+	assertContains(t, query, "p.side = $2")
+	assertContains(t, query, "p.opened_at >= $3")
+	assertContains(t, query, "p.opened_at <= $4")
 	assertContains(t, query, "LIMIT $5 OFFSET $6")
 }
 
@@ -64,7 +64,7 @@ func TestBuildPositionOpenQuery_FiltersOnlyOpenPositions(t *testing.T) {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
 
-	assertContains(t, query, "closed_at IS NULL")
+	assertContains(t, query, "p.closed_at IS NULL")
 	assertNotContains(t, query, "closed_at = ")
 	assertContains(t, query, "LIMIT $1 OFFSET $2")
 }
@@ -78,15 +78,15 @@ func TestBuildPositionOpenQuery_WithSideFilter(t *testing.T) {
 		t.Fatalf("expected 3 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "closed_at IS NULL")
-	assertContains(t, query, "side = $1")
+	assertContains(t, query, "p.closed_at IS NULL")
+	assertContains(t, query, "p.side = $1")
 	assertContains(t, query, "LIMIT $2 OFFSET $3")
 }
 
 func TestBuildPositionScopedQuery_StrategyScope(t *testing.T) {
 	strategyID := uuid.New()
 
-	query, args := buildPositionScopedQuery("strategy_id", strategyID, repository.PositionFilter{
+	query, args := buildPositionScopedQuery("p.strategy_id", strategyID, repository.PositionFilter{
 		Side: domain.PositionSideShort,
 	}, 5, 10)
 
@@ -94,8 +94,8 @@ func TestBuildPositionScopedQuery_StrategyScope(t *testing.T) {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "strategy_id = $1")
-	assertContains(t, query, "side = $2")
+	assertContains(t, query, "p.strategy_id = $1")
+	assertContains(t, query, "p.side = $2")
 	assertContains(t, query, "LIMIT $3 OFFSET $4")
 	assertNotContains(t, query, "closed_at IS NULL")
 }
@@ -108,7 +108,7 @@ func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	defer cleanup()
 
 	repo := NewPositionRepo(pool)
-	strategyID := createTestPositionStrategy(t, ctx, pool)
+	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 
 	currentPrice := 185.50
 	unrealizedPnL := 55.0
@@ -117,6 +117,7 @@ func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 
 	position := &domain.Position{
 		StrategyID:    &strategyID,
+		MarketType:    domain.MarketTypeStock,
 		Ticker:        "AAPL",
 		Side:          domain.PositionSideLong,
 		Quantity:      10,
@@ -145,6 +146,9 @@ func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 
 	if got.StrategyID == nil || *got.StrategyID != strategyID {
 		t.Fatalf("expected StrategyID %s, got %v", strategyID, got.StrategyID)
+	}
+	if got.MarketType != domain.MarketTypeStock {
+		t.Fatalf("expected MarketType stock, got %q", got.MarketType)
 	}
 	if got.Ticker != position.Ticker {
 		t.Errorf("expected Ticker %q, got %q", position.Ticker, got.Ticker)
@@ -282,8 +286,8 @@ func TestPositionRepoIntegration_ListGetOpenGetByStrategy(t *testing.T) {
 	defer cleanup()
 
 	repo := NewPositionRepo(pool)
-	strategyA := createTestPositionStrategy(t, ctx, pool)
-	strategyB := createTestPositionStrategy(t, ctx, pool)
+	strategyA := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
+	strategyB := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	closedAt := time.Now().UTC()
 
 	// posA: open, long, AAPL, strategyA
@@ -441,7 +445,8 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 			'short'
 		)`,
 		`CREATE TABLE strategies (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid()
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			market_type market_type NOT NULL
 		)`,
 		`CREATE TABLE positions (
 			id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -478,11 +483,11 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 	return pool, cleanup
 }
 
-func createTestPositionStrategy(t *testing.T, ctx context.Context, pool *pgxpool.Pool) uuid.UUID {
+func createTestPositionStrategy(t *testing.T, ctx context.Context, pool *pgxpool.Pool, marketType domain.MarketType) uuid.UUID {
 	t.Helper()
 
 	var id uuid.UUID
-	if err := pool.QueryRow(ctx, `INSERT INTO strategies DEFAULT VALUES RETURNING id`).Scan(&id); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO strategies (market_type) VALUES ($1) RETURNING id`, marketType).Scan(&id); err != nil {
 		t.Fatalf("failed to create test strategy: %v", err)
 	}
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/edge"
+	"github.com/PatrickFanella/get-rich-quick/internal/position"
 )
 
 type OpportunityState string
@@ -49,7 +50,7 @@ func DefaultScanConfig() ScanConfig {
 		MaxSpread:              0.08,
 		MinDepthUSD:            250,
 		KellyFraction:          0.25,
-		MaxPositionPctBankroll: 0.05,
+		MaxPositionPctBankroll: position.DefaultPolymarketFractionPct,
 		Bankroll:               1000,
 		MaxSnapshotAge:         5 * time.Minute,
 	}

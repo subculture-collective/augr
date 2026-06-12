@@ -63,6 +63,30 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 	return nil
 }
 
+// GetByID retrieves a pipeline run by its ID without requiring the caller to
+// know the storage partition trade date. It returns ErrNotFound when no row
+// matches.
+func (r *PipelineRunRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
+	row := r.pool.QueryRow(ctx,
+		`SELECT id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings
+		 FROM pipeline_runs
+		 WHERE id = $1
+		 ORDER BY trade_date DESC, started_at DESC, id DESC
+		 LIMIT 1`,
+		id,
+	)
+
+	run, err := scanPipelineRun(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("postgres: get pipeline run %s: %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("postgres: get pipeline run: %w", err)
+	}
+
+	return run, nil
+}
+
 // Get retrieves a pipeline run by its composite key. It returns ErrNotFound
 // when no row matches.
 func (r *PipelineRunRepo) Get(ctx context.Context, id uuid.UUID, tradeDate time.Time) (*domain.PipelineRun, error) {

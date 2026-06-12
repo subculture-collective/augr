@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { useWebSocketClient } from '@/hooks/use-websocket-client';
 import * as auth from '@/lib/auth';
+import { WEBSOCKET_EVENT_TYPES } from '@/lib/api/websocket-events';
 
 class MockWebSocket {
   static instances: MockWebSocket[] = [];
@@ -133,5 +134,23 @@ describe('useWebSocketClient', () => {
 
     expect(MockWebSocket.instances).toHaveLength(1);
     expect(MockWebSocket.instances[0]?.url).toBe('ws://localhost:8080/ws');
+  });
+
+  it('pins the websocket event vocabulary', () => {
+    expect(WEBSOCKET_EVENT_TYPES).toEqual([
+      'pipeline_start',
+      'agent_decision',
+      'debate_round',
+      'signal',
+      'order_submitted',
+      'order_filled',
+      'position_update',
+      'circuit_breaker',
+      'error',
+      'pipeline_health',
+      'polymarket_whale_trade',
+      'polymarket_price_move',
+      'polymarket_account_tracked',
+    ]);
   });
 });

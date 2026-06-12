@@ -754,6 +754,9 @@ func TestCreateStrategyConfigValidation(t *testing.T) {
 					"llm_config": map[string]any{
 						"deep_think_model": "gpt-5.4",
 					},
+					"risk_config": map[string]any{
+						"use_kelly_sizing": true,
+					},
 				},
 			},
 			wantStatus: http.StatusCreated,
@@ -812,6 +815,9 @@ func TestCreateStrategyConfigValidation(t *testing.T) {
 				}
 				if got := *cfg.LLMConfig.DeepThinkModel; got != tt.wantModel {
 					t.Fatalf("deep_think_model = %q, want %q", got, tt.wantModel)
+				}
+				if cfg.RiskConfig == nil || cfg.RiskConfig.UseKellySizing == nil || !*cfg.RiskConfig.UseKellySizing {
+					t.Fatalf("risk_config.use_kelly_sizing = %#v, want true", cfg.RiskConfig)
 				}
 				return
 			}
@@ -1100,6 +1106,20 @@ func TestUpdateStrategyConfigValidation(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
+			name: "kelly opt-in config",
+			payload: map[string]any{
+				"name":        "Alpha Updated",
+				"ticker":      "AAPL",
+				"market_type": "stock",
+				"config": map[string]any{
+					"risk_config": map[string]any{
+						"use_kelly_sizing": true,
+					},
+				},
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
 			name: "unknown analyst role",
 			payload: map[string]any{
 				"name":        "Alpha Updated",
@@ -1315,6 +1335,22 @@ func TestGetRunIncludesPhaseTimings(t *testing.T) {
 	}
 	if runRepo.lastFilter != (repository.PipelineRunFilter{}) {
 		t.Fatalf("lastFilter = %+v, want empty filter", runRepo.lastFilter)
+	}
+}
+
+func TestGetRunNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv := newTestServer(t)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String(), nil)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
+	}
+	body := decodeJSON[ErrorResponse](t, rr)
+	if body.Code != ErrCodeNotFound {
+		t.Fatalf("code = %q, want %q", body.Code, ErrCodeNotFound)
 	}
 }
 
@@ -2224,6 +2260,15 @@ func (s *stubRunRepo) Get(_ context.Context, _ uuid.UUID, _ time.Time) (*domain.
 	return nil, fmt.Errorf("run: %w", repository.ErrNotFound)
 }
 
+func (s *stubRunRepo) GetByID(_ context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
+	for i := range s.runs {
+		if s.runs[i].ID == id {
+			return &s.runs[i], nil
+		}
+	}
+	return nil, fmt.Errorf("run: %w", repository.ErrNotFound)
+}
+
 func (s *stubRunRepo) List(_ context.Context, filter repository.PipelineRunFilter, _, _ int) ([]domain.PipelineRun, error) {
 	s.lastFilter = filter
 	return s.runs, nil
@@ -2754,6 +2799,20 @@ func TestCreateConversationEndpoint(t *testing.T) {
 	if conv.PipelineRunID != runID {
 		t.Fatalf("pipeline_run_id = %s, want %s", conv.PipelineRunID, runID)
 	}
+}
+
+func TestCreateConversationUnknownPipelineRunReturnsValidationError(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Conversations = newStubConversationRepo()
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/conversations", map[string]any{
+		"pipeline_run_id": uuid.New().String(),
+		"agent_role":      "bull_researcher",
+	})
+	assertValidationError(t, rr, "pipeline_run_id does not reference an existing run")
 }
 
 // ---------------------------------------------------------------------------

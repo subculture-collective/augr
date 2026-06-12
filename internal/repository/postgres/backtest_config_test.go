@@ -143,7 +143,7 @@ func TestBacktestConfigRepoIntegration_CRUD(t *testing.T) {
 	ensureBacktestConfigTable(t, ctx, pool)
 
 	repo := NewBacktestConfigRepo(pool)
-	strategyID := createTestPositionStrategy(t, ctx, pool)
+	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 
 	config := &domain.BacktestConfig{
 		StrategyID:   strategyID,

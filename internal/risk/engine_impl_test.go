@@ -85,6 +85,35 @@ func TestCheckPreTrade_CircuitBreakerTripped(t *testing.T) {
 	}
 }
 
+func TestCheckPreTrade_MarketKillSwitchActive(t *testing.T) {
+	t.Parallel()
+
+	engine := newTestEngine()
+	ctx := context.Background()
+	if err := engine.ActivateMarketKillSwitch(ctx, domain.MarketTypeCrypto, "crypto halt"); err != nil {
+		t.Fatalf("unexpected error activating market kill switch: %v", err)
+	}
+
+	approved, reason, err := engine.CheckPreTrade(ctx, &domain.Order{Ticker: "BTC", Quantity: 1, MarketType: domain.MarketTypeCrypto}, Portfolio{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if approved {
+		t.Fatal("expected rejected when market kill switch active")
+	}
+	if reason == "" {
+		t.Fatal("expected non-empty reason")
+	}
+
+	approved, reason, err = engine.CheckPreTrade(ctx, &domain.Order{Ticker: "AAPL", Quantity: 1, MarketType: domain.MarketTypeStock}, Portfolio{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !approved {
+		t.Fatalf("expected stock trade approved, got rejected: %s", reason)
+	}
+}
+
 func TestCheckPreTrade_InvalidOrder(t *testing.T) {
 	t.Parallel()
 
@@ -309,6 +338,30 @@ func TestCheckPositionLimits_ExceedsPolymarketExposure(t *testing.T) {
 	}
 	if reason == "" {
 		t.Fatal("expected non-empty reason")
+	}
+}
+
+func TestCheckPositionLimits_UsesCustomPolymarketLimit(t *testing.T) {
+	t.Parallel()
+
+	engine := newTestEngine().WithPolymarketLimits(PolymarketLimits{MaxSingleMarketExposurePct: 0.08})
+	portfolio := Portfolio{
+		TotalExposurePct:    0.10,
+		ConcurrentPositions: 1,
+		PositionExposureBySymbol: map[string]float64{
+			"POLY-ELECTION": 0.04,
+		},
+		MarketExposurePct: map[domain.MarketType]float64{
+			domain.MarketTypePolymarket: 0.07,
+		},
+	}
+
+	approved, reason, err := engine.CheckPositionLimits(context.Background(), "POLY-ELECTION", 0.01, portfolio)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !approved {
+		t.Fatalf("expected approved under custom polymarket cap, got rejected: %s", reason)
 	}
 }
 
@@ -538,6 +591,37 @@ func TestGetStatus_Warning(t *testing.T) {
 	status, err := engine.GetStatus(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if status.RiskStatus != domain.RiskStatusWarning {
+		t.Fatalf("expected warning status, got %q", status.RiskStatus)
+	}
+}
+
+func TestGetStatus_IncludesRestoredMarketKillSwitches(t *testing.T) {
+	t.Parallel()
+
+	engine := newTestEngine()
+	persister := &memoryRiskPersister{state: PersistedRiskState{
+		KillSwitch: KillSwitchStatus{Active: true, Reason: "persisted halt"},
+		MarketKillSwitches: map[domain.MarketType]KillSwitchStatus{
+			domain.MarketTypePolymarket: KillSwitchStatus{Active: true, Reason: "market persisted halt"},
+			domain.MarketTypeCrypto:     KillSwitchStatus{Active: false, Reason: "ignored"},
+		},
+	}}
+	engine.WithStatePersister(context.Background(), persister)
+
+	status, err := engine.GetStatus(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !status.KillSwitch.Active || status.KillSwitch.Reason != "persisted halt" {
+		t.Fatalf("unexpected kill switch status: %+v", status.KillSwitch)
+	}
+	if !status.MarketKillSwitches[domain.MarketTypePolymarket].Active {
+		t.Fatalf("expected polymarket kill switch restored: %+v", status.MarketKillSwitches)
+	}
+	if status.MarketKillSwitches[domain.MarketTypeCrypto].Active {
+		t.Fatalf("did not expect inactive market switch restored: %+v", status.MarketKillSwitches)
 	}
 	if status.RiskStatus != domain.RiskStatusWarning {
 		t.Fatalf("expected warning status, got %q", status.RiskStatus)
@@ -1171,4 +1255,19 @@ func TestKillSwitch_DeactivateAPIDoesNotAffectFileOrEnv(t *testing.T) {
 	if approved {
 		t.Fatal("expected trade rejected when file flag still active")
 	}
+}
+
+type memoryRiskPersister struct {
+	state PersistedRiskState
+	load  error
+	saved []PersistedRiskState
+}
+
+func (m *memoryRiskPersister) Load(context.Context) (PersistedRiskState, error) {
+	return m.state, m.load
+}
+
+func (m *memoryRiskPersister) Save(_ context.Context, state PersistedRiskState) error {
+	m.saved = append(m.saved, state)
+	return nil
 }

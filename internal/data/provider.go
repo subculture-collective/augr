@@ -13,7 +13,7 @@ var ErrNotImplemented = errors.New("data: not implemented")
 
 // DataProvider defines the abstraction for retrieving market data.
 // A provider may support a subset of methods; unsupported methods should
-// return a non-nil error so that ProviderChain can fall back to the next provider.
+// return ErrNotImplemented so chain fallback policies can fall through.
 type DataProvider interface {
 	// GetOHLCV returns candlestick bars for the given ticker and timeframe
 	// between from and to (inclusive).

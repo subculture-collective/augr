@@ -20,6 +20,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
@@ -530,6 +531,45 @@ func (s *stubDecisionRepo) CountByRun(_ context.Context, _ uuid.UUID, _ reposito
 	return len(s.decisions), nil
 }
 
+type stubPipelineRunRepo struct {
+	run          *domain.PipelineRun
+	err          error
+	getByID      bool
+	getCalled    bool
+	listCalled   bool
+	countCalled  bool
+	updateCalled bool
+}
+
+func (r *stubPipelineRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
+
+func (r *stubPipelineRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
+	r.getByID = true
+	return r.run, r.err
+}
+
+func (r *stubPipelineRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
+	r.getCalled = true
+	panic("unexpected Get call")
+}
+
+func (r *stubPipelineRunRepo) List(context.Context, repository.PipelineRunFilter, int, int) ([]domain.PipelineRun, error) {
+	r.listCalled = true
+	panic("unexpected List call")
+}
+
+func (r *stubPipelineRunRepo) Count(context.Context, repository.PipelineRunFilter) (int, error) {
+	r.countCalled = true
+	return 0, nil
+}
+
+func (r *stubPipelineRunRepo) UpdateStatus(context.Context, uuid.UUID, time.Time, repository.PipelineRunStatusUpdate) error {
+	r.updateCalled = true
+	return nil
+}
+
+var _ repository.PipelineRunRepository = (*stubPipelineRunRepo)(nil)
+
 func TestSmokeStrategyRunnerDispatchNotifications_RoutesSignalAndDecisionsToN8NAndDiscord(t *testing.T) {
 	t.Parallel()
 
@@ -592,6 +632,70 @@ func TestSmokeStrategyRunnerDispatchNotifications_RoutesSignalAndDecisionsToN8NA
 	}
 	if decisionRequests.Load() != 2 {
 		t.Fatalf("decision requests = %d, want 2", decisionRequests.Load())
+	}
+}
+
+func TestSmokeStrategyRunnerFindRunUsesGetByID(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	expected := &domain.PipelineRun{ID: runID}
+	repo := &stubPipelineRunRepo{run: expected}
+	runner := &smokeStrategyRunner{runRepo: repo}
+
+	got, err := runner.findRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("findRun() error = %v", err)
+	}
+	if got != expected {
+		t.Fatalf("findRun() = %+v, want %+v", got, expected)
+	}
+	if !repo.getByID {
+		t.Fatal("findRun() did not call GetByID")
+	}
+	if repo.getCalled || repo.listCalled {
+		t.Fatal("findRun() fell back to Get/List scanning")
+	}
+}
+
+func TestRealStrategyRunnerFindRunUsesGetByID(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	expected := &domain.PipelineRun{ID: runID}
+	repo := &stubPipelineRunRepo{run: expected}
+	runner := &realStrategyRunner{runRepo: repo}
+
+	got, err := runner.findRun(context.Background(), runID)
+	if err != nil {
+		t.Fatalf("findRun() error = %v", err)
+	}
+	if got != expected {
+		t.Fatalf("findRun() = %+v, want %+v", got, expected)
+	}
+	if !repo.getByID {
+		t.Fatal("findRun() did not call GetByID")
+	}
+	if repo.getCalled || repo.listCalled {
+		t.Fatal("findRun() fell back to Get/List scanning")
+	}
+}
+
+func TestSmokeStrategyRunnerFindRunNotFoundWrapsErrNotFound(t *testing.T) {
+	t.Parallel()
+
+	runID := uuid.New()
+	runner := &smokeStrategyRunner{runRepo: &stubPipelineRunRepo{err: repository.ErrNotFound}}
+
+	got, err := runner.findRun(context.Background(), runID)
+	if got != nil {
+		t.Fatalf("findRun() run = %+v, want nil", got)
+	}
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("findRun() error = %v, want ErrNotFound", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), runID.String()) {
+		t.Fatalf("findRun() error = %v, want run id in error", err)
 	}
 }
 
@@ -660,6 +764,15 @@ func (stubPositionRepo) Count(context.Context, repository.PositionFilter) (int, 
 
 func (stubPositionRepo) CountOpen(context.Context, repository.PositionFilter) (int, error) {
 	return 0, nil
+}
+
+type historyPositionRepo struct {
+	stubPositionRepo
+	positions []domain.Position
+}
+
+func (r historyPositionRepo) GetByStrategy(context.Context, uuid.UUID, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return r.positions, nil
 }
 
 type metricPositionRepo struct{ count int }
@@ -842,8 +955,10 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 	}
 
 	_, err := runner.newOrderManager(
+		context.Background(),
 		domain.Strategy{ID: uuid.New(), Ticker: "AAPL", MarketType: domain.MarketTypeStock, IsPaper: true},
 		agent.ResolvedConfig{RiskConfig: agent.ResolvedRiskConfig{PositionSizePct: 10}},
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("newOrderManager() error = %v", err)
@@ -858,6 +973,62 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 	}
 	if status.PositionLimits.CurrentTotalExposurePct == nil || *status.PositionLimits.CurrentTotalExposurePct != 0 {
 		t.Fatalf("CurrentTotalExposurePct = %+v, want pointer to 0", status.PositionLimits.CurrentTotalExposurePct)
+	}
+}
+
+func TestSizingConfigForStrategy_UsesMarketDefaults(t *testing.T) {
+	t.Parallel()
+
+	resolved := agent.ResolvedConfig{RiskConfig: agent.ResolvedRiskConfig{PositionSizePct: 8, StopLossMultiplier: 1.75}}
+
+	for _, tc := range []struct {
+		name   string
+		market domain.MarketType
+		want   execution.SizingConfig
+	}{
+		{name: "stock", market: domain.MarketTypeStock, want: execution.SizingConfig{Method: execution.PositionSizingMethodATR, RiskPct: 0.08, ATRMultiplier: 1.75}},
+		{name: "crypto", market: domain.MarketTypeCrypto, want: execution.SizingConfig{Method: execution.PositionSizingMethodATR, RiskPct: 0.08, ATRMultiplier: 1.75}},
+		{name: "polymarket", market: domain.MarketTypePolymarket, want: execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: 0.02}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: uuid.New(), MarketType: tc.market}, nil, resolved, stubPositionRepo{}, slogDiscardLogger())
+			if got != tc.want {
+				t.Fatalf("sizingConfigForStrategy() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSizingConfigForStrategy_UsesHalfKellyWhenExplicitlyOptedInAndEligible(t *testing.T) {
+	t.Parallel()
+
+	strategyID := uuid.New()
+	positions := make([]domain.Position, 0, 100)
+	for i := 0; i < 60; i++ {
+		closedAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+		positions = append(positions, domain.Position{ID: uuid.New(), Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: 2, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
+	}
+	for i := 0; i < 40; i++ {
+		closedAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+		positions = append(positions, domain.Position{ID: uuid.New(), Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: -1, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
+	}
+
+	runner := &realStrategyRunner{
+		positionRepo: historyPositionRepo{stubPositionRepo: stubPositionRepo{}, positions: positions},
+		logger:       slogDiscardLogger(),
+	}
+	useKelly := true
+	strategyConfig := &agent.StrategyConfig{RiskConfig: &agent.StrategyRiskConfig{UseKellySizing: &useKelly}}
+	resolved := agent.ResolvedConfig{RiskConfig: agent.ResolvedRiskConfig{PositionSizePct: 8, StopLossMultiplier: 1.75}}
+
+	got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock}, strategyConfig, resolved, runner.positionRepo, slogDiscardLogger())
+	if got.Method != execution.PositionSizingMethodKelly || !got.HalfKelly {
+		t.Fatalf("sizingConfigForStrategy() = %+v, want half-Kelly", got)
+	}
+	if got.WinRate != 0.6 || got.WinLossRatio != 2 {
+		t.Fatalf("Kelly stats = %+v, want win rate 0.6 and win/loss ratio 2", got)
 	}
 }
 
@@ -1038,176 +1209,6 @@ func TestBuildRunnerDefinition_AppliesPromptOverridesBeyondAnalysis(t *testing.T
 		t.Fatalf("JudgeRisk() error = %v", err)
 	}
 	assertPromptContains("risk_manager", riskOut.LLMResponse.PromptText, "custom risk manager prompt")
-}
-
-func TestNewLLMProviderForSelection_SupportsOpenRouterAndXAI(t *testing.T) {
-	t.Parallel()
-
-	baseCfg := config.LLMConfig{Providers: config.LLMProviderConfigs{OpenRouter: config.LLMProviderConfig{APIKey: "openrouter-key", BaseURL: "https://openrouter.example/v1", Model: "openai/gpt-4.1-mini"}, XAI: config.LLMProviderConfig{APIKey: "xai-key", BaseURL: "https://api.x.ai/v1", Model: "grok-3-mini"}}}
-
-	if provider, err := newLLMProviderForSelection(baseCfg, "openrouter", "", nil); err != nil || provider == nil {
-		t.Fatalf("newLLMProviderForSelection(openrouter) = (%v, %v), want non-nil provider", provider, err)
-	}
-	if provider, err := newLLMProviderForSelection(baseCfg, "xai", "", nil); err != nil || provider == nil {
-		t.Fatalf("newLLMProviderForSelection(xai) = (%v, %v), want non-nil provider", provider, err)
-	}
-}
-
-func TestLLMCacheEnabled(t *testing.T) {
-	t.Setenv("LLM_CACHE_ENABLED", "")
-	if !llmCacheEnabled() {
-		t.Fatal("llmCacheEnabled() = false, want true when unset")
-	}
-
-	t.Setenv("LLM_CACHE_ENABLED", "true")
-	if !llmCacheEnabled() {
-		t.Fatal("llmCacheEnabled() = false, want true when env=true")
-	}
-
-	t.Setenv("LLM_CACHE_ENABLED", "false")
-	if llmCacheEnabled() {
-		t.Fatal("llmCacheEnabled() = true, want false when env=false")
-	}
-}
-
-func TestBuildProviderChain_PrimaryOnly(t *testing.T) {
-	cfg := config.LLMConfig{
-		DefaultProvider:     "openai",
-		ThrottleConcurrency: 2,
-		RetryMaxAttempts:    1, // no retry layer (needs >1)
-		CallTimeout:         5 * time.Minute,
-		Providers: config.LLMProviderConfigs{
-			OpenAI: config.LLMProviderConfig{
-				APIKey: "test-key",
-				Model:  "gpt-5-mini",
-			},
-		},
-	}
-
-	// Cache enabled by default (env unset).
-	t.Setenv("LLM_CACHE_ENABLED", "true")
-
-	provider := buildProviderChain(cfg, metrics.New(), slogDiscardLogger(), buildLLMBudget(cfg))
-	if provider == nil {
-		t.Fatal("buildProviderChain() = nil, want non-nil provider")
-	}
-}
-
-func TestBuildProviderChain_WithFallback(t *testing.T) {
-	cfg := config.LLMConfig{
-		DefaultProvider:     "openai",
-		FallbackProvider:    "anthropic",
-		FallbackModel:       "claude-sonnet-4-20250514",
-		ThrottleConcurrency: 4,
-		RetryMaxAttempts:    2,
-		CallTimeout:         5 * time.Minute,
-		Providers: config.LLMProviderConfigs{
-			OpenAI: config.LLMProviderConfig{
-				APIKey: "test-openai-key",
-				Model:  "gpt-5-mini",
-			},
-			Anthropic: config.LLMProviderConfig{
-				APIKey: "test-anthropic-key",
-				Model:  "claude-sonnet-4-20250514",
-			},
-		},
-	}
-
-	t.Setenv("LLM_CACHE_ENABLED", "false")
-
-	provider := buildProviderChain(cfg, metrics.New(), slogDiscardLogger(), buildLLMBudget(cfg))
-	if provider == nil {
-		t.Fatal("buildProviderChain() = nil, want non-nil provider with fallback")
-	}
-}
-
-func TestBuildProviderChain_NilWhenNoProvider(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.LLMConfig{} // no provider configured
-	provider := buildProviderChain(cfg, metrics.New(), slogDiscardLogger(), buildLLMBudget(cfg))
-	if provider != nil {
-		t.Fatalf("buildProviderChain() = %v, want nil when no provider configured", provider)
-	}
-}
-
-func TestBuildProviderChain_BudgetExhausted(t *testing.T) {
-	t.Parallel()
-
-	// Build a chain with captureProvider + budget of 1 request.
-	budget := llm.NewBudget(1, 0)
-	chain := llm.NewProviderChain(captureProvider{}, slogDiscardLogger(), llm.WithBudget(budget))
-
-	// First call succeeds.
-	resp, err := chain.Complete(context.Background(), llm.CompletionRequest{
-		Model:    "test",
-		Messages: []llm.Message{{Role: "user", Content: "first"}},
-	})
-	if err != nil {
-		t.Fatalf("first Complete() error = %v, want nil", err)
-	}
-	if resp == nil {
-		t.Fatal("first Complete() response = nil, want non-nil")
-	}
-
-	// Record usage so budget is consumed.
-	budget.Record(10, 20)
-
-	// Second call should be rejected by budget guard.
-	_, err = chain.Complete(context.Background(), llm.CompletionRequest{
-		Model:    "test",
-		Messages: []llm.Message{{Role: "user", Content: "second"}},
-	})
-	if err == nil {
-		t.Fatal("second Complete() error = nil, want ErrBudgetExhausted")
-	}
-	if !errors.Is(err, llm.ErrBudgetExhausted) {
-		t.Fatalf("second Complete() error = %v, want ErrBudgetExhausted", err)
-	}
-}
-
-func TestBuildProviderChain_InvalidFallbackSkipped(t *testing.T) {
-	cfg := config.LLMConfig{
-		DefaultProvider:     "openai",
-		FallbackProvider:    "nonexistent-provider",
-		ThrottleConcurrency: 1,
-		Providers: config.LLMProviderConfigs{
-			OpenAI: config.LLMProviderConfig{
-				APIKey: "test-key",
-				Model:  "gpt-5-mini",
-			},
-		},
-	}
-
-	t.Setenv("LLM_CACHE_ENABLED", "false")
-
-	// Should not panic; invalid fallback is logged and skipped.
-	provider := buildProviderChain(cfg, metrics.New(), slogDiscardLogger(), buildLLMBudget(cfg))
-	if provider == nil {
-		t.Fatal("buildProviderChain() = nil, want non-nil provider (fallback skipped)")
-	}
-}
-
-func TestConfiguredPrimaryRetryProviderLabel(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{name: "trimmed provider", input: " openai ", expected: "configured_primary:openai"},
-		{name: "empty provider", input: "   ", expected: "configured_primary:unknown"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			if got := configuredPrimaryRetryProviderLabel(tt.input); got != tt.expected {
-				t.Fatalf("configuredPrimaryRetryProviderLabel(%q) = %q, want %q", tt.input, got, tt.expected)
-			}
-		})
-	}
 }
 
 func slogDiscardLogger() *slog.Logger {

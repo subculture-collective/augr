@@ -337,6 +337,12 @@ func (m *OrderManager) ProcessSignal(
 	if err != nil {
 		return fmt.Errorf("order_manager: build risk portfolio: %w", err)
 	}
+	if marketType != "" {
+		if portfolio.MarketExposurePct == nil {
+			portfolio.MarketExposurePct = make(map[domain.MarketType]float64)
+		}
+		portfolio.MarketExposurePct[marketType] += additionalExposurePct
+	}
 	approved, reason, err := m.riskEngine.CheckPositionLimits(ctx, plan.Ticker, additionalExposurePct, portfolio)
 	if err != nil {
 		return fmt.Errorf("order_manager: check position limits: %w", err)

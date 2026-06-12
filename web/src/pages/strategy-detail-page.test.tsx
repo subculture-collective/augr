@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { strategyConfigBoundary } from '@/lib/strategy-config/boundary'
 import { StrategyDetailPage } from '@/pages/strategy-detail-page'
 
 const strategyId = '00000000-0000-0000-0000-000000000001'
@@ -206,6 +207,8 @@ describe('StrategyDetailPage', () => {
   })
 
   it('renders the human summary and rules table when rules engine config is present', async () => {
+    const extractRulesEngineSpy = vi.spyOn(strategyConfigBoundary, 'extractRulesEngine')
+
     stubStrategyFetch({
       strategy: createStrategy({
         description: 'Trades trend continuation with risk controls',
@@ -232,6 +235,17 @@ describe('StrategyDetailPage', () => {
             take_profit: { method: 'rr', ratio: 2 },
             filters: { min_volume: 1000000, min_atr: 2.5 },
           },
+          risk_config: {
+            position_size_pct: 20,
+            use_kelly_sizing: true,
+            stop_loss_multiplier: 1.5,
+            take_profit_multiplier: 2.5,
+            min_confidence: 0.7,
+          },
+          analyst_selection: ['market_analyst', 'news_analyst'],
+          prompt_overrides: {
+            trader: 'Stay concise',
+          },
         },
       }),
     })
@@ -244,6 +258,7 @@ describe('StrategyDetailPage', () => {
     expect(summary).toHaveTextContent('stock')
     expect(summary).toHaveTextContent('paper')
     expect(summary).toHaveTextContent('skip-next clear')
+    expect(await screen.findByTestId('strategy-config-summary')).toHaveTextContent('opted in')
     const rules = await screen.findByTestId('strategy-rules-table')
     expect(rules).toHaveTextContent('Momentum Rules')
     expect(rules).toHaveTextContent('Entry rules: 1; exit rules: 1')
@@ -251,6 +266,39 @@ describe('StrategyDetailPage', () => {
     expect(rules).toHaveTextContent('Field')
     expect(rules).toHaveTextContent('rsi')
     expect(rules).toHaveTextContent('support_level')
+    expect(extractRulesEngineSpy).not.toHaveBeenCalled()
+  })
+
+  it('renders rules engine output from the boundary view model', async () => {
+    const baseView = strategyConfigBoundary.view({}, '0 9 * * 1-5')
+    const viewSpy = vi.spyOn(strategyConfigBoundary, 'view').mockReturnValue({
+      ...baseView,
+      rulesEngine: {
+        name: 'Boundary Rules',
+        description: 'Rendered without raw shape knowledge',
+        summary: 'Entry rules: 2; exit rules: 1.',
+        rows: [
+          { group: 'Entry', field: 'rsi', operator: 'lt', value: '30', explanation: 'Oversold entry' },
+          { group: 'Entry', field: 'trend', operator: 'eq', value: 'up', explanation: 'Trend follow' },
+          { group: 'Exit', field: 'price', operator: 'lt', value: 'support_level', explanation: 'Breakdown exit' },
+        ],
+        riskHints: ['Mocked risk hint'],
+        details: [{ label: 'Position sizing', text: 'fraction • 5% • ATR × 2.00' }],
+      },
+    })
+
+    stubStrategyFetch({ strategy: createStrategy({ config: {} }) })
+
+    renderPage()
+
+    expect(await screen.findByText('Boundary Rules')).toBeInTheDocument()
+    expect(screen.getByTestId('strategy-human-summary')).toHaveTextContent('Mocked risk hint')
+    const rules = await screen.findByTestId('strategy-rules-table')
+    expect(rules).toHaveTextContent('Rendered without raw shape knowledge')
+    expect(rules).toHaveTextContent('Entry rules: 2; exit rules: 1.')
+    expect(rules).toHaveTextContent('trend')
+    expect(rules).toHaveTextContent('fraction • 5% • ATR × 2.00')
+    expect(viewSpy).toHaveBeenCalled()
   })
 
   it('renders empty backtests and orders sections with truthful copy', async () => {

@@ -94,6 +94,10 @@ func (r *captureUpdateRunRepo) Get(_ context.Context, _ uuid.UUID, _ time.Time) 
 	return nil, repository.ErrNotFound
 }
 
+func (r *captureUpdateRunRepo) GetByID(_ context.Context, _ uuid.UUID) (*domain.PipelineRun, error) {
+	return nil, repository.ErrNotFound
+}
+
 func (r *captureUpdateRunRepo) List(_ context.Context, _ repository.PipelineRunFilter, _, _ int) ([]domain.PipelineRun, error) {
 	return nil, nil
 }

@@ -2,6 +2,7 @@ package risk
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
@@ -26,4 +27,61 @@ type StatePersister interface {
 type PersistedRiskState struct {
 	KillSwitch         KillSwitchStatus                       `json:"kill_switch"`
 	MarketKillSwitches map[domain.MarketType]KillSwitchStatus `json:"market_kill_switches"`
+}
+
+// WithStatePersister attaches a StatePersister and immediately loads any
+// previously persisted kill-switch state. An operator-activated kill-switch
+// will be restored so it survives process restarts. Returns the receiver for
+// chaining.
+func (e *RiskEngineImpl) WithStatePersister(ctx context.Context, p StatePersister) *RiskEngineImpl {
+	e.persister = p
+	state, err := p.Load(ctx)
+	if err != nil {
+		e.logger.Warn("risk: failed to load persisted state, starting clean",
+			slog.String("error", err.Error()))
+		return e
+	}
+
+	e.state.mu.Lock()
+	defer e.state.mu.Unlock()
+	if state.KillSwitch.Active {
+		e.state.ks = state.KillSwitch
+		e.logger.Warn("risk: restored active kill switch from persistent state",
+			slog.String("reason", state.KillSwitch.Reason))
+	}
+	for mt, mks := range state.MarketKillSwitches {
+		if mks.Active {
+			e.state.mks[mt] = mks
+			e.logger.Warn("risk: restored active market kill switch from persistent state",
+				slog.String("market_type", string(mt)),
+				slog.String("reason", mks.Reason))
+		}
+	}
+	return e
+}
+
+// buildPersistedStateLocked snapshots the current API-toggle kill-switch state.
+// Must be called with e.state.mu held.
+func (e *RiskEngineImpl) buildPersistedStateLocked() PersistedRiskState {
+	mks := make(map[domain.MarketType]KillSwitchStatus, len(e.state.mks))
+	for k, v := range e.state.mks {
+		mks[k] = v
+	}
+	return PersistedRiskState{
+		KillSwitch:         e.state.ks,
+		MarketKillSwitches: mks,
+	}
+}
+
+// saveState writes the risk state to the persister if one is configured.
+// Errors are logged but not returned — persistence is best-effort and must
+// not block the safety path.
+func (e *RiskEngineImpl) saveState(ctx context.Context, state PersistedRiskState) {
+	if e.persister == nil {
+		return
+	}
+	if err := e.persister.Save(ctx, state); err != nil {
+		e.logger.Error("risk: failed to persist kill switch state",
+			slog.String("error", err.Error()))
+	}
 }

@@ -21,6 +21,9 @@ type staleRunRepoStub struct {
 }
 
 func (s *staleRunRepoStub) Create(context.Context, *domain.PipelineRun) error { return nil }
+func (s *staleRunRepoStub) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
+	return nil, repository.ErrNotFound
+}
 func (s *staleRunRepoStub) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
 	return nil, repository.ErrNotFound
 }

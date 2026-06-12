@@ -1,3 +1,7 @@
+import { WEBSOCKET_EVENT_TYPES } from './websocket-events';
+
+export { WEBSOCKET_EVENT_TYPES };
+
 export type UUID = string;
 export type ISODateString = string;
 
@@ -60,12 +64,15 @@ export interface StrategyConfigWire {
   };
   risk_config?: {
     position_size_pct?: number;
+    use_kelly_sizing?: boolean;
     stop_loss_multiplier?: number;
     take_profit_multiplier?: number;
     min_confidence?: number;
   };
   analyst_selection?: AgentRole[];
   prompt_overrides?: Record<string, string>;
+  rules_engine?: unknown;
+  options_rules?: unknown;
 }
 export type StrategyStatus = 'active' | 'paused' | 'inactive';
 export type PipelineStatus = 'running' | 'completed' | 'failed' | 'cancelled';
@@ -96,20 +103,7 @@ export type Phase = 'analysis' | 'research_debate' | 'trading' | 'risk_debate';
 export type RiskStatus = 'normal' | 'warning' | 'breached';
 export type CircuitBreakerPhase = 'open' | 'tripped' | 'cooldown';
 export type KillSwitchMechanism = 'api_toggle' | 'file_flag' | 'env_var' | 'unknown';
-export type WebSocketEventType =
-  | 'pipeline_start'
-  | 'agent_decision'
-  | 'debate_round'
-  | 'signal'
-  | 'order_submitted'
-  | 'order_filled'
-  | 'position_update'
-  | 'circuit_breaker'
-  | 'error'
-  | 'pipeline_health'
-  | 'polymarket_whale_trade'
-  | 'polymarket_price_move'
-  | 'polymarket_account_tracked';
+export type WebSocketEventType = (typeof WEBSOCKET_EVENT_TYPES)[number];
 
 export interface ErrorResponse {
   error: string;

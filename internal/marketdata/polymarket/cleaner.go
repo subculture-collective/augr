@@ -96,6 +96,11 @@ func (c *Cleaner) run() {
 }
 
 func (c *Cleaner) handleTick(tk Tick) {
+	select {
+	case <-c.ctx.Done():
+		return
+	default:
+	}
 	if tk.Slug == "" {
 		return
 	}
@@ -159,6 +164,8 @@ func (c *Cleaner) handleTick(tk Tick) {
 	c.mu.Unlock()
 
 	select {
+	case <-c.ctx.Done():
+		return
 	case c.out <- tk:
 	default:
 		c.incDrop("downstream_full")

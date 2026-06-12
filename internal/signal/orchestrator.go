@@ -29,10 +29,11 @@ type OrchestratorDeps struct {
 }
 
 // Orchestrator owns the full signal intelligence lifecycle:
-// EventStore, WatchIndex, SignalHub, and TriggerHandler.
+// EventStore, WatchIndex, Lifecycle, SignalHub, and TriggerHandler.
 type Orchestrator struct {
 	store      *EventStore
 	watchIndex *WatchIndex
+	lifecycle  *Lifecycle
 	hub        *SignalHub
 	handler    *TriggerHandler
 	cancel     context.CancelFunc
@@ -54,14 +55,16 @@ func NewOrchestrator(cfg OrchestratorConfig, deps OrchestratorDeps) *Orchestrato
 	store := NewEventStore(storeSize)
 	watchIndex := NewWatchIndex()
 	triggerCh := make(chan TriggerEvent, trigSize)
+	lifecycle := NewLifecycle(watchIndex, deps.StrategyProvider, cfg.LLMEvaluator, triggerCh, store, deps.Logger)
 
-	hub := NewSignalHub(cfg.Sources, cfg.LLMEvaluator, watchIndex, deps.StrategyProvider, triggerCh, store, deps.Logger)
+	hub := NewSignalHub(cfg.Sources, lifecycle, deps.Logger)
 
 	handler := NewTriggerHandler(triggerCh, deps.StrategyLoader, deps.ThesisLoader, deps.Runner, store, deps.Logger)
 
 	return &Orchestrator{
 		store:      store,
 		watchIndex: watchIndex,
+		lifecycle:  lifecycle,
 		hub:        hub,
 		handler:    handler,
 		logger:     deps.Logger,

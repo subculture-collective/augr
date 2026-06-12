@@ -15,6 +15,7 @@ import type {
 } from '@/lib/api/types';
 import {
   defaultAnalysts,
+  formatAgentRoleLabel,
   strategyConfigBoundary,
   type StrategyConfigForm,
 } from '@/lib/strategy-config/boundary';
@@ -48,11 +49,10 @@ export function StrategyConfigEditor({
   const [description, setDescription] = useState(strategy.description ?? '');
   const [ticker, setTicker] = useState(strategy.ticker);
   const [marketType, setMarketType] = useState<MarketType>(strategy.market_type);
-  const [scheduleCron, setScheduleCron] = useState(strategy.schedule_cron ?? '');
   const [isPaper, setIsPaper] = useState(strategy.is_paper);
   const [isActive, setIsActive] = useState(resolveStrategyStatus(strategy) === 'active');
   const [configForm, setConfigForm] = useState<StrategyConfigForm>(() =>
-    strategyConfigBoundary.load(strategy.config),
+    strategyConfigBoundary.load(strategy.config, strategy.schedule_cron),
   );
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -62,10 +62,9 @@ export function StrategyConfigEditor({
     setDescription(strategy.description ?? '');
     setTicker(strategy.ticker);
     setMarketType(strategy.market_type);
-    setScheduleCron(strategy.schedule_cron ?? '');
     setIsPaper(strategy.is_paper);
     setIsActive(resolveStrategyStatus(strategy) === 'active');
-    setConfigForm(strategyConfigBoundary.load(strategy.config));
+    setConfigForm(strategyConfigBoundary.load(strategy.config, strategy.schedule_cron));
     setFieldErrors({});
     setShowAdvanced(false);
   }, [strategy]);
@@ -103,7 +102,7 @@ export function StrategyConfigEditor({
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
 
-    const result = strategyConfigBoundary.submit(configForm);
+    const result = strategyConfigBoundary.submit(configForm, strategy.config);
     if (!result.ok) {
       setFieldErrors(result.fieldErrors);
       return;
@@ -123,7 +122,7 @@ export function StrategyConfigEditor({
       description: description || undefined,
       ticker: ticker.toUpperCase(),
       market_type: marketType,
-      schedule_cron: scheduleCron || undefined,
+      schedule_cron: result.scheduleCron,
       config: result.config,
       status: nextStatus,
       is_paper: isPaper,
@@ -187,15 +186,6 @@ export function StrategyConfigEditor({
                 ))}
               </select>
             </div>
-            <div className="space-y-2 rounded-lg border border-border bg-background p-4">
-              <Label htmlFor="edit-schedule">Schedule (cron)</Label>
-              <Input
-                id="edit-schedule"
-                value={scheduleCron}
-                onChange={(e) => setScheduleCron(e.target.value)}
-                placeholder="0 9 * * 1-5"
-              />
-            </div>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
@@ -217,6 +207,16 @@ export function StrategyConfigEditor({
               />
               Active
             </label>
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-border bg-background p-4">
+            <Label htmlFor="edit-schedule">Schedule (cron)</Label>
+            <Input
+              id="edit-schedule"
+              value={configForm.scheduleCron}
+              onChange={(e) => setConfigForm((prev) => ({ ...prev, scheduleCron: e.target.value }))}
+              placeholder="0 9 * * 1-5"
+            />
           </div>
 
           <div className="space-y-4 rounded-lg border border-border bg-background p-4">
@@ -354,6 +354,15 @@ export function StrategyConfigEditor({
                 />
               </div>
             </div>
+            <label className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-2 text-sm">
+              <input
+                type="checkbox"
+                checked={configForm.risk.useKellySizing}
+                onChange={(e) => setRisk({ useKellySizing: e.target.checked })}
+                className="rounded border-input"
+              />
+              Kelly sizing opt-in
+            </label>
           </div>
 
           <div className="space-y-4 rounded-lg border border-border bg-background p-4">
@@ -372,7 +381,7 @@ export function StrategyConfigEditor({
                     onChange={(e) => toggleAnalyst(role, e.target.checked)}
                     className="rounded border-input"
                   />
-                  {role.replace(/_/g, ' ')}
+                  {formatAgentRoleLabel(role)}
                 </label>
               ))}
             </div>

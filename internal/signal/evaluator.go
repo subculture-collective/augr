@@ -45,6 +45,11 @@ type Evaluator struct {
 	fallbackMode string            // "drop" (default) or "legacy"
 }
 
+// SignalEvaluator is the adapter used by the signal lifecycle.
+type SignalEvaluator interface {
+	Evaluate(context.Context, RawSignalEvent, []StrategyContext) (*EvaluatedSignal, error)
+}
+
 // NewEvaluator creates an Evaluator backed by the given LLM provider and model.
 func NewEvaluator(provider llm.Provider, model string, logger *slog.Logger) *Evaluator {
 	if logger == nil {
