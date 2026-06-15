@@ -261,6 +261,7 @@ func (r *mockOrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter re
 type mockPositionRepo struct {
 	mu        sync.Mutex
 	positions []*domain.Position
+	updates   []*domain.Position
 
 	createFn        func(ctx context.Context, position *domain.Position) error
 	getFn           func(ctx context.Context, id uuid.UUID) (*domain.Position, error)
@@ -302,9 +303,15 @@ func (r *mockPositionRepo) List(ctx context.Context, filter repository.PositionF
 }
 
 func (r *mockPositionRepo) Update(ctx context.Context, position *domain.Position) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if r.updateFn != nil {
 		return r.updateFn(ctx, position)
 	}
+
+	cp := *position
+	r.updates = append(r.updates, &cp)
 
 	return nil
 }
@@ -649,6 +656,357 @@ func TestProcessSignal_HappyPath(t *testing.T) {
 	}
 	if *trade.PositionID != position.ID {
 		t.Errorf("expected trade position_id %s, got %s", position.ID, *trade.PositionID)
+	}
+}
+
+func TestProcessSignal_PolymarketPositionTickerIncludesPredictionSide(t *testing.T) {
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	mgr := newTestOrderManager(
+		&mockBroker{},
+		&mockRiskEngine{},
+		orderRepo,
+		positionRepo,
+		tradeRepo,
+		&mockAuditLogRepo{},
+	)
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypePolymarket
+	plan.Ticker = "will-example-happen"
+	plan.EntryPrice = 0.43
+	plan.Side = "NO"
+
+	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+	if len(positionRepo.positions) != 1 {
+		t.Fatalf("expected 1 position created, got %d", len(positionRepo.positions))
+	}
+	if got := positionRepo.positions[0].Ticker; got != "will-example-happen:NO" {
+		t.Fatalf("position ticker = %q, want side-qualified ticker", got)
+	}
+	if len(orderRepo.orders) != 1 || orderRepo.orders[0].Ticker != "will-example-happen" || orderRepo.orders[0].PredictionSide != "NO" {
+		t.Fatalf("unexpected order identity: %+v", orderRepo.orders)
+	}
+}
+
+func TestProcessSignal_PolymarketBuyUsesUSDCCapForQuantity(t *testing.T) {
+	broker := &mockBroker{
+		getAccountBalanceFn: func(context.Context) (execution.Balance, error) {
+			return execution.Balance{Currency: "USD", Cash: 100000, BuyingPower: 100000, Equity: 100000}, nil
+		},
+	}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypePolymarket
+	plan.Ticker = "will-example-happen"
+	plan.EntryPrice = 0.25
+	plan.Side = "YES"
+
+	mgr := execution.NewOrderManager(
+		broker,
+		"polymarket",
+		&mockRiskEngine{},
+		positionRepo,
+		orderRepo,
+		tradeRepo,
+		&mockAuditLogRepo{},
+		nil,
+		execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: 0.02, MaxPositionUSDC: 500},
+		slog.Default(),
+	)
+
+	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("expected 1 order created, got %d", len(orderRepo.orders))
+	}
+	if got, want := orderRepo.orders[0].Quantity, 2000.0; math.Abs(got-want) > 1e-9 {
+		t.Fatalf("order quantity = %v, want %v", got, want)
+	}
+}
+
+func TestProcessSignal_PolymarketExitClosesSideQualifiedPosition(t *testing.T) {
+	strategyID := uuid.New()
+	positionID := uuid.New()
+	broker := &mockBroker{
+		getAccountBalanceFn: func(context.Context) (execution.Balance, error) {
+			return execution.Balance{Currency: "USD", Cash: 250, BuyingPower: 250, Equity: 250}, nil
+		},
+	}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{
+		getByStrategyFn: func(ctx context.Context, gotStrategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+			if gotStrategyID != strategyID {
+				t.Fatalf("strategyID = %s, want %s", gotStrategyID, strategyID)
+			}
+			if filter.Ticker != "will-example-happen:YES" || filter.Side != domain.PositionSideLong {
+				t.Fatalf("filter = %+v, want will-example-happen:YES long", filter)
+			}
+			return []domain.Position{{
+				ID:         positionID,
+				StrategyID: &strategyID,
+				Ticker:     "will-example-happen:YES",
+				Side:       domain.PositionSideLong,
+				Quantity:   10,
+				AvgEntry:   0.30,
+				OpenedAt:   time.Now(),
+			}}, nil
+		},
+	}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, auditRepo)
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypePolymarket
+	plan.Ticker = "will-example-happen"
+	plan.Side = "YES"
+	plan.EntryPrice = 0.50
+	plan.Action = domain.PipelineSignalSell
+
+	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("expected 1 order created, got %d", len(orderRepo.orders))
+	}
+	if orderRepo.orders[0].Side != domain.OrderSideSell || orderRepo.orders[0].PredictionSide != "YES" {
+		t.Fatalf("unexpected order identity: %+v", orderRepo.orders[0])
+	}
+	if len(positionRepo.positions) != 0 {
+		t.Fatalf("expected no new position creation, got %d", len(positionRepo.positions))
+	}
+	if len(positionRepo.updates) != 1 {
+		t.Fatalf("expected 1 position update, got %d", len(positionRepo.updates))
+	}
+	updated := positionRepo.updates[0]
+	if updated.Ticker != "will-example-happen:YES" || updated.Quantity != 0 {
+		t.Fatalf("updated position = %+v, want closed YES position", updated)
+	}
+	if updated.ClosedAt == nil {
+		t.Fatal("expected ClosedAt to be set")
+	}
+	if math.Abs(updated.RealizedPnL-2.0) > 1e-9 {
+		t.Fatalf("RealizedPnL = %v, want 2.0", updated.RealizedPnL)
+	}
+	if len(tradeRepo.trades) != 1 || tradeRepo.trades[0].PositionID == nil || *tradeRepo.trades[0].PositionID != positionID {
+		t.Fatalf("unexpected trade position linkage: %+v", tradeRepo.trades)
+	}
+}
+
+func TestProcessSignal_PolymarketExitQuantityCappedToOwnedPosition(t *testing.T) {
+	strategyID := uuid.New()
+	positionID := uuid.New()
+	broker := &mockBroker{
+		getAccountBalanceFn: func(context.Context) (execution.Balance, error) {
+			return execution.Balance{Currency: "USD", Cash: 100000, BuyingPower: 100000, Equity: 100000}, nil
+		},
+	}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{
+		getByStrategyFn: func(ctx context.Context, gotStrategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+			if gotStrategyID != strategyID {
+				t.Fatalf("strategyID = %s, want %s", gotStrategyID, strategyID)
+			}
+			if filter.Ticker != "will-example-happen:YES" || filter.Side != domain.PositionSideLong {
+				t.Fatalf("filter = %+v, want will-example-happen:YES long", filter)
+			}
+			return []domain.Position{{
+				ID:         positionID,
+				StrategyID: &strategyID,
+				Ticker:     "will-example-happen:YES",
+				Side:       domain.PositionSideLong,
+				Quantity:   3,
+				AvgEntry:   0.30,
+				OpenedAt:   time.Now(),
+			}}, nil
+		},
+	}
+	tradeRepo := &mockTradeRepo{}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, &mockAuditLogRepo{})
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypePolymarket
+	plan.Ticker = "will-example-happen"
+	plan.Side = "YES"
+	plan.EntryPrice = 0.50
+	plan.Action = domain.PipelineSignalSell
+
+	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("expected 1 order created, got %d", len(orderRepo.orders))
+	}
+	if got := orderRepo.orders[0].Quantity; got != 3 {
+		t.Fatalf("exit order quantity = %v, want owned quantity cap 3", got)
+	}
+	if len(positionRepo.updates) != 1 || positionRepo.updates[0].Quantity != 0 || positionRepo.updates[0].ClosedAt == nil {
+		t.Fatalf("expected position closed without oversized sell: %+v", positionRepo.updates)
+	}
+}
+
+func TestProcessSignal_PolymarketPartialCloseReducesQuantity(t *testing.T) {
+	strategyID := uuid.New()
+	positionID := uuid.New()
+	broker := &mockBroker{
+		getAccountBalanceFn: func(context.Context) (execution.Balance, error) {
+			return execution.Balance{Currency: "USD", Cash: 250, BuyingPower: 250, Equity: 250}, nil
+		},
+	}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{
+		getByStrategyFn: func(ctx context.Context, gotStrategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+			if gotStrategyID != strategyID {
+				t.Fatalf("strategyID = %s, want %s", gotStrategyID, strategyID)
+			}
+			if filter.Ticker != "will-example-happen:YES" || filter.Side != domain.PositionSideLong {
+				t.Fatalf("filter = %+v, want will-example-happen:YES long", filter)
+			}
+			return []domain.Position{{
+				ID:         positionID,
+				StrategyID: &strategyID,
+				Ticker:     "will-example-happen:YES",
+				Side:       domain.PositionSideLong,
+				Quantity:   15,
+				AvgEntry:   0.30,
+				OpenedAt:   time.Now(),
+			}}, nil
+		},
+	}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, auditRepo)
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypePolymarket
+	plan.Ticker = "will-example-happen"
+	plan.Side = "YES"
+	plan.EntryPrice = 0.50
+	plan.Action = domain.PipelineSignalSell
+
+	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+
+	if len(positionRepo.updates) != 1 {
+		t.Fatalf("expected 1 position update, got %d", len(positionRepo.updates))
+	}
+	updated := positionRepo.updates[0]
+	if updated.Quantity != 5 {
+		t.Fatalf("updated quantity = %v, want 5", updated.Quantity)
+	}
+	if updated.ClosedAt != nil {
+		t.Fatal("expected partial close to keep position open")
+	}
+	if math.Abs(updated.RealizedPnL-2.0) > 1e-9 {
+		t.Fatalf("RealizedPnL = %v, want 2.0", updated.RealizedPnL)
+	}
+	if len(tradeRepo.trades) != 1 || tradeRepo.trades[0].PositionID == nil || *tradeRepo.trades[0].PositionID != positionID {
+		t.Fatalf("unexpected trade position linkage: %+v", tradeRepo.trades)
+	}
+}
+
+func TestProcessSignal_PolymarketSellWithoutMatchingPositionSkipped(t *testing.T) {
+	broker := &mockBroker{
+		submitOrderFn: func(context.Context, *domain.Order) (string, error) {
+			t.Fatal("SubmitOrder should not be called for unowned polymarket exit")
+			return "", nil
+		},
+	}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+	recorder := &mockDecisionRecorder{}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypePolymarket
+	plan.Ticker = "will-example-happen"
+	plan.Side = "YES"
+	plan.EntryPrice = 0.50
+	plan.Action = domain.PipelineSignalSell
+
+	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, uuid.New(), uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+
+	if len(recorder.decisions) != 1 {
+		t.Fatalf("expected 1 recorded decision, got %d", len(recorder.decisions))
+	}
+	if recorder.decisions[0].Status != domain.TradeDecisionStatusRejected || !slices.Contains(recorder.decisions[0].RiskReasons, "unowned_polymarket_exit_no_open_position") {
+		t.Fatalf("unexpected decision: %+v", recorder.decisions[0])
+	}
+	if len(positionRepo.positions) != 0 || len(positionRepo.updates) != 0 || len(tradeRepo.trades) != 0 {
+		t.Fatalf("expected no order lifecycle changes, got positions=%d updates=%d trades=%d", len(positionRepo.positions), len(positionRepo.updates), len(tradeRepo.trades))
+	}
+}
+
+func TestProcessSignal_PolymarketExitClosesNoPosition(t *testing.T) {
+	strategyID := uuid.New()
+	positionID := uuid.New()
+	broker := &mockBroker{
+		getAccountBalanceFn: func(context.Context) (execution.Balance, error) {
+			return execution.Balance{Currency: "USD", Cash: 250, BuyingPower: 250, Equity: 250}, nil
+		},
+	}
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{
+		getByStrategyFn: func(ctx context.Context, gotStrategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+			if gotStrategyID != strategyID {
+				t.Fatalf("strategyID = %s, want %s", gotStrategyID, strategyID)
+			}
+			if filter.Ticker != "will-example-happen:NO" || filter.Side != domain.PositionSideLong {
+				t.Fatalf("filter = %+v, want will-example-happen:NO long", filter)
+			}
+			return []domain.Position{{
+				ID:         positionID,
+				StrategyID: &strategyID,
+				Ticker:     "will-example-happen:NO",
+				Side:       domain.PositionSideLong,
+				Quantity:   10,
+				AvgEntry:   0.40,
+				OpenedAt:   time.Now(),
+			}}, nil
+		},
+	}
+	tradeRepo := &mockTradeRepo{}
+	auditRepo := &mockAuditLogRepo{}
+
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, auditRepo)
+
+	plan := defaultPlan()
+	plan.MarketType = domain.MarketTypePolymarket
+	plan.Ticker = "will-example-happen"
+	plan.Side = "NO"
+	plan.EntryPrice = 0.50
+	plan.Action = domain.PipelineSignalSell
+
+	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+		t.Fatalf("ProcessSignal() unexpected error: %v", err)
+	}
+
+	if len(positionRepo.updates) != 1 {
+		t.Fatalf("expected 1 position update, got %d", len(positionRepo.updates))
+	}
+	updated := positionRepo.updates[0]
+	if updated.Ticker != "will-example-happen:NO" || updated.Quantity != 0 || updated.ClosedAt == nil {
+		t.Fatalf("updated position = %+v, want closed NO position", updated)
+	}
+	if math.Abs(updated.RealizedPnL-1.0) > 1e-9 {
+		t.Fatalf("RealizedPnL = %v, want 1.0", updated.RealizedPnL)
+	}
+	if len(tradeRepo.trades) != 1 || tradeRepo.trades[0].PositionID == nil || *tradeRepo.trades[0].PositionID != positionID {
+		t.Fatalf("unexpected trade position linkage: %+v", tradeRepo.trades)
 	}
 }
 

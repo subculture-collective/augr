@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_strategies_polymarket_paper_active_slug;

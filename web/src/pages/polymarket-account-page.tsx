@@ -57,6 +57,31 @@ function jobLabel(job?: JobStatus) {
   return 'ok'
 }
 
+function PolymarketContextRail({ address }: { address?: string }) {
+  return (
+    <nav aria-label="Polymarket links" className="hud-panel rounded-none px-3 py-2.5">
+      <div className="flex flex-wrap gap-2">
+        <Link className="inline-flex items-center border border-border bg-panel px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.14em] text-ink-dim transition-colors hover:border-border-strong hover:bg-panel-raised hover:text-ink" to="/polymarket">
+          Hub
+        </Link>
+        <Link className="inline-flex items-center border border-border bg-panel px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.14em] text-ink-dim transition-colors hover:border-border-strong hover:bg-panel-raised hover:text-ink" to="/surfers/ops">
+          Surfers Ops
+        </Link>
+        {address ? (
+          <a
+            className="inline-flex items-center border border-border bg-panel px-3 py-1.5 text-[11px] font-medium uppercase tracking-[0.14em] text-ink-dim transition-colors hover:border-border-strong hover:bg-panel-raised hover:text-ink"
+            href={profileUrl(address)}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Polymarket profile
+          </a>
+        ) : null}
+      </div>
+    </nav>
+  )
+}
+
 function JobStatusCard({ job }: { job?: JobStatus }) {
   return (
     <div className="rounded-md border border-border bg-card px-4 py-3">
@@ -163,6 +188,12 @@ export function PolymarketAccountPage() {
         description="Polymarket account detail"
         actions={
           <div className="flex gap-2">
+            <Button size="sm" variant="outline" asChild>
+              <Link to="/polymarket">Hub</Link>
+            </Button>
+            <Button size="sm" variant="outline" asChild>
+              <Link to="/surfers/ops">Surfers Ops</Link>
+            </Button>
             <Button size="sm" variant="outline" onClick={() => void navigator.clipboard.writeText(address ?? '')}>Copy</Button>
             {address ? (
               <Button size="sm" variant="outline" asChild>
@@ -172,6 +203,8 @@ export function PolymarketAccountPage() {
           </div>
         }
       />
+
+      <PolymarketContextRail address={address} />
 
       {account.isLoading && (
         <Card>

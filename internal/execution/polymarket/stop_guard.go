@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	marketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 )
@@ -24,15 +26,18 @@ type StopGuardMetrics interface {
 	IncTriggered(slug string)
 	IncSendError(slug string)
 	ObserveTickToFireSeconds(slug string, seconds float64)
+	SetActive(count float64)
 }
 
 type Position struct {
-	ID      string
-	Slug    string
-	Side    string
-	EntryPx float64
-	Size    float64
-	StopPx  float64
+	ID           string
+	Slug         string
+	Side         string
+	OutcomeSide  string
+	EntryPx      float64
+	Size         float64
+	StopPx       float64
+	TakeProfitPx float64
 }
 
 type templateSender interface {
@@ -51,7 +56,9 @@ const (
 type guardEntry struct {
 	positionID string
 	slug       string
+	outcome    string
 	stopPx     float64
+	takePx     float64
 	long       bool
 	template   *OrderTemplate
 	state      atomic.Int32
@@ -97,37 +104,87 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 	if pos.Size <= 0 {
 		return errors.New("polymarket: size must be greater than zero")
 	}
-	if pos.StopPx <= 0 {
-		return errors.New("polymarket: stop price must be greater than zero")
+	if pos.StopPx <= 0 && pos.TakeProfitPx <= 0 {
+		return errors.New("polymarket: stop price or take-profit price is required")
 	}
 	long := strings.EqualFold(strings.TrimSpace(pos.Side), "BUY")
 	short := strings.EqualFold(strings.TrimSpace(pos.Side), "SELL")
 	if !long && !short {
 		return fmt.Errorf("polymarket: unsupported side %q", pos.Side)
 	}
+	outcome := strings.ToUpper(strings.TrimSpace(pos.OutcomeSide))
+	if outcome == "" {
+		outcome = "YES"
+	}
+	if outcome != "YES" && outcome != "NO" {
+		return fmt.Errorf("polymarket: unsupported outcome side %q", pos.OutcomeSide)
+	}
 	intent := "ORDER_INTENT_SELL_LONG"
-	if short {
+	if outcome == "NO" && long {
+		intent = "ORDER_INTENT_SELL_SHORT"
+	} else if outcome == "NO" && short {
+		intent = "ORDER_INTENT_BUY_SHORT"
+	} else if short {
 		intent = "ORDER_INTENT_BUY_SHORT"
 	}
 	side := "BUY"
 	if long {
 		side = "SELL"
 	}
-	order := &domain.Order{Ticker: slug, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, PolymarketIntent: intent}
+	order := &domain.Order{Ticker: slug, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, PredictionSide: outcome, PolymarketIntent: intent}
+	g.mu.RLock()
+	if _, exists := g.byID[positionID]; exists {
+		g.mu.RUnlock()
+		return nil
+	}
+	g.mu.RUnlock()
 	tmpl, err := g.broker.PrepareTemplate(order)
 	if err != nil {
 		return err
 	}
-	entry := &guardEntry{positionID: positionID, slug: slug, stopPx: pos.StopPx, long: long, template: tmpl, receivedAt: time.Now()}
+	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, receivedAt: time.Now()}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if _, exists := g.byID[positionID]; exists {
-		return fmt.Errorf("polymarket: position %q already registered", positionID)
+		return nil
 	}
 	g.byID[positionID] = entry
 	g.bySlug[slug] = append(g.bySlug[slug], entry)
 	g.count.Add(1)
+	if g.metrics != nil {
+		g.metrics.SetActive(float64(g.count.Load()))
+	}
 	return nil
+}
+
+func (g *StopGuard) RegisterPosition(pos domain.Position) error {
+	if g == nil {
+		return errors.New("polymarket: stop guard is nil")
+	}
+	positionID := pos.ID.String()
+	if positionID == "" || pos.ID == uuid.Nil {
+		return errors.New("polymarket: position id is required")
+	}
+	slug, outcome, err := polymarketPositionParts(pos.Ticker)
+	if err != nil {
+		return err
+	}
+	entry := Position{ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
+	switch pos.Side {
+	case domain.PositionSideLong:
+		entry.Side = "BUY"
+	case domain.PositionSideShort:
+		entry.Side = "SELL"
+	default:
+		return fmt.Errorf("polymarket: unsupported position side %q", pos.Side)
+	}
+	if pos.StopLoss != nil {
+		entry.StopPx = *pos.StopLoss
+	}
+	if pos.TakeProfit != nil {
+		entry.TakeProfitPx = *pos.TakeProfit
+	}
+	return g.RegisterEntry(entry)
 }
 
 func (g *StopGuard) Cancel(positionID string) {
@@ -144,6 +201,7 @@ func (g *StopGuard) Cancel(positionID string) {
 	if !ok {
 		return
 	}
+	entry.state.Store(int32(guardFired))
 	delete(g.byID, positionID)
 	entries := g.bySlug[entry.slug]
 	for i := range entries {
@@ -159,6 +217,9 @@ func (g *StopGuard) Cancel(positionID string) {
 		g.bySlug[entry.slug] = entries
 	}
 	g.count.Add(-1)
+	if g.metrics != nil {
+		g.metrics.SetActive(float64(g.count.Load()))
+	}
 }
 
 func (g *StopGuard) Active() int {
@@ -173,13 +234,17 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 		return
 	}
 	g.mu.RLock()
-	entries := g.bySlug[t.Slug]
+	entries := append([]*guardEntry(nil), g.bySlug[t.Slug]...)
 	g.mu.RUnlock()
 	for _, entry := range entries {
+		if !tickMatchesOutcome(t, entry.outcome) {
+			continue
+		}
 		if entry == nil || !entry.state.CompareAndSwap(int32(guardArmed), int32(guardFiring)) {
 			continue
 		}
-		crossed := (entry.long && t.Price <= entry.stopPx) || (!entry.long && t.Price >= entry.stopPx)
+		crossed := (entry.long && ((entry.stopPx > 0 && t.Price <= entry.stopPx) || (entry.takePx > 0 && t.Price >= entry.takePx))) ||
+			(!entry.long && ((entry.stopPx > 0 && t.Price >= entry.stopPx) || (entry.takePx > 0 && t.Price <= entry.takePx)))
 		if !crossed {
 			entry.state.Store(int32(guardArmed))
 			continue
@@ -198,8 +263,37 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			if g.logger != nil {
 				g.logger.Error("polymarket stop guard send failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
 			}
+			entry.state.Store(int32(guardArmed))
+			continue
 		}
 		entry.state.Store(int32(guardFired))
 		g.Cancel(entry.positionID)
 	}
+}
+
+func polymarketPositionSlug(ticker string) (string, error) {
+	slug, _, err := polymarketPositionParts(ticker)
+	return slug, err
+}
+
+func polymarketPositionParts(ticker string) (string, string, error) {
+	ticker = strings.TrimSpace(ticker)
+	if ticker == "" {
+		return "", "", errors.New("polymarket: ticker is required")
+	}
+	slug, outcome, found := strings.Cut(ticker, ":")
+	slug = strings.TrimSpace(slug)
+	outcome = strings.ToUpper(strings.TrimSpace(outcome))
+	if !found || slug == "" || (outcome != "YES" && outcome != "NO") {
+		return "", "", fmt.Errorf("polymarket: ticker %q is not a polymarket position ticker", ticker)
+	}
+	return slug, outcome, nil
+}
+
+func tickMatchesOutcome(t marketdata.Tick, outcome string) bool {
+	side := strings.ToUpper(strings.TrimSpace(t.Side))
+	if side != "YES" && side != "NO" {
+		return false
+	}
+	return side == strings.ToUpper(strings.TrimSpace(outcome))
 }

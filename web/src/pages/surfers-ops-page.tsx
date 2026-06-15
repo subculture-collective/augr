@@ -37,6 +37,14 @@ function loadingBlock(testId: string) {
   return <div data-testid={testId} className="h-20 animate-pulse rounded-none border border-border bg-muted/40" />
 }
 
+function listOrEmpty<T>(value: T[] | null | undefined): T[] {
+  return Array.isArray(value) ? value : []
+}
+
+function numberOrZero(value: number | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
 function PanelNarrative({
   summary,
   whyNoData,
@@ -113,8 +121,9 @@ export function SurfersOpsPage() {
       }
 
       if (breakersResult.status === 'fulfilled') {
-        setBreakers(breakersResult.value.tripped)
-        setLastBreakers(breakersResult.value.tripped)
+        const tripped = listOrEmpty(breakersResult.value.tripped)
+        setBreakers(tripped)
+        setLastBreakers(tripped)
       } else {
         setBreakers([])
         setBreakersError(breakersResult.reason)
@@ -180,6 +189,11 @@ export function SurfersOpsPage() {
   const statusFailed = Boolean(statusError) && !statusUnavailable
   const breakersFailed = Boolean(breakersError) && !breakersUnavailable
   const divergenceFailed = Boolean(divergenceError) && !divergenceUnavailable && !divergenceMissing
+  const readySlugs = listOrEmpty(status?.ready_slugs)
+  const wsConnections = numberOrZero(status?.ws_connections)
+  const avgJitterMs = numberOrZero(status?.avg_jitter_ms)
+  const dropped = numberOrZero(status?.dropped)
+  const recorderLagSeconds = numberOrZero(status?.recorder_lag_seconds)
   const statusCurrent = statusLoading
     ? 'Loading market feed…'
     : statusUnavailable
@@ -235,7 +249,7 @@ export function SurfersOpsPage() {
             }
             lastKnownState={
               lastStatus
-                ? `${lastStatus.enabled ? 'Enabled' : 'Disabled'}, ${lastStatus.ws_connections} connections, lag ${lastStatus.recorder_lag_seconds.toFixed(2)} s`
+                ? `${lastStatus.enabled ? 'Enabled' : 'Disabled'}, ${numberOrZero(lastStatus.ws_connections)} connections, lag ${numberOrZero(lastStatus.recorder_lag_seconds).toFixed(2)} s`
                 : 'No cached feed snapshot yet.'
             }
             currentStatus={statusCurrent}
@@ -254,23 +268,23 @@ export function SurfersOpsPage() {
             <>
               <div className="flex flex-wrap gap-2">
                 <Badge variant={status.enabled ? 'success' : 'warning'}>{status.enabled ? 'Enabled' : 'Disabled'}</Badge>
-                <Badge variant="outline">{status.ws_connections} connections</Badge>
-                <Badge variant={status.ready_slugs.length ? 'success' : 'secondary'}>
-                  {status.ready_slugs.length ? `${status.ready_slugs.length} ready slugs` : 'No ready slugs'}
+                <Badge variant="outline">{wsConnections} connections</Badge>
+                <Badge variant={readySlugs.length ? 'success' : 'secondary'}>
+                  {readySlugs.length ? `${readySlugs.length} ready slugs` : 'No ready slugs'}
                 </Badge>
               </div>
               <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
                 <div className="rounded-none border border-border bg-background p-3">
                   <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Jitter</div>
-                  <div className="mt-1 font-medium">{status.avg_jitter_ms.toFixed(2)} ms</div>
+                  <div className="mt-1 font-medium">{avgJitterMs.toFixed(2)} ms</div>
                 </div>
                 <div className="rounded-none border border-border bg-background p-3">
                   <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Dropped</div>
-                  <div className="mt-1 font-medium">{status.dropped}</div>
+                  <div className="mt-1 font-medium">{dropped}</div>
                 </div>
                 <div className="rounded-none border border-border bg-background p-3">
                   <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Recorder lag</div>
-                  <div className="mt-1 font-medium">{status.recorder_lag_seconds.toFixed(2)} s</div>
+                  <div className="mt-1 font-medium">{recorderLagSeconds.toFixed(2)} s</div>
                 </div>
                 <div className="rounded-none border border-border bg-background p-3">
                   <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Updated</div>
@@ -281,7 +295,7 @@ export function SurfersOpsPage() {
                 <p className="text-muted-foreground" data-testid="surfers-status-disabled">
                   Feed is disabled; no live market data will arrive until the dependency is enabled.
                 </p>
-              ) : status.ws_connections === 0 && status.ready_slugs.length === 0 ? (
+              ) : wsConnections === 0 && readySlugs.length === 0 ? (
                 <p className="text-muted-foreground">Feed is enabled, but no markets are connected yet.</p>
               ) : null}
             </>

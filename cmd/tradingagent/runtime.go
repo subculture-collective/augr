@@ -39,6 +39,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	alpacaexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/alpaca"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
+	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/anthropic"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/embedding"
@@ -320,6 +321,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 	var polymarketFeed *polymarketws.Feed
 	var polymarketRecorder *recorder.Recorder
+	var strategyRunner *realStrategyRunner
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_WS_ENABLED")), "true") {
 		pcfg := polymarketws.DefaultConfig()
 		if v := strings.TrimSpace(os.Getenv("POLYMARKET_WS_URL")); v != "" {
@@ -410,6 +412,19 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		dataService := data.NewDataService(cfg, reg, marketDataCacheRepo, logger, socialTriage)
 		deps.DataService = dataService
 		var alpacaReconciler *automation.AlpacaReconciler
+		var polymarketExecutionReconciler *polymarketexecution.Reconciler
+		if strings.TrimSpace(cfg.Brokers.Polymarket.KeyID) != "" && strings.TrimSpace(cfg.Brokers.Polymarket.SecretKey) != "" {
+			polymarketClient := polymarketexecution.NewClient(cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, logger)
+			polymarketClient.SetAPIBaseURL(cfg.Brokers.Polymarket.APIBaseURL)
+			polymarketClient.SetGatewayBaseURL(cfg.Brokers.Polymarket.GatewayBaseURL)
+			polymarketExecutionReconciler = polymarketexecution.NewReconciler(polymarketexecution.ReconcilerDeps{
+				Broker:       polymarketexecution.NewBroker(polymarketClient),
+				PositionRepo: positionRepo,
+				AuditLogRepo: auditLogRepo,
+				Metrics:      appMetrics,
+				Logger:       logger,
+			})
+		}
 		if strings.TrimSpace(cfg.Brokers.Alpaca.APIKey) != "" && strings.TrimSpace(cfg.Brokers.Alpaca.APISecret) != "" {
 			alpacaClient := alpacaexecution.NewClient(
 				cfg.Brokers.Alpaca.APIKey,
@@ -454,7 +469,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			Strategies:  strategyRepo,
 			Logger:      logger,
 		}
-		strategyRunner := newRealStrategyRunner(
+		strategyRunner = newRealStrategyRunner(
 			cfg,
 			dataService,
 			runRepo,
@@ -472,9 +487,13 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			sharedLLMBudget,
 			promptSettingsSvc,
 			tradeDecisionRecorder,
+			polymarketFeed,
 			logger,
 		)
 		deps.Runner = strategyRunner
+		if err := bootstrapPolymarketStopGuards(ctx, strategyRunner, positionRepo, logger); err != nil {
+			logger.Warn("polymarket stop guard bootstrap failed", slog.Any("error", err))
+		}
 
 		if cfg.Features.EnableScheduler {
 			schedOpts := []scheduler.Option{
@@ -547,6 +566,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					OptionsScanRepo:         optionsScanRepo,
 					NewsFeedRepo:            newsFeedRepo,
 					PolymarketAccountRepo:   polymarketAccountRepo,
+					PolymarketReconciler:    polymarketExecutionReconciler,
 					PolymarketResolvedRepo:  polymarketResolvedRepo,
 					PolymarketWatchedRepo:   polymarketWatchedRepo,
 					PolymarketDiscoveryRuns: polymarketDiscoveryRunRepo,
@@ -700,6 +720,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 
 	return server, schedLifecycle, func() {
+		if strategyRunner != nil {
+			strategyRunner.stopPolymarketTickWorkers()
+		}
 		if polymarketRecorder != nil {
 			polymarketRecorder.Close()
 		}

@@ -80,6 +80,16 @@ it('preset fills scanner fields', async () => {
   render(<PolymarketPage />, { wrapper: Wrapper })
 
   expect(await screen.findByTestId('polymarket-page')).toBeInTheDocument()
+  const sectionNav = screen.getByRole('navigation', { name: /polymarket sections/i })
+  expect(within(sectionNav).getByRole('link', { name: 'Overview' })).toHaveAttribute('href', '#overview')
+  expect(within(sectionNav).getByRole('link', { name: 'Intelligence' })).toHaveAttribute('href', '#intelligence')
+  expect(within(sectionNav).getByRole('link', { name: 'Accounts' })).toHaveAttribute('href', '#accounts')
+  expect(screen.getByTestId('polymarket-overview-section')).toBeInTheDocument()
+  expect(screen.getByTestId('polymarket-intelligence-section')).toBeInTheDocument()
+  expect(screen.getByTestId('polymarket-accounts-section')).toBeInTheDocument()
+  expect(screen.getByTestId('polymarket-watched-section')).toBeInTheDocument()
+  expect(screen.getByTestId('polymarket-operations-section')).toBeInTheDocument()
+  expect(screen.getByTestId('polymarket-discovery-section')).toBeInTheDocument()
 
   fireEvent.click(screen.getByTestId('polymarket-scanner-preset-event-momentum'))
 

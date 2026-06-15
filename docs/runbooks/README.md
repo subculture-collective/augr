@@ -34,6 +34,7 @@ These runbooks are for operators and contributors handling a running system, an 
 ## Routine operator tasks
 
 - [Adding a new strategy](add-strategy.md)
+- [Polymarket live activation](polymarket-live-activation.md)
 
 ## Notes on scope
 

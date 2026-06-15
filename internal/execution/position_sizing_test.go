@@ -35,6 +35,54 @@ func TestFixedFractionalSize(t *testing.T) {
 	assertFloatClose(t, got, want)
 }
 
+func TestPolymarketPositionSizeCapsUSDCExposure(t *testing.T) {
+	t.Parallel()
+
+	got := execution.PolymarketPositionSize(execution.PolymarketSizingParams{
+		AccountValue:    100000,
+		FractionPct:     0.02,
+		MaxPositionUSDC: 500,
+		EntryPrice:      0.25,
+	})
+	want := 2000.0
+
+	assertFloatClose(t, got, want)
+}
+
+func TestPolymarketPositionSizeUsesAccountFractionWhenUncapped(t *testing.T) {
+	t.Parallel()
+
+	got := execution.PolymarketPositionSize(execution.PolymarketSizingParams{
+		AccountValue: 100000,
+		FractionPct:  0.02,
+		EntryPrice:   0.25,
+	})
+	want := 8000.0
+
+	assertFloatClose(t, got, want)
+}
+
+func TestPolymarketPositionSizeReturnsZeroForInvalidInputs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		params execution.PolymarketSizingParams
+	}{
+		{name: "non-positive account value", params: execution.PolymarketSizingParams{AccountValue: 0, FractionPct: 0.02, EntryPrice: 0.25}},
+		{name: "non-positive fraction", params: execution.PolymarketSizingParams{AccountValue: 100000, FractionPct: 0, EntryPrice: 0.25}},
+		{name: "non-positive entry price", params: execution.PolymarketSizingParams{AccountValue: 100000, FractionPct: 0.02, EntryPrice: 0}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := execution.PolymarketPositionSize(tc.params); got != 0 {
+				t.Fatalf("PolymarketPositionSize() = %v, want 0", got)
+			}
+		})
+	}
+}
+
 func TestPositionSizingReturnsZeroForInvalidInputs(t *testing.T) {
 	t.Parallel()
 

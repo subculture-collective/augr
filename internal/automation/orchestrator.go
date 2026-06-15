@@ -14,6 +14,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data/polygon"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/rss"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/embedding"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
@@ -62,6 +63,7 @@ type OrchestratorDeps struct {
 	NewsFeedRepo            *pgrepo.NewsFeedRepo
 	StrategyTrigger         StrategyTrigger                        // optional; nil = no event-driven triggers
 	PolymarketAccountRepo   repository.PolymarketAccountRepository // optional; nil = skip profiling job
+	PolymarketReconciler    *polymarketexecution.Reconciler        // optional; nil = skip reconciliation job
 	PolymarketResolvedRepo  repository.PolymarketResolvedMarketsRepository
 	PolymarketWatchedRepo   repository.PolymarketWatchedMarketsRepository // optional; nil = skip discovery auto-watch
 	PolymarketDiscoveryRuns repository.PolymarketDiscoveryRunRepository   // optional; nil = skip chunked discovery job registration/execution
@@ -204,6 +206,7 @@ func (o *JobOrchestrator) RegisterAll() {
 	o.registerWeeklyJobs()
 	o.registerNewsJobs()
 	o.registerPolymarketProfileJob()
+	o.registerPolymarketReconciliationJobs()
 	o.registerPolymarketResolutionsJob()
 	o.registerPolymarketDiscoveryJob()
 	o.registerReportJobs()

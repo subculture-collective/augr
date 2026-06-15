@@ -35,16 +35,16 @@ var AllTemplates = []StrategyTemplate{
 
 // TemplateDescriptions is the human + LLM-readable catalog of templates.
 var TemplateDescriptions = map[StrategyTemplate]string{
-	TemplateWhaleCopy:        "Copy entries by tracked high-win-rate wallets in this market. Enter YES/NO mirroring recent whale buys when wallet WR>=70% and trade <24h old. Exit on whale exit, resolution, or 30% adverse move.",
-	TemplateArbitrage:        "Exploit YES+NO!=1 mispricings or cross-market arb. Enter only when implied probability deviation exceeds fees+slippage. Close within hours when spread reverts.",
-	TemplateNewsCatalyst:     "Trade clean public catalysts (court rulings, votes, official statements) that should move resolution odds. Enter on confirmed headline, take profit on first repricing wave.",
-	TemplateMicrostructure:   "Lean on orderbook imbalance or spread compression. Short holding period. Small size.",
-	TemplateConvergence:      "Buy YES near resolution when probability is already 0.80-0.95 and no remaining catalyst can flip outcome. Hold to settlement.",
-	TemplateVolumeDivergence: "Enter on volume z-score spike with flat price, in direction of trade-flow imbalance. Exit on breakout or fading volume.",
-	TemplateResolutionEdge:   "Identify markets where literal resolution rules differ from crowd interpretation. Hold to resolution.",
-	TemplateMeanReversion:    "Fade overshoots beyond k-sigma of VWAP in thin markets with no news support. Exit on revert.",
-	TemplateCalendarEvent:    "Trade scheduled events (debate, ruling, vote, CPI) where market is misaligned with pre-event consensus. Exit around event time.",
-	TemplateAntiFavorite:     "Fade long-tail YES<5% late in market life when new evidence raises tail above implied price. Small size, asymmetric payoff.",
+	TemplateWhaleCopy:        "Follow high-performing tracked wallets buying YES or NO when recency, liquidity, and spread gates make the fill executable.",
+	TemplateArbitrage:        "Exploit YES+NO mispricings or cross-market dislocations when fees and slippage still leave positive edge.",
+	TemplateNewsCatalyst:     "Trade confirmed public catalysts such as court rulings, votes, or official statements that should reprice resolution odds.",
+	TemplateMicrostructure:   "Enter only when YES/NO spread, orderbook depth, and liquidity support a bounded-slippage fill.",
+	TemplateConvergence:      "Buy YES when the market is already near settlement odds and the remaining path to resolution is narrow.",
+	TemplateVolumeDivergence: "Enter when trade flow and liquidity shift faster than price, creating a usable edge in the current YES/NO quote.",
+	TemplateResolutionEdge:   "Trade literal resolution wording and source metadata when the market misreads how the market settles.",
+	TemplateMeanReversion:    "Fade stale mispricings after fresh market information fails to justify the current YES/NO price.",
+	TemplateCalendarEvent:    "Trade scheduled events such as debates, rulings, votes, or data releases where market pricing drifts from the setup.",
+	TemplateAntiFavorite:     "Fade long-shot YES positions late in market life when new evidence lifts tail probability above the implied price.",
 }
 
 // IsValid reports whether the template is one of the known archetypes.

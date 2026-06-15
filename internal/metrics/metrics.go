@@ -9,30 +9,35 @@ import (
 
 // Metrics holds all Prometheus instruments for the trading agent.
 type Metrics struct {
-	registry                 *prometheus.Registry
-	PipelineRunsTotal        *prometheus.CounterVec
-	PipelineDuration         *prometheus.HistogramVec
-	LLMCallsTotal            *prometheus.CounterVec
-	LLMFallbackTotal         *prometheus.CounterVec
-	LLMTokensTotal           *prometheus.CounterVec
-	LLMLatency               *prometheus.HistogramVec
-	LLMCacheHitsTotal        prometheus.Counter
-	LLMCacheMissesTotal      prometheus.Counter
-	OrdersTotal              *prometheus.CounterVec
-	SignalParseFailuresTotal prometheus.Counter
-	SchedulerTickTotal       *prometheus.CounterVec
-	AutomationJobErrorsTotal *prometheus.CounterVec
-	AlpacaReconcileRunsTotal *prometheus.CounterVec
-	StaleRunsReconciled      prometheus.Counter
-	PortfolioValue           prometheus.Gauge
-	PositionsOpen            prometheus.Gauge
-	CircuitBreakerState      prometheus.Gauge
-	KillSwitchActive         prometheus.Gauge
-	LLMRetryTotal            *prometheus.CounterVec
-	LLMBudgetExhaustedTotal  prometheus.Counter
-	ReportWorkerSuccessTotal *prometheus.CounterVec
-	ReportWorkerErrorTotal   *prometheus.CounterVec
-	ReportStaleness          *prometheus.HistogramVec
+	registry                           *prometheus.Registry
+	PipelineRunsTotal                  *prometheus.CounterVec
+	PipelineDuration                   *prometheus.HistogramVec
+	LLMCallsTotal                      *prometheus.CounterVec
+	LLMFallbackTotal                   *prometheus.CounterVec
+	LLMTokensTotal                     *prometheus.CounterVec
+	LLMLatency                         *prometheus.HistogramVec
+	LLMCacheHitsTotal                  prometheus.Counter
+	LLMCacheMissesTotal                prometheus.Counter
+	OrdersTotal                        *prometheus.CounterVec
+	SignalParseFailuresTotal           prometheus.Counter
+	SchedulerTickTotal                 *prometheus.CounterVec
+	AutomationJobErrorsTotal           *prometheus.CounterVec
+	AlpacaReconcileRunsTotal           *prometheus.CounterVec
+	PolymarketReconciliationDriftTotal *prometheus.CounterVec
+	PolymarketStopGuardTriggeredTotal  *prometheus.CounterVec
+	PolymarketStopGuardSendErrorsTotal *prometheus.CounterVec
+	PolymarketStopGuardTickToFire      *prometheus.HistogramVec
+	PolymarketStopGuardActive          prometheus.Gauge
+	StaleRunsReconciled                prometheus.Counter
+	PortfolioValue                     prometheus.Gauge
+	PositionsOpen                      prometheus.Gauge
+	CircuitBreakerState                prometheus.Gauge
+	KillSwitchActive                   prometheus.Gauge
+	LLMRetryTotal                      *prometheus.CounterVec
+	LLMBudgetExhaustedTotal            prometheus.Counter
+	ReportWorkerSuccessTotal           *prometheus.CounterVec
+	ReportWorkerErrorTotal             *prometheus.CounterVec
+	ReportStaleness                    *prometheus.HistogramVec
 }
 
 // New creates a new isolated Prometheus registry, registers all trading-agent
@@ -113,6 +118,32 @@ func New() *Metrics {
 			Help: "Total Alpaca reconciliation runs by outcome.",
 		}, []string{"result"}),
 
+		PolymarketReconciliationDriftTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tradingagent_polymarket_reconciliation_drift_total",
+			Help: "Total Polymarket reconciliation drifts by drift type.",
+		}, []string{"drift_type"}),
+
+		PolymarketStopGuardTriggeredTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tradingagent_polymarket_stop_guard_triggered_total",
+			Help: "Total Polymarket stop-guard triggers.",
+		}, nil),
+
+		PolymarketStopGuardSendErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tradingagent_polymarket_stop_guard_send_errors_total",
+			Help: "Total Polymarket stop-guard send errors.",
+		}, nil),
+
+		PolymarketStopGuardTickToFire: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "tradingagent_polymarket_stop_guard_tick_to_fire_seconds",
+			Help:    "Seconds from tick receipt to stop-guard fire.",
+			Buckets: prometheus.DefBuckets,
+		}, nil),
+
+		PolymarketStopGuardActive: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "tradingagent_polymarket_stop_guard_active",
+			Help: "Number of active Polymarket stop-guard registrations.",
+		}),
+
 		StaleRunsReconciled: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "tradingagent_stale_runs_reconciled_total",
 			Help: "Total number of stale pipeline runs force-failed by the reconciler.",
@@ -179,6 +210,11 @@ func New() *Metrics {
 		m.SchedulerTickTotal,
 		m.AutomationJobErrorsTotal,
 		m.AlpacaReconcileRunsTotal,
+		m.PolymarketReconciliationDriftTotal,
+		m.PolymarketStopGuardTriggeredTotal,
+		m.PolymarketStopGuardSendErrorsTotal,
+		m.PolymarketStopGuardTickToFire,
+		m.PolymarketStopGuardActive,
 		m.StaleRunsReconciled,
 		m.PortfolioValue,
 		m.PositionsOpen,
@@ -254,6 +290,46 @@ func (m *Metrics) RecordAlpacaReconcileRun(result string) {
 		return
 	}
 	m.AlpacaReconcileRunsTotal.WithLabelValues(result).Inc()
+}
+
+// IncDrift increments the Polymarket reconciliation drift counter for the given drift type.
+func (m *Metrics) IncDrift(driftType string) {
+	if m == nil {
+		return
+	}
+	m.PolymarketReconciliationDriftTotal.WithLabelValues(driftType).Inc()
+}
+
+// IncTriggered increments the Polymarket stop-guard trigger counter.
+func (m *Metrics) IncTriggered(slug string) {
+	if m == nil {
+		return
+	}
+	m.PolymarketStopGuardTriggeredTotal.WithLabelValues().Inc()
+}
+
+// IncSendError increments the Polymarket stop-guard send-error counter.
+func (m *Metrics) IncSendError(slug string) {
+	if m == nil {
+		return
+	}
+	m.PolymarketStopGuardSendErrorsTotal.WithLabelValues().Inc()
+}
+
+// ObserveTickToFireSeconds records the elapsed seconds between tick receipt and guard fire.
+func (m *Metrics) ObserveTickToFireSeconds(slug string, seconds float64) {
+	if m == nil {
+		return
+	}
+	m.PolymarketStopGuardTickToFire.WithLabelValues().Observe(seconds)
+}
+
+// SetActive updates the active stop-guard gauge.
+func (m *Metrics) SetActive(count float64) {
+	if m == nil {
+		return
+	}
+	m.PolymarketStopGuardActive.Set(count)
 }
 
 func (m *Metrics) RecordStaleRunReconciled() {

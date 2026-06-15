@@ -1000,6 +1000,64 @@ func TestRunStrategy_ActiveRunsNormally(t *testing.T) {
 	}
 }
 
+func TestRunStrategy_PolymarketRoutesToStrategyExecutorWhenConfigured(t *testing.T) {
+	strategyID := uuid.New()
+	repo := &mockStrategyRepo{
+		strategies: []domain.Strategy{
+			{
+				ID:           strategyID,
+				Ticker:       "will-example-happen",
+				MarketType:   domain.MarketType(" POLYMARKET "),
+				ScheduleCron: testScheduleSpec,
+				Status:       domain.StrategyStatusActive,
+			},
+		},
+	}
+	pipeline := &mockPipeline{}
+	executor := &mockStrategyExecutor{}
+	s := NewScheduler(
+		repo,
+		pipeline,
+		&mockRiskEngine{},
+		testLogger(),
+		WithStrategyExecution(executor.execute),
+	)
+	s.ctx = context.Background()
+
+	s.runStrategy(repo.strategies[0])
+
+	if got := executor.callCount(); got != 1 {
+		t.Fatalf("strategy executor calls = %d, want 1 for polymarket native execution", got)
+	}
+	if got := pipeline.callCount(); got != 0 {
+		t.Fatalf("pipeline calls = %d, want 0 for polymarket legacy skip", got)
+	}
+}
+
+func TestRunStrategy_PolymarketSkipsLegacyOHLCVExecutionWithoutStrategyExecutor(t *testing.T) {
+	strategyID := uuid.New()
+	repo := &mockStrategyRepo{
+		strategies: []domain.Strategy{
+			{
+				ID:           strategyID,
+				Ticker:       "will-example-happen",
+				MarketType:   domain.MarketType(" POLYMARKET "),
+				ScheduleCron: testScheduleSpec,
+				Status:       domain.StrategyStatusActive,
+			},
+		},
+	}
+	pipeline := &mockPipeline{}
+	s := NewScheduler(repo, pipeline, &mockRiskEngine{}, testLogger())
+	s.ctx = context.Background()
+
+	s.runStrategy(repo.strategies[0])
+
+	if got := pipeline.callCount(); got != 0 {
+		t.Fatalf("pipeline calls = %d, want 0 for polymarket legacy skip", got)
+	}
+}
+
 func TestRunStrategy_UsesStrategyExecutorWhenConfigured(t *testing.T) {
 	strategyID := uuid.New()
 	repo := &mockStrategyRepo{

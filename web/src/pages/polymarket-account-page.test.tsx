@@ -74,6 +74,8 @@ it('renders account stats', async () => {
 
   expect(await screen.findByTestId('polymarket-account-page')).toBeInTheDocument()
   expect(await screen.findByText('0xabc')).toBeInTheDocument()
+  expect(screen.getAllByRole('link', { name: /hub/i }).length).toBeGreaterThan(0)
+  expect(screen.getAllByRole('link', { name: /surfers ops/i }).length).toBeGreaterThan(0)
   expect(await screen.findByText('total_volume')).toBeInTheDocument()
   expect(await screen.findByText('Trades')).toBeInTheDocument()
 })

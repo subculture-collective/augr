@@ -62,13 +62,14 @@ type DecisionMetadata struct {
 
 // SizingConfig holds the parameters used to size positions.
 type SizingConfig struct {
-	Method        PositionSizingMethod
-	RiskPct       float64
-	ATRMultiplier float64
-	WinRate       float64
-	WinLossRatio  float64
-	FractionPct   float64
-	HalfKelly     bool
+	Method          PositionSizingMethod
+	RiskPct         float64
+	ATRMultiplier   float64
+	WinRate         float64
+	WinLossRatio    float64
+	FractionPct     float64
+	MaxPositionUSDC float64
+	HalfKelly       bool
 }
 
 // OrderManager orchestrates the full order lifecycle:
@@ -202,6 +203,7 @@ func (m *OrderManager) ProcessSignal(
 	strategyID, runID uuid.UUID,
 ) error {
 	marketType := planMarketType(plan)
+	polymarketExitMaxQuantity := 0.0
 
 	// Ignore hold signals — nothing to execute.
 	if signal.Signal == domain.PipelineSignalHold {
@@ -255,6 +257,54 @@ func (m *OrderManager) ProcessSignal(
 
 			return nil
 		}
+	}
+
+	if signal.Signal == domain.PipelineSignalSell && marketType == domain.MarketTypePolymarket {
+		predictionSide := strings.ToUpper(strings.TrimSpace(plan.Side))
+		ownedQuantity, err := m.openPolymarketPositionQuantity(ctx, strategyID, plan.Ticker, predictionSide)
+		if err != nil {
+			return err
+		}
+		if ownedQuantity <= 0 {
+			m.logger.InfoContext(ctx, "polymarket sell signal has no open side-qualified position, skipping order", "ticker", plan.Ticker, "prediction_side", predictionSide, "strategy_id", strategyID)
+
+			decision := m.newTradeDecision(
+				strategyID,
+				runID,
+				plan,
+				marketType,
+				string(domain.OrderSideSell),
+				0,
+				0,
+				domain.RiskDecisionRejected,
+				[]string{"unowned_polymarket_exit_no_open_position"},
+				domain.TradeDecisionStatusRejected,
+			)
+			decision.Evidence, _ = json.Marshal(map[string]any{
+				"reason":            "unowned_polymarket_exit_no_open_position",
+				"has_open_position": false,
+				"ticker":            plan.Ticker,
+				"prediction_side":   predictionSide,
+				"strategy_id":       strategyID.String(),
+				"pipeline_run_id":   runID.String(),
+				"pipeline_signal":   signal.Signal,
+			})
+			m.recordTradeDecision(ctx, decision)
+
+			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
+				"ticker":          plan.Ticker,
+				"prediction_side": predictionSide,
+				"strategy_id":     strategyID,
+				"run_id":          runID,
+				"signal":          signal.Signal,
+				"market_type":     marketType,
+			}); auditErr != nil {
+				m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
+			}
+
+			return nil
+		}
+		polymarketExitMaxQuantity = ownedQuantity
 	}
 
 	// 1. Check kill switch via risk engine.
@@ -318,6 +368,17 @@ func (m *OrderManager) ProcessSignal(
 		PricePerShare: plan.EntryPrice,
 		HalfKelly:     m.sizingConfig.HalfKelly,
 	})
+	if marketType.Normalize() == domain.MarketTypePolymarket {
+		quantity = PolymarketPositionSize(PolymarketSizingParams{
+			AccountValue:    balance.Equity,
+			FractionPct:     m.sizingConfig.FractionPct,
+			MaxPositionUSDC: m.sizingConfig.MaxPositionUSDC,
+			EntryPrice:      plan.EntryPrice,
+		})
+		if signal.Signal == domain.PipelineSignalSell && polymarketExitMaxQuantity > 0 && quantity > polymarketExitMaxQuantity {
+			quantity = polymarketExitMaxQuantity
+		}
+	}
 
 	if quantity <= 0 {
 		m.logger.WarnContext(ctx, "calculated position size is zero", "ticker", plan.Ticker)
@@ -665,6 +726,51 @@ func (m *OrderManager) hasOpenLongPosition(ctx context.Context, strategyID uuid.
 	return false, nil
 }
 
+func (m *OrderManager) openPolymarketPositionQuantity(ctx context.Context, strategyID uuid.UUID, slug, side string) (float64, error) {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return 0, fmt.Errorf("order_manager: polymarket exit ownership check requires ticker")
+	}
+
+	positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{
+		Ticker: polymarketPositionTicker(slug, side),
+		Side:   domain.PositionSideLong,
+	}, riskSnapshotPositionLimit, 0)
+	if err != nil {
+		return 0, fmt.Errorf("order_manager: get open polymarket position for %s:%s: %w", slug, strings.ToUpper(strings.TrimSpace(side)), err)
+	}
+
+	total := 0.0
+	for _, position := range positions {
+		if position.ClosedAt == nil && position.Quantity > 0 {
+			total += position.Quantity
+		}
+	}
+
+	return total, nil
+}
+
+func polymarketPositionTicker(slug, side string) string {
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return ""
+	}
+
+	side = strings.ToUpper(strings.TrimSpace(side))
+	if side == "" {
+		return slug
+	}
+
+	return slug + ":" + side
+}
+
+func realizedPnL(side domain.PositionSide, avgEntry, fillPrice, quantity float64) float64 {
+	if side == domain.PositionSideLong {
+		return (fillPrice - avgEntry) * quantity
+	}
+	return (avgEntry - fillPrice) * quantity
+}
+
 // handleFill creates a Trade and creates or updates the Position.
 func (m *OrderManager) handleFill(
 	ctx context.Context,
@@ -691,10 +797,81 @@ func (m *OrderManager) handleFill(
 		fillPrice = *order.FilledAvgPrice
 	}
 
-	// Create trade.
+	marketType := order.MarketType.Normalize()
+	var position *domain.Position
+	if marketType == domain.MarketTypePolymarket && order.Side == domain.OrderSideSell {
+		positionTicker := polymarketPositionTicker(order.Ticker, order.PredictionSide)
+		positions, err := m.positionRepo.GetByStrategy(ctx, *order.StrategyID, repository.PositionFilter{
+			Ticker: positionTicker,
+			Side:   domain.PositionSideLong,
+		}, riskSnapshotPositionLimit, 0)
+		if err != nil {
+			return fmt.Errorf("order_manager: get polymarket exit position for %s: %w", positionTicker, err)
+		}
+
+		for i := range positions {
+			if positions[i].ClosedAt == nil && positions[i].Quantity > 0 {
+				position = &positions[i]
+				break
+			}
+		}
+		if position == nil {
+			return fmt.Errorf("order_manager: polymarket sell fill has no open position for %s", positionTicker)
+		}
+
+		closedQuantity := math.Min(position.Quantity, order.FilledQuantity)
+		currentPrice := fillPrice
+		position.CurrentPrice = &currentPrice
+		position.RealizedPnL += realizedPnL(position.Side, position.AvgEntry, fillPrice, closedQuantity)
+		if position.Quantity > order.FilledQuantity {
+			position.Quantity -= order.FilledQuantity
+		} else {
+			position.Quantity = 0
+			closedAt := now
+			position.ClosedAt = &closedAt
+		}
+
+		if err := m.positionRepo.Update(ctx, position); err != nil {
+			return fmt.Errorf("order_manager: update polymarket position: %w", err)
+		}
+	} else {
+		positionSide := domain.PositionSideLong
+		if order.Side == domain.OrderSideSell {
+			positionSide = domain.PositionSideShort
+		}
+
+		positionTicker := order.Ticker
+		if marketType == domain.MarketTypePolymarket {
+			positionTicker = polymarketPositionTicker(order.Ticker, order.PredictionSide)
+		}
+
+		position = &domain.Position{
+			ID:         uuid.New(),
+			StrategyID: &strategyID,
+			Ticker:     positionTicker,
+			Side:       positionSide,
+			Quantity:   order.FilledQuantity,
+			AvgEntry:   fillPrice,
+			OpenedAt:   now,
+		}
+
+		if plan.StopLoss > 0 {
+			position.StopLoss = &plan.StopLoss
+		}
+
+		if plan.TakeProfit > 0 {
+			position.TakeProfit = &plan.TakeProfit
+		}
+
+		if err := m.positionRepo.Create(ctx, position); err != nil {
+			return fmt.Errorf("order_manager: create position: %w", err)
+		}
+	}
+
 	trade := &domain.Trade{
 		ID:         uuid.New(),
 		OrderID:    &order.ID,
+		PositionID: &position.ID,
 		Ticker:     order.Ticker,
 		Side:       order.Side,
 		Quantity:   order.FilledQuantity,
@@ -702,36 +879,6 @@ func (m *OrderManager) handleFill(
 		ExecutedAt: now,
 		CreatedAt:  now,
 	}
-
-	// Create or update position.
-	positionSide := domain.PositionSideLong
-	if order.Side == domain.OrderSideSell {
-		positionSide = domain.PositionSideShort
-	}
-
-	position := &domain.Position{
-		ID:         uuid.New(),
-		StrategyID: &strategyID,
-		Ticker:     order.Ticker,
-		Side:       positionSide,
-		Quantity:   order.FilledQuantity,
-		AvgEntry:   fillPrice,
-		OpenedAt:   now,
-	}
-
-	if plan.StopLoss > 0 {
-		position.StopLoss = &plan.StopLoss
-	}
-
-	if plan.TakeProfit > 0 {
-		position.TakeProfit = &plan.TakeProfit
-	}
-
-	if err := m.positionRepo.Create(ctx, position); err != nil {
-		return fmt.Errorf("order_manager: create position: %w", err)
-	}
-
-	trade.PositionID = &position.ID
 
 	if err := m.tradeRepo.Create(ctx, trade); err != nil {
 		// Audit the incomplete fill so it can be reconciled later.

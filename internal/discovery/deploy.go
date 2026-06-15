@@ -15,7 +15,10 @@ import (
 // CreateOrReusePaperStrategy creates a paper strategy if it does not already
 // exist, and returns the existing row when a matching strategy is present.
 //
-// Matching key: (ticker, market_type, is_paper=true, exact name).
+// Matching key: (ticker, market_type, is_paper=true, exact name). For
+// Polymarket paper strategies, ticker is the canonical market slug, so any
+// existing paper strategy for the same slug is reused even if an older LLM
+// display name differs.
 func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRepository, strategy domain.Strategy) (domain.Strategy, bool, error) {
 	if !strategy.IsPaper {
 		if err := repo.Create(ctx, &strategy); err != nil {
@@ -64,6 +67,10 @@ func findExistingPaperStrategy(ctx context.Context, repo repository.StrategyRepo
 	}
 
 	for i := range existing {
+		if strategy.MarketType == domain.MarketTypePolymarket {
+			copy := existing[i]
+			return &copy, nil
+		}
 		if existing[i].Name == strategy.Name {
 			copy := existing[i]
 			return &copy, nil

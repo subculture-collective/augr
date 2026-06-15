@@ -49,6 +49,21 @@ func TestNew(t *testing.T) {
 	if m.AutomationJobErrorsTotal == nil {
 		t.Fatal("AutomationJobErrorsTotal is nil")
 	}
+	if m.PolymarketReconciliationDriftTotal == nil {
+		t.Fatal("PolymarketReconciliationDriftTotal is nil")
+	}
+	if m.PolymarketStopGuardTriggeredTotal == nil {
+		t.Fatal("PolymarketStopGuardTriggeredTotal is nil")
+	}
+	if m.PolymarketStopGuardSendErrorsTotal == nil {
+		t.Fatal("PolymarketStopGuardSendErrorsTotal is nil")
+	}
+	if m.PolymarketStopGuardTickToFire == nil {
+		t.Fatal("PolymarketStopGuardTickToFire is nil")
+	}
+	if m.PolymarketStopGuardActive == nil {
+		t.Fatal("PolymarketStopGuardActive is nil")
+	}
 	if m.StaleRunsReconciled == nil {
 		t.Fatal("StaleRunsReconciled is nil")
 	}
@@ -97,6 +112,11 @@ func TestConvenienceMethods(t *testing.T) {
 	m.RecordSchedulerTick("strategy")
 	m.RecordAutomationJobError("sync_positions")
 	m.RecordStaleRunReconciled()
+	m.IncDrift("quantity_mismatch")
+	m.IncTriggered("market-a")
+	m.IncSendError("market-a")
+	m.ObserveTickToFireSeconds("market-a", 1.25)
+	m.SetActive(3)
 	m.SetPortfolioValue(50000.0)
 	m.SetPositionsOpen(3)
 	m.SetCircuitBreakerState(true)
@@ -126,6 +146,11 @@ func TestHandler(t *testing.T) {
 	m.RecordSchedulerTick("strategy")
 	m.RecordAutomationJobError("sync_positions")
 	m.RecordStaleRunReconciled()
+	m.IncDrift("quantity_mismatch")
+	m.IncTriggered("market-a")
+	m.IncSendError("market-a")
+	m.ObserveTickToFireSeconds("market-a", 1.25)
+	m.SetActive(3)
 	m.RecordLLMRetry("configured_primary:openai")
 	m.RecordLLMBudgetExhausted()
 	m.RecordReportWorkerSuccess("strategy-a")
@@ -158,6 +183,11 @@ func TestHandler(t *testing.T) {
 		"tradingagent_signal_parse_failures_total",
 		"tradingagent_scheduler_tick_total",
 		"tradingagent_automation_job_errors_total",
+		"tradingagent_polymarket_reconciliation_drift_total",
+		"tradingagent_polymarket_stop_guard_triggered_total",
+		"tradingagent_polymarket_stop_guard_send_errors_total",
+		"tradingagent_polymarket_stop_guard_tick_to_fire_seconds",
+		"tradingagent_polymarket_stop_guard_active",
 		"tradingagent_stale_runs_reconciled_total",
 		"tradingagent_portfolio_value",
 		"tradingagent_positions_open",
@@ -254,6 +284,20 @@ tradingagent_alpaca_reconcile_runs_total{result="success"} 2
 `,
 		},
 		{
+			name:      "polymarket reconciliation drift",
+			collector: func(m *metrics.Metrics) prometheus.Collector { return m.PolymarketReconciliationDriftTotal },
+			add: func(m *metrics.Metrics) {
+				m.IncDrift("local_missing_externally")
+				m.IncDrift("local_missing_externally")
+				m.IncDrift("quantity_mismatch")
+			},
+			want: `# HELP tradingagent_polymarket_reconciliation_drift_total Total Polymarket reconciliation drifts by drift type.
+# TYPE tradingagent_polymarket_reconciliation_drift_total counter
+tradingagent_polymarket_reconciliation_drift_total{drift_type="local_missing_externally"} 2
+tradingagent_polymarket_reconciliation_drift_total{drift_type="quantity_mismatch"} 1
+`,
+		},
+		{
 			name:      "llm retry",
 			collector: func(m *metrics.Metrics) prometheus.Collector { return m.LLMRetryTotal },
 			add: func(m *metrics.Metrics) {
@@ -327,5 +371,36 @@ func TestObserveReportStaleness_EmitsSeries(t *testing.T) {
 	m.ObserveReportStaleness("strategy-a", 120)
 	if got := testutil.CollectAndCount(m.ReportStaleness); got != 1 {
 		t.Fatalf("CollectAndCount(report staleness) = %d, want 1", got)
+	}
+}
+
+func TestPolymarketStopGuardMetrics(t *testing.T) {
+	t.Parallel()
+
+	m := metrics.New()
+	m.IncTriggered("market-a")
+	m.IncSendError("market-a")
+	m.ObserveTickToFireSeconds("market-a", 1.5)
+	m.SetActive(4)
+
+	if got := testutil.ToFloat64(m.PolymarketStopGuardActive); got != 4 {
+		t.Fatalf("active gauge = %v, want 4", got)
+	}
+	if got := testutil.CollectAndCount(m.PolymarketStopGuardTickToFire); got != 1 {
+		t.Fatalf("CollectAndCount(stop guard tick-to-fire) = %d, want 1", got)
+	}
+	if err := testutil.CollectAndCompare(m.PolymarketStopGuardTriggeredTotal, strings.NewReader(`
+# HELP tradingagent_polymarket_stop_guard_triggered_total Total Polymarket stop-guard triggers.
+# TYPE tradingagent_polymarket_stop_guard_triggered_total counter
+tradingagent_polymarket_stop_guard_triggered_total 1
+`)); err != nil {
+		t.Fatalf("trigger metric compare failed: %v", err)
+	}
+	if err := testutil.CollectAndCompare(m.PolymarketStopGuardSendErrorsTotal, strings.NewReader(`
+# HELP tradingagent_polymarket_stop_guard_send_errors_total Total Polymarket stop-guard send errors.
+# TYPE tradingagent_polymarket_stop_guard_send_errors_total counter
+tradingagent_polymarket_stop_guard_send_errors_total 1
+`)); err != nil {
+		t.Fatalf("send-error metric compare failed: %v", err)
 	}
 }

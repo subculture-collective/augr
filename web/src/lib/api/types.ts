@@ -194,7 +194,7 @@ export interface PolymarketStatus {
   ws_connections: number;
   avg_jitter_ms: number;
   dropped: number;
-  ready_slugs: string[];
+  ready_slugs: string[] | null;
   recorder_lag_seconds: number;
   updated_at: string;
 }

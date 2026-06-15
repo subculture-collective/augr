@@ -498,6 +498,16 @@ func (s *Scheduler) runStrategy(strategy domain.Strategy) {
 		}
 		return
 	}
+
+	if current.MarketType.Normalize() == domain.MarketTypePolymarket && s.strategyExecution == nil {
+		s.logger.Info("scheduler: skipping polymarket strategy until native executor is enabled",
+			slog.String("strategy_id", current.ID.String()),
+			slog.String("ticker", current.Ticker),
+			slog.String("market_type", current.MarketType.String()),
+		)
+		return
+	}
+
 	now := s.nowFunc()
 	ctx, cancel := s.jobContext()
 	defer cancel()

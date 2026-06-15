@@ -22,6 +22,14 @@ type PositionSizingParams struct {
 	HalfKelly     bool
 }
 
+// PolymarketSizingParams contains the inputs needed to size a Polymarket entry.
+type PolymarketSizingParams struct {
+	AccountValue    float64
+	FractionPct     float64
+	MaxPositionUSDC float64
+	EntryPrice      float64
+}
+
 // ATRPositionSize calculates the number of shares based on ATR stop distance.
 func ATRPositionSize(accountValue, riskPct, atr, multiplier float64) float64 {
 	if accountValue <= 0 || riskPct <= 0 || atr <= 0 || multiplier <= 0 {
@@ -52,6 +60,21 @@ func FixedFractionalSize(accountValue, fractionPct, pricePerShare float64) float
 	}
 
 	return (accountValue * fractionPct) / pricePerShare
+}
+
+// PolymarketPositionSize calculates the contract quantity for a Polymarket
+// entry while respecting an optional USDC notional cap.
+func PolymarketPositionSize(params PolymarketSizingParams) float64 {
+	if params.AccountValue <= 0 || params.FractionPct <= 0 || params.EntryPrice <= 0 {
+		return 0
+	}
+
+	notional := params.AccountValue * params.FractionPct
+	if params.MaxPositionUSDC > 0 && notional > params.MaxPositionUSDC {
+		notional = params.MaxPositionUSDC
+	}
+
+	return notional / params.EntryPrice
 }
 
 // CalculatePositionSize dispatches to the configured position sizing method.

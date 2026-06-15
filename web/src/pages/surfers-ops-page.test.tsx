@@ -65,6 +65,26 @@ describe('SurfersOpsPage', () => {
     expect(await screen.findByTestId('surfers-divergence-empty')).toHaveTextContent('No divergence data exists for this strategy.')
   })
 
+  it('treats nullable ops arrays as empty without crashing', async () => {
+    apiClientMock.getPolymarketMarketDataStatus.mockResolvedValue({
+      enabled: true,
+      ws_connections: 0,
+      avg_jitter_ms: null,
+      dropped: null,
+      ready_slugs: null,
+      recorder_lag_seconds: null,
+      updated_at: '2026-06-10T12:00:00Z',
+    })
+    apiClientMock.listRiskBreakers.mockResolvedValue({ tripped: null })
+
+    render(<SurfersOpsPage />)
+
+    const statusPanel = await screen.findByTestId('surfers-status-panel')
+    expect(within(statusPanel).getByText('No ready slugs')).toBeInTheDocument()
+    expect(within(statusPanel).getByText('Feed is enabled, but no markets are connected yet.')).toBeInTheDocument()
+    expect(screen.getByText('No tripped breakers.')).toBeInTheDocument()
+  })
+
   it('explains when dependencies are not configured', async () => {
     apiClientMock.getPolymarketMarketDataStatus.mockRejectedValue(
       new ApiClientError('polymarket feed unavailable', 503, 'ERR_NOT_IMPLEMENTED'),

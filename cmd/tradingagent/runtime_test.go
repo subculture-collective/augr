@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
+	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/notification"
@@ -379,6 +381,106 @@ func TestNewAPIServerWiresAlpacaReconcileAutomationJob(t *testing.T) {
 	cleanup()
 	if !cleanupCalled.Load() {
 		t.Fatal("cleanup did not close db")
+	}
+}
+
+func TestNewAPIServerWiresPolymarketReconcileAutomationJob(t *testing.T) {
+	origNewDB := runtimeNewDB
+	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
+	origAfterSchemaGate := runtimeAfterSchemaGate
+	origCloseDB := runtimeCloseDB
+	origNewServer := runtimeNewServer
+	defer func() {
+		runtimeNewDB = origNewDB
+		runtimeCurrentSchemaVersion = origCurrentSchemaVersion
+		runtimeAfterSchemaGate = origAfterSchemaGate
+		runtimeCloseDB = origCloseDB
+		runtimeNewServer = origNewServer
+	}()
+
+	pool, err := pgxpool.New(context.Background(), "postgres://postgres:***@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatalf("pgxpool.New() error = %v", err)
+	}
+	defer pool.Close()
+
+	var capturedDeps api.Deps
+	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) {
+		return &pgrepo.DB{Pool: pool}, nil
+	}
+	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) {
+		return pgrepo.RequiredSchemaVersion, nil
+	}
+	runtimeAfterSchemaGate = func() {}
+	runtimeCloseDB = func(*pgrepo.DB) {}
+	runtimeNewServer = func(_ api.ServerConfig, deps api.Deps, _ *slog.Logger) (*api.Server, error) {
+		capturedDeps = deps
+		return &api.Server{}, nil
+	}
+
+	cfg := config.Config{
+		Environment: "development",
+		Database:    config.DatabaseConfig{URL: "postgres://ignored"},
+		Features: config.FeatureFlags{
+			EnableScheduler:       true,
+			EnableTickerDiscovery: true,
+		},
+		DataProviders: config.DataProviderConfigs{
+			Polygon: config.DataProviderConfig{APIKey: "polygon-key"},
+		},
+		Brokers: config.BrokerConfigs{
+			Polymarket: config.PolymarketConfig{KeyID: "pm-key", SecretKey: "pm-secret"},
+		},
+		Embedding: config.EmbeddingConfig{Model: "nomic-embed-text", Timeout: time.Second},
+		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434", APIKey: "test-key"}}},
+	}
+
+	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	if err != nil {
+		t.Fatalf("newAPIServer() error = %v", err)
+	}
+	if capturedDeps.Automation == nil {
+		t.Fatal("newAPIServer() automation = nil, want non-nil")
+	}
+	status := runtimeSingleAutomationJobStatus(t, capturedDeps.Automation, "polymarket_reconcile")
+	if status.Name != "polymarket_reconcile" {
+		t.Fatalf("status.Name = %q, want polymarket_reconcile", status.Name)
+	}
+	if got := status.Schedule; got == "" || got == "Manual only" {
+		t.Fatalf("status.Schedule = %q, want scheduled job description", got)
+	}
+
+	cleanup()
+}
+
+func TestBootstrapPolymarketStopGuardsFiltersAndPaginates(t *testing.T) {
+	t.Parallel()
+
+	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
+	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client)})
+	if err != nil {
+		t.Fatalf("NewStopGuard() error = %v", err)
+	}
+	runner := &realStrategyRunner{polymarketStopGuard: guard, logger: slogDiscardLogger()}
+	firstPage := make([]domain.Position, 0, polymarketBootstrapPageSize)
+	for i := 0; i < polymarketBootstrapPageSize-1; i++ {
+		firstPage = append(firstPage, domain.Position{MarketType: domain.MarketTypePolymarket, Ticker: fmt.Sprintf("ignore-%d", i), Quantity: 1})
+	}
+	firstPage = append(firstPage, domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)})
+	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{
+		firstPage,
+		{{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-three:NO", Side: domain.PositionSideShort, Quantity: 7, TakeProfit: floatPtr(0.6)}},
+	}}
+
+	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
+		t.Fatalf("bootstrapPolymarketStopGuards() error = %v", err)
+	}
+	if got := repo.calls.Load(); got != 2 {
+		t.Fatalf("GetOpen call count = %d, want 2 paged calls", got)
+	}
+	if got := guard.Active(); got != 2 {
+		t.Fatalf("guard.Active() = %d, want 2 registered side-qualified polymarket positions", got)
 	}
 }
 
@@ -798,6 +900,22 @@ func (m metricPositionRepo) Count(context.Context, repository.PositionFilter) (i
 func (m metricPositionRepo) CountOpen(context.Context, repository.PositionFilter) (int, error) {
 	return m.count, nil
 }
+
+type bootstrapPolymarketPositionRepoStub struct {
+	stubPositionRepo
+	pages [][]domain.Position
+	calls atomic.Int32
+}
+
+func (r *bootstrapPolymarketPositionRepoStub) GetOpen(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	idx := int(r.calls.Add(1) - 1)
+	if idx >= len(r.pages) {
+		return nil, nil
+	}
+	return append([]domain.Position(nil), r.pages[idx]...), nil
+}
+
+func floatPtr(v float64) *float64 { return &v }
 
 func TestSelectedAnalysisRoles_RejectsNonAnalysisRoles(t *testing.T) {
 	t.Parallel()

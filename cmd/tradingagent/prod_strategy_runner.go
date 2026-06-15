@@ -28,6 +28,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
+	polymarketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/notification"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
@@ -59,6 +60,14 @@ type promptOverrideSource interface {
 	Overrides() map[agent.AgentRole]string
 }
 
+type polymarketMarketDataSource interface {
+	GetMarketData(ctx context.Context, slug string) (*agent.PredictionMarketData, error)
+}
+
+type polymarketTickFeed interface {
+	Ticks(slug string) <-chan polymarketdata.Tick
+}
+
 type realStrategyRunner struct {
 	cfg                   config.Config
 	globals               agent.GlobalSettings
@@ -82,7 +91,14 @@ type realStrategyRunner struct {
 	localPaperMu          sync.Mutex
 	localPaperBroker      *paper.PaperBroker
 	polymarketClient      *polymarketexecution.Client // nil if not configured
-	hub                   *api.Hub                    // nil until wired; optional WebSocket broadcast
+	polymarketMarketData  polymarketMarketDataSource
+	polymarketFeed        polymarketTickFeed
+	polymarketStopGuard   *polymarketexecution.StopGuard
+	polymarketWorkers     sync.Map
+	polymarketWorkerCtx   context.Context
+	polymarketWorkerStop  context.CancelFunc
+	polymarketWorkerWG    sync.WaitGroup
+	hub                   *api.Hub // nil until wired; optional WebSocket broadcast
 }
 
 func newRealStrategyRunner(
@@ -103,12 +119,14 @@ func newRealStrategyRunner(
 	llmBudget *llm.Budget,
 	promptOverrides promptOverrideSource,
 	tradeDecisionRecorder execution.DecisionRecorder,
+	polymarketFeed polymarketTickFeed,
 	logger *slog.Logger,
 ) *realStrategyRunner {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
+	workerCtx, workerStop := context.WithCancel(context.Background())
 	runner := &realStrategyRunner{
 		cfg:                   cfg,
 		globals:               globalSettingsFromConfig(cfg),
@@ -129,6 +147,9 @@ func newRealStrategyRunner(
 		llmBudget:             llmBudget,
 		promptOverrides:       promptOverrides,
 		logger:                logger,
+		polymarketFeed:        polymarketFeed,
+		polymarketWorkerCtx:   workerCtx,
+		polymarketWorkerStop:  workerStop,
 		localPaperBroker:      paper.NewPaperBroker(localPaperBuyingPower, 0, 0),
 	}
 	runner.setRiskPortfolioSnapshotSource(runner.localPaperBroker)
@@ -140,12 +161,29 @@ func newRealStrategyRunner(
 		client.SetAPIBaseURL(pm.APIBaseURL)
 		client.SetGatewayBaseURL(pm.GatewayBaseURL)
 		runner.polymarketClient = client
+		runner.polymarketMarketData = client
+		if strings.TrimSpace(pm.SecretKey) != "" {
+			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client), Logger: logger, Metrics: appMetrics}); err == nil {
+				runner.polymarketStopGuard = guard
+			} else {
+				logger.Warn("polymarket stop guard disabled", slog.String("error", err.Error()))
+			}
+		}
+	}
+	if runner.polymarketMarketData == nil {
+		client := polymarketexecution.NewClient("", "", logger)
+		client.SetGatewayBaseURL(pm.GatewayBaseURL)
+		runner.polymarketMarketData = client
 	}
 
 	return runner
 }
 
 func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+	if strategy.MarketType.Normalize() == domain.MarketTypePolymarket {
+		return r.runPolymarketNative(ctx, strategy)
+	}
+
 	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy)
 	if err != nil {
 		return nil, err
@@ -264,6 +302,205 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	}, nil
 }
 
+func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+	executionStrategy := r.effectivePolymarketExecutionStrategy(strategy)
+
+	strategyConfig, err := parseStrategyConfig(strategy.Config)
+	if err != nil {
+		return nil, err
+	}
+	resolved := agent.ResolveConfig(strategyConfig, r.globals)
+	now := time.Now().UTC()
+	run := domain.PipelineRun{
+		ID:             uuid.New(),
+		StrategyID:     strategy.ID,
+		Ticker:         strategy.Ticker,
+		TradeDate:      now,
+		Status:         domain.PipelineStatusRunning,
+		StartedAt:      now,
+		ConfigSnapshot: strategy.Config,
+	}
+	if r.runRepo != nil {
+		if err := r.runRepo.Create(ctx, &run); err != nil {
+			return nil, fmt.Errorf("polymarket native: create run: %w", err)
+		}
+	}
+
+	completeRun := func(status domain.PipelineStatus, signal domain.PipelineSignal, errMsg string) error {
+		completedAt := time.Now().UTC()
+		run.Status = status
+		run.Signal = signal
+		run.CompletedAt = &completedAt
+		run.ErrorMessage = errMsg
+		if r.runRepo == nil {
+			return nil
+		}
+		update := repository.PipelineRunStatusUpdate{Status: status, Signal: &signal, CompletedAt: &completedAt, ErrorMessage: errMsg}
+		return r.runRepo.UpdateStatus(ctx, run.ID, run.TradeDate, update)
+	}
+	failRun := func(err error) (*api.StrategyRunResult, error) {
+		if updateErr := completeRun(domain.PipelineStatusFailed, domain.PipelineSignalHold, err.Error()); updateErr != nil {
+			r.logger.WarnContext(ctx, "polymarket native: failed to update failed run", "error", updateErr, "run_id", run.ID)
+		}
+		return nil, err
+	}
+
+	if r.polymarketMarketData == nil {
+		return failRun(errors.New("polymarket native: market data client is required"))
+	}
+	marketData, err := r.polymarketMarketData.GetMarketData(ctx, strategy.Ticker)
+	if err != nil {
+		return failRun(fmt.Errorf("polymarket native: fetch market data for %s: %w", strategy.Ticker, err))
+	}
+	snapshot := polymarketexecution.SnapshotFromPredictionMarketData(marketData, time.Now().UTC())
+	if err := r.persistPolymarketNativeSnapshot(ctx, run.ID, snapshot); err != nil {
+		return failRun(err)
+	}
+
+	executor := polymarketexecution.NewDeterministicNativeExecutor()
+	decision, err := executor.Execute(ctx, strategy, snapshot)
+	if err != nil {
+		return failRun(fmt.Errorf("polymarket native: execute strategy %s: %w", strategy.Name, err))
+	}
+	signal := decision.Signal
+	if signal == "" {
+		signal = domain.PipelineSignalHold
+	}
+	if signal == domain.PipelineSignalBuy {
+		sizingConfig := applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger), r.cfg.Risk.Polymarket.MaxPositionUSDC)
+		plannedNotional, err := r.plannedPolymarketNotional(ctx, executionStrategy, sizingConfig, decision)
+		if err != nil {
+			return failRun(err)
+		}
+		if err := r.checkPolymarketNativePreconditions(snapshot, decision, plannedNotional); err != nil {
+			return failRun(err)
+		}
+	}
+
+	orderManager, err := r.newOrderManager(ctx, executionStrategy, resolved, strategyConfig)
+	if err != nil {
+		return failRun(err)
+	}
+	if err := orderManager.ProcessSignal(ctx, execution.FinalSignal{Signal: signal, Confidence: decision.Confidence}, execution.TradingPlan{
+		Action:      signal,
+		MarketType:  domain.MarketTypePolymarket,
+		Ticker:      strategy.Ticker,
+		EntryType:   decision.EntryType,
+		EntryPrice:  decision.EntryPrice,
+		StopLoss:    decision.StopLoss,
+		TakeProfit:  decision.TakeProfit,
+		TimeHorizon: decision.TimeHorizon,
+		Confidence:  decision.Confidence,
+		Rationale:   decision.Rationale,
+		RiskReward:  decision.RiskReward,
+		Side:        decision.Side,
+	}, strategy.ID, run.ID); err != nil {
+		return failRun(err)
+	}
+
+	if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
+		return nil, err
+	}
+	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+	if err != nil {
+		return nil, err
+	}
+	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	if err != nil {
+		return nil, err
+	}
+	if !executionStrategy.IsPaper {
+		if err := r.registerPolymarketPositions(ctx, positions); err != nil && r.logger != nil {
+			r.logger.WarnContext(ctx, "polymarket stop guard registration failed", "error", err, "strategy_id", strategy.ID)
+		}
+	}
+	return &api.StrategyRunResult{Run: run, Signal: signal, Orders: orders, Positions: positions}, nil
+}
+
+func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context, runID uuid.UUID, snapshot polymarketexecution.Snapshot) error {
+	if r.snapshotRepo == nil {
+		return nil
+	}
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return fmt.Errorf("polymarket native: marshal snapshot: %w", err)
+	}
+	return r.snapshotRepo.Create(ctx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: runID, DataType: "polymarket_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()})
+}
+
+func (r *realStrategyRunner) checkPolymarketNativePreconditions(snapshot polymarketexecution.Snapshot, decision polymarketexecution.NativeDecision, plannedNotional float64) error {
+	limits := r.cfg.Risk.Polymarket
+	minLiquidity := limits.MinLiquidity
+	if minLiquidity <= 0 {
+		minLiquidity = 1000
+	}
+	now := time.Now().UTC()
+	if err := snapshot.ValidateExecutableSide(decision.Side, minLiquidity, now); err != nil {
+		return fmt.Errorf("polymarket native: %w", err)
+	}
+	bid, ask := snapshot.BidAskForSide(decision.Side)
+	spread := ask - bid
+	if spread <= 0 {
+		return fmt.Errorf("polymarket native: executable %s bid/ask spread is required", decision.Side)
+	}
+	mid := ask - spread/2
+	spreadMid := 0.0
+	if mid > 0 {
+		spreadMid = spread / mid
+	}
+	daysToResolution := int(snapshot.EndDate.Sub(now).Hours() / 24)
+	if ok, reason := risk.CheckPolymarketPreConditions(risk.PolymarketLimits{
+		MinLiquidity:        minLiquidity,
+		MaxSpreadPct:        limits.MaxSpreadPct,
+		MinDaysToResolution: limits.MinDaysToResolution,
+		MaxPositionUSDC:     limits.MaxPositionUSDC,
+	}, snapshot.Liquidity, spreadMid, daysToResolution, plannedNotional); !ok {
+		return errors.New(reason)
+	}
+	return nil
+}
+
+func (r *realStrategyRunner) plannedPolymarketNotional(ctx context.Context, strategy domain.Strategy, sizingConfig execution.SizingConfig, decision polymarketexecution.NativeDecision) (float64, error) {
+	if decision.EntryPrice <= 0 {
+		return 0, nil
+	}
+	broker, _, err := r.newBrokerForStrategy(strategy)
+	if err != nil {
+		return 0, err
+	}
+	if broker == nil {
+		return 0, errors.New("polymarket native: broker is required to estimate position size")
+	}
+	balance, err := broker.GetAccountBalance(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("polymarket native: get account balance: %w", err)
+	}
+	quantity := execution.PolymarketPositionSize(execution.PolymarketSizingParams{
+		AccountValue:    balance.Equity,
+		FractionPct:     sizingConfig.FractionPct,
+		MaxPositionUSDC: sizingConfig.MaxPositionUSDC,
+		EntryPrice:      decision.EntryPrice,
+	})
+	return quantity * decision.EntryPrice, nil
+}
+
+func (r *realStrategyRunner) effectivePolymarketExecutionStrategy(strategy domain.Strategy) domain.Strategy {
+	effective := strategy
+	if strategy.IsPaper || r == nil || !r.cfg.Features.EnableLiveTrading {
+		effective.IsPaper = true
+		return effective
+	}
+	gate, err := r.liveGateForStrategy(strategy)
+	if err != nil {
+		effective.IsPaper = true
+		return effective
+	}
+	if allowed, _ := gate.Allows(&strategy.ID, "polymarket"); !allowed {
+		effective.IsPaper = true
+	}
+	return effective
+}
+
 func (r *realStrategyRunner) executionDecisionMetadata(ctx context.Context, runID uuid.UUID) *execution.DecisionMetadata {
 	return executionDecisionMetadata(ctx, r.decisionRepo, r.logger, runID)
 }
@@ -313,6 +550,89 @@ func executionDecisionMetadata(ctx context.Context, decisionRepo repository.Agen
 	metadata.CostUSD = &value
 
 	return metadata
+}
+
+func (r *realStrategyRunner) registerPolymarketPositions(ctx context.Context, positions []domain.Position) error {
+	if r == nil || r.polymarketStopGuard == nil {
+		return nil
+	}
+	var firstErr error
+	for _, position := range positions {
+		if err := r.registerPolymarketPosition(ctx, position); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (r *realStrategyRunner) registerPolymarketPosition(ctx context.Context, position domain.Position) error {
+	if r == nil || r.polymarketStopGuard == nil {
+		return nil
+	}
+	if position.ClosedAt != nil || position.Quantity <= 0 {
+		return nil
+	}
+	if position.StopLoss == nil && position.TakeProfit == nil {
+		return nil
+	}
+	if err := r.polymarketStopGuard.RegisterPosition(position); err != nil {
+		return err
+	}
+	slug, err := polymarketPositionSlugFromTicker(position.Ticker)
+	if err != nil {
+		return err
+	}
+	r.ensurePolymarketTickWorker(slug)
+	return nil
+}
+
+func (r *realStrategyRunner) ensurePolymarketTickWorker(slug string) {
+	if r == nil || r.polymarketStopGuard == nil || r.polymarketFeed == nil || r.polymarketWorkerCtx == nil {
+		return
+	}
+	slug = strings.TrimSpace(slug)
+	if slug == "" {
+		return
+	}
+	if _, loaded := r.polymarketWorkers.LoadOrStore(slug, struct{}{}); loaded {
+		return
+	}
+	r.polymarketWorkerWG.Add(1)
+	go func() {
+		defer r.polymarketWorkerWG.Done()
+		ticks := r.polymarketFeed.Ticks(slug)
+		for {
+			select {
+			case <-r.polymarketWorkerCtx.Done():
+				return
+			case tick, ok := <-ticks:
+				if !ok {
+					return
+				}
+				r.polymarketStopGuard.OnTick(r.polymarketWorkerCtx, tick)
+			}
+		}
+	}()
+}
+
+func (r *realStrategyRunner) stopPolymarketTickWorkers() {
+	if r == nil || r.polymarketWorkerStop == nil {
+		return
+	}
+	r.polymarketWorkerStop()
+	r.polymarketWorkerWG.Wait()
+}
+
+func polymarketPositionSlugFromTicker(ticker string) (string, error) {
+	ticker = strings.TrimSpace(ticker)
+	if ticker == "" {
+		return "", errors.New("polymarket: ticker is required")
+	}
+	slug, _, found := strings.Cut(ticker, ":")
+	if !found || strings.TrimSpace(slug) == "" {
+		return "", fmt.Errorf("polymarket: ticker %q is not a polymarket position ticker", ticker)
+	}
+	return strings.TrimSpace(slug), nil
 }
 
 func normalizePolymarketStrategySide(side string) (string, error) {
@@ -775,7 +1095,7 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 		r.tradeRepo,
 		r.auditLogRepo,
 		r.eventRepo,
-		sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger),
+		applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger), r.cfg.Risk.Polymarket.MaxPositionUSDC),
 		r.logger,
 	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper), nil
 }

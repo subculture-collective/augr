@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -21,17 +22,22 @@ type GeneratorConfig struct {
 
 // Proposal is the LLM's strategy proposal for a single market.
 type Proposal struct {
-	Template      StrategyTemplate `json:"template"`
-	Skip          bool             `json:"skip,omitempty"`
-	SkipReason    string           `json:"skip_reason,omitempty"`
-	Name          string           `json:"name"`
-	Summary       string           `json:"summary"`
-	Direction     string           `json:"direction"`                 // "YES" or "NO"
-	Conviction    float64          `json:"conviction"`                // 0..1
-	TimeHorizon   string           `json:"time_horizon"`              // "hours"|"days"|"weeks"
-	EntryPriceMax float64          `json:"entry_price_max,omitempty"` // YES price ceiling for buys
-	WatchTerms    []string         `json:"watch_terms"`
-	InvalidateIf  []string         `json:"invalidate_if"`
+	Template         StrategyTemplate `json:"template"`
+	Skip             bool             `json:"skip,omitempty"`
+	SkipReason       string           `json:"skip_reason,omitempty"`
+	Name             string           `json:"name"`
+	Summary          string           `json:"summary"`
+	Direction        string           `json:"direction"`                 // "YES" or "NO"
+	Conviction       float64          `json:"conviction"`                // 0..1
+	TimeHorizon      string           `json:"time_horizon"`              // "hours"|"days"|"weeks"
+	EntryPriceMax    float64          `json:"entry_price_max,omitempty"` // YES price ceiling for buys
+	WatchTerms       []string         `json:"watch_terms"`
+	InvalidateIf     []string         `json:"invalidate_if"`
+	SourceReferences []string         `json:"source_references,omitempty"`
+	MaxSpreadPct     float64          `json:"max_spread_pct,omitempty"`
+	MinLiquidity     float64          `json:"min_liquidity,omitempty"`
+	StopPolicy       string           `json:"stop_policy,omitempty"`
+	TargetPolicy     string           `json:"target_policy,omitempty"`
 }
 
 const generatorSystemPrompt = `You are a senior prediction-market trading strategist. Given a single Polymarket market and supporting evidence, decide whether there is a credible edge to trade and, if so, produce a structured proposal.
@@ -48,11 +54,17 @@ You MUST output a single JSON object with this schema:
   "time_horizon": "<hours|days|weeks>",
   "entry_price_max": <0..1 float; max YES price you would still enter at>,
   "watch_terms": ["<keyword 1>", "<keyword 2>", "..."],
-  "invalidate_if": ["<natural language condition 1>", "..."]
+  "invalidate_if": ["<natural language condition 1>", "..."],
+  "source_references": ["<specific source 1>", "<specific source 2>", "..."],
+  "max_spread_pct": <positive float <=100>,
+  "min_liquidity": <positive float>,
+  "stop_policy": "<stop-loss or invalidation policy>",
+  "target_policy": "<take-profit or exit policy>"
 }
 
 Rules:
 - If no credible edge is visible, set skip=true with a one-line skip_reason. Do NOT invent edges.
+- If skip=false, all execution fields are required: direction, entry_price_max, watch_terms, source_references, max_spread_pct, min_liquidity, stop_policy, target_policy.
 - conviction must reflect evidence strength. 0.30 is "marginal", 0.70+ is "strong with clear catalyst".
 - watch_terms are concrete keywords (entities, sources, ruling names) the signal layer will match against incoming news, never generic phrases like "news" or "update".
 - invalidate_if entries are concrete falsifiers (e.g. "favored candidate concedes", "official source rules opposite").
@@ -152,13 +164,86 @@ func validateProposal(p *Proposal) error {
 	default:
 		return fmt.Errorf("invalid time_horizon %q", p.TimeHorizon)
 	}
-	if p.EntryPriceMax < 0 || p.EntryPriceMax > 1 {
-		return fmt.Errorf("entry_price_max out of range: %.3f", p.EntryPriceMax)
+	if p.EntryPriceMax <= 0 || p.EntryPriceMax > 1 {
+		return fmt.Errorf("entry_price_max must be > 0 and <= 1: %.3f", p.EntryPriceMax)
 	}
 	if len(p.WatchTerms) == 0 {
 		return errors.New("watch_terms must not be empty")
 	}
+	if len(trimNonEmptyStrings(p.SourceReferences)) == 0 {
+		return errors.New("source_references must not be empty")
+	}
+	if p.MaxSpreadPct <= 0 || p.MaxSpreadPct > 100 {
+		return fmt.Errorf("max_spread_pct out of range: %.3f", p.MaxSpreadPct)
+	}
+	if p.MinLiquidity <= 0 {
+		return errors.New("min_liquidity must be > 0")
+	}
+	if strings.TrimSpace(p.StopPolicy) == "" {
+		return errors.New("stop_policy required")
+	}
+	if strings.TrimSpace(p.TargetPolicy) == "" {
+		return errors.New("target_policy required")
+	}
+	if term := prohibitedProposalLanguage(p); term != "" {
+		return fmt.Errorf("proposal text contains prohibited stock/OHLCV language %q", term)
+	}
 	return nil
+}
+
+func trimNonEmptyStrings(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+var prohibitedProposalLanguagePatterns = []struct {
+	term string
+	re   *regexp.Regexp
+}{
+	{term: "rsi", re: regexp.MustCompile(`(?i)\brsi\b`)},
+	{term: "macd", re: regexp.MustCompile(`(?i)\bmacd\b`)},
+	{term: "sma", re: regexp.MustCompile(`(?i)\bsma\b`)},
+	{term: "ema", re: regexp.MustCompile(`(?i)\bema\b`)},
+	{term: "bollinger", re: regexp.MustCompile(`(?i)\bbollinger\b`)},
+	{term: "atr", re: regexp.MustCompile(`(?i)\batr\b`)},
+	{term: "ohlcv", re: regexp.MustCompile(`(?i)\bohlcv\b`)},
+	{term: "candles", re: regexp.MustCompile(`(?i)\bcandles\b`)},
+	{term: "vwap", re: regexp.MustCompile(`(?i)\bvwap\b`)},
+	{term: "z-score", re: regexp.MustCompile(`(?i)\bz-score\b`)},
+	{term: "mean reversion", re: regexp.MustCompile(`(?i)\bmean reversion\b`)},
+}
+
+func prohibitedProposalLanguage(p *Proposal) string {
+	if p == nil {
+		return ""
+	}
+	text := strings.ToLower(strings.Join([]string{
+		p.Name,
+		p.Summary,
+		strings.Join(p.WatchTerms, " "),
+		strings.Join(p.InvalidateIf, " "),
+	}, " "))
+	for _, item := range prohibitedProposalLanguagePatterns {
+		if item.re.MatchString(text) {
+			return item.term
+		}
+	}
+	return ""
+}
+
+// ValidateProposalForMarket re-runs the same validation used at generation time.
+// Deployment paths use it to quarantine stale or seam-injected proposals instead
+// of activating them.
+func ValidateProposalForMarket(p *Proposal, mc MarketContext) error {
+	if err := validateProposal(p); err != nil {
+		return err
+	}
+	return validateProposalMatchesMarket(p, mc)
 }
 
 func validateProposalMatchesMarket(p *Proposal, mc MarketContext) error {

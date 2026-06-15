@@ -2,12 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/agent"
+	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -49,6 +56,113 @@ func TestNormalizePolymarketStrategySide(t *testing.T) {
 				t.Fatalf("normalizePolymarketStrategySide(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunStrategy_PolymarketUsesNativePathBeforeLegacyOHLCV(t *testing.T) {
+	t.Parallel()
+
+	runner := &realStrategyRunner{polymarketMarketData: failingPolymarketMarketData{err: fmt.Errorf("native data used")}}
+	_, err := runner.RunStrategy(context.Background(), domain.Strategy{
+		Name:       "native disabled",
+		Ticker:     "will-example-happen",
+		MarketType: domain.MarketTypePolymarket,
+		Status:     domain.StrategyStatusActive,
+	})
+	if err == nil || !strings.Contains(err.Error(), "native data used") {
+		t.Fatalf("RunStrategy() error = %v, want native market-data error", err)
+	}
+}
+
+type failingPolymarketMarketData struct{ err error }
+
+func (f failingPolymarketMarketData) GetMarketData(context.Context, string) (*agent.PredictionMarketData, error) {
+	return nil, f.err
+}
+
+type staticPolymarketMarketData struct{ data *agent.PredictionMarketData }
+
+func (s staticPolymarketMarketData) GetMarketData(context.Context, string) (*agent.PredictionMarketData, error) {
+	return s.data, nil
+}
+
+func nativeMarketDataFixture() *agent.PredictionMarketData {
+	end := time.Now().UTC().Add(72 * time.Hour)
+	return &agent.PredictionMarketData{
+		Slug:       "will-example-happen",
+		EndDate:    &end,
+		YesPrice:   0.42,
+		NoPrice:    0.58,
+		BestBidYes: 0.41,
+		BestAskYes: 0.43,
+		BestBidNo:  0.57,
+		BestAskNo:  0.59,
+		SpreadYes:  0.02,
+		Liquidity:  20_000,
+	}
+}
+
+func TestEffectivePolymarketExecutionStrategy_DefaultsToPaperUnlessLiveAllowlisted(t *testing.T) {
+	t.Parallel()
+
+	strategyID := uuid.New()
+	strategy := domain.Strategy{ID: strategyID, MarketType: domain.MarketTypePolymarket, IsPaper: false}
+
+	runner := &realStrategyRunner{}
+	if got := runner.effectivePolymarketExecutionStrategy(strategy); !got.IsPaper {
+		t.Fatal("expected paper when live trading is globally disabled")
+	}
+
+	runner.cfg.Features.EnableLiveTrading = true
+	if got := runner.effectivePolymarketExecutionStrategy(strategy); !got.IsPaper {
+		t.Fatal("expected paper when strategy/broker are not allowlisted")
+	}
+
+	runner.cfg.LiveTradingAllowedStrategies = []string{strategyID.String()}
+	runner.cfg.LiveTradingAllowedBrokers = []string{"polymarket"}
+	if got := runner.effectivePolymarketExecutionStrategy(strategy); got.IsPaper {
+		t.Fatal("expected live only after explicit strategy and broker allowlist")
+	}
+}
+
+func TestPolymarketExecutionDefaultsToPaperForUnspecifiedStrategyMode(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(map[string]any{"discovery_meta": map[string]any{"direction": "YES", "entry_price_max": 0.5}})
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	runner := &realStrategyRunner{cfg: config.Config{}, polymarketMarketData: staticPolymarketMarketData{data: nativeMarketDataFixture()}}
+	strategy := runner.effectivePolymarketExecutionStrategy(domain.Strategy{ID: uuid.New(), Ticker: "will-example-happen", MarketType: domain.MarketTypePolymarket, Config: raw})
+	if !strategy.IsPaper {
+		t.Fatal("polymarket strategy should default to paper when not explicitly live-enabled")
+	}
+}
+
+func TestCheckPolymarketNativePreconditionsRejectsCapBreaches(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	end := now.Add(48 * time.Hour)
+	runner := &realStrategyRunner{cfg: config.Config{Risk: config.RiskConfig{Polymarket: config.PolymarketRiskConfig{MaxPositionUSDC: 500, MinLiquidity: 1000}}}}
+	snapshot := polymarketexecution.Snapshot{
+		Slug:       "will-example-happen",
+		EndDate:    &end,
+		BestBidYes: 0.41,
+		BestAskYes: 0.43,
+		BestBidNo:  0.56,
+		BestAskNo:  0.58,
+		Liquidity:  20_000,
+		FetchedAt:  now,
+	}
+	decision := polymarketexecution.NativeDecision{Side: "YES", EntryPrice: 0.43}
+
+	err := runner.checkPolymarketNativePreconditions(snapshot, decision, 600)
+	if err == nil {
+		t.Fatal("expected cap breach to be rejected")
+	}
+	if !strings.Contains(err.Error(), "exceeds cap") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

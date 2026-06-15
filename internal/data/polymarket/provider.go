@@ -43,12 +43,12 @@ func NewProvider(clobURL string, logger *slog.Logger) *Provider {
 // GetOHLCV returns synthetic OHLCV bars derived from Polymarket YES price history.
 // Close = YES price (0–1). Volume is always 0.
 func (p *Provider) GetOHLCV(ctx context.Context, ticker string, timeframe data.Timeframe, from, to time.Time) ([]domain.OHLCV, error) {
-	conditionID, err := p.resolveConditionID(ctx, ticker)
+	marketID, err := p.resolvePriceHistoryMarketID(ctx, ticker)
 	if err != nil {
 		return nil, fmt.Errorf("polymarket: resolve slug %q: %w", ticker, err)
 	}
 
-	pts, err := p.fetchPriceHistory(ctx, conditionID, timeframe, from, to)
+	pts, err := p.fetchPriceHistory(ctx, marketID, timeframe, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("polymarket: price history for %q: %w", ticker, err)
 	}
@@ -76,6 +76,10 @@ func (p *Provider) GetSocialSentiment(_ context.Context, _ string, _, _ time.Tim
 type marketsPage struct {
 	Data []struct {
 		ConditionID string `json:"condition_id"`
+		Tokens      []struct {
+			TokenID string `json:"token_id"`
+			Outcome string `json:"outcome"`
+		} `json:"tokens"`
 	} `json:"data"`
 }
 
@@ -88,8 +92,10 @@ type priceHistoryResponse struct {
 	History []pricePoint `json:"history"`
 }
 
-// resolveConditionID fetches the conditionID for a market slug.
-func (p *Provider) resolveConditionID(ctx context.Context, slug string) (string, error) {
+// resolvePriceHistoryMarketID fetches the YES token id for a market slug. The
+// CLOB prices-history endpoint is token-oriented, while generated strategy
+// tickers store the human slug.
+func (p *Provider) resolvePriceHistoryMarketID(ctx context.Context, slug string) (string, error) {
 	u, err := url.Parse(p.clobURL + "/markets")
 	if err != nil {
 		return "", err
@@ -120,6 +126,14 @@ func (p *Provider) resolveConditionID(ctx context.Context, slug string) (string,
 	if len(page.Data) == 0 {
 		return "", fmt.Errorf("no market found for slug %q", slug)
 	}
+	for _, token := range page.Data[0].Tokens {
+		if strings.EqualFold(strings.TrimSpace(token.Outcome), "yes") && strings.TrimSpace(token.TokenID) != "" {
+			return token.TokenID, nil
+		}
+	}
+	if len(page.Data[0].Tokens) > 0 && strings.TrimSpace(page.Data[0].Tokens[0].TokenID) != "" {
+		return page.Data[0].Tokens[0].TokenID, nil
+	}
 	return page.Data[0].ConditionID, nil
 }
 
@@ -142,13 +156,13 @@ func fidelityMinutes(tf data.Timeframe) int {
 }
 
 // fetchPriceHistory retrieves YES-token price ticks from the Polymarket CLOB API.
-func (p *Provider) fetchPriceHistory(ctx context.Context, conditionID string, tf data.Timeframe, from, to time.Time) ([]pricePoint, error) {
+func (p *Provider) fetchPriceHistory(ctx context.Context, marketID string, tf data.Timeframe, from, to time.Time) ([]pricePoint, error) {
 	u, err := url.Parse(p.clobURL + "/prices-history")
 	if err != nil {
 		return nil, err
 	}
 	q := u.Query()
-	q.Set("market", conditionID)
+	q.Set("market", marketID)
 	q.Set("startTs", fmt.Sprintf("%d", from.Unix()))
 	q.Set("endTs", fmt.Sprintf("%d", to.Unix()))
 	q.Set("fidelity", fmt.Sprintf("%d", fidelityMinutes(tf)))

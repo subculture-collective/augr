@@ -7,6 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
@@ -197,6 +203,43 @@ func TestJobOrchestratorRegisterAllAddsCurrentDataRefreshBeforeHotScan(t *testin
 	}
 }
 
+func TestJobOrchestratorRegisterAllAddsPolymarketReconcile(t *testing.T) {
+	t.Parallel()
+
+	reconciler := polymarketexecution.NewReconciler(polymarketexecution.ReconcilerDeps{
+		Broker: &polymarketBrokerStub{positions: []domain.Position{{Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 10}}},
+		PositionRepo: &polymarketPositionRepoStub{positions: []domain.Position{{
+			MarketType: domain.MarketTypePolymarket,
+			Ticker:     "market-one",
+			Side:       domain.PositionSideLong,
+			Quantity:   10,
+		}}},
+		AuditLogRepo: &polymarketAuditRepoStub{},
+		Metrics:      &polymarketReconcilerMetricsStub{},
+		Logger:       slog.Default(),
+	})
+	orch := NewJobOrchestrator(OrchestratorDeps{PolymarketReconciler: reconciler})
+	orch.RegisterAll()
+
+	status := singleJobStatus(t, orch, "polymarket_reconcile")
+	if status.Schedule == "" {
+		t.Fatal("polymarket_reconcile schedule is empty")
+	}
+
+	if err := orch.RunJob(context.Background(), "polymarket_reconcile"); err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	waitForJobRuns(t, orch, "polymarket_reconcile", 1)
+
+	status = singleJobStatus(t, orch, "polymarket_reconcile")
+	if status.LastResult != "success" {
+		t.Fatalf("LastResult = %q, want success", status.LastResult)
+	}
+	if status.LastSummary == nil || status.LastSummary["drifts"] != 0 {
+		t.Fatalf("LastSummary = %#v, want drifts=0", status.LastSummary)
+	}
+}
+
 func TestJobOrchestratorAlpacaReconcileRecordsMetricsAndSummary(t *testing.T) {
 	t.Parallel()
 
@@ -250,3 +293,65 @@ func singleJobStatus(t *testing.T, orch *JobOrchestrator, jobName string) JobSta
 func schedulerSpecEveryMinute() scheduler.ScheduleSpec {
 	return scheduler.ScheduleSpec{Cron: "* * * * *", Type: scheduler.ScheduleTypeCron}
 }
+
+type polymarketBrokerStub struct {
+	positions []domain.Position
+}
+
+func (s *polymarketBrokerStub) SubmitOrder(context.Context, *domain.Order) (string, error) {
+	return "", nil
+}
+
+func (s *polymarketBrokerStub) CancelOrder(context.Context, string) error { return nil }
+
+func (s *polymarketBrokerStub) GetOrderStatus(context.Context, string) (domain.OrderStatus, error) {
+	return "", nil
+}
+
+func (s *polymarketBrokerStub) GetPositions(context.Context) ([]domain.Position, error) {
+	return append([]domain.Position(nil), s.positions...), nil
+}
+
+func (s *polymarketBrokerStub) GetAccountBalance(context.Context) (execution.Balance, error) {
+	return execution.Balance{}, nil
+}
+
+type polymarketPositionRepoStub struct {
+	positions []domain.Position
+}
+
+func (s *polymarketPositionRepoStub) Create(context.Context, *domain.Position) error { return nil }
+func (s *polymarketPositionRepoStub) Get(context.Context, uuid.UUID) (*domain.Position, error) {
+	return nil, repository.ErrNotFound
+}
+func (s *polymarketPositionRepoStub) List(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return nil, nil
+}
+func (s *polymarketPositionRepoStub) Count(context.Context, repository.PositionFilter) (int, error) {
+	return 0, nil
+}
+func (s *polymarketPositionRepoStub) Update(context.Context, *domain.Position) error { return nil }
+func (s *polymarketPositionRepoStub) Delete(context.Context, uuid.UUID) error        { return nil }
+func (s *polymarketPositionRepoStub) GetOpen(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return append([]domain.Position(nil), s.positions...), nil
+}
+func (s *polymarketPositionRepoStub) CountOpen(context.Context, repository.PositionFilter) (int, error) {
+	return len(s.positions), nil
+}
+func (s *polymarketPositionRepoStub) GetByStrategy(context.Context, uuid.UUID, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return nil, nil
+}
+
+type polymarketAuditRepoStub struct{}
+
+func (s *polymarketAuditRepoStub) Create(context.Context, *domain.AuditLogEntry) error { return nil }
+func (s *polymarketAuditRepoStub) Query(context.Context, repository.AuditLogFilter, int, int) ([]domain.AuditLogEntry, error) {
+	return nil, nil
+}
+func (s *polymarketAuditRepoStub) Count(context.Context, repository.AuditLogFilter) (int, error) {
+	return 0, nil
+}
+
+type polymarketReconcilerMetricsStub struct{}
+
+func (s *polymarketReconcilerMetricsStub) IncDrift(string) {}

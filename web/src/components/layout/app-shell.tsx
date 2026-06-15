@@ -51,7 +51,6 @@ const navigationItems: NavItem[] = [
       { to: '/backtests', label: 'Backtests', icon: FlaskConical, authRequired: true },
       { to: '/portfolio', label: 'Portfolio', icon: BriefcaseBusiness, authRequired: true },
       { to: '/signals', label: 'Signals', icon: Signal, authRequired: true },
-      { to: '/polymarket', label: 'Polymarket', icon: TrendingUp, authRequired: true },
     ],
   },
   {
@@ -68,8 +67,11 @@ const navigationItems: NavItem[] = [
     items: [{ to: '/automation', label: 'Automation', icon: Zap, authRequired: true }],
   },
   {
-    label: 'Operations',
-    items: [{ to: '/surfers/ops', label: 'Surfers Ops', icon: ShieldCheck, authRequired: true }],
+    label: 'Polymarket Ops',
+    items: [
+      { to: '/polymarket', label: 'Polymarket', icon: TrendingUp, authRequired: true },
+      { to: '/surfers/ops', label: 'Surfers Ops', icon: ShieldCheck, authRequired: true },
+    ],
   },
   {
     label: 'Intelligence',

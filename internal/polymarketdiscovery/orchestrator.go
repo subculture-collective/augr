@@ -20,14 +20,14 @@ import (
 
 // Config bundles the full set of parameters for one discovery run.
 type Config struct {
-	Screener         ScreenerConfig
-	Generator        GeneratorConfig
-	GammaBaseURL     string // optional override
-	MaxDeployments   int    // cap strategies created per run (default 3)
-	MinConviction    float64
-	ScheduleCron     string // ScheduleCron for deployed strategies (default "0 */6 * * *")
-	AutoWatchSlug    bool   // also add winning slugs to watched_markets if not present
-	DryRun           bool
+	Screener       ScreenerConfig
+	Generator      GeneratorConfig
+	GammaBaseURL   string // optional override
+	MaxDeployments int    // cap strategies created per run (default 3)
+	MinConviction  float64
+	ScheduleCron   string // ScheduleCron for deployed strategies (default "0 */6 * * *")
+	AutoWatchSlug  bool   // also add winning slugs to watched_markets if not present
+	DryRun         bool
 }
 
 // Deps bundles external dependencies for one discovery run.
@@ -52,15 +52,15 @@ type DeployedStrategy struct {
 
 // Result summarises one full discovery run.
 type Result struct {
-	StartedAt   time.Time          `json:"started_at"`
-	Duration    time.Duration      `json:"duration"`
-	FetchedAll  int                `json:"fetched_all"`
-	Screened    int                `json:"screened"`
-	Proposed    int                `json:"proposed"`
-	Skipped     int                `json:"skipped"`
-	Deployed    []DeployedStrategy `json:"deployed"`
-	Errors      []string           `json:"errors,omitempty"`
-	DryRun      bool               `json:"dry_run"`
+	StartedAt  time.Time          `json:"started_at"`
+	Duration   time.Duration      `json:"duration"`
+	FetchedAll int                `json:"fetched_all"`
+	Screened   int                `json:"screened"`
+	Proposed   int                `json:"proposed"`
+	Skipped    int                `json:"skipped"`
+	Deployed   []DeployedStrategy `json:"deployed"`
+	Errors     []string           `json:"errors,omitempty"`
+	DryRun     bool               `json:"dry_run"`
 }
 
 // Run executes a full polymarket strategy discovery pipeline.
@@ -189,18 +189,35 @@ func DeployStrategy(
 	mc MarketContext,
 	p Proposal,
 ) (DeployedStrategy, error) {
+	if p.Skip {
+		return DeployedStrategy{}, fmt.Errorf("cannot deploy skipped proposal for %s: %s", mc.Market.Slug, strings.TrimSpace(p.SkipReason))
+	}
+
+	if err := ValidateProposalForMarket(&p, mc); err != nil {
+		return DeployedStrategy{}, fmt.Errorf("quarantine invalid proposal for %s: %w", mc.Market.Slug, err)
+	}
+
 	// Build the polymarket-specific strategy config payload. The agent
 	// pipeline reads market_type=polymarket; the JSON sub-object below is
 	// stored under the discovery_meta key so downstream consumers can audit
 	// the source of the strategy without affecting agent.StrategyConfig.
 	metaCfg := map[string]any{
 		"discovery_meta": map[string]any{
-			"source":          "polymarket_discovery",
-			"template":        p.Template,
-			"direction":       p.Direction,
-			"conviction":      p.Conviction,
-			"time_horizon":    p.TimeHorizon,
-			"entry_price_max": p.EntryPriceMax,
+			"source":                    "polymarket_discovery",
+			"market_slug":               mc.Market.Slug,
+			"condition_id":              mc.Market.ConditionID,
+			"template":                  p.Template,
+			"direction":                 p.Direction,
+			"conviction":                p.Conviction,
+			"time_horizon":              p.TimeHorizon,
+			"entry_price_max":           p.EntryPriceMax,
+			"source_references":         p.SourceReferences,
+			"max_spread_pct":            p.MaxSpreadPct,
+			"min_liquidity":             p.MinLiquidity,
+			"stop_policy":               p.StopPolicy,
+			"target_policy":             p.TargetPolicy,
+			"native_execution_required": true,
+			"activation_blocked_reason": "",
 		},
 	}
 	cfgBytes, err := json.Marshal(metaCfg)
@@ -208,15 +225,9 @@ func DeployStrategy(
 		return DeployedStrategy{}, fmt.Errorf("marshal config: %w", err)
 	}
 
-	name := strings.TrimSpace(p.Name)
-	if name == "" {
-		name = fmt.Sprintf("auto: %s %s", p.Template, mc.Market.Slug)
-	} else {
-		// Prefix so paper auto strategies are easy to identify in the UI.
-		if !strings.HasPrefix(name, "auto:") {
-			name = "auto: " + name
-		}
-	}
+	// Use a deterministic name so repeated LLM wording does not create duplicate
+	// active strategies for the same market slug.
+	name := fmt.Sprintf("auto: polymarket %s", mc.Market.Slug)
 
 	strategy := domain.Strategy{
 		ID:           uuid.New(),

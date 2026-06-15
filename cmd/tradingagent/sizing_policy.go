@@ -36,6 +36,14 @@ func sizingConfigForStrategy(
 	return position.ResolveForMarket(strategy.MarketType, resolved.RiskConfig.PositionSizePct, resolved.RiskConfig.StopLossMultiplier, useKelly, stats).ExecutionSizingConfig()
 }
 
+func applyPolymarketSizingCap(market domain.MarketType, cfg execution.SizingConfig, maxPositionUSDC float64) execution.SizingConfig {
+	if market.Normalize() == domain.MarketTypePolymarket {
+		cfg.MaxPositionUSDC = maxPositionUSDC
+	}
+
+	return cfg
+}
+
 func closedTradeStatsForStrategy(ctx context.Context, positionRepo repository.PositionRepository, strategyID uuid.UUID) (position.HistoryStats, error) {
 	var (
 		closedTrades int
