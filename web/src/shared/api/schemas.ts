@@ -495,6 +495,8 @@ export const riskCockpitSummarySchema = z
     generated_at: isoDateSchema,
     kill_switch_active: z.boolean(),
     circuit_breaker: z.boolean(),
+    decision_window_start: isoDateSchema,
+    decision_window_end: isoDateSchema,
     exposures: z.array(
       z.object({
         market_type: forwardCompatibleEnumSchema,
@@ -508,6 +510,7 @@ export const riskCockpitSummarySchema = z
         net_expected_value: z.number(),
       }).passthrough(),
     ),
+    historical_decision_counts: z.record(z.string(), z.object({ approved: z.number().int().nonnegative(), rejected: z.number().int().nonnegative() })),
     open_positions: z.number().int().nonnegative(),
     marked_positions: z.number().int().nonnegative(),
     unmarked_positions: z.number().int().nonnegative(),

@@ -120,7 +120,7 @@ func BuildDiagnosticsSummary(input DiagnosticsInput) DiagnosticsSummary {
 			Mode:              string(profile.Mode),
 			StorageNamespace:  profile.StorageNamespace,
 			EvidenceClass:     profile.EvidenceClass,
-			PromotionEligible: profile.PromotionEligible(),
+			PromotionEligible: profile.PromotionEligible() && input.PaperResultsIsolated,
 			ResultsIsolated:   input.PaperResultsIsolated,
 		}
 	}

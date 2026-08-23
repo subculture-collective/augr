@@ -340,10 +340,16 @@ export function buildRiskCockpit(overrides: Partial<RiskCockpitSummary> = {}): R
     generated_at: fixtureDate,
     kill_switch_active: false,
     circuit_breaker: false,
+    decision_window_start: fixtureDate,
+    decision_window_end: fixtureDate,
     exposures: [
       { market_type: 'stock', open_positions: 2, marked_positions: 2, unmarked_positions: 0, approved_decisions: 5, rejected_decisions: 1, gross_exposure: 0.18, gross_marked_value: 0.2, net_expected_value: 120.5 },
       { market_type: 'crypto', open_positions: 1, marked_positions: 1, unmarked_positions: 0, approved_decisions: 2, rejected_decisions: 0, gross_exposure: 0.06, gross_marked_value: 0.07, net_expected_value: 25.25 },
     ],
+    historical_decision_counts: {
+      stock: { approved: 5, rejected: 4 },
+      crypto: { approved: 2, rejected: 0 },
+    },
     open_positions: 3,
     marked_positions: 3,
     unmarked_positions: 0,

@@ -132,6 +132,23 @@ func TestBuildDiagnosticsSummaryUtilizationMath(t *testing.T) {
 	}
 }
 
+func TestBuildDiagnosticsSummaryPromotionEligibilityRequiresIsolatedResults(t *testing.T) {
+	t.Parallel()
+	profile, err := domain.NewPaperEvaluationProfile(domain.PaperEvaluationModeScored, 100_000, 2, 5, 0.0001)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	unisolated := BuildDiagnosticsSummary(DiagnosticsInput{PaperEvaluation: &profile, PaperResultsIsolated: false})
+	if unisolated.PaperEvaluation.PromotionEligible {
+		t.Fatal("unisolated paper results must not be promotion eligible")
+	}
+	isolated := BuildDiagnosticsSummary(DiagnosticsInput{PaperEvaluation: &profile, PaperResultsIsolated: true})
+	if !isolated.PaperEvaluation.PromotionEligible {
+		t.Fatal("isolated scored paper results should be promotion eligible")
+	}
+}
+
 func TestBuildDiagnosticsSummaryZeroEquityWarning(t *testing.T) {
 	t.Parallel()
 

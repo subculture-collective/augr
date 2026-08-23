@@ -488,7 +488,10 @@ export type RiskCockpitSummary = {
   generated_at: ISODate
   kill_switch_active: boolean
   circuit_breaker: boolean
+  decision_window_start: ISODate
+  decision_window_end: ISODate
   exposures: RiskCockpitExposure[]
+  historical_decision_counts: Partial<Record<MarketType, { approved: number; rejected: number }>>
   open_positions: number
   marked_positions: number
   unmarked_positions: number

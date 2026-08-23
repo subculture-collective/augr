@@ -34,13 +34,40 @@ func TestBuildCockpitSummaryEmptyState(t *testing.T) {
 	if len(got.Exposures) != 5 {
 		t.Fatalf("exposures len = %d want 5", len(got.Exposures))
 	}
-	if len(got.Warnings) != 1 || got.Warnings[0] != "no trade decisions available" {
-		t.Fatalf("warnings = %+v", got.Warnings)
+	if len(got.Warnings) != 0 {
+		t.Fatalf("warnings = %+v, want none", got.Warnings)
 	}
 	for i, mt := range cockpitMarketOrder {
 		if got.Exposures[i].MarketType != mt {
 			t.Fatalf("exposure[%d] market = %s want %s", i, got.Exposures[i].MarketType, mt)
 		}
+	}
+}
+
+func TestBuildCockpitSummaryHistoricalRejectionsAreInformational(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	historical := []domain.TradeDecision{
+		td(domain.MarketTypeStock, domain.RiskDecisionRejected, domain.TradeDecisionStatusRejected, 0, 0),
+		td(domain.MarketTypeStock, domain.RiskDecisionRejected, domain.TradeDecisionStatusRejected, 0, 0),
+		td(domain.MarketTypeStock, domain.RiskDecisionRejected, domain.TradeDecisionStatusRejected, 0, 0),
+		td(domain.MarketTypeStock, domain.RiskDecisionRejected, domain.TradeDecisionStatusRejected, 0, 0),
+	}
+
+	got := BuildCockpitSummaryWithHistory(nil, historical, nil, now.Add(-12*time.Hour), now)
+
+	if got.HistoricalDecisionCounts[domain.MarketTypeStock].Rejected != 4 {
+		t.Fatalf("historical stock rejections = %d, want 4", got.HistoricalDecisionCounts[domain.MarketTypeStock].Rejected)
+	}
+	for _, warning := range got.Warnings {
+		if warning == "market stock has rejected decisions but no approved exposure" {
+			t.Fatalf("historical rejection created active warning: %q", warning)
+		}
+	}
+	if got.Exposures[0].RejectedDecisions != 0 {
+		t.Fatalf("current stock rejections = %d, want 0", got.Exposures[0].RejectedDecisions)
+	}
+	if len(got.Warnings) != 0 {
+		t.Fatalf("active warnings = %+v, want none", got.Warnings)
 	}
 }
 

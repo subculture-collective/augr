@@ -21,6 +21,7 @@ describe('risk console', () => {
     expect(await screen.findByRole('heading', { name: /^risk$/i })).toBeTruthy()
     expect(await screen.findByRole('heading', { name: /risk engine status/i })).toBeTruthy()
     expect(await screen.findByRole('table', { name: /risk exposures/i })).toBeTruthy()
+    expect(screen.getByText(/4 historical rejections/i)).toBeTruthy()
     expect(await screen.findByRole('table', { name: /tripped breakers/i })).toBeTruthy()
     expect(screen.getByText(/paper drawdown guard/i)).toBeTruthy()
   })

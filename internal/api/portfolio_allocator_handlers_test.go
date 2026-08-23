@@ -329,8 +329,8 @@ func TestPortfolioAllocatorDiagnosticsReturnsSummary(t *testing.T) {
 	if got.BuyingPowerUtilizationPct != 1 {
 		t.Fatalf("buying power utilization pct = %v, want 1", got.BuyingPowerUtilizationPct)
 	}
-	if got.PaperEvaluation.Mode != string(domain.PaperEvaluationModeScored) || !got.PaperEvaluation.PromotionEligible {
-		t.Fatalf("paper evaluation = %+v, want scored promotion evidence", got.PaperEvaluation)
+	if got.PaperEvaluation.Mode != string(domain.PaperEvaluationModeScored) || got.PaperEvaluation.PromotionEligible {
+		t.Fatalf("paper evaluation = %+v, want unisolated scored evidence to fail closed", got.PaperEvaluation)
 	}
 	if got.PaperEvaluation.ResultsIsolated || !containsWarning(got.Warnings, portfolioDiagnosticsWarningPaperScope) {
 		t.Fatalf("paper evaluation = %+v warnings = %#v, want explicit unscoped legacy boundary", got.PaperEvaluation, got.Warnings)

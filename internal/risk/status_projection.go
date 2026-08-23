@@ -98,16 +98,36 @@ func projectEngineStatus(now time.Time, limits PositionLimits, cb CircuitBreaker
 	}
 }
 
-func buildCockpitSummary(decisions []domain.TradeDecision, status *EngineStatus, generatedAt time.Time) CockpitSummary {
-	byMarket := cockpitExposureByMarket(decisions)
-	result := CockpitSummary{
-		GeneratedAt: generatedAt,
-		Exposures:   make([]CockpitExposure, 0, len(cockpitMarketOrder)),
-		Warnings:    make([]string, 0, 8),
+func historicalDecisionCounts(decisions []domain.TradeDecision) map[domain.MarketType]DecisionCounts {
+	counts := make(map[domain.MarketType]DecisionCounts, len(cockpitMarketOrder))
+	for _, marketType := range cockpitMarketOrder {
+		counts[marketType] = DecisionCounts{}
 	}
+	for _, decision := range decisions {
+		count, ok := counts[decision.MarketType]
+		if !ok {
+			continue
+		}
+		switch decision.RiskStatus {
+		case domain.RiskDecisionApproved:
+			count.Approved++
+		case domain.RiskDecisionRejected:
+			count.Rejected++
+		}
+		counts[decision.MarketType] = count
+	}
+	return counts
+}
 
-	if len(decisions) == 0 {
-		result.Warnings = append(result.Warnings, "no trade decisions available")
+func buildCockpitSummary(currentDecisions, historicalDecisions []domain.TradeDecision, status *EngineStatus, windowStart, generatedAt time.Time) CockpitSummary {
+	byMarket := cockpitExposureByMarket(currentDecisions)
+	result := CockpitSummary{
+		GeneratedAt:              generatedAt,
+		DecisionWindowStart:      windowStart,
+		DecisionWindowEnd:        generatedAt,
+		Exposures:                make([]CockpitExposure, 0, len(cockpitMarketOrder)),
+		HistoricalDecisionCounts: historicalDecisionCounts(historicalDecisions),
+		Warnings:                 make([]string, 0, 8),
 	}
 
 	if status != nil {
@@ -135,13 +155,27 @@ func buildCockpitSummary(decisions []domain.TradeDecision, status *EngineStatus,
 // BuildCockpitSummary aggregates trade decisions and risk status into a
 // deterministic cockpit snapshot suitable for API responses and tests.
 func BuildCockpitSummary(decisions []domain.TradeDecision, status *EngineStatus, generatedAt time.Time) CockpitSummary {
-	return buildCockpitSummary(decisions, status, generatedAt)
+	windowStart := time.Date(generatedAt.Year(), generatedAt.Month(), generatedAt.Day(), 0, 0, 0, 0, time.UTC)
+	return buildCockpitSummary(decisions, decisions, status, windowStart, generatedAt)
+}
+
+// BuildCockpitSummaryWithHistory separates current-window decisions, which can
+// create warnings, from the all-time journal counts shown as context.
+func BuildCockpitSummaryWithHistory(currentDecisions, historicalDecisions []domain.TradeDecision, status *EngineStatus, windowStart, generatedAt time.Time) CockpitSummary {
+	return buildCockpitSummary(currentDecisions, historicalDecisions, status, windowStart, generatedAt)
 }
 
 // BuildCockpitSummaryWithPositions uses durable open positions as the source
 // of truth for exposure while retaining decision counts as separate context.
 func BuildCockpitSummaryWithPositions(decisions []domain.TradeDecision, positions []domain.Position, status *EngineStatus, generatedAt time.Time) CockpitSummary {
-	result := buildCockpitSummary(decisions, status, generatedAt)
+	windowStart := time.Date(generatedAt.Year(), generatedAt.Month(), generatedAt.Day(), 0, 0, 0, 0, time.UTC)
+	return BuildCockpitSummaryWithPositionsAndHistory(decisions, decisions, positions, status, windowStart, generatedAt)
+}
+
+// BuildCockpitSummaryWithPositionsAndHistory uses only current-window decisions
+// for active warnings while retaining all-time journal counts.
+func BuildCockpitSummaryWithPositionsAndHistory(currentDecisions, historicalDecisions []domain.TradeDecision, positions []domain.Position, status *EngineStatus, windowStart, generatedAt time.Time) CockpitSummary {
+	result := buildCockpitSummary(currentDecisions, historicalDecisions, status, windowStart, generatedAt)
 	byMarket := make(map[domain.MarketType]*CockpitExposure, len(result.Exposures))
 	for i := range result.Exposures {
 		exposure := &result.Exposures[i]

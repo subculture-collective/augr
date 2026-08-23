@@ -88,19 +88,21 @@ function AllocatorDiagnosticsPanel({ diagnostics }: { diagnostics: Awaited<Retur
   )
 }
 
-function ExposureRows({ exposures }: { exposures: RiskCockpitExposure[] }) {
+function ExposureRows({ cockpit }: { cockpit: RiskCockpitSummary }) {
+  const { exposures, historical_decision_counts: historicalCounts } = cockpit
   if (exposures.length === 0) return <EmptyState title="No cockpit exposure" message="No risk cockpit exposures are available." />
   return (
     <>
       <div className="table-wrap">
         <table aria-label="Risk exposures">
-          <thead><tr><th>Market</th><th>Open positions</th><th>Approved</th><th>Rejected</th><th>Gross exposure</th><th>Net expected value</th></tr></thead>
+          <thead><tr><th>Market</th><th>Open positions</th><th>Current approved</th><th>Current rejected</th><th>Historical rejected</th><th>Gross exposure</th><th>Net expected value</th></tr></thead>
           <tbody>{exposures.map((exposure) => (
             <tr key={exposure.market_type}>
               <td><StatusPill value={exposure.market_type} known={['stock', 'crypto', 'options', 'polymarket', 'kalshi']} /></td>
               <td>{exposure.open_positions}</td>
               <td>{exposure.approved_decisions}</td>
               <td>{exposure.rejected_decisions}</td>
+              <td>{historicalCounts[exposure.market_type]?.rejected ?? 0}</td>
               <td>{numberValue(exposure.gross_exposure)}</td>
               <td>{numberValue(exposure.net_expected_value)}</td>
             </tr>
@@ -112,7 +114,8 @@ function ExposureRows({ exposures }: { exposures: RiskCockpitExposure[] }) {
           <article className="strategy-card" key={exposure.market_type}>
             <h3>{displayEnum(exposure.market_type)}</h3>
             <p>{exposure.open_positions} open positions · {numberValue(exposure.gross_exposure)} gross exposure</p>
-            <p>{exposure.approved_decisions} approved / {exposure.rejected_decisions} rejected decisions</p>
+            <p>{exposure.approved_decisions} approved / {exposure.rejected_decisions} rejected in current window</p>
+            <p>{historicalCounts[exposure.market_type]?.rejected ?? 0} historical rejections</p>
           </article>
         ))}
       </div>
@@ -512,7 +515,7 @@ export function RiskPage() {
             <div><span className="muted">Circuit breaker</span><strong>{cockpitQuery.data.circuit_breaker ? 'Tripped' : 'Open'}</strong></div>
           </div>
           {cockpitQuery.data.warnings.length > 0 ? <div role="alert" className="inline-alert warning">{cockpitQuery.data.warnings.join(', ')}</div> : null}
-          <ExposureRows exposures={cockpitQuery.data.exposures} />
+          <ExposureRows cockpit={cockpitQuery.data} />
         </> : null}
       </section>
 

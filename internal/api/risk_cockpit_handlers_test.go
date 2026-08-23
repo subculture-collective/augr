@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
 
@@ -52,6 +53,71 @@ func TestRiskCockpitRoute(t *testing.T) {
 	}
 	if len(body.Warnings) == 0 {
 		t.Fatalf("expected warnings, got %+v", body)
+	}
+}
+
+func TestRiskCockpitHistoricalRejectionsDoNotCreateActiveWarning(t *testing.T) {
+	historical := []domain.TradeDecision{
+		{MarketType: domain.MarketTypeStock, RiskStatus: domain.RiskDecisionRejected, Status: domain.TradeDecisionStatusRejected},
+		{MarketType: domain.MarketTypeStock, RiskStatus: domain.RiskDecisionRejected, Status: domain.TradeDecisionStatusRejected},
+		{MarketType: domain.MarketTypeStock, RiskStatus: domain.RiskDecisionRejected, Status: domain.TradeDecisionStatusRejected},
+		{MarketType: domain.MarketTypeStock, RiskStatus: domain.RiskDecisionRejected, Status: domain.TradeDecisionStatusRejected},
+	}
+	repo := &stubTradeDecisionJournalRepo{}
+	var countFilters []repository.TradeDecisionFilter
+	repo.countFn = func(filter repository.TradeDecisionFilter) (int, error) {
+		countFilters = append(countFilters, filter)
+		if filter.CreatedAfter != nil {
+			return 0, nil
+		}
+		return len(historical), nil
+	}
+	repo.listFn = func(filter repository.TradeDecisionFilter) ([]domain.TradeDecision, error) {
+		if filter.CreatedAfter != nil {
+			t.Fatal("current-window decisions should not be listed when count is zero")
+		}
+		return historical, nil
+	}
+	deps := testDeps()
+	deps.TradeDecisions = repo
+	deps.Positions = &stubPositionRepo{}
+	deps.Risk = &stubRiskEngine{getStatusFn: func(context.Context) (risk.EngineStatus, error) { return risk.EngineStatus{}, nil }}
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/risk/cockpit", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	body := decodeJSON[risk.CockpitSummary](t, rr)
+	if len(countFilters) != 2 {
+		t.Fatalf("count filters = %d, want 2", len(countFilters))
+	}
+	historicalFilter, currentFilter := countFilters[0], countFilters[1]
+	if historicalFilter.CreatedAfter != nil || historicalFilter.CreatedBefore == nil {
+		t.Fatalf("historical filter = %+v, want cutoff only", historicalFilter)
+	}
+	if currentFilter.CreatedAfter == nil || currentFilter.CreatedBefore == nil {
+		t.Fatalf("current filter = %+v, want bounded window", currentFilter)
+	}
+	if historicalFilter.CreatedBefore != currentFilter.CreatedBefore {
+		t.Fatalf("decision cutoffs differ: historical=%v current=%v", historicalFilter.CreatedBefore, currentFilter.CreatedBefore)
+	}
+	if !body.GeneratedAt.Equal(*historicalFilter.CreatedBefore) || !body.DecisionWindowEnd.Equal(*historicalFilter.CreatedBefore) {
+		t.Fatalf("response boundary generated_at=%v window_end=%v, want %v", body.GeneratedAt, body.DecisionWindowEnd, *historicalFilter.CreatedBefore)
+	}
+	if body.HistoricalDecisionCounts[domain.MarketTypeStock].Rejected != 4 {
+		t.Fatalf("historical stock rejections = %d, want 4", body.HistoricalDecisionCounts[domain.MarketTypeStock].Rejected)
+	}
+	if body.DecisionWindowStart.Hour() != 0 || body.DecisionWindowStart.Location() != time.UTC {
+		t.Fatalf("decision window start = %v, want UTC midnight", body.DecisionWindowStart)
+	}
+	for _, warning := range body.Warnings {
+		if warning == "market stock has rejected decisions but no approved exposure" {
+			t.Fatalf("historical rejection created active warning: %q", warning)
+		}
+	}
+	if len(body.Warnings) != 0 {
+		t.Fatalf("active warnings = %+v, want none", body.Warnings)
 	}
 }
 

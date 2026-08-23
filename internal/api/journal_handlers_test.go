@@ -24,6 +24,8 @@ type stubTradeDecisionJournalRepo struct {
 	getResult  *domain.TradeDecision
 	getErr     error
 	listErr    error
+	listFn     func(repository.TradeDecisionFilter) ([]domain.TradeDecision, error)
+	countFn    func(repository.TradeDecisionFilter) (int, error)
 
 	lastFilter repository.TradeDecisionFilter
 	lastLimit  int
@@ -47,10 +49,16 @@ func (s *stubTradeDecisionJournalRepo) List(_ context.Context, filter repository
 	s.lastFilter = filter
 	s.lastLimit = limit
 	s.lastOffset = offset
+	if s.listFn != nil {
+		return s.listFn(filter)
+	}
 	return s.listResult, s.listErr
 }
 
-func (s *stubTradeDecisionJournalRepo) Count(context.Context, repository.TradeDecisionFilter) (int, error) {
+func (s *stubTradeDecisionJournalRepo) Count(_ context.Context, filter repository.TradeDecisionFilter) (int, error) {
+	if s.countFn != nil {
+		return s.countFn(filter)
+	}
 	return len(s.listResult), nil
 }
 
