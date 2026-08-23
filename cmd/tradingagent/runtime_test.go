@@ -505,8 +505,9 @@ func TestNewAPIServerWiresPolymarketReconcileAutomationJob(t *testing.T) {
 	cleanup()
 }
 
-func TestNewAPIServerWiresKalshiDiscoveryAutomationJob(t *testing.T) {
+func TestNewAPIServerWiresKalshiDiscoveryAndMarkingAutomationJobs(t *testing.T) {
 	origNewDB := runtimeNewDB
+	origNewProjectionDB := runtimeNewProjectionDB
 	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
 	origNewPaperAccountRepo := runtimeNewPaperAccountRepo
 	origAfterSchemaGate := runtimeAfterSchemaGate
@@ -514,6 +515,7 @@ func TestNewAPIServerWiresKalshiDiscoveryAutomationJob(t *testing.T) {
 	origNewServer := runtimeNewServer
 	defer func() {
 		runtimeNewDB = origNewDB
+		runtimeNewProjectionDB = origNewProjectionDB
 		runtimeCurrentSchemaVersion = origCurrentSchemaVersion
 		runtimeNewPaperAccountRepo = origNewPaperAccountRepo
 		runtimeAfterSchemaGate = origAfterSchemaGate
@@ -526,10 +528,20 @@ func TestNewAPIServerWiresKalshiDiscoveryAutomationJob(t *testing.T) {
 		t.Fatalf("pgxpool.New() error = %v", err)
 	}
 	defer pool.Close()
+	projectionPool, err := pgxpool.New(context.Background(), "postgres://projection-writer:***@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatalf("projection pgxpool.New() error = %v", err)
+	}
+	defer projectionPool.Close()
 
 	var capturedDeps api.Deps
+	var projectionDatabaseURL string
 	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) {
 		return &pgrepo.DB{Pool: pool}, nil
+	}
+	runtimeNewProjectionDB = func(_ context.Context, databaseURL string) (*pgrepo.DB, error) {
+		projectionDatabaseURL = databaseURL
+		return &pgrepo.DB{Pool: projectionPool}, nil
 	}
 	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) {
 		return pgrepo.RequiredSchemaVersion, nil
@@ -551,6 +563,13 @@ func TestNewAPIServerWiresKalshiDiscoveryAutomationJob(t *testing.T) {
 		},
 		Embedding: config.EmbeddingConfig{Model: "nomic-embed-text", Timeout: time.Second},
 		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434", APIKey: "test-key"}}},
+		Brokers: config.BrokerConfigs{Kalshi: config.KalshiConfig{
+			APIBaseURL: "https://example.com", RequestsPerWindow: 1, Window: time.Second,
+			MaxAttempts: 1, BaseBackoff: time.Millisecond, MaxBackoff: time.Millisecond,
+			MarkMaxAge: 2 * time.Minute, ProjectionDatabaseURL: "postgres://projection-writer:secret@db:5432/tradingagent",
+			ProjectionKeyID:     "runtime-test-key",
+			ProjectionSecretB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		}},
 	}
 
 	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
@@ -567,8 +586,59 @@ func TestNewAPIServerWiresKalshiDiscoveryAutomationJob(t *testing.T) {
 	if !strings.Contains(status.Schedule, "15 * * * *") {
 		t.Fatalf("status.Schedule = %q, want kalshi cron", status.Schedule)
 	}
+	marking := runtimeSingleAutomationJobStatus(t, capturedDeps.Automation, "kalshi_marking")
+	if !strings.Contains(marking.Schedule, "25 * * * *") {
+		t.Fatalf("marking.Schedule = %q, want hourly marking cron", marking.Schedule)
+	}
+	if projectionDatabaseURL != cfg.Brokers.Kalshi.ProjectionDatabaseURL {
+		t.Fatalf("projection database URL = %q, want dedicated URL %q", projectionDatabaseURL, cfg.Brokers.Kalshi.ProjectionDatabaseURL)
+	}
+	if projectionDatabaseURL == cfg.Database.URL {
+		t.Fatal("ProjectionRepo constructed with general DATABASE_URL")
+	}
 
 	cleanup()
+}
+
+func TestNewRuntimeKalshiProjectionRepoConnectionFailureDisablesJob(t *testing.T) {
+	origNewProjectionDB := runtimeNewProjectionDB
+	defer func() { runtimeNewProjectionDB = origNewProjectionDB }()
+
+	runtimeNewProjectionDB = func(context.Context, string) (*pgrepo.DB, error) {
+		return nil, errors.New("projection database unavailable")
+	}
+	cfg := config.KalshiConfig{
+		ProjectionDatabaseURL: "postgres://projection-writer:secret@db:5432/tradingagent",
+		ProjectionKeyID:       "runtime-test-key",
+		ProjectionSecretB64:   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}
+	repo, closeDB := newRuntimeKalshiProjectionRepo(context.Background(), cfg, "postgres://general-app:secret@db:5432/tradingagent", slogDiscardLogger())
+	defer closeDB()
+	if repo != nil {
+		t.Fatal("newRuntimeKalshiProjectionRepo() repo != nil after connection failure")
+	}
+}
+
+func TestNewRuntimeKalshiProjectionRepoRejectsGeneralDatabaseURL(t *testing.T) {
+	origNewProjectionDB := runtimeNewProjectionDB
+	defer func() { runtimeNewProjectionDB = origNewProjectionDB }()
+
+	var constructed atomic.Bool
+	runtimeNewProjectionDB = func(context.Context, string) (*pgrepo.DB, error) {
+		constructed.Store(true)
+		return &pgrepo.DB{}, nil
+	}
+	databaseURL := "postgres://general-app:secret@db:5432/tradingagent"
+	cfg := config.KalshiConfig{
+		ProjectionDatabaseURL: databaseURL,
+		ProjectionKeyID:       "runtime-test-key",
+		ProjectionSecretB64:   "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+	}
+	repo, closeDB := newRuntimeKalshiProjectionRepo(context.Background(), cfg, databaseURL, slogDiscardLogger())
+	defer closeDB()
+	if repo != nil || constructed.Load() {
+		t.Fatal("general DATABASE_URL was accepted for ProjectionRepo")
+	}
 }
 
 func TestNewRuntimeKalshiClientsShareGovernorAndSeparateLabels(t *testing.T) {

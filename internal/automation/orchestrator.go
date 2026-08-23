@@ -131,13 +131,18 @@ type OrchestratorDeps struct {
 	KalshiSettlementThreshold int
 	KalshiSettlementDryRun    bool
 	KalshiSettlementEnabled   bool
-	ReportArtifactRepo        *pgrepo.ReportArtifactRepo          // optional; nil = skip report jobs
-	BacktestConfigRepo        repository.BacktestConfigRepository // optional; needed by report jobs
-	BacktestRunRepo           repository.BacktestRunRepository    // optional; needed by report jobs
-	DiscoveryRunRepo          discovery.RunRepository             // required by stock discovery jobs
-	OvernightBacktestRuns     repository.OvernightBacktestRunRepository
-	JobTimeout                time.Duration
-	Logger                    *slog.Logger
+	KalshiMarkProvider        interface {
+		LoadSnapshot(context.Context, string) (kalshiexecution.Snapshot, error)
+	}
+	KalshiProjectionRepo  repository.ProjectionRepository
+	KalshiMarkMaxAge      time.Duration
+	ReportArtifactRepo    *pgrepo.ReportArtifactRepo          // optional; nil = skip report jobs
+	BacktestConfigRepo    repository.BacktestConfigRepository // optional; needed by report jobs
+	BacktestRunRepo       repository.BacktestRunRepository    // optional; needed by report jobs
+	DiscoveryRunRepo      discovery.RunRepository             // required by stock discovery jobs
+	OvernightBacktestRuns repository.OvernightBacktestRunRepository
+	JobTimeout            time.Duration
+	Logger                *slog.Logger
 }
 
 // RegisteredJob tracks a single automated job and its runtime state.
@@ -337,6 +342,7 @@ func (o *JobOrchestrator) RegisterAll() {
 		o.registerPolymarketDiscoveryJob()
 	}
 	o.registerKalshiDiscoveryJob()
+	o.registerKalshiMarkingJob()
 	o.registerKalshiSettlementJob()
 	o.registerKalshiReconciliationJob()
 	o.registerReportJobs()

@@ -41,6 +41,10 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	t.Setenv("KALSHI_API_KEY_ID", "kalshi-key-id")
 	t.Setenv("KALSHI_PRIVATE_KEY_PEM_B64", "a2Fsc2hpLXByaXZhdGUta2V5")
 	t.Setenv("KALSHI_DEMO", "true")
+	t.Setenv("KALSHI_MARK_MAX_AGE", "3m")
+	t.Setenv("KALSHI_PROJECTION_DATABASE_URL", "postgres://projection-writer:secret@localhost:5432/tradingagent?sslmode=require")
+	t.Setenv("KALSHI_PROJECTION_KEY_ID", "kalshi-mark-v1")
+	t.Setenv("KALSHI_PROJECTION_SECRET_B64", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 	t.Setenv("NOTIFY_TELEGRAM_BOT_TOKEN", "telegram-token")
 	t.Setenv("NOTIFY_TELEGRAM_CHAT_ID", "12345")
 	t.Setenv("NOTIFY_SMTP_HOST", "smtp.example.com")
@@ -176,6 +180,10 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.Brokers.Kalshi.SettlementGateThreshold != 20 {
 		t.Fatalf("cfg.Brokers.Kalshi.SettlementGateThreshold = %d, want %d", cfg.Brokers.Kalshi.SettlementGateThreshold, 20)
+	}
+	if cfg.Brokers.Kalshi.MarkMaxAge != 3*time.Minute || cfg.Brokers.Kalshi.ProjectionDatabaseURL != "postgres://projection-writer:secret@localhost:5432/tradingagent?sslmode=require" || cfg.Brokers.Kalshi.ProjectionKeyID != "kalshi-mark-v1" ||
+		cfg.Brokers.Kalshi.ProjectionSecretB64 != "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" {
+		t.Fatalf("Kalshi marking config = %+v", cfg.Brokers.Kalshi)
 	}
 
 	if cfg.Notifications.Telegram.BotToken != "telegram-token" {
@@ -930,6 +938,10 @@ func clearConfigEnv(t *testing.T) {
 		"KALSHI_API_KEY_ID",
 		"KALSHI_PRIVATE_KEY_PEM_B64",
 		"KALSHI_DEMO",
+		"KALSHI_MARK_MAX_AGE",
+		"KALSHI_PROJECTION_DATABASE_URL",
+		"KALSHI_PROJECTION_KEY_ID",
+		"KALSHI_PROJECTION_SECRET_B64",
 		"RISK_MAX_POSITION_SIZE_PCT",
 		"RISK_MAX_DAILY_LOSS_PCT",
 		"RISK_MAX_DRAWDOWN_PCT",

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -169,6 +170,7 @@ func (a watchedMarketsLoaderAdapter) ListEnabledSlugs(ctx context.Context) ([]st
 
 var (
 	runtimeNewDB                                                                   = pgrepo.NewDB
+	runtimeNewProjectionDB                                                         = pgrepo.NewDB
 	runtimeCurrentSchemaVersion                                                    = pgrepo.CurrentSchemaVersion
 	runtimeNewPaperAccountRepo  func(*pgrepo.DB) repository.PaperAccountRepository = func(db *pgrepo.DB) repository.PaperAccountRepository {
 		return pgrepo.NewPaperAccountRepo(db)
@@ -193,6 +195,32 @@ var (
 		OpenCode:   runtimeOpenCodeProvider,
 	})
 )
+
+func newRuntimeKalshiProjectionRepo(ctx context.Context, cfg config.KalshiConfig, generalDatabaseURL string, logger *slog.Logger) (repository.ProjectionRepository, func()) {
+	databaseURL := strings.TrimSpace(cfg.ProjectionDatabaseURL)
+	keyID := strings.TrimSpace(cfg.ProjectionKeyID)
+	secretB64 := strings.TrimSpace(cfg.ProjectionSecretB64)
+	if databaseURL == "" || keyID == "" || secretB64 == "" {
+		return nil, func() {}
+	}
+	if databaseURL == strings.TrimSpace(generalDatabaseURL) {
+		logger.Warn("automation: Kalshi projection database URL matches general DATABASE_URL; marking disabled")
+		return nil, func() {}
+	}
+
+	secret, err := base64.StdEncoding.DecodeString(secretB64)
+	if err != nil || len(secret) != 32 {
+		logger.Warn("automation: invalid Kalshi projection attestation secret; marking disabled")
+		return nil, func() {}
+	}
+
+	db, err := runtimeNewProjectionDB(ctx, databaseURL)
+	if err != nil {
+		logger.Warn("automation: failed to connect to Kalshi projection-writer database; marking disabled", slog.Any("error", err))
+		return nil, func() {}
+	}
+	return pgrepo.NewProjectionRepo(db.Pool, pgrepo.ProjectionCheckpointAttestor{KeyID: keyID, Secret: secret}), db.Close
+}
 
 func runtimeOpenAIProvider(cfg llm.OpenAIProviderConfig) (llm.Provider, error) {
 	provider, err := openaiProvider.NewProvider(openaiProvider.Config{APIKey: cfg.APIKey, BaseURL: cfg.BaseURL, Model: cfg.Model})
@@ -298,6 +326,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		return nil, nil, nil, err
 	}
 	runtimeAfterSchemaGate()
+	closeKalshiProjectionDB := func() {}
 
 	redisHealth, closeRedis := newRedisHealthCheck(cfg)
 
@@ -757,6 +786,14 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			if err != nil {
 				logger.Warn("automation: failed to create embedding provider", slog.Any("error", err))
 			} else {
+				var kalshiMarkProvider *kalshidata.Provider
+				var kalshiProjectionRepo repository.ProjectionRepository
+				if kalshiDataClient != nil {
+					kalshiProjectionRepo, closeKalshiProjectionDB = newRuntimeKalshiProjectionRepo(ctx, cfg.Brokers.Kalshi, cfg.Database.URL, logger)
+					if kalshiProjectionRepo != nil {
+						kalshiMarkProvider = kalshidata.NewProviderWithClient(kalshiDataClient, logger)
+					}
+				}
 				overnightBacktestRunRepo := pgrepo.NewOvernightBacktestRunRepo(db.Pool)
 				polymarketDiscoveryRunRepo := pgrepo.NewPolymarketDiscoveryRunRepo(db.Pool)
 				portfolioPaperProcessor := portfolio.NewPaperOrderManagerProcessor(portfolio.PaperOrderManagerProcessorDeps{
@@ -821,6 +858,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					KalshiSettlementThreshold:   cfg.Brokers.Kalshi.SettlementGateThreshold,
 					KalshiSettlementDryRun:      cfg.Brokers.Kalshi.DryRun,
 					KalshiSettlementEnabled:     !cfg.Brokers.Kalshi.DryRun,
+					KalshiMarkProvider:          kalshiMarkProvider,
+					KalshiProjectionRepo:        kalshiProjectionRepo,
+					KalshiMarkMaxAge:            cfg.Brokers.Kalshi.MarkMaxAge,
 					ReportArtifactRepo:          reportArtifactRepo,
 					BacktestConfigRepo:          backtestConfigRepo,
 					BacktestRunRepo:             backtestRunRepo,
@@ -972,6 +1012,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	server, err := runtimeNewServer(apiCfg, deps, logger)
 	if err != nil {
 		closeRedis()
+		closeKalshiProjectionDB()
 		runtimeCloseDB(db)
 		return nil, nil, nil, err
 	}
@@ -1021,6 +1062,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		staleRunReconcilerCancel()
 		signalShutdown()
 		closeRedis()
+		closeKalshiProjectionDB()
 		runtimeCloseDB(db)
 	}, nil
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
@@ -109,6 +110,71 @@ func (repo *ProjectionRepo) GetMarkObservationByID(ctx context.Context, id uuid.
 		return nil, fmt.Errorf("postgres: get canonical mark %s: %w", id, err)
 	}
 	return mark, nil
+}
+
+// ListCanonicalOpenLots derives account-scoped inventory only from canonical
+// economic normalizations. It does not inspect the legacy positions table.
+func (repo *ProjectionRepo) ListCanonicalOpenLots(ctx context.Context, asOf time.Time) ([]repository.CanonicalOpenLot, error) {
+	if asOf.IsZero() {
+		return nil, fmt.Errorf("postgres: list canonical open lots: as-of time is required")
+	}
+	rows, err := repo.pool.Query(ctx, `WITH movements AS (
+		SELECT lt.account_id, n.instrument_id, n.venue_contract_id,
+			CASE WHEN n.event_type='fill.buy' THEN n.quantity
+				 WHEN n.event_type='fill.sell' THEN -n.quantity
+				 WHEN n.event_type='settlement.prediction_payout' THEN -n.position_quantity
+				 ELSE 0 END AS quantity
+		FROM economic_event_normalizations n
+		JOIN ledger_transactions lt ON lt.id=n.ledger_transaction_id
+		WHERE n.venue='kalshi' AND n.instrument_id IS NOT NULL AND n.venue_contract_id IS NOT NULL
+		  AND lt.effective_at <= $1 AND lt.observed_at <= $1
+	), open_inventory AS (
+		SELECT account_id, instrument_id, venue_contract_id, SUM(quantity) AS quantity
+		FROM movements GROUP BY account_id, instrument_id, venue_contract_id HAVING SUM(quantity) <> 0
+	)
+	SELECT oi.account_id, oi.instrument_id, oi.venue_contract_id, oi.quantity::TEXT,
+		vc.contract_id, vc.currency, vc.metadata->'kalshi_v2'->>'outcome'
+	FROM open_inventory oi
+	JOIN venue_contracts vc ON vc.id=oi.venue_contract_id AND vc.instrument_id=oi.instrument_id AND vc.venue='kalshi'
+	JOIN instruments i ON i.id=oi.instrument_id AND i.primary_venue='kalshi' AND i.currency=vc.currency
+	JOIN accounts a ON a.id=oi.account_id AND a.base_currency=vc.currency
+	WHERE vc.currency='USD' AND vc.valid_from <= $1 AND (vc.valid_to IS NULL OR vc.valid_to > $1)
+	  AND i.status='active' AND vc.contract_id=btrim(vc.contract_id) AND vc.contract_id<>''
+	  AND vc.metadata = jsonb_build_object(
+		'kalshi_v2', jsonb_build_object('outcome', vc.metadata->'kalshi_v2'->>'outcome'))
+	  AND vc.metadata->'kalshi_v2'->>'outcome' IN ('yes','no')
+	ORDER BY oi.account_id, oi.instrument_id, oi.venue_contract_id`, asOf.UTC().Truncate(time.Microsecond))
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list canonical open lots: %w", err)
+	}
+	defer rows.Close()
+	result := make([]repository.CanonicalOpenLot, 0)
+	for rows.Next() {
+		var lot repository.CanonicalOpenLot
+		var quantity, ticker, outcome string
+		if err := rows.Scan(&lot.AccountID, &lot.InstrumentID, &lot.VenueContractID, &quantity, &ticker, &lot.Currency, &outcome); err != nil {
+			return nil, fmt.Errorf("postgres: scan canonical open lot: %w", err)
+		}
+		parsed, err := decimal.NewFromString(quantity)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: parse canonical open lot quantity: %w", err)
+		}
+		if parsed.IsNegative() {
+			lot.Side = domain.PositionSideShort
+		} else {
+			lot.Side = domain.PositionSideLong
+		}
+		outcome = strings.ToUpper(strings.TrimSpace(outcome))
+		if strings.TrimSpace(ticker) == "" || (outcome != "YES" && outcome != "NO") {
+			continue
+		}
+		lot.Ticker = strings.TrimSpace(ticker) + ":" + outcome
+		result = append(result, lot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list canonical open lots: %w", err)
+	}
+	return result, nil
 }
 
 func (repo *ProjectionRepo) getMarkObservationByIdentity(

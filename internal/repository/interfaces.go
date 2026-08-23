@@ -130,8 +130,20 @@ type VenueObservationRepository interface {
 type ProjectionRepository interface {
 	RecordMarkObservation(context.Context, *ledger.MarkObservation) (*ledger.MarkObservation, error)
 	GetMarkObservationByID(context.Context, uuid.UUID) (*ledger.MarkObservation, error)
+	ListCanonicalOpenLots(context.Context, time.Time) ([]CanonicalOpenLot, error)
 	RebuildPortfolioProjection(context.Context, ledger.ProjectionRequest) (*ledger.PortfolioProjection, error)
 	GetProjectionCheckpointByID(context.Context, uuid.UUID) (*ledger.ProjectionCheckpoint, error)
+}
+
+// CanonicalOpenLot identifies an account-scoped open position whose Kalshi
+// contract identity is complete. Legacy positions never enter this read path.
+type CanonicalOpenLot struct {
+	AccountID       uuid.UUID
+	InstrumentID    uuid.UUID
+	VenueContractID uuid.UUID
+	Side            domain.PositionSide
+	Ticker          string
+	Currency        string
 }
 
 // AccountingReconciliationRepository appends and reloads immutable structural

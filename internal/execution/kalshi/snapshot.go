@@ -1,11 +1,93 @@
 package kalshi
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 )
+
+const (
+	KalshiMarkSource    = "kalshi"
+	KalshiMarkNamespace = "quotes/kalshi/orderbook"
+)
+
+type KalshiMarkInput struct {
+	AccountID       uuid.UUID
+	InstrumentID    uuid.UUID
+	VenueContractID uuid.UUID
+	Side            domain.PositionSide
+	Ticker          string
+	Quote           Snapshot
+	ObservedAt      time.Time
+	MaxAge          time.Duration
+}
+
+// NewMarkObservation returns a conservative liquidation mark. Canonical
+// Kalshi tickers use MARKET:OUTCOME so YES and NO holdings select their own bid.
+func NewMarkObservation(input KalshiMarkInput) (*ledger.MarkObservation, error) {
+	if input.AccountID == uuid.Nil || input.InstrumentID == uuid.Nil || input.VenueContractID == uuid.Nil {
+		return nil, errors.New("kalshi mark: canonical account, instrument, and venue contract are required")
+	}
+	if !input.Side.IsValid() {
+		return nil, errors.New("kalshi mark: valid position side is required")
+	}
+	if input.Side != domain.PositionSideLong {
+		return nil, errors.New("kalshi mark: short canonical lots are unavailable")
+	}
+	marketTicker, outcome, ok := strings.Cut(strings.TrimSpace(input.Ticker), ":")
+	if !ok || marketTicker == "" || (strings.ToUpper(outcome) != "YES" && strings.ToUpper(outcome) != "NO") {
+		return nil, errors.New("kalshi mark: ticker must contain a canonical YES or NO outcome")
+	}
+	if !strings.EqualFold(strings.TrimSpace(input.Quote.Ticker), marketTicker) {
+		return nil, errors.New("kalshi mark: snapshot ticker does not match canonical contract")
+	}
+	status := strings.ToLower(strings.TrimSpace(input.Quote.Status))
+	if status != "active" && status != "open" {
+		return nil, fmt.Errorf("kalshi mark: market status %q is unavailable", input.Quote.Status)
+	}
+	evaluatedAt := input.ObservedAt.UTC().Truncate(time.Microsecond)
+	snapshotObservedAt := input.Quote.FetchedAt.UTC().Truncate(time.Microsecond)
+	if evaluatedAt.IsZero() || snapshotObservedAt.IsZero() || input.MaxAge <= 0 || snapshotObservedAt.After(evaluatedAt) || evaluatedAt.Sub(snapshotObservedAt) > input.MaxAge {
+		return nil, errors.New("kalshi mark: snapshot is stale or has invalid observation time")
+	}
+
+	yes := strings.EqualFold(outcome, "YES")
+	bid, ask := input.Quote.BestBidNo, input.Quote.BestAskNo
+	if yes {
+		bid, ask = input.Quote.BestBidYes, input.Quote.BestAskYes
+	}
+	if math.IsNaN(bid) || math.IsInf(bid, 0) || math.IsNaN(ask) || math.IsInf(ask, 0) ||
+		bid <= 0 || ask <= 0 || bid > 1 || ask > 1 || bid > ask {
+		return nil, fmt.Errorf("kalshi mark: valid nonzero noncrossed %s book is required", strings.ToUpper(outcome))
+	}
+	metadata, err := json.Marshal(map[string]any{
+		"account_id": input.AccountID.String(), "venue_contract_id": input.VenueContractID.String(), "ticker": marketTicker,
+		"outcome": strings.ToLower(outcome), "convention": "executable_bid",
+		"currency": "USD", "bid": bid, "ask": ask, "status": status, "fetched_at": snapshotObservedAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("kalshi mark: encode metadata: %w", err)
+	}
+	return ledger.NewMarkObservation(ledger.MarkObservationInput{
+		InstrumentID: input.InstrumentID, Price: decimal.NewFromFloat(bid), PriceCurrency: "USD",
+		Source: KalshiMarkSource, SourceNamespace: KalshiAccountMarkNamespace(input.AccountID),
+		SourceObservationID: input.AccountID.String() + "/" + input.VenueContractID.String() + "/" + marketTicker + "/" + strings.ToLower(outcome) + "/" + snapshotObservedAt.Format("20060102T150405.000000Z"),
+		SourceRevision:      "", EffectiveAt: snapshotObservedAt, ObservedAt: snapshotObservedAt, Metadata: metadata,
+	})
+}
+
+func KalshiAccountMarkNamespace(accountID uuid.UUID) string {
+	return KalshiMarkNamespace + "/accounts/" + accountID.String()
+}
 
 // Snapshot captures the native Kalshi execution state needed to decide whether
 // a market can be activated safely.

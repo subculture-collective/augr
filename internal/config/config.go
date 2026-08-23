@@ -188,6 +188,10 @@ type KalshiConfig struct {
 	DryRun                  bool
 	AutoExitsEnabled        bool
 	SettlementGateThreshold int
+	MarkMaxAge              time.Duration
+	ProjectionDatabaseURL   string
+	ProjectionKeyID         string
+	ProjectionSecretB64     string
 }
 
 // BrokerConfig contains broker credentials and execution mode.
@@ -482,6 +486,10 @@ func loadFromEnvironment() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	kalshiMarkMaxAge, err := getEnvDuration("KALSHI_MARK_MAX_AGE", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
 
 	maxPositionSizePct, err := getEnvFloat64("RISK_MAX_POSITION_SIZE_PCT", 0.10)
 	if err != nil {
@@ -757,6 +765,10 @@ func loadFromEnvironment() (Config, error) {
 				DryRun:                  kalshiDryRun,
 				AutoExitsEnabled:        kalshiAutoExitsEnabled,
 				SettlementGateThreshold: kalshiSettlementGateThreshold,
+				MarkMaxAge:              kalshiMarkMaxAge,
+				ProjectionDatabaseURL:   os.Getenv("KALSHI_PROJECTION_DATABASE_URL"),
+				ProjectionKeyID:         os.Getenv("KALSHI_PROJECTION_KEY_ID"),
+				ProjectionSecretB64:     os.Getenv("KALSHI_PROJECTION_SECRET_B64"),
 			},
 		},
 		Paper: PaperConfig{

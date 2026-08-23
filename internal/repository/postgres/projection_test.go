@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
@@ -180,6 +182,78 @@ func TestPortfolioProjectionRepoRebuildsAndPersistsExactCheckpoint(t *testing.T)
 	if replayed.CheckpointID != first.CheckpointID || replayed.InputChecksum != first.InputChecksum ||
 		!bytes.Equal(replayed.PayloadBytes, first.PayloadBytes) {
 		t.Fatal("identical rebuild did not converge")
+	}
+}
+
+func TestProjectionRepoListsOnlyResolvableCanonicalKalshiOpenLots(t *testing.T) {
+	ctx := context.Background()
+	pools := newProjectionIntegrationPool(t, ctx)
+	account, err := NewAccountRepo(pools.owner).GetByID(ctx, uuid.MustParse("00000000-0000-4000-8000-000000000064"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
+	instrumentRepo := NewInstrumentRepo(pools.owner)
+	reference, err := instrument.NewInstrument(instrument.InstrumentInput{
+		IdentityKey: "kalshi:markable-open-lot", AssetClass: instrument.AssetClassPredictionContract,
+		PrimaryVenue: "kalshi", Currency: "USD", TickSize: decimal.RequireFromString("0.01"),
+		LotSize: decimal.NewFromInt(1), Multiplier: decimal.NewFromInt(1),
+		SettlementMethod: instrument.SettlementBinary, Status: instrument.StatusActive,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, err = instrumentRepo.CreateInstrument(ctx, reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := instrument.NewVenueContract(instrument.VenueContractInput{
+		InstrumentID: reference.ID, Venue: "kalshi", ContractID: "KX-MARKABLE", Currency: "USD",
+		TickSize: decimal.RequireFromString("0.01"), LotSize: decimal.NewFromInt(1), Multiplier: decimal.NewFromInt(1),
+		SettlementMethod: instrument.SettlementBinary, ValidFrom: now.Add(-time.Hour),
+		Metadata: json.RawMessage(`{"kalshi_v2":{"outcome":"yes"}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err = instrumentRepo.RegisterVenueContract(ctx, contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := ledger.NewEconomicSourceEvent(ledger.EconomicSourceEventInput{
+		AccountID: account.ID, Source: "kalshi", SourceNamespace: "fills/kalshi",
+		SourceEventID: "markable-open-lot-fill", ObservedAt: now.Add(-29 * time.Minute),
+		RawPayload: json.RawMessage(`{"fill_id":"markable-open-lot-fill"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	normalization, err := ledger.NewFillEconomicNormalization(ledger.FillEconomicEventInput{
+		Base: ledger.EconomicNormalizationBaseInput{
+			SourceEvent: source, Account: account, NormalizerVersion: "economic_event_v1",
+			ExecutionOriginType: ledger.ExecutionOriginStrategyVersion, ExecutionOriginID: "kalshi-marking-test",
+			ReferenceType: "fill", ReferenceID: "markable-open-lot-fill", EffectiveAt: now.Add(-30 * time.Minute),
+		},
+		Instrument: *reference, VenueContract: *contract, Side: ledger.FillSideBuy,
+		Quantity: decimal.NewFromInt(2), Price: decimal.RequireFromString("0.40"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerRepo := NewLedgerRepo(pools.owner)
+	if _, err := ledgerRepo.RecordEconomicSourceEvent(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledgerRepo.ApplyEconomicNormalization(ctx, normalization); err != nil {
+		t.Fatal(err)
+	}
+	lots, err := NewProjectionRepo(pools.writer, pools.attestor).ListCanonicalOpenLots(ctx, now)
+	if err != nil {
+		t.Fatalf("ListCanonicalOpenLots() error = %v", err)
+	}
+	if len(lots) != 1 || lots[0].AccountID != account.ID || lots[0].InstrumentID != reference.ID ||
+		lots[0].VenueContractID != contract.ID || lots[0].Ticker != "KX-MARKABLE:YES" || lots[0].Side != domain.PositionSideLong {
+		t.Fatalf("ListCanonicalOpenLots() = %+v", lots)
 	}
 }
 

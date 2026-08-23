@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"slices"
@@ -101,6 +102,18 @@ func Validate(cfg Config) error {
 	}
 	if cfg.Brokers.Kalshi.SettlementGateThreshold < 0 {
 		errs = append(errs, "KALSHI_SETTLEMENT_GATE_THRESHOLD must be >= 0")
+	}
+	projectionConfigured := strings.TrimSpace(cfg.Brokers.Kalshi.ProjectionKeyID) != "" || strings.TrimSpace(cfg.Brokers.Kalshi.ProjectionSecretB64) != ""
+	if projectionConfigured && cfg.Brokers.Kalshi.MarkMaxAge <= 0 {
+		errs = append(errs, "KALSHI_MARK_MAX_AGE must be greater than 0")
+	}
+	if (strings.TrimSpace(cfg.Brokers.Kalshi.ProjectionKeyID) == "") != (strings.TrimSpace(cfg.Brokers.Kalshi.ProjectionSecretB64) == "") {
+		errs = append(errs, "KALSHI_PROJECTION_KEY_ID and KALSHI_PROJECTION_SECRET_B64 must be configured together")
+	} else if strings.TrimSpace(cfg.Brokers.Kalshi.ProjectionSecretB64) != "" {
+		secret, err := base64.StdEncoding.DecodeString(strings.TrimSpace(cfg.Brokers.Kalshi.ProjectionSecretB64))
+		if err != nil || len(secret) != 32 {
+			errs = append(errs, "KALSHI_PROJECTION_SECRET_B64 must encode exactly 32 bytes")
+		}
 	}
 
 	validateNotificationConfig(&errs, cfg.Notifications)
