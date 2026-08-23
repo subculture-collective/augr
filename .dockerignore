@@ -12,3 +12,4 @@ docs
 **/*_test.go
 web/node_modules
 web/dist
+web/.env.*
