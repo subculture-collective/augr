@@ -9,6 +9,8 @@ import { queryKeys } from '@/shared/query/keys'
 import type { AutomationJobStatus } from '@/shared/types/domain'
 import { normalizeStatus } from '@/lib/status'
 
+import { automationCutover, automationOperationalState, currentAutomationErrorCount, isPostAutomationCutover } from './automationCutover'
+
 function formatDuration(ns?: number): string {
   if (!ns) return '--'
   const ms = Math.round(ns / 1_000_000)
@@ -23,10 +25,12 @@ function formatDate(value?: string): string {
 }
 
 function JobStatePill({ job }: { job: AutomationJobStatus }) {
-  if (!job.enabled) return <StatusBadge status="unknown" label="disabled" />
-  if (job.running) return <StatusBadge status="running" />
-  if (job.consecutive_failures >= 3) return <StatusBadge status="danger" label="failing" />
-  if (job.consecutive_failures > 0) return <StatusBadge status="warning" label="degraded" />
+  const state = automationOperationalState(job)
+  if (state === 'disabled') return <StatusBadge status="unknown" label="disabled" />
+  if (state === 'running') return <StatusBadge status="running" />
+  if (state === 'unverified') return <StatusBadge status="unknown" label="unverified" />
+  if (state === 'failing') return <StatusBadge status="danger" label="failing" />
+  if (state === 'degraded') return <StatusBadge status="warning" label="degraded" />
   return <StatusBadge status="success" label="healthy" />
 }
 
@@ -37,7 +41,7 @@ export function AutomationDetailPage() {
   const statusQuery = useQuery({ queryKey: queryKeys.automationStatus, queryFn: ({ signal }) => getAutomationStatus(signal), refetchInterval: 30_000 })
   const runsQuery = useQuery({ queryKey: queryKeys.automationRuns({ limit: 100, offset: 0 }), queryFn: ({ signal }) => getAutomationRuns({ limit: 100, offset: 0 }, signal), refetchInterval: 30_000 })
   const job = statusQuery.data?.find((item) => item.name === name)
-  const runs = (runsQuery.data?.data ?? []).filter((run) => run.job_name === name)
+  const runs = (runsQuery.data?.data ?? []).filter((run) => run.job_name === name && isPostAutomationCutover(run.started_at))
 
   const invalidate = async () => {
     await Promise.all([
@@ -65,19 +69,19 @@ export function AutomationDetailPage() {
             <div className="metrics-grid">
               <div className="panel nested-panel"><span>State</span><strong><JobStatePill job={job} /></strong></div>
               <div className="panel nested-panel"><span>Runs</span><strong>{job.run_count}</strong></div>
-              <div className="panel nested-panel"><span>Errors</span><strong>{job.error_count}</strong></div>
-              <div className="panel nested-panel"><span>Consecutive failures</span><strong>{job.consecutive_failures}</strong></div>
+              <div className="panel nested-panel"><span>Current errors</span><strong>{currentAutomationErrorCount(job)}</strong></div>
+              <div className="panel nested-panel"><span>Consecutive failures</span><strong>{currentAutomationErrorCount(job)}</strong></div>
             </div>
             <dl className="detail-grid">
               <div><dt>Description</dt><dd>{job.description}</dd></div>
               <div><dt>Schedule</dt><dd>{job.schedule || 'Manual only'}</dd></div>
               <div><dt>Last run</dt><dd>{formatDate(job.last_run)}</dd></div>
-              <div><dt>Last result</dt><dd>{job.last_result || '--'}</dd></div>
-              <div><dt>Last error</dt><dd>{job.last_error || '--'}</dd></div>
+              <div><dt>Last result</dt><dd>{automationOperationalState(job) === 'unverified' ? 'Unverified after deployment cutover' : job.last_result || '--'}</dd></div>
+              <div><dt>Last error</dt><dd>{automationOperationalState(job) === 'unverified' ? `Pre-deploy history excluded after ${automationCutover.deployment}` : job.last_error || '--'}</dd></div>
             </dl>
-            {job.last_summary ? (
+            {job.last_summary && automationOperationalState(job) !== 'unverified' ? (
               <div className="json-viewer"><pre>{JSON.stringify(job.last_summary, null, 2)}</pre></div>
-            ) : null}
+            ) : automationOperationalState(job) === 'unverified' ? <p className="muted">The pre-deployment result summary is excluded from this operational view.</p> : null}
             <div className="header-cluster">
               <button type="button" disabled={busy || job.running || !job.enabled} onClick={() => runMutation.mutate()}>{runMutation.isPending ? 'Running…' : 'Run now'}</button>
               <button type="button" disabled={busy || job.running} onClick={() => toggleMutation.mutate()}>{toggleMutation.isPending ? 'Saving…' : job.enabled ? 'Disable' : 'Enable'}</button>
@@ -91,12 +95,13 @@ export function AutomationDetailPage() {
           <div>
             <p className="eyebrow">History</p>
             <h2>Recent runs</h2>
+            <p className="muted">Runs before deployment {automationCutover.deployment} are excluded from this operational view.</p>
           </div>
           <LastUpdated date={runsQuery.dataUpdatedAt || undefined} />
         </div>
         {runsQuery.isLoading ? <LoadingState label="Loading automation history…" /> : null}
         {runsQuery.error ? <ErrorState error={runsQuery.error} onRetry={() => void runsQuery.refetch()} /> : null}
-        {!runsQuery.isLoading && !runsQuery.error && runs.length === 0 ? <EmptyState title="No recent runs" message="This job has no recent persisted run history in the latest 100 automation job runs." /> : null}
+        {!runsQuery.isLoading && !runsQuery.error && runs.length === 0 ? <EmptyState title="No post-deployment runs" message="This job has no persisted run after deployment 3c937ff75a9e in the latest 100 automation job runs." /> : null}
         {runs.length > 0 ? (
           <div className="table-wrap" role="region" aria-label="Automation run history" tabIndex={0}>
             <table aria-label="Automation run history">
