@@ -32,6 +32,12 @@ type BacktestService struct {
 	dataService     *data.DataService
 	llmProvider     llm.Provider
 	logger          *slog.Logger
+	scopeValidator  BacktestScopeValidator
+}
+
+type BacktestScopeValidator interface {
+	ValidateBacktestConfigScope(context.Context, *domain.BacktestConfig) error
+	ScopedExecutionBinding(context.Context, uuid.UUID) (bool, string, error)
 }
 
 func NewBacktestService(
@@ -42,6 +48,7 @@ func NewBacktestService(
 	dataService *data.DataService,
 	llmProvider llm.Provider,
 	logger *slog.Logger,
+	scopeValidator BacktestScopeValidator,
 ) *BacktestService {
 	return &BacktestService{
 		backtestConfigs: backtestConfigs,
@@ -51,6 +58,7 @@ func NewBacktestService(
 		dataService:     dataService,
 		llmProvider:     llmProvider,
 		logger:          logger,
+		scopeValidator:  scopeValidator,
 	}
 }
 
@@ -64,6 +72,24 @@ func (svc *BacktestService) RunBacktest(ctx context.Context, configID uuid.UUID,
 			return nil, &ServiceError{Status: 404, Message: "backtest config not found"}
 		}
 		return nil, &ServiceError{Status: 500, Message: "failed to get backtest config"}
+	}
+	if config.ScopeID != nil {
+		if svc.scopeValidator == nil {
+			return nil, &ServiceError{Status: 422, Message: "scoped backtest execution rejected: scope validator is not configured"}
+		}
+		if err := svc.scopeValidator.ValidateBacktestConfigScope(ctx, config); err != nil {
+			return nil, &ServiceError{Status: 422, Message: "scoped backtest execution rejected: " + err.Error()}
+		}
+		bound, reason, err := svc.scopeValidator.ScopedExecutionBinding(ctx, *config.ScopeID)
+		if err != nil {
+			return nil, &ServiceError{Status: 500, Message: "failed to verify immutable dataset binding: " + err.Error()}
+		}
+		if !bound {
+			if reason == "" {
+				reason = "immutable dataset binding is unavailable"
+			}
+			return nil, &ServiceError{Status: 422, Message: "scoped backtest execution rejected: " + reason}
+		}
 	}
 
 	strategy, err := svc.strategies.Get(ctx, config.StrategyID)
@@ -155,7 +181,7 @@ func (svc *BacktestService) runRulesEngineBacktest(
 		return nil, &ServiceError{Status: 500, Message: "failed to serialize equity curve"}
 	}
 
-	run, svcErr := svc.persistBacktestRun(ctx, actor, config.ID, strategy.Ticker, metricsJSON, tradeLogJSON, equityCurveJSON, start, duration, result.PromptVersion, result.PromptVersionHash, result.SimulationVersion, result.InputHash)
+	run, svcErr := svc.persistBacktestRun(ctx, actor, config.ID, config.ScopeID, strategy.Ticker, metricsJSON, tradeLogJSON, equityCurveJSON, start, duration, result.PromptVersion, result.PromptVersionHash, result.SimulationVersion, result.InputHash)
 	if svcErr != nil {
 		return nil, svcErr
 	}
@@ -236,7 +262,7 @@ func (svc *BacktestService) runOptionsRulesBacktest(
 	if hashErr != nil {
 		return nil, &ServiceError{Status: 500, Message: "failed to hash simulation inputs"}
 	}
-	run, svcErr := svc.persistBacktestRun(ctx, actor, config.ID, underlying, metricsJSON, tradeLogJSON, equityCurveJSON, start, duration, "options-rules-v1", analysts.CurrentPromptVersionHash(), backtest.SimulationInputVersion, inputHash)
+	run, svcErr := svc.persistBacktestRun(ctx, actor, config.ID, config.ScopeID, underlying, metricsJSON, tradeLogJSON, equityCurveJSON, start, duration, "options-rules-v1", analysts.CurrentPromptVersionHash(), backtest.SimulationInputVersion, inputHash)
 	if svcErr != nil {
 		return nil, svcErr
 	}
@@ -298,6 +324,7 @@ func (svc *BacktestService) persistBacktestRun(
 	ctx context.Context,
 	actor string,
 	configID uuid.UUID,
+	scopeID *uuid.UUID,
 	ticker string,
 	metricsJSON json.RawMessage,
 	tradeLogJSON json.RawMessage,
@@ -311,6 +338,7 @@ func (svc *BacktestService) persistBacktestRun(
 ) (domain.BacktestRun, *ServiceError) {
 	run := domain.BacktestRun{
 		ID:                uuid.New(),
+		ScopeID:           scopeID,
 		BacktestConfigID:  configID,
 		Metrics:           metricsJSON,
 		TradeLog:          tradeLogJSON,

@@ -47,8 +47,20 @@ func (s *Server) handleCreateBacktestConfig(w http.ResponseWriter, r *http.Reque
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeValidation)
 		return
 	}
+	if config.ScopeID == nil {
+		respondError(w, http.StatusBadRequest, "scope_id is required for new backtest configs", ErrCodeValidation)
+		return
+	}
 	if err := validateScheduleCron(config.ScheduleCron); err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeValidation)
+		return
+	}
+	if s.paperEvaluationScopes == nil {
+		respondError(w, http.StatusUnprocessableEntity, "scope validation is not configured", ErrCodeValidation)
+		return
+	}
+	if err := s.paperEvaluationScopes.ValidateBacktestConfigScope(r.Context(), &config); err != nil {
+		respondError(w, http.StatusUnprocessableEntity, "backtest config does not match scope: "+err.Error(), ErrCodeValidation)
 		return
 	}
 	config.ID = uuid.New()

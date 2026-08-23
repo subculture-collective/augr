@@ -34,6 +34,7 @@ type BacktestSimulationParameters struct {
 // BacktestConfig represents a reusable backtest definition.
 type BacktestConfig struct {
 	ID               uuid.UUID                    `json:"id"`
+	ScopeID          *uuid.UUID                   `json:"scope_id,omitempty"`
 	StrategyID       uuid.UUID                    `json:"strategy_id"`
 	Name             string                       `json:"name"`
 	Description      string                       `json:"description,omitempty"`

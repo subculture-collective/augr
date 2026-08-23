@@ -432,6 +432,7 @@ func createOrReuseDiscoveryStrategy(
 	strategies repository.StrategyRepository,
 	configs repository.BacktestConfigRepository,
 ) (domain.Strategy, bool, error) {
+	_ = initialCash
 	if strategies == nil {
 		return domain.Strategy{}, false, fmt.Errorf("strategy repository is required")
 	}
@@ -462,25 +463,11 @@ func createOrReuseDiscoveryStrategy(
 		}
 	}
 
-	btCfg := domain.BacktestConfig{
-		ID:         uuid.New(),
-		StrategyID: persisted.ID,
-		Name:       persisted.Name + " (discovery)",
-		StartDate:  bars[0].Timestamp,
-		EndDate:    bars[len(bars)-1].Timestamp,
-		Simulation: domain.BacktestSimulationParameters{InitialCapital: initialCash},
-	}
-	if err := configs.Create(ctx, &btCfg); err != nil {
-		if created {
-			if cleanupErr := strategies.Delete(ctx, persisted.ID); cleanupErr != nil {
-				return persisted, true, fmt.Errorf("create backtest config: %w; remove paused strategy: %v", err, cleanupErr)
-			}
-			return domain.Strategy{}, false, fmt.Errorf("create backtest config: %w", err)
-		}
-		return persisted, false, fmt.Errorf("create backtest config; strategy remains fail-closed: %w", err)
-	}
+	// Discovery's provider-backed bars are not an immutable manifest binding.
+	// Keep the strategy paused and do not attempt a DB insert that could be
+	// mistaken for scoped evidence.
+	return persisted, created, fmt.Errorf("create backtest config skipped: discovery has no immutable paper evaluation scope")
 
-	return persisted, created, nil
 }
 
 func recordDiscoveryDeploymentOutcome(result *DiscoveryResult, dryRun, created bool) {

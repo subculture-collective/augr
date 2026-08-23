@@ -72,12 +72,16 @@ export type StrategyListParams = {
   offset?: number
 }
 
+export type ReportScopeSelector =
+  | { account_id: string; scope_id: string; legacy?: never }
+  | { legacy: 'legacy_unscoped'; account_id?: never; scope_id?: never }
+
 export type StrategyReportListParams = {
   report_type?: string
   status?: string
   limit?: number
   offset?: number
-}
+} & ReportScopeSelector
 
 export type RunListParams = {
   status?: string
@@ -454,11 +458,11 @@ export function deleteStrategy(id: string, signal?: AbortSignal): Promise<void> 
   return api.delete<void>(`/strategies/${encodeURIComponent(id)}`, { signal, retryOnUnauthorized: false })
 }
 
-export function getLatestStrategyReport(id: string, reportType = 'paper_validation', signal?: AbortSignal): Promise<ReportLatestResponse> {
-  return api.get<ReportLatestResponse>(`/strategies/${encodeURIComponent(id)}/reports/latest${buildQuery({ report_type: reportType })}`, { schema: reportLatestResponseSchema as never, signal })
+export function getLatestStrategyReport(id: string, scope: ReportScopeSelector, reportType = 'paper_validation', signal?: AbortSignal): Promise<ReportLatestResponse> {
+  return api.get<ReportLatestResponse>(`/strategies/${encodeURIComponent(id)}/reports/latest${buildQuery({ report_type: reportType, ...scope })}`, { schema: reportLatestResponseSchema as never, signal })
 }
 
-export function getStrategyReports(id: string, params: StrategyReportListParams = {}, signal?: AbortSignal): Promise<ListResponse<ReportArtifact>> {
+export function getStrategyReports(id: string, params: StrategyReportListParams, signal?: AbortSignal): Promise<ListResponse<ReportArtifact>> {
   return api.get<ListResponse<ReportArtifact>>(`/strategies/${encodeURIComponent(id)}/reports${buildQuery(params)}`, { schema: listResponseSchema(reportArtifactSchema) as never, signal })
 }
 

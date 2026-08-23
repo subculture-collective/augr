@@ -41,9 +41,9 @@ func (r *BacktestConfigRepo) Create(ctx context.Context, config *domain.Backtest
 
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO backtest_configs (
-			strategy_id, name, description, schedule_cron, start_date, end_date, simulation_params
+			strategy_id, name, description, schedule_cron, start_date, end_date, simulation_params, scope_id
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 RETURNING id, created_at, updated_at`,
 		config.StrategyID,
 		config.Name,
@@ -52,6 +52,7 @@ func (r *BacktestConfigRepo) Create(ctx context.Context, config *domain.Backtest
 		config.StartDate,
 		config.EndDate,
 		simulationJSON,
+		config.ScopeID,
 	)
 
 	if err := row.Scan(&config.ID, &config.CreatedAt, &config.UpdatedAt); err != nil {
@@ -107,6 +108,12 @@ func (r *BacktestConfigRepo) Update(ctx context.Context, config *domain.Backtest
 	if err := config.Validate(); err != nil {
 		return fmt.Errorf("postgres: validate backtest config: %w", err)
 	}
+	existing, err := r.Get(ctx, config.ID)
+	if err != nil {
+		return err
+	}
+	config.StrategyID = existing.StrategyID
+	config.ScopeID = existing.ScopeID
 
 	simulationJSON, err := marshalBacktestSimulation(config.Simulation)
 	if err != nil {
@@ -115,17 +122,15 @@ func (r *BacktestConfigRepo) Update(ctx context.Context, config *domain.Backtest
 
 	row := r.pool.QueryRow(ctx,
 		`UPDATE backtest_configs
-		 SET strategy_id = $1,
-		     name = $2,
-		     description = $3,
-		     schedule_cron = $4,
-		     start_date = $5,
-		     end_date = $6,
-		     simulation_params = $7,
+		 SET name = $1,
+		     description = $2,
+		     schedule_cron = $3,
+		     start_date = $4,
+		     end_date = $5,
+		     simulation_params = $6,
 		     updated_at = NOW()
-		 WHERE id = $8
+		 WHERE id = $7
 		 RETURNING updated_at`,
-		config.StrategyID,
 		config.Name,
 		config.Description,
 		config.ScheduleCron,
@@ -159,10 +164,10 @@ func (r *BacktestConfigRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-const backtestConfigSelectSQL = `SELECT id, strategy_id, name, COALESCE(description, ''), COALESCE(schedule_cron, ''), start_date, end_date, simulation_params, created_at, updated_at
+const backtestConfigSelectSQL = `SELECT id, strategy_id, name, COALESCE(description, ''), COALESCE(schedule_cron, ''), start_date, end_date, simulation_params, scope_id, created_at, updated_at
 	 FROM backtest_configs`
 
-const backtestConfigListSelectSQL = `SELECT bc.id, bc.strategy_id, bc.name, COALESCE(bc.description, ''), COALESCE(bc.schedule_cron, ''), bc.start_date, bc.end_date, bc.simulation_params, bc.created_at, bc.updated_at, latest_run_summary.latest_run_summary
+const backtestConfigListSelectSQL = `SELECT bc.id, bc.strategy_id, bc.name, COALESCE(bc.description, ''), COALESCE(bc.schedule_cron, ''), bc.start_date, bc.end_date, bc.simulation_params, bc.scope_id, bc.created_at, bc.updated_at, latest_run_summary.latest_run_summary
 	 FROM backtest_configs bc
 	 LEFT JOIN LATERAL (
          SELECT jsonb_build_object(
@@ -193,6 +198,7 @@ func scanBacktestConfig(sc scanner) (*domain.BacktestConfig, error) {
 		&config.StartDate,
 		&config.EndDate,
 		&simulationJSON,
+		&config.ScopeID,
 		&config.CreatedAt,
 		&config.UpdatedAt,
 	)
@@ -225,6 +231,7 @@ func scanBacktestConfigWithLatestRun(sc scanner) (*domain.BacktestConfig, error)
 		&config.StartDate,
 		&config.EndDate,
 		&simulationJSON,
+		&config.ScopeID,
 		&config.CreatedAt,
 		&config.UpdatedAt,
 		&latestRunJSON,
@@ -265,6 +272,9 @@ func buildBacktestConfigListQuery(filter repository.BacktestConfigFilter, limit,
 
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "bc.strategy_id = "+nextArg(*filter.StrategyID))
+	}
+	if filter.ScopeID != nil {
+		conditions = append(conditions, "bc.scope_id = "+nextArg(*filter.ScopeID))
 	}
 	if filter.CreatedAfter != nil {
 		conditions = append(conditions, "bc.created_at >= "+nextArg(*filter.CreatedAfter))
@@ -311,6 +321,9 @@ func buildBacktestConfigCountQuery(filter repository.BacktestConfigFilter) (stri
 
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))
+	}
+	if filter.ScopeID != nil {
+		conditions = append(conditions, "scope_id = "+nextArg(*filter.ScopeID))
 	}
 	if filter.CreatedAfter != nil {
 		conditions = append(conditions, "created_at >= "+nextArg(*filter.CreatedAfter))

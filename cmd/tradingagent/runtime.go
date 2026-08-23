@@ -417,6 +417,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		DiscoveryRunRepo:       discoveryRunRepo,
 		JobRunRepo:             jobRunRepo,
 		ReportArtifacts:        reportArtifactRepo,
+		PaperEvaluationScopes:  reportArtifactRepo,
 		ReportMetrics:          appMetrics,
 		MilestoneEvidence:      milestoneEvidenceRepo,
 		PolymarketClient:       nil,
@@ -723,7 +724,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					return err
 				}),
 			}
-			backtestSvc := service.NewBacktestService(backtestConfigRepo, backtestRunRepo, strategyRepo, auditLogRepo, dataService, deps.LLMProvider, logger)
+			backtestSvc := service.NewBacktestService(backtestConfigRepo, backtestRunRepo, strategyRepo, auditLogRepo, dataService, deps.LLMProvider, logger, reportArtifactRepo)
 			schedOpts = append(schedOpts, scheduler.WithBacktestServiceScheduling(backtestConfigRepo, backtestSvc, "scheduler"))
 
 			sched = scheduler.NewScheduler(

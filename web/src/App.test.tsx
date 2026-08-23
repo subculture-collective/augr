@@ -1020,6 +1020,7 @@ describe('first vertical slice app', () => {
     expect(await screen.findByRole('tab', { name: /reports/i })).toHaveAttribute('aria-selected', 'true')
     expect(await screen.findByRole('heading', { name: /latest report/i })).toBeTruthy()
     expect(screen.getByText(/paper validation passed/i)).toBeTruthy()
+    expect(screen.getAllByText(/legacy unscoped/i).length).toBeGreaterThan(0)
     expect(screen.getByRole('table', { name: /strategy report history/i })).toBeTruthy()
     expect(screen.getAllByText(/offset 0/i).length).toBeGreaterThan(0)
     const reportPagination = screen.getByLabelText(/report history pagination/i)

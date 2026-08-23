@@ -3584,6 +3584,7 @@ func TestCreateBacktestConfigRejectsInvalidCron(t *testing.T) {
 
 	body := map[string]any{
 		"strategy_id":   stratA.ID.String(),
+		"scope_id":      uuid.NewString(),
 		"name":          "My Backtest",
 		"start_date":    "2024-01-01T00:00:00Z",
 		"end_date":      "2024-12-31T00:00:00Z",
@@ -3601,10 +3602,12 @@ func TestCreateBacktestConfigAcceptsValidCron(t *testing.T) {
 
 	deps := testDeps()
 	deps.BacktestConfigs = newStubBacktestConfigRepo()
+	deps.PaperEvaluationScopes = &stubPaperEvaluationScopeStore{}
 	srv := newTestServerWithDeps(t, deps)
 
 	body := map[string]any{
 		"strategy_id":   stratA.ID.String(),
+		"scope_id":      uuid.NewString(),
 		"name":          "My Backtest",
 		"start_date":    "2024-01-01T00:00:00Z",
 		"end_date":      "2024-12-31T00:00:00Z",

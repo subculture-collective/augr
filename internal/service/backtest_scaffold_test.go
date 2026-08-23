@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,6 +19,40 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/service"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategyscaffold"
 )
+
+type allowBoundScope struct{}
+
+func (allowBoundScope) ValidateBacktestConfigScope(context.Context, *domain.BacktestConfig) error {
+	return nil
+}
+
+type rejectUnboundScope struct{}
+
+func (rejectUnboundScope) ValidateBacktestConfigScope(context.Context, *domain.BacktestConfig) error {
+	return nil
+}
+func (rejectUnboundScope) ScopedExecutionBinding(context.Context, uuid.UUID) (bool, string, error) {
+	return false, "historical loader is not manifest-bound", nil
+}
+
+func TestRunBacktestRejectsScopedExecutionWithoutImmutableDatasetBinding(t *testing.T) {
+	scopeID := uuid.New()
+	strategy := domain.Strategy{ID: uuid.New(), Name: "scoped", Ticker: "SPY", MarketType: domain.MarketTypeStock,
+		Status: domain.StrategyStatusActive, Config: domain.StrategyConfig(`{"rules_engine":{}}`)}
+	config := domain.BacktestConfig{ID: uuid.New(), ScopeID: &scopeID, StrategyID: strategy.ID, Name: "scoped",
+		StartDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), EndDate: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+		Simulation: domain.BacktestSimulationParameters{InitialCapital: 500}}
+	svc := service.NewBacktestService(stubBacktestConfigRepo{config: &config}, &recordingBacktestRunRepo{},
+		&stubStrategyRepo{strategy: &strategy}, nil, nil, nil, slog.Default(), rejectUnboundScope{})
+	_, err := svc.RunBacktest(context.Background(), config.ID, "tester")
+	var svcErr *service.ServiceError
+	if !errors.As(err, &svcErr) || svcErr.Status != 422 || !strings.Contains(svcErr.Message, "not manifest-bound") {
+		t.Fatalf("error = %v, want surfaced immutable binding rejection", err)
+	}
+}
+func (allowBoundScope) ScopedExecutionBinding(context.Context, uuid.UUID) (bool, string, error) {
+	return true, "", nil
+}
 
 func TestRunBacktestRejectsStrategyWithoutSupportedBacktestConfig(t *testing.T) {
 	strategy := domain.Strategy{
@@ -46,6 +81,7 @@ func TestRunBacktestRejectsStrategyWithoutSupportedBacktestConfig(t *testing.T) 
 		nil,
 		nil,
 		slog.Default(),
+		nil,
 	)
 
 	run, err := svc.RunBacktest(context.Background(), cfg.ID, "tester")
@@ -76,6 +112,7 @@ func TestRunBacktestExecutesOptionsRulesAndPersistsRun(t *testing.T) {
 
 	cfg := domain.BacktestConfig{
 		ID:         uuid.New(),
+		ScopeID:    func() *uuid.UUID { id := uuid.New(); return &id }(),
 		StrategyID: optionsStrategy.ID,
 		Name:       "options-paper-validation",
 		StartDate:  time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC),
@@ -102,6 +139,7 @@ func TestRunBacktestExecutesOptionsRulesAndPersistsRun(t *testing.T) {
 		dataSvc,
 		nil,
 		slog.Default(),
+		allowBoundScope{},
 	)
 
 	run, err := svc.RunBacktest(context.Background(), cfg.ID, "tester")
@@ -113,6 +151,9 @@ func TestRunBacktestExecutesOptionsRulesAndPersistsRun(t *testing.T) {
 	}
 	if run.BacktestConfigID != cfg.ID {
 		t.Fatalf("BacktestConfigID = %s, want %s", run.BacktestConfigID, cfg.ID)
+	}
+	if run.ScopeID == nil || *run.ScopeID != *cfg.ScopeID {
+		t.Fatalf("ScopeID = %v, want %s", run.ScopeID, *cfg.ScopeID)
 	}
 	if len(run.Metrics) == 0 || len(run.TradeLog) == 0 || len(run.EquityCurve) == 0 {
 		t.Fatalf("persisted run fields missing: metrics=%d trade_log=%d equity_curve=%d", len(run.Metrics), len(run.TradeLog), len(run.EquityCurve))
@@ -200,6 +241,7 @@ func TestRunBacktestOptionsRulesUsesConfiguredUnderlying(t *testing.T) {
 		dataSvc,
 		nil,
 		slog.Default(),
+		nil,
 	)
 
 	run, err := svc.RunBacktest(context.Background(), cfg.ID, "tester")

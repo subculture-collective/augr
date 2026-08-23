@@ -11,6 +11,7 @@ import (
 // BacktestRun stores the persisted results of a single executed backtest.
 type BacktestRun struct {
 	ID                uuid.UUID       `json:"id"`
+	ScopeID           *uuid.UUID      `json:"scope_id,omitempty"`
 	BacktestConfigID  uuid.UUID       `json:"backtest_config_id"`
 	Metrics           json.RawMessage `json:"metrics"`
 	TradeLog          json.RawMessage `json:"trade_log"`

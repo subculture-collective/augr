@@ -199,6 +199,7 @@ type StrategyFilter struct {
 // BacktestConfigFilter defines supported filters when listing backtest configurations.
 type BacktestConfigFilter struct {
 	StrategyID    *uuid.UUID
+	ScopeID       *uuid.UUID
 	CreatedAfter  *time.Time
 	CreatedBefore *time.Time
 }
@@ -206,6 +207,7 @@ type BacktestConfigFilter struct {
 // BacktestRunFilter defines supported filters when listing persisted backtest runs.
 type BacktestRunFilter struct {
 	BacktestConfigID  *uuid.UUID
+	ScopeID           *uuid.UUID
 	PromptVersion     string
 	PromptVersionHash string
 	RunAfter          *time.Time

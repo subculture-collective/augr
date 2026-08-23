@@ -41,10 +41,11 @@ func (r *BacktestRunRepo) Create(ctx context.Context, run *domain.BacktestRun) e
 
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO backtest_runs (
-			backtest_config_id, metrics, trade_log, equity_curve, run_timestamp, duration_ns, prompt_version, prompt_version_hash, simulation_version, input_hash
+			backtest_config_id, metrics, trade_log, equity_curve, run_timestamp, duration_ns, prompt_version, prompt_version_hash, simulation_version, input_hash, scope_id
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 RETURNING id, created_at, updated_at`,
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, scope_id
+		 FROM backtest_configs WHERE id=$1
+		 RETURNING id, scope_id, created_at, updated_at`,
 		run.BacktestConfigID,
 		metricsJSON,
 		tradeLogJSON,
@@ -57,7 +58,7 @@ func (r *BacktestRunRepo) Create(ctx context.Context, run *domain.BacktestRun) e
 		run.InputHash,
 	)
 
-	if err := row.Scan(&run.ID, &run.CreatedAt, &run.UpdatedAt); err != nil {
+	if err := row.Scan(&run.ID, &run.ScopeID, &run.CreatedAt, &run.UpdatedAt); err != nil {
 		return fmt.Errorf("postgres: create backtest run: %w", err)
 	}
 
@@ -105,7 +106,7 @@ func (r *BacktestRunRepo) List(ctx context.Context, filter repository.BacktestRu
 	return runs, nil
 }
 
-const backtestRunSelectSQL = `SELECT id, backtest_config_id, metrics, trade_log, equity_curve, run_timestamp, duration_ns, prompt_version, prompt_version_hash, simulation_version, input_hash, created_at, updated_at
+const backtestRunSelectSQL = `SELECT id, backtest_config_id, metrics, trade_log, equity_curve, run_timestamp, duration_ns, prompt_version, prompt_version_hash, simulation_version, input_hash, scope_id, created_at, updated_at
 	 FROM backtest_runs`
 
 // scanBacktestRun scans a single row (pgx.Row or pgx.Rows) into a BacktestRun.
@@ -130,6 +131,7 @@ func scanBacktestRun(sc scanner) (*domain.BacktestRun, error) {
 		&run.PromptVersionHash,
 		&run.SimulationVersion,
 		&run.InputHash,
+		&run.ScopeID,
 		&run.CreatedAt,
 		&run.UpdatedAt,
 	)
@@ -174,6 +176,9 @@ func buildBacktestRunCountQuery(filter repository.BacktestRunFilter) (string, []
 	if filter.BacktestConfigID != nil {
 		conditions = append(conditions, "backtest_config_id = "+nextArg(*filter.BacktestConfigID))
 	}
+	if filter.ScopeID != nil {
+		conditions = append(conditions, "scope_id = "+nextArg(*filter.ScopeID))
+	}
 	if filter.PromptVersion != "" {
 		conditions = append(conditions, "prompt_version = "+nextArg(filter.PromptVersion))
 	}
@@ -209,6 +214,9 @@ func buildBacktestRunListQuery(filter repository.BacktestRunFilter, limit, offse
 
 	if filter.BacktestConfigID != nil {
 		conditions = append(conditions, "backtest_config_id = "+nextArg(*filter.BacktestConfigID))
+	}
+	if filter.ScopeID != nil {
+		conditions = append(conditions, "scope_id = "+nextArg(*filter.ScopeID))
 	}
 	if filter.PromptVersion != "" {
 		conditions = append(conditions, "prompt_version = "+nextArg(filter.PromptVersion))

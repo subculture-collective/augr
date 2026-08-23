@@ -955,6 +955,10 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
+      const scopeQuery = new URL(request.url).searchParams
+      if (scopeQuery.get('legacy') !== 'legacy_unscoped' && !(scopeQuery.get('account_id') && scopeQuery.get('scope_id'))) {
+        return errorJson(400, 'explicit report scope required', 'ERR_BAD_REQUEST')
+      }
       const error = scenarioError(state)
       if (error) return error
       if (state.scenario === 'empty-data' || params.id === '00000000-0000-4000-8000-000000000999') {
@@ -976,6 +980,10 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
+      const scopeQuery = new URL(request.url).searchParams
+      if (scopeQuery.get('legacy') !== 'legacy_unscoped' && !(scopeQuery.get('account_id') && scopeQuery.get('scope_id'))) {
+        return errorJson(400, 'explicit report scope required', 'ERR_BAD_REQUEST')
+      }
       const error = scenarioError(state)
       if (error) return error
       const url = new URL(request.url)

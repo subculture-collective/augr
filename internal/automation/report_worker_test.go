@@ -201,6 +201,29 @@ func (m *captureReportMetrics) RecordReportWorkerError(strategyID string) {
 
 func newTestReportWorker(t *testing.T, strategies []domain.Strategy, configs map[uuid.UUID][]domain.BacktestConfig, runs map[uuid.UUID][]domain.BacktestRun, repo *stubReportArtifactRepo, metrics *captureReportMetrics) *ReportWorker {
 	t.Helper()
+	for strategyID, values := range configs {
+		for i := range values {
+			if values[i].ScopeID == nil {
+				id := uuid.New()
+				values[i].ScopeID = &id
+			}
+		}
+		configs[strategyID] = values
+	}
+	for configID, values := range runs {
+		for i := range values {
+			if values[i].ScopeID == nil {
+				for _, configsForStrategy := range configs {
+					for _, config := range configsForStrategy {
+						if config.ID == configID {
+							values[i].ScopeID = config.ScopeID
+						}
+					}
+				}
+			}
+		}
+		runs[configID] = values
+	}
 	w := NewReportWorker(reportWorkerDeps{
 		StrategyRepo:       &stubReportStrategyRepo{strategies: strategies},
 		BacktestConfigRepo: &stubReportBacktestConfigRepo{byStrategy: configs},
@@ -244,8 +267,8 @@ func TestRunPaperValidationReport_FiltersAndPersistsCompletedArtifacts(t *testin
 			{ID: uuid.New(), Name: "inactive-paper", Status: domain.StrategyStatusInactive, IsPaper: true, CreatedAt: fixedNow.Add(-45 * 24 * time.Hour)},
 		},
 		map[uuid.UUID][]domain.BacktestConfig{
-			activePaperA: {{ID: configA, StrategyID: activePaperA}},
-			activePaperB: {{ID: configB, StrategyID: activePaperB}},
+			activePaperA: {{ID: configA, StrategyID: activePaperA, StartDate: fixedNow.Add(-90 * 24 * time.Hour), EndDate: fixedNow.Add(-30 * 24 * time.Hour)}},
+			activePaperB: {{ID: configB, StrategyID: activePaperB, StartDate: fixedNow.Add(-60 * 24 * time.Hour), EndDate: fixedNow.Add(-10 * 24 * time.Hour)}},
 		},
 		map[uuid.UUID][]domain.BacktestRun{
 			configA: {{ID: uuid.New(), BacktestConfigID: configA, Metrics: metricsJSON, TradeLog: tradesJSON}},
@@ -282,19 +305,66 @@ func TestRunPaperValidationReport_FiltersAndPersistsCompletedArtifacts(t *testin
 		if artifact.CompletedAt == nil {
 			t.Fatal("completed_at should be set")
 		}
+		if artifact.ScopeID == nil || artifact.BacktestRunID == nil || artifact.ReportSHA256 == "" {
+			t.Fatalf("completed artifact lacks immutable scope/run/content identity: %+v", artifact)
+		}
 		var report papervalidation.ValidationReport
 		if err := json.Unmarshal(artifact.ReportJSON, &report); err != nil {
 			t.Fatalf("unmarshal report: %v", err)
 		}
-		if !report.ReportDate.Equal(fixedNow) {
-			t.Fatalf("report date = %v, want %v", report.ReportDate, fixedNow)
+		if report.ReportDate.After(fixedNow.Add(-10 * 24 * time.Hour)) {
+			t.Fatalf("report date = %v, want evaluation_end cap", report.ReportDate)
 		}
-		if report.ElapsedDays != 90 && report.ElapsedDays != 60 {
-			t.Fatalf("elapsed days = %d, want a strategy-specific paper age", report.ElapsedDays)
+		if report.ElapsedDays != 60 && report.ElapsedDays != 50 {
+			t.Fatalf("elapsed days = %d, want scope evaluation age", report.ElapsedDays)
 		}
 		if report.Decision == "" {
 			t.Fatal("report decision should not be empty")
 		}
+	}
+}
+
+func TestGenerateOneReportRejectsRunScopeMismatch(t *testing.T) {
+	t.Parallel()
+	strategyID, configID := uuid.New(), uuid.New()
+	configScope, runScope := uuid.New(), uuid.New()
+	now := time.Date(2026, 6, 11, 15, 4, 5, 0, time.UTC)
+	repo := &stubReportArtifactRepo{}
+	worker := newTestReportWorker(t,
+		[]domain.Strategy{{ID: strategyID, Name: "paper", Status: domain.StrategyStatusActive, IsPaper: true}},
+		map[uuid.UUID][]domain.BacktestConfig{strategyID: {{ID: configID, StrategyID: strategyID, ScopeID: &configScope}}},
+		map[uuid.UUID][]domain.BacktestRun{configID: {{ID: uuid.New(), BacktestConfigID: configID, ScopeID: &runScope}}}, repo, &captureReportMetrics{})
+	_, err := worker.generateOneReport(context.Background(), strategyID, "paper", now.Truncate(24*time.Hour), now)
+	if err == nil || !strings.Contains(err.Error(), "scope mismatch") {
+		t.Fatalf("error = %v, want scope mismatch", err)
+	}
+	if len(repo.artifacts) != 0 {
+		t.Fatalf("artifacts = %+v, want none", repo.artifacts)
+	}
+}
+
+func TestGenerateConfigReportIgnoresStrategyCreatedAtAndCapsEligibilityAtEvaluationEnd(t *testing.T) {
+	t.Parallel()
+	strategyID, configID, scopeID := uuid.New(), uuid.New(), uuid.New()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(60 * 24 * time.Hour)
+	repo := &stubReportArtifactRepo{}
+	worker := newTestReportWorker(t,
+		[]domain.Strategy{{ID: strategyID, Name: "paper", Status: domain.StrategyStatusActive, IsPaper: true, CreatedAt: start.Add(-10 * 365 * 24 * time.Hour)}},
+		map[uuid.UUID][]domain.BacktestConfig{strategyID: {{ID: configID, StrategyID: strategyID, ScopeID: &scopeID, StartDate: start, EndDate: end}}},
+		map[uuid.UUID][]domain.BacktestRun{configID: {{ID: uuid.New(), BacktestConfigID: configID, ScopeID: &scopeID, Metrics: mustMarshal(t, backtest.Metrics{}), TradeLog: json.RawMessage(`[]`)}}},
+		repo, &captureReportMetrics{})
+
+	_, err := worker.generateOneReport(context.Background(), strategyID, "paper", end.Add(30*24*time.Hour).Truncate(24*time.Hour), end.Add(30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report papervalidation.ValidationReport
+	if err := json.Unmarshal(repo.artifacts[0].ReportJSON, &report); err != nil {
+		t.Fatal(err)
+	}
+	if !report.PaperStartDate.Equal(start) || !report.ReportDate.Equal(end) || report.ElapsedDays != 60 {
+		t.Fatalf("report window start=%v end=%v elapsed=%d", report.PaperStartDate, report.ReportDate, report.ElapsedDays)
 	}
 }
 
@@ -317,15 +387,8 @@ func TestGenerateOneReport_PersistsErrorArtifactWhenBacktestConfigMissing(t *tes
 	if err == nil {
 		t.Fatal("expected error when no backtest configs exist")
 	}
-	if got := len(reportRepo.artifacts); got != 1 {
-		t.Fatalf("artifacts persisted = %d, want 1", got)
-	}
-	artifact := reportRepo.artifacts[0]
-	if artifact.Status != "error" {
-		t.Fatalf("artifact status = %q, want error", artifact.Status)
-	}
-	if !strings.Contains(artifact.ErrorMessage, "no backtest configs") {
-		t.Fatalf("error message = %q, want backtest config failure", artifact.ErrorMessage)
+	if got := len(reportRepo.artifacts); got != 0 {
+		t.Fatalf("artifacts persisted = %d, want 0 unscoped artifacts", got)
 	}
 }
 
@@ -439,8 +502,8 @@ func TestGenerateOneReportSurfacesErrorArtifactPersistenceFailure(t *testing.T) 
 	)
 
 	_, err := worker.generateOneReport(context.Background(), strategyID, "paper", fixedNow.Truncate(24*time.Hour), fixedNow)
-	if err == nil || !strings.Contains(err.Error(), "no backtest configs") || !strings.Contains(err.Error(), "persist error artifact") {
-		t.Fatalf("generateOneReport() error = %v, want generation and artifact persistence failures", err)
+	if err == nil || !strings.Contains(err.Error(), "no scoped backtest configs") {
+		t.Fatalf("generateOneReport() error = %v, want unscoped generation failure", err)
 	}
 	if len(reportRepo.artifacts) != 0 {
 		t.Fatalf("artifacts = %#v, want no falsely persisted artifact", reportRepo.artifacts)
@@ -462,14 +525,57 @@ func TestRunPaperValidationReportSkipsEventMarketsAndReportsEligibleFailures(t *
 	worker.now = func() time.Time { return fixedNow }
 
 	err := worker.RunPaperValidationReport(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "1 of 1 eligible strategies failed") {
+	if err != nil {
 		t.Fatalf("RunPaperValidationReport() error = %v", err)
 	}
-	if got := worker.LastSummary(); got["eligible"] != 1 || got["skipped"] != 1 || got["failed"] != 1 {
-		t.Fatalf("summary = %v, want one eligible failure and one skip", got)
+	if got := worker.LastSummary(); got["eligible"] != 0 || got["skipped"] != 2 || got["failed"] != 0 {
+		t.Fatalf("summary = %v, want unscoped and event strategies skipped", got)
 	}
-	if len(reportRepo.artifacts) != 1 || reportRepo.artifacts[0].StrategyID != stockID {
-		t.Fatalf("artifacts = %#v, event-market strategy must be skipped", reportRepo.artifacts)
+	if len(reportRepo.artifacts) != 0 {
+		t.Fatalf("artifacts = %#v, unscoped evidence must not be written", reportRepo.artifacts)
+	}
+}
+
+func TestRunPaperValidationReportProcessesEveryScopedConfigAndKeepsBucketBytesStable(t *testing.T) {
+	strategyID := uuid.New()
+	configA, configB, legacy := uuid.New(), uuid.New(), uuid.New()
+	scopeA, scopeB := uuid.New(), uuid.New()
+	fixedNow := time.Date(2026, 6, 11, 15, 4, 5, 0, time.UTC)
+	metricsJSON := mustMarshal(t, backtest.Metrics{StartTime: fixedNow.Add(-48 * time.Hour), EndTime: fixedNow.Add(-24 * time.Hour)})
+	repo := &stubReportArtifactRepo{}
+	worker := newTestReportWorker(t,
+		[]domain.Strategy{{ID: strategyID, Name: "paper", Status: domain.StrategyStatusActive, IsPaper: true, CreatedAt: fixedNow.Add(-30 * 24 * time.Hour)}},
+		map[uuid.UUID][]domain.BacktestConfig{strategyID: {
+			{ID: legacy, StrategyID: strategyID, ScopeID: nil},
+			{ID: configA, StrategyID: strategyID, ScopeID: &scopeA, StartDate: fixedNow.Add(-30 * 24 * time.Hour), EndDate: fixedNow.Add(30 * 24 * time.Hour)},
+			{ID: configB, StrategyID: strategyID, ScopeID: &scopeB, StartDate: fixedNow.Add(-30 * 24 * time.Hour), EndDate: fixedNow.Add(30 * 24 * time.Hour)},
+		}},
+		map[uuid.UUID][]domain.BacktestRun{
+			configA: {{ID: uuid.New(), BacktestConfigID: configA, ScopeID: &scopeA, Metrics: metricsJSON, TradeLog: json.RawMessage(`[]`)}},
+			configB: {{ID: uuid.New(), BacktestConfigID: configB, ScopeID: &scopeB, Metrics: metricsJSON, TradeLog: json.RawMessage(`[]`)}},
+		}, repo, &captureReportMetrics{})
+	// Restore the explicit legacy fixture overwritten by the generic helper.
+	worker.deps.BacktestConfigRepo.(*stubReportBacktestConfigRepo).byStrategy[strategyID][0].ScopeID = nil
+	worker.now = func() time.Time { return fixedNow }
+	if err := worker.RunPaperValidationReport(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.artifacts) != 2 || worker.LastSummary()["skipped"] != 1 {
+		t.Fatalf("artifacts=%d summary=%v", len(repo.artifacts), worker.LastSummary())
+	}
+	first := map[uuid.UUID]string{}
+	for _, artifact := range repo.artifacts {
+		first[*artifact.ScopeID] = string(artifact.ReportJSON)
+	}
+	repo.artifacts = nil
+	worker.now = func() time.Time { return fixedNow.Add(8 * time.Hour) }
+	if err := worker.RunPaperValidationReport(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range repo.artifacts {
+		if first[*artifact.ScopeID] != string(artifact.ReportJSON) {
+			t.Fatalf("scope %s report bytes changed within bucket", *artifact.ScopeID)
+		}
 	}
 }
 

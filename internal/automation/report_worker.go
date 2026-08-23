@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,16 +81,35 @@ func (w *ReportWorker) RunPaperValidationReport(ctx context.Context) error {
 	}
 
 	type paperEntry struct {
-		ID   uuid.UUID
-		Name string
+		Strategy domain.Strategy
+		Config   domain.BacktestConfig
 	}
 	var paperStrategies []paperEntry
+	skipped := 0
 	for _, s := range strategies {
-		if s.IsPaper && !eventmarkets.IsEventMarket(s.MarketType) {
-			paperStrategies = append(paperStrategies, paperEntry{ID: s.ID, Name: s.Name})
+		if !s.IsPaper || eventmarkets.IsEventMarket(s.MarketType) {
+			skipped++
+			continue
+		}
+		if w.deps.BacktestConfigRepo == nil {
+			return fmt.Errorf("paper_validation_report: backtest config repo not configured")
+		}
+		configs, listErr := w.deps.BacktestConfigRepo.List(ctx, repository.BacktestConfigFilter{StrategyID: &s.ID}, 10_000, 0)
+		if listErr != nil {
+			return fmt.Errorf("paper_validation_report: list configs for %s: %w", s.Name, listErr)
+		}
+		if len(configs) == 0 {
+			skipped++
+			continue
+		}
+		for _, config := range configs {
+			if config.ScopeID == nil {
+				skipped++
+				continue
+			}
+			paperStrategies = append(paperStrategies, paperEntry{Strategy: s, Config: config})
 		}
 	}
-	skipped := len(strategies) - len(paperStrategies)
 	if len(paperStrategies) == 0 {
 		w.lastSummary = map[string]int{"scanned": len(strategies), "eligible": 0, "skipped": skipped, "succeeded": 0, "pending": 0, "failed": 0}
 		w.logger.Info("paper_validation_report: no active paper strategies")
@@ -107,15 +127,15 @@ func (w *ReportWorker) RunPaperValidationReport(ctx context.Context) error {
 			return ctx.Err()
 		}
 
-		outcome, err := w.generateOneReport(ctx, ps.ID, ps.Name, timeBucket, now)
+		outcome, err := w.generateConfigReport(ctx, ps.Strategy, ps.Config, timeBucket, timeBucket)
 		switch {
 		case err != nil:
 			failed++
 			if w.metrics != nil {
-				w.metrics.RecordReportWorkerError(ps.ID.String())
+				w.metrics.RecordReportWorkerError(ps.Strategy.ID.String())
 			}
 			w.logger.Warn("paper_validation_report: strategy failed",
-				slog.String("strategy", ps.Name),
+				slog.String("strategy", ps.Strategy.Name),
 				slog.Any("error", err),
 			)
 		case outcome == reportGenerationPending:
@@ -123,7 +143,7 @@ func (w *ReportWorker) RunPaperValidationReport(ctx context.Context) error {
 		default:
 			succeeded++
 			if w.metrics != nil {
-				w.metrics.RecordReportWorkerSuccess(ps.ID.String())
+				w.metrics.RecordReportWorkerSuccess(ps.Strategy.ID.String())
 			}
 		}
 	}
@@ -140,77 +160,78 @@ func (w *ReportWorker) RunPaperValidationReport(ctx context.Context) error {
 	return nil
 }
 
-func (w *ReportWorker) generateOneReport(
+func (w *ReportWorker) generateConfigReport(
 	ctx context.Context,
-	strategyID uuid.UUID,
-	strategyName string,
+	strategy domain.Strategy,
+	config domain.BacktestConfig,
 	timeBucket, now time.Time,
 ) (reportGenerationOutcome, error) {
 	start := time.Now()
 
-	strategy, err := w.deps.StrategyRepo.Get(ctx, strategyID)
-	if err != nil {
-		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("get strategy: %w", err))
-	}
-	paperStart := strategy.CreatedAt
-
 	if w.deps.BacktestConfigRepo == nil || w.deps.BacktestRunRepo == nil {
-		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("backtest repos not configured"))
+		return reportGenerationCompleted, fmt.Errorf("backtest repos not configured")
 	}
 
-	configs, err := w.deps.BacktestConfigRepo.List(ctx, repository.BacktestConfigFilter{StrategyID: &strategyID}, 1, 0)
-	if err != nil {
-		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("list backtest configs: %w", err))
+	if config.ScopeID == nil {
+		return reportGenerationCompleted, fmt.Errorf("legacy_unscoped: backtest config %s", config.ID)
 	}
-	if len(configs) == 0 {
-		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("no backtest configs found for strategy %s", strategyName))
+	evaluationDate := now
+	if evaluationDate.After(config.EndDate) {
+		evaluationDate = config.EndDate
 	}
 
-	configID := configs[0].ID
-	runs, err := w.deps.BacktestRunRepo.List(ctx, repository.BacktestRunFilter{BacktestConfigID: &configID}, 1, 0)
+	strategyID := strategy.ID
+	configID := config.ID
+	runs, err := w.deps.BacktestRunRepo.List(ctx, repository.BacktestRunFilter{BacktestConfigID: &configID, ScopeID: config.ScopeID}, 1, 0)
 	if err != nil {
-		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("list backtest runs: %w", err))
+		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, config.ScopeID, nil, timeBucket, fmt.Errorf("list backtest runs: %w", err))
 	}
 	if len(runs) == 0 {
 		w.logger.Info("paper_validation_report: no backtest runs yet, persisting pending artifact",
-			slog.String("strategy", strategyName),
+			slog.String("strategy", strategy.Name),
 		)
-		return reportGenerationPending, w.persistPendingArtifact(ctx, strategyID, timeBucket, time.Since(start))
+		return reportGenerationPending, w.persistPendingArtifact(ctx, strategyID, *config.ScopeID, timeBucket, time.Since(start))
 	}
 
 	var btMetrics backtest.Metrics
 	var analytics backtest.TradeAnalytics
 	latestRun := runs[0]
+	if latestRun.ScopeID == nil || *latestRun.ScopeID != *config.ScopeID {
+		return reportGenerationCompleted, fmt.Errorf("scope mismatch between backtest config and run")
+	}
 	if err := json.Unmarshal(latestRun.Metrics, &btMetrics); err != nil {
-		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("unmarshal metrics: %w", err))
+		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, config.ScopeID, &latestRun.ID, timeBucket, fmt.Errorf("unmarshal metrics: %w", err))
 	}
 	if len(latestRun.TradeLog) > 0 {
 		var trades []domain.Trade
 		if err := json.Unmarshal(latestRun.TradeLog, &trades); err != nil {
-			return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("unmarshal trade log: %w", err))
+			return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, config.ScopeID, &latestRun.ID, timeBucket, fmt.Errorf("unmarshal trade log: %w", err))
 		}
 		analytics = backtest.ComputeTradeAnalytics(trades, btMetrics.StartTime, btMetrics.EndTime)
 	} else {
 		analytics = backtest.ComputeTradeAnalytics(nil, btMetrics.StartTime, btMetrics.EndTime)
 	}
 
-	report := papervalidation.GenerateReport(btMetrics, analytics, papervalidation.DefaultThresholds(), paperStart, now)
+	report := papervalidation.GenerateReport(btMetrics, analytics, papervalidation.DefaultThresholds(), config.StartDate, evaluationDate)
 
 	reportJSON, err := json.Marshal(report)
 	if err != nil {
-		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, timeBucket, fmt.Errorf("marshal report: %w", err))
+		return reportGenerationCompleted, w.persistErrorArtifact(ctx, strategyID, config.ScopeID, &latestRun.ID, timeBucket, fmt.Errorf("marshal report: %w", err))
 	}
 
 	latencyMs := int(time.Since(start).Milliseconds())
 	completed := time.Now().UTC()
 	artifact := &pgrepo.ReportArtifact{
-		StrategyID:  strategyID,
-		ReportType:  reportTypePaperValidation,
-		TimeBucket:  timeBucket,
-		Status:      "completed",
-		ReportJSON:  reportJSON,
-		LatencyMs:   latencyMs,
-		CompletedAt: &completed,
+		StrategyID:    strategyID,
+		ScopeID:       config.ScopeID,
+		BacktestRunID: &latestRun.ID,
+		ReportType:    reportTypePaperValidation,
+		TimeBucket:    timeBucket,
+		Status:        "completed",
+		ReportJSON:    reportJSON,
+		ReportSHA256:  fmt.Sprintf("%x", sha256.Sum256(reportJSON)),
+		LatencyMs:     latencyMs,
+		CompletedAt:   &completed,
 	}
 	if w.deps.ReportArtifactRepo == nil {
 		return reportGenerationCompleted, fmt.Errorf("persist report: report artifact repo not configured")
@@ -220,16 +241,34 @@ func (w *ReportWorker) generateOneReport(
 	}
 
 	w.logger.Info("paper_validation_report: generated",
-		slog.String("strategy", strategyName),
+		slog.String("strategy", strategy.Name),
 		slog.String("decision", report.Decision),
 		slog.Int("latency_ms", latencyMs),
 	)
 	return reportGenerationCompleted, nil
 }
 
+func (w *ReportWorker) generateOneReport(ctx context.Context, strategyID uuid.UUID, strategyName string, timeBucket, now time.Time) (reportGenerationOutcome, error) {
+	strategy, err := w.deps.StrategyRepo.Get(ctx, strategyID)
+	if err != nil {
+		return reportGenerationCompleted, fmt.Errorf("get strategy: %w", err)
+	}
+	configs, err := w.deps.BacktestConfigRepo.List(ctx, repository.BacktestConfigFilter{StrategyID: &strategyID}, 10_000, 0)
+	if err != nil {
+		return reportGenerationCompleted, fmt.Errorf("list backtest configs: %w", err)
+	}
+	for _, config := range configs {
+		if config.ScopeID != nil {
+			return w.generateConfigReport(ctx, *strategy, config, timeBucket, now)
+		}
+	}
+	return reportGenerationCompleted, fmt.Errorf("no scoped backtest configs found for strategy %s", strategyName)
+}
+
 func (w *ReportWorker) persistPendingArtifact(
 	ctx context.Context,
 	strategyID uuid.UUID,
+	scopeID uuid.UUID,
 	timeBucket time.Time,
 	elapsed time.Duration,
 ) error {
@@ -245,6 +284,7 @@ func (w *ReportWorker) persistPendingArtifact(
 	}
 	artifact := &pgrepo.ReportArtifact{
 		StrategyID: strategyID,
+		ScopeID:    &scopeID,
 		ReportType: reportTypePaperValidation,
 		TimeBucket: timeBucket,
 		Status:     "pending",
@@ -260,6 +300,8 @@ func (w *ReportWorker) persistPendingArtifact(
 func (w *ReportWorker) persistErrorArtifact(
 	ctx context.Context,
 	strategyID uuid.UUID,
+	scopeID *uuid.UUID,
+	backtestRunID *uuid.UUID,
 	timeBucket time.Time,
 	origErr error,
 ) error {
@@ -269,12 +311,14 @@ func (w *ReportWorker) persistErrorArtifact(
 	}
 	completed := time.Now().UTC()
 	artifact := &pgrepo.ReportArtifact{
-		StrategyID:   strategyID,
-		ReportType:   reportTypePaperValidation,
-		TimeBucket:   timeBucket,
-		Status:       "error",
-		ErrorMessage: origErr.Error(),
-		CompletedAt:  &completed,
+		StrategyID:    strategyID,
+		ScopeID:       scopeID,
+		BacktestRunID: backtestRunID,
+		ReportType:    reportTypePaperValidation,
+		TimeBucket:    timeBucket,
+		Status:        "error",
+		ErrorMessage:  origErr.Error(),
+		CompletedAt:   &completed,
 	}
 	if err := w.deps.ReportArtifactRepo.Upsert(ctx, artifact); err != nil {
 		w.logger.Error("paper_validation_report: failed to persist error artifact",

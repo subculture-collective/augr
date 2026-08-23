@@ -21,6 +21,7 @@ type StrategyAction = 'pause' | 'resume' | 'skip-next' | 'run'
 type ActionDialogError = { message: string; unknownCompletion?: boolean } | null
 type DetailTab = 'overview' | 'config' | 'reports'
 const reportsPageSize = 5
+const legacyReportScope = { legacy: 'legacy_unscoped' as const }
 const deleteTypedToken = 'DELETE'
 
 const actionLabels: Record<StrategyAction, { verb: string; button: string; title: string; confirm: string; success: string }> = {
@@ -100,15 +101,16 @@ function ModePill({ isPaper }: { isPaper: boolean }) { return <span className={`
 function ReportStatusPill({ value }: { value: string }) { return <StatusBadge status={normalizeStatus(value)} label={value} /> }
 
 function ReportSummary({ report }: { report: ReportArtifact | ReportLatestResponse }) {
-  return <dl className="kv-grid"><dt>Report ID</dt><dd><code>{report.id}</code></dd><dt>Type</dt><dd>{titleCase(report.report_type)}</dd><dt>Status</dt><dd><ReportStatusPill value={report.status} /></dd><dt>Bucket</dt><dd>{new Date(report.time_bucket).toLocaleString()}</dd><dt>Provider</dt><dd>{report.provider || 'Unknown'}</dd><dt>Model</dt><dd>{report.model || 'Unknown'}</dd><dt>Tokens</dt><dd>{report.prompt_tokens + report.completion_tokens} total</dd><dt>Latency</dt><dd>{report.latency_ms} ms</dd><dt>Completed</dt><dd>{report.completed_at ? new Date(report.completed_at).toLocaleString() : 'Not completed'}</dd>{'stale_seconds' in report ? <><dt>Age</dt><dd>{Math.round(report.stale_seconds)} seconds stale</dd></> : null}{report.error_message ? <><dt>Error</dt><dd>{report.error_message}</dd></> : null}</dl>
+  const scopeLabel = titleCase(report.scope_label)
+  return <dl className="kv-grid"><dt>Report ID</dt><dd><code>{report.id}</code></dd><dt>Evidence scope</dt><dd>{scopeLabel}</dd><dt>Type</dt><dd>{titleCase(report.report_type)}</dd><dt>Status</dt><dd><ReportStatusPill value={report.status} /></dd><dt>Bucket</dt><dd>{new Date(report.time_bucket).toLocaleString()}</dd><dt>Provider</dt><dd>{report.provider || 'Unknown'}</dd><dt>Model</dt><dd>{report.model || 'Unknown'}</dd><dt>Tokens</dt><dd>{report.prompt_tokens + report.completion_tokens} total</dd><dt>Latency</dt><dd>{report.latency_ms} ms</dd><dt>Completed</dt><dd>{report.completed_at ? new Date(report.completed_at).toLocaleString() : 'Not completed'}</dd>{'stale_seconds' in report ? <><dt>Age</dt><dd>{Math.round(report.stale_seconds)} seconds stale</dd></> : null}{report.error_message ? <><dt>Error</dt><dd>{report.error_message}</dd></> : null}</dl>
 }
 
 function ReportsPanel({ strategyId, realtimeStale }: { strategyId: string; realtimeStale: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const reportOffset = Number(searchParams.get('report_offset') ?? '0')
   const reportType = searchParams.get('report_type') || 'paper_validation'
-  const filters = useMemo(() => ({ report_type: reportType, limit: reportsPageSize, offset: reportOffset }), [reportOffset, reportType])
-  const latestQuery = useQuery({ queryKey: queryKeys.strategyReportLatest(strategyId, reportType), queryFn: ({ signal }) => getLatestStrategyReport(strategyId, reportType, signal), retry: false })
+  const filters = useMemo(() => ({ report_type: reportType, limit: reportsPageSize, offset: reportOffset, ...legacyReportScope }), [reportOffset, reportType])
+  const latestQuery = useQuery({ queryKey: queryKeys.strategyReportLatest(strategyId, reportType), queryFn: ({ signal }) => getLatestStrategyReport(strategyId, legacyReportScope, reportType, signal), retry: false })
   const historyQuery = useQuery({ queryKey: queryKeys.strategyReports(strategyId, filters), queryFn: ({ signal }) => getStrategyReports(strategyId, filters, signal) })
   const latestNotFound = isApiClientError(latestQuery.error) && latestQuery.error.kind === 'not_found'
   const history = historyQuery.data?.data ?? []

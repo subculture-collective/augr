@@ -83,6 +83,7 @@ export function buildReportArtifact(overrides: Partial<ReportArtifact> = {}): Re
   return {
     id: fixtureId(60),
     strategy_id: fixtureId(10),
+    scope_label: 'legacy_unscoped',
     report_type: 'paper_validation',
     time_bucket: fixtureDate,
     status: 'completed',

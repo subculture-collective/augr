@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func TestCreateOrReuseDiscoveryStrategyStagesNewStrategyUntilBacktestConfigExist
 	strategy := discoveryTestStrategy()
 
 	created, wasCreated, err := createOrReuseDiscoveryStrategy(ctx, strategy, discoveryTestBars(), 50_000, strategies, configs)
-	if err != nil {
+	if err == nil || !strings.Contains(err.Error(), "no immutable paper evaluation scope") {
 		t.Fatalf("createOrReuseDiscoveryStrategy() error = %v", err)
 	}
 	if !wasCreated || created.Status != domain.StrategyStatusInactive || created.ScheduleCron != "" {
@@ -79,8 +80,8 @@ func TestCreateOrReuseDiscoveryStrategyStagesNewStrategyUntilBacktestConfigExist
 	if len(strategies.updateStatuses) != 0 {
 		t.Fatalf("update statuses = %v, want no activation", strategies.updateStatuses)
 	}
-	if len(configs.items) != 1 || configs.items[0].StrategyID != created.ID || configs.items[0].Simulation.InitialCapital != 50_000 {
-		t.Fatalf("backtest configs = %+v", configs.items)
+	if len(configs.items) != 0 {
+		t.Fatalf("unscoped backtest config attempted: %+v", configs.items)
 	}
 }
 
@@ -91,11 +92,11 @@ func TestCreateOrReuseDiscoveryStrategyRemovesNewPausedStrategyWhenConfigFails(t
 	configs.createErr = errors.New("config write failed")
 
 	_, wasCreated, err := createOrReuseDiscoveryStrategy(context.Background(), discoveryTestStrategy(), discoveryTestBars(), 100_000, strategies, configs)
-	if err == nil || wasCreated {
+	if err == nil || !wasCreated || !strings.Contains(err.Error(), "no immutable paper evaluation scope") {
 		t.Fatalf("error = %v, wasCreated = %v", err, wasCreated)
 	}
-	if len(strategies.strategies) != 0 {
-		t.Fatalf("strategies after compensation = %+v", strategies.strategies)
+	if len(configs.items) != 0 {
+		t.Fatalf("unscoped backtest config attempted: %+v", configs.items)
 	}
 }
 
@@ -111,7 +112,7 @@ func TestCreateOrReuseDiscoveryStrategyRepairsReusedActiveStrategyFailClosed(t *
 	configs := newDiscoveryBacktestConfigRepo()
 
 	reused, wasCreated, err := createOrReuseDiscoveryStrategy(ctx, discoveryTestStrategy(), discoveryTestBars(), 100_000, strategies, configs)
-	if err != nil {
+	if err == nil || !strings.Contains(err.Error(), "no immutable paper evaluation scope") {
 		t.Fatalf("createOrReuseDiscoveryStrategy() error = %v", err)
 	}
 	if wasCreated || reused.ID != existing.ID || reused.Status != domain.StrategyStatusPaused {
@@ -120,8 +121,8 @@ func TestCreateOrReuseDiscoveryStrategyRepairsReusedActiveStrategyFailClosed(t *
 	if len(strategies.updateStatuses) != 1 || strategies.updateStatuses[0] != domain.StrategyStatusPaused {
 		t.Fatalf("update statuses = %v, want [paused]", strategies.updateStatuses)
 	}
-	if len(configs.items) != 1 || configs.items[0].StrategyID != existing.ID {
-		t.Fatalf("backtest configs = %+v", configs.items)
+	if len(configs.items) != 0 {
+		t.Fatalf("unscoped backtest config attempted: %+v", configs.items)
 	}
 }
 

@@ -117,7 +117,8 @@ type Server struct {
 	kalshiDiscoveryRuns   repository.KalshiDiscoveryRunRepository
 
 	// Report artifacts (optional; nil = feature not enabled).
-	reportArtifacts ReportArtifactStore
+	reportArtifacts       ReportArtifactStore
+	paperEvaluationScopes PaperEvaluationScopeStore
 
 	// Report metrics (optional; nil = no metrics).
 	reportMetrics ReportMetrics
@@ -277,7 +278,8 @@ type Deps struct {
 	KalshiDiscoveryRuns    repository.KalshiDiscoveryRunRepository
 
 	// Report artifacts (optional; nil = feature not enabled).
-	ReportArtifacts ReportArtifactStore
+	ReportArtifacts       ReportArtifactStore
+	PaperEvaluationScopes PaperEvaluationScopeStore
 
 	// Report metrics (optional; nil = no metrics).
 	ReportMetrics ReportMetrics
@@ -415,6 +417,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		kalshiSnapshotsRepo:   deps.KalshiSnapshotsRepo,
 		kalshiDiscoveryRuns:   deps.KalshiDiscoveryRuns,
 		reportArtifacts:       deps.ReportArtifacts,
+		paperEvaluationScopes: deps.PaperEvaluationScopes,
 		reportMetrics:         deps.ReportMetrics,
 		milestoneEvidence:     deps.MilestoneEvidence,
 		economicAccounts:      deps.EconomicAccounts,
@@ -423,7 +426,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 	// Construct services from the assembled deps.
 	s.backtestSvc = service.NewBacktestService(
 		deps.BacktestConfigs, deps.BacktestRuns, deps.Strategies, deps.AuditLog,
-		deps.DataService, deps.LLMProvider, logger,
+		deps.DataService, deps.LLMProvider, logger, deps.PaperEvaluationScopes,
 	)
 	s.conversationSvc = service.NewConversationService(
 		deps.Conversations, deps.Decisions, deps.Snapshots, deps.Memories,
@@ -567,6 +570,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		})
 
 		v1.Get("/evidence/assessments/{id}", s.handleGetMilestoneAssessment)
+		v1.Post("/paper-evaluation-scopes", s.handleCreatePaperEvaluationScope)
 		v1.Route("/economic", func(er chi.Router) {
 			er.Get("/accounts", s.handleListEconomicAccounts)
 			er.Get("/accounts/{id}", s.handleGetEconomicAccount)

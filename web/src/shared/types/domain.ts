@@ -204,10 +204,15 @@ export type StrategyRunAcceptedResponse = {
 export type ReportArtifact = {
   id: UUID
   strategy_id: UUID
+  scope_id?: UUID
+  scope_label: 'scoped' | 'legacy_unscoped'
+  account_id?: UUID
+  backtest_run_id?: UUID
   report_type: string
   time_bucket: ISODate
   status: ReportStatus
   report_json?: RawJson
+  report_sha256?: string
   provider?: string
   model?: string
   prompt_tokens: number
