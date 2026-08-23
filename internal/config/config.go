@@ -49,9 +49,10 @@ type TickerDiscoveryConfig struct {
 
 // ServerConfig contains HTTP server settings.
 type ServerConfig struct {
-	Host      string
-	Port      int
-	JWTSecret string
+	Host                string
+	Port                int
+	JWTSecret           string
+	ProjectionAccountID string
 }
 
 // DatabaseConfig contains database connection settings.
@@ -637,9 +638,10 @@ func loadFromEnvironment() (Config, error) {
 	cfg := Config{
 		Environment: getEnvString("APP_ENV", "development"),
 		Server: ServerConfig{
-			Host:      getEnvString("APP_HOST", "0.0.0.0"),
-			Port:      serverPort,
-			JWTSecret: os.Getenv("JWT_SECRET"),
+			Host:                getEnvString("APP_HOST", "0.0.0.0"),
+			Port:                serverPort,
+			JWTSecret:           os.Getenv("JWT_SECRET"),
+			ProjectionAccountID: strings.TrimSpace(os.Getenv("PROJECTION_ACCOUNT_ID")),
 		},
 		Database: DatabaseConfig{
 			URL:      os.Getenv("DATABASE_URL"),

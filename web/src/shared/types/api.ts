@@ -29,14 +29,17 @@ export type ListResponse<T> = {
 }
 
 export type PortfolioSummary = {
-  open_positions: number
-  marked_positions: number
-  unmarked_positions: number
-  unrealized_pnl: number | null
-  realized_pnl: number
-  total_pnl: number | null
-  gross_cost_basis: number
-  gross_marked_value: number | null
-  valuation_status: 'complete' | 'partial' | 'unavailable'
-  valuation_generated_at: string
+	account_id: string | null
+	generated_at: string
+	as_of: string | null
+	mark_coverage_complete: boolean | null
+	reconciliation_passed: boolean | null
+  open_positions: number | null
+  marked_positions: number | null
+  unmarked_positions: number | null
+	market_value: string | null
+	unrealized_pnl: string | null
+	realized_pnl: string | null
+	total_pnl: string | null
+	unavailable_reasons: string[]
 }

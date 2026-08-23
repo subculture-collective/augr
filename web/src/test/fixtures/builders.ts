@@ -338,25 +338,20 @@ export function buildRiskStatus(overrides: Partial<RiskEngineStatus> = {}): Risk
 
 export function buildRiskCockpit(overrides: Partial<RiskCockpitSummary> = {}): RiskCockpitSummary {
   return {
+    scope: 'legacy_unscoped',
     generated_at: fixtureDate,
     kill_switch_active: false,
     circuit_breaker: false,
     decision_window_start: fixtureDate,
     decision_window_end: fixtureDate,
     exposures: [
-      { market_type: 'stock', open_positions: 2, marked_positions: 2, unmarked_positions: 0, approved_decisions: 5, rejected_decisions: 1, gross_exposure: 0.18, gross_marked_value: 0.2, net_expected_value: 120.5 },
-      { market_type: 'crypto', open_positions: 1, marked_positions: 1, unmarked_positions: 0, approved_decisions: 2, rejected_decisions: 0, gross_exposure: 0.06, gross_marked_value: 0.07, net_expected_value: 25.25 },
+      { market_type: 'stock', approved_decisions: 5, rejected_decisions: 1, net_expected_value: 120.5 },
+      { market_type: 'crypto', approved_decisions: 2, rejected_decisions: 0, net_expected_value: 25.25 },
     ],
     historical_decision_counts: {
       stock: { approved: 5, rejected: 4 },
       crypto: { approved: 2, rejected: 0 },
     },
-    open_positions: 3,
-    marked_positions: 3,
-    unmarked_positions: 0,
-    gross_cost_basis: 0.24,
-    valuation_status: 'complete',
-    reconciliation_status: 'complete',
     warnings: ['paper risk cockpit fixture'],
     ...overrides,
   }
@@ -373,16 +368,19 @@ export function buildRiskBreakers(overrides: Partial<RiskBreakersResponse> = {})
 
 export function buildPortfolioSummary(overrides: Partial<PortfolioSummary> = {}): PortfolioSummary {
   return {
+    account_id: '00000000-0000-4000-8000-000000000001',
+		generated_at: fixtureDate,
+    as_of: fixtureDate,
+    mark_coverage_complete: true,
+    reconciliation_passed: true,
     open_positions: 1,
     marked_positions: 1,
     unmarked_positions: 0,
-    unrealized_pnl: 15,
-    realized_pnl: 0,
-    total_pnl: 15,
-    gross_cost_basis: 100,
-    gross_marked_value: 115,
-    valuation_status: 'complete',
-    valuation_generated_at: fixtureDate,
+    market_value: '115',
+    unrealized_pnl: '15',
+    realized_pnl: '0',
+    total_pnl: '15',
+    unavailable_reasons: [],
     ...overrides,
   }
 }

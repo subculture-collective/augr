@@ -1614,7 +1614,7 @@ func TestPortfolioSummary(t *testing.T) {
 	}
 }
 
-func TestPortfolioSummaryIncludesClosedPositionRealizedPnL(t *testing.T) {
+func TestPortfolioSummaryNeverFallsBackToLegacyPnL(t *testing.T) {
 	t.Parallel()
 
 	unrealized := 12.5
@@ -1649,17 +1649,12 @@ func TestPortfolioSummaryIncludesClosedPositionRealizedPnL(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 	body := decodeJSON[map[string]any](t, rr)
-	if got := body["open_positions"]; got != float64(1) {
-		t.Fatalf("open_positions = %v, want 1", got)
+	if body["unrealized_pnl"] != nil || body["realized_pnl"] != nil || body["total_pnl"] != nil {
+		t.Fatalf("legacy P&L leaked into canonical valuation: %+v", body)
 	}
-	if got := body["unrealized_pnl"]; got != unrealized {
-		t.Fatalf("unrealized_pnl = %v, want %v", got, unrealized)
-	}
-	if got := body["realized_pnl"]; got != 211.21 {
-		t.Fatalf("realized_pnl = %v, want 211.21", got)
-	}
-	if got := body["valuation_status"]; got != "complete" {
-		t.Fatalf("valuation_status = %v, want complete", got)
+	reasons, _ := body["unavailable_reasons"].([]any)
+	if len(reasons) != 1 || reasons[0] != "server_account_binding_unavailable" {
+		t.Fatalf("unavailable_reasons = %+v", reasons)
 	}
 }
 
@@ -1682,14 +1677,11 @@ func TestPortfolioSummaryDoesNotRenderUnknownValuationAsZero(t *testing.T) {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 	body := decodeJSON[PortfolioSummary](t, rr)
-	if body.UnrealizedPnL != nil || body.TotalPnL != nil || body.GrossMarkedValue != nil {
+	if body.UnrealizedPnL != nil || body.RealizedPnL != nil || body.TotalPnL != nil || body.MarketValue != nil {
 		t.Fatalf("unknown valuation returned numeric values: %+v", body)
 	}
-	if body.ValuationStatus != "unavailable" || body.MarkedPositions != 0 || body.UnmarkedPositions != 1 {
+	if len(body.UnavailableReasons) != 1 || body.UnavailableReasons[0] != "server_account_binding_unavailable" {
 		t.Fatalf("unexpected valuation coverage: %+v", body)
-	}
-	if body.GrossCostBasis != 2.5 {
-		t.Fatalf("gross_cost_basis = %v, want 2.5", body.GrossCostBasis)
 	}
 }
 

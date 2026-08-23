@@ -449,6 +449,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		PaperEvaluationScopes:  reportArtifactRepo,
 		ReportMetrics:          appMetrics,
 		MilestoneEvidence:      milestoneEvidenceRepo,
+		Projections:            pgrepo.NewProjectionReader(db.Pool),
 		PolymarketClient:       nil,
 		KalshiWatchedRepo:      pgrepo.NewKalshiWatchedMarketsRepo(db.Pool),
 		KalshiSnapshotsRepo:    pgrepo.NewKalshiMarketSnapshotsRepo(db.Pool),
@@ -984,6 +985,13 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	apiCfg.Port = cfg.Server.Port
 	apiCfg.JWTSecret = cfg.Server.JWTSecret
 	apiCfg.RefreshTokenTTL = 24 * time.Hour
+	if cfg.Server.ProjectionAccountID != "" {
+		accountID, parseErr := uuid.Parse(cfg.Server.ProjectionAccountID)
+		if parseErr != nil || accountID == uuid.Nil {
+			return nil, nil, nil, fmt.Errorf("parse PROJECTION_ACCOUNT_ID: valid non-zero UUID required")
+		}
+		apiCfg.ProjectionAccountID = &accountID
+	}
 
 	deps.ReleaseReadiness = operations.SourceFunc(func(checkCtx context.Context) (operations.ReadinessReport, error) {
 		databaseReady := db.Pool.Ping(checkCtx) == nil

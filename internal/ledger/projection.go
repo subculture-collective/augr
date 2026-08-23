@@ -209,6 +209,116 @@ type ProjectionCheckpoint struct {
 	CreatedAt            time.Time
 }
 
+// ProjectionValuation is the read-only valuation subset of a validated
+// canonical portfolio checkpoint.
+type ProjectionValuation struct {
+	Positions []ProjectionPosition
+	Totals    ProjectionTotals
+}
+
+// DecodeProjectionValuation validates a checkpoint before decoding the exact
+// decimal valuation values embedded in its canonical payload.
+func DecodeProjectionValuation(checkpoint *ProjectionCheckpoint) (*ProjectionValuation, error) {
+	if checkpoint == nil {
+		return nil, fmt.Errorf("projection checkpoint is required")
+	}
+	if err := checkpoint.Validate(); err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Positions []struct {
+			InstrumentID         string `json:"instrument_id"`
+			Open                 bool   `json:"open"`
+			Quantity             string `json:"quantity"`
+			RemainingOpeningCash string `json:"remaining_opening_cash"`
+			RealizedPnL          string `json:"realized_pnl"`
+			MarketValue          string `json:"market_value"`
+			UnrealizedPnL        string `json:"unrealized_pnl"`
+			MarkObservationID    string `json:"mark_observation_id"`
+			OpenLotCount         int    `json:"open_lot_count"`
+		} `json:"positions"`
+		Totals struct {
+			Cash          string `json:"cash"`
+			NetCapital    string `json:"net_capital"`
+			Fees          string `json:"fees"`
+			Rebates       string `json:"rebates"`
+			RealizedPnL   string `json:"realized_pnl"`
+			UnrealizedPnL string `json:"unrealized_pnl"`
+			MarketValue   string `json:"market_value"`
+			Equity        string `json:"equity"`
+			TotalPnL      string `json:"total_pnl"`
+		} `json:"totals"`
+	}
+	if err := json.Unmarshal(checkpoint.PayloadBytes, &payload); err != nil {
+		return nil, fmt.Errorf("decode projection valuation: %w", err)
+	}
+	parseDecimal := func(name, value string) (decimal.Decimal, error) {
+		parsed, err := decimal.NewFromString(value)
+		if err != nil {
+			return decimal.Zero, fmt.Errorf("decode projection valuation %s: %w", name, err)
+		}
+		return parsed, nil
+	}
+	result := &ProjectionValuation{Positions: make([]ProjectionPosition, 0, len(payload.Positions))}
+	for index, value := range payload.Positions {
+		instrumentID, err := uuid.Parse(value.InstrumentID)
+		if err != nil {
+			return nil, fmt.Errorf("decode projection valuation position %d instrument: %w", index, err)
+		}
+		markID := uuid.Nil
+		if value.MarkObservationID != "" {
+			markID, err = uuid.Parse(value.MarkObservationID)
+			if err != nil {
+				return nil, fmt.Errorf("decode projection valuation position %d mark: %w", index, err)
+			}
+		}
+		quantity, err := parseDecimal("position quantity", value.Quantity)
+		if err != nil {
+			return nil, err
+		}
+		openingCash, err := parseDecimal("position remaining opening cash", value.RemainingOpeningCash)
+		if err != nil {
+			return nil, err
+		}
+		realized, err := parseDecimal("position realized P&L", value.RealizedPnL)
+		if err != nil {
+			return nil, err
+		}
+		marketValue, err := parseDecimal("position market value", value.MarketValue)
+		if err != nil {
+			return nil, err
+		}
+		unrealized, err := parseDecimal("position unrealized P&L", value.UnrealizedPnL)
+		if err != nil {
+			return nil, err
+		}
+		result.Positions = append(result.Positions, ProjectionPosition{
+			InstrumentID: instrumentID, Open: value.Open, Quantity: quantity,
+			RemainingOpeningCash: openingCash, RealizedPnL: realized,
+			MarketValue: marketValue, UnrealizedPnL: unrealized,
+			MarkObservationID: markID, OpenLotCount: value.OpenLotCount,
+		})
+	}
+	values := []struct {
+		name, raw string
+		target    *decimal.Decimal
+	}{
+		{"cash", payload.Totals.Cash, &result.Totals.Cash}, {"net capital", payload.Totals.NetCapital, &result.Totals.NetCapital},
+		{"fees", payload.Totals.Fees, &result.Totals.Fees}, {"rebates", payload.Totals.Rebates, &result.Totals.Rebates},
+		{"realized P&L", payload.Totals.RealizedPnL, &result.Totals.RealizedPnL}, {"unrealized P&L", payload.Totals.UnrealizedPnL, &result.Totals.UnrealizedPnL},
+		{"market value", payload.Totals.MarketValue, &result.Totals.MarketValue}, {"equity", payload.Totals.Equity, &result.Totals.Equity},
+		{"total P&L", payload.Totals.TotalPnL, &result.Totals.TotalPnL},
+	}
+	for _, value := range values {
+		parsed, err := parseDecimal(value.name, value.raw)
+		if err != nil {
+			return nil, err
+		}
+		*value.target = parsed
+	}
+	return result, nil
+}
+
 type projectionState struct {
 	lots       []ProjectionLot
 	matches    []ProjectionMatch

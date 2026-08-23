@@ -497,6 +497,7 @@ export const riskBreakersResponseSchema = z
 
 export const riskCockpitSummarySchema = z
   .object({
+    scope: z.literal('legacy_unscoped'),
     generated_at: isoDateSchema,
     kill_switch_active: z.boolean(),
     circuit_breaker: z.boolean(),
@@ -505,23 +506,12 @@ export const riskCockpitSummarySchema = z
     exposures: z.array(
       z.object({
         market_type: forwardCompatibleEnumSchema,
-        open_positions: z.number().int(),
-        marked_positions: z.number().int(),
-        unmarked_positions: z.number().int(),
         approved_decisions: z.number().int(),
         rejected_decisions: z.number().int(),
-        gross_exposure: z.number(),
-        gross_marked_value: optionalNullable(z.number()).optional(),
         net_expected_value: z.number(),
       }).passthrough(),
     ),
     historical_decision_counts: z.record(z.string(), z.object({ approved: z.number().int().nonnegative(), rejected: z.number().int().nonnegative() })),
-    open_positions: z.number().int().nonnegative(),
-    marked_positions: z.number().int().nonnegative(),
-    unmarked_positions: z.number().int().nonnegative(),
-    gross_cost_basis: z.number().nonnegative(),
-    valuation_status: z.enum(['complete', 'partial', 'unavailable']),
-    reconciliation_status: z.enum(['complete', 'incomplete']),
     warnings: z.array(z.string()),
   })
   .passthrough()
@@ -632,16 +622,19 @@ export const healthStatusResponseSchema = z
 
 export const portfolioSummarySchema = z
   .object({
-    open_positions: z.number().int().nonnegative(),
-    marked_positions: z.number().int().nonnegative(),
-    unmarked_positions: z.number().int().nonnegative(),
-    unrealized_pnl: z.number().nullable(),
-    realized_pnl: z.number(),
-    total_pnl: z.number().nullable(),
-    gross_cost_basis: z.number().nonnegative(),
-    gross_marked_value: z.number().nullable(),
-    valuation_status: z.enum(['complete', 'partial', 'unavailable']),
-    valuation_generated_at: isoDateSchema,
+    account_id: z.string().uuid().nullable(),
+    generated_at: isoDateSchema,
+    as_of: isoDateSchema.nullable(),
+    mark_coverage_complete: z.boolean().nullable(),
+    reconciliation_passed: z.boolean().nullable(),
+    open_positions: z.number().int().nonnegative().nullable(),
+    marked_positions: z.number().int().nonnegative().nullable(),
+    unmarked_positions: z.number().int().nonnegative().nullable(),
+    market_value: z.string().nullable(),
+    unrealized_pnl: z.string().nullable(),
+    realized_pnl: z.string().nullable(),
+    total_pnl: z.string().nullable(),
+    unavailable_reasons: z.array(z.string()),
   })
   .passthrough()
 

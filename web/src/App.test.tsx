@@ -457,22 +457,19 @@ describe('first vertical slice app', () => {
     expect(screen.getAllByRole('link', { name: /Strategy/i })[0]).toHaveAttribute('href', '/strategies/00000000-0000-4000-8000-000000000010')
   })
 
-  it('renders missing portfolio valuation as incomplete rather than zero', async () => {
+  it('keeps legacy portfolio positions separate from account valuation', async () => {
     resetApp('/portfolio')
     setTokenSnapshot(buildAuthResponse())
-    server.use(http.get(`${apiBaseUrl}/portfolio/summary`, () => HttpResponse.json(buildPortfolioSummary({
-      marked_positions: 0,
-      unmarked_positions: 1,
-      unrealized_pnl: null,
-      total_pnl: null,
-      gross_marked_value: null,
-      valuation_status: 'unavailable',
-    }))))
+    let summaryCalls = 0
+    server.use(http.get(`${apiBaseUrl}/portfolio/summary`, () => {
+      summaryCalls++
+      return HttpResponse.json(buildPortfolioSummary())
+    }))
     render(<App />)
 
-    expect(await screen.findByText(/valuation unavailable for 1 of 1/i)).toBeTruthy()
-    expect(screen.getAllByText(/unknown/i).length).toBeGreaterThan(0)
-    expect(screen.getAllByText(/unrealized p\/l/i).length).toBeGreaterThan(0)
+    expect(await screen.findByText(/legacy global positions and p\/l/i)).toBeTruthy()
+    expect(screen.getAllByText(/legacy_unscoped/i).length).toBeGreaterThan(0)
+    expect(summaryCalls).toBe(0)
   })
 
   it('renders persisted option contract and Greek position metadata', async () => {

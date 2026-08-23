@@ -41,14 +41,14 @@ func TestRiskCockpitRoute(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
-	body := decodeJSON[risk.CockpitSummary](t, rr)
+	body := decodeJSON[RiskCockpitSummary](t, rr)
 	if !body.KillSwitchActive || !body.CircuitBreaker {
 		t.Fatalf("unexpected active flags: %+v", body)
 	}
 	if len(body.Exposures) != 5 {
 		t.Fatalf("exposures len = %d want 5", len(body.Exposures))
 	}
-	if body.Exposures[0].MarketType != domain.MarketTypeStock || body.Exposures[0].OpenPositions != 1 || body.Exposures[0].GrossExposure != 4 {
+	if body.Scope != "legacy_unscoped" || body.Exposures[0].MarketType != domain.MarketTypeStock || body.Exposures[0].ApprovedDecisions != 1 {
 		t.Fatalf("unexpected stock exposure: %+v", body.Exposures[0])
 	}
 	if len(body.Warnings) == 0 {
@@ -128,7 +128,6 @@ func TestRiskCockpitHandlerMissingDeps(t *testing.T) {
 	}{
 		{name: "missing risk", srv: &Server{}},
 		{name: "missing decisions", srv: &Server{risk: &stubRiskEngine{}}},
-		{name: "missing positions", srv: &Server{risk: &stubRiskEngine{}, tradeDecisions: &stubTradeDecisionJournalRepo{}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := httptest.NewRecorder()

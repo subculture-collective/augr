@@ -135,6 +135,20 @@ type ProjectionRepository interface {
 	GetProjectionCheckpointByID(context.Context, uuid.UUID) (*ledger.ProjectionCheckpoint, error)
 }
 
+// ProjectionSnapshot is one canonical account-scoped checkpoint and the
+// reconciliation result tied to that exact checkpoint.
+type ProjectionSnapshot struct {
+	Checkpoint              *ledger.ProjectionCheckpoint
+	Valuation               *ledger.ProjectionValuation
+	ReconciliationAvailable bool
+	ReconciliationPassed    bool
+}
+
+// ProjectionReader exposes no mark or checkpoint write authority.
+type ProjectionReader interface {
+	GetLatestPortfolioProjection(context.Context, uuid.UUID, time.Time) (*ProjectionSnapshot, error)
+}
+
 // CanonicalOpenLot identifies an account-scoped open position whose Kalshi
 // contract identity is complete. Legacy positions never enter this read path.
 type CanonicalOpenLot struct {

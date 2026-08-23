@@ -1,7 +1,6 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 	"time"
 
@@ -9,6 +8,25 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
+
+type RiskCockpitSummary struct {
+	Scope                    string                                    `json:"scope"`
+	GeneratedAt              time.Time                                 `json:"generated_at"`
+	KillSwitchActive         bool                                      `json:"kill_switch_active"`
+	CircuitBreaker           bool                                      `json:"circuit_breaker"`
+	DecisionWindowStart      time.Time                                 `json:"decision_window_start"`
+	DecisionWindowEnd        time.Time                                 `json:"decision_window_end"`
+	Exposures                []RiskDecisionActivity                    `json:"exposures"`
+	HistoricalDecisionCounts map[domain.MarketType]risk.DecisionCounts `json:"historical_decision_counts"`
+	Warnings                 []string                                  `json:"warnings"`
+}
+
+type RiskDecisionActivity struct {
+	MarketType        domain.MarketType `json:"market_type"`
+	ApprovedDecisions int               `json:"approved_decisions"`
+	RejectedDecisions int               `json:"rejected_decisions"`
+	NetExpectedValue  float64           `json:"net_expected_value"`
+}
 
 func (s *Server) handleRiskCockpit(w http.ResponseWriter, r *http.Request) {
 	if s == nil || s.risk == nil {
@@ -19,11 +37,6 @@ func (s *Server) handleRiskCockpit(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotImplemented, "risk cockpit requires trade decision journal repository", ErrCodeNotImplemented)
 		return
 	}
-	if s.positions == nil {
-		respondError(w, http.StatusNotImplemented, "risk cockpit requires position repository", ErrCodeNotImplemented)
-		return
-	}
-
 	generatedAt := time.Now().UTC()
 	windowStart := time.Date(generatedAt.Year(), generatedAt.Month(), generatedAt.Day(), 0, 0, 0, 0, time.UTC)
 
@@ -67,15 +80,19 @@ func (s *Server) handleRiskCockpit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	positions, openPositionCount, err := s.loadAllOpenPositions(r.Context())
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to list open positions for risk cockpit", ErrCodeInternal)
-		return
+	cockpit := risk.BuildCockpitSummaryWithHistory(currentDecisions, historicalDecisions, &status, windowStart, generatedAt)
+	exposures := make([]RiskDecisionActivity, len(cockpit.Exposures))
+	for index, exposure := range cockpit.Exposures {
+		exposures[index] = RiskDecisionActivity{
+			MarketType: exposure.MarketType, ApprovedDecisions: exposure.ApprovedDecisions,
+			RejectedDecisions: exposure.RejectedDecisions, NetExpectedValue: exposure.NetExpectedValue,
+		}
 	}
-	summary := risk.BuildCockpitSummaryWithPositionsAndHistory(currentDecisions, historicalDecisions, positions, &status, windowStart, generatedAt)
-	if openPositionCount != len(positions) {
-		summary.ReconciliationStatus = "incomplete"
-		summary.Warnings = append(summary.Warnings, fmt.Sprintf("risk aggregation loaded %d of %d open positions", len(positions), openPositionCount))
+	summary := RiskCockpitSummary{
+		Scope: "legacy_unscoped", GeneratedAt: cockpit.GeneratedAt,
+		KillSwitchActive: cockpit.KillSwitchActive, CircuitBreaker: cockpit.CircuitBreaker,
+		DecisionWindowStart: cockpit.DecisionWindowStart, DecisionWindowEnd: cockpit.DecisionWindowEnd,
+		Exposures: exposures, HistoricalDecisionCounts: cockpit.HistoricalDecisionCounts, Warnings: cockpit.Warnings,
 	}
 	respondJSON(w, http.StatusOK, summary)
 }

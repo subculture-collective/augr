@@ -479,17 +479,13 @@ export type RiskBreakersResponse = {
 
 export type RiskCockpitExposure = {
   market_type: MarketType
-  open_positions: number
-  marked_positions: number
-  unmarked_positions: number
   approved_decisions: number
   rejected_decisions: number
-  gross_exposure: number
-  gross_marked_value?: number
   net_expected_value: number
 }
 
 export type RiskCockpitSummary = {
+	scope: 'legacy_unscoped'
   generated_at: ISODate
   kill_switch_active: boolean
   circuit_breaker: boolean
@@ -497,12 +493,6 @@ export type RiskCockpitSummary = {
   decision_window_end: ISODate
   exposures: RiskCockpitExposure[]
   historical_decision_counts: Partial<Record<MarketType, { approved: number; rejected: number }>>
-  open_positions: number
-  marked_positions: number
-  unmarked_positions: number
-  gross_cost_basis: number
-  valuation_status: 'complete' | 'partial' | 'unavailable'
-  reconciliation_status: 'complete' | 'incomplete'
   warnings: string[]
 }
 

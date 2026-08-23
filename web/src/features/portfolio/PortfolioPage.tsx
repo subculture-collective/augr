@@ -5,7 +5,7 @@ import { RefreshCw } from 'lucide-react'
 
 import { Alert } from '@/components/ui/alert'
 import { PageHeader } from '@/components/ui/page-header'
-import { getAllocationDecisions, getAllocatorDiagnostics, getAllocatorOpportunities, getAllocatorSummary, getOpenPortfolioPositions, getPortfolioSummary } from '@/shared/api/endpoints'
+import { getAllocationDecisions, getAllocatorDiagnostics, getAllocatorOpportunities, getAllocatorSummary, getOpenPortfolioPositions } from '@/shared/api/endpoints'
 import { Breadcrumbs, EntityId, EntityLink } from '@/shared/components/EntityLinks'
 import { EmptyState, ErrorState, LastUpdated, LoadingState, StaleBanner } from '@/shared/components/QueryStates'
 import { queryKeys } from '@/shared/query/keys'
@@ -14,9 +14,9 @@ import { useRealtime } from '@/shared/websocket/RealtimeProvider'
 
 const pageSize = 20
 
-function money(value?: number | null) {
+function money(value?: number | string | null) {
   if (value === undefined || value === null) return 'Unknown'
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(Number(value))
 }
 
 function numberValue(value?: number) {
@@ -27,13 +27,6 @@ function numberValue(value?: number) {
 function percent(value?: number) {
   if (value === undefined) return 'Unknown'
   return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)}%`
-}
-
-function pnlClass(value?: number | null) {
-  if (value === undefined || value === null) return 'unknown'
-  if (value > 0) return 'active'
-  if (value < 0) return 'unknown'
-  return 'unknown'
 }
 
 function compactMap(entries: Record<string, number>, emptyLabel = 'No counts reported.') {
@@ -280,7 +273,6 @@ export function PortfolioPage() {
     limit: pageSize,
     offset: Number.isFinite(offset) && offset > 0 ? offset : 0,
   }), [offset, searchParams])
-  const summaryQuery = useQuery({ queryKey: queryKeys.portfolioSummary, queryFn: ({ signal }) => getPortfolioSummary(signal) })
   const positionsQuery = useQuery({ queryKey: queryKeys.portfolioOpenPositions(filters), queryFn: ({ signal }) => getOpenPortfolioPositions(filters, signal) })
   const positions = positionsQuery.data?.data ?? []
   const total = positionsQuery.data?.total
@@ -292,10 +284,9 @@ export function PortfolioPage() {
     if (!latest) return
     if (latest.type === 'position_update' || latest.type === 'order_filled') {
       setRealtimeStale(true)
-      void summaryQuery.refetch()
       void positionsQuery.refetch()
     }
-  }, [realtime.events, positionsQuery, summaryQuery])
+  }, [realtime.events, positionsQuery])
 
   function updateFilters(updates: Record<string, string>) {
     const next = new URLSearchParams(searchParams)
@@ -323,7 +314,7 @@ export function PortfolioPage() {
 
   return (
     <div className="detail-stack">
-      <PageHeader eyebrow="Paper exposure" title="Portfolio" description="Current paper positions and P/L, presented as a read-only operating snapshot." actions={<span className="status-pill active">Read-only</span>} />
+      <PageHeader eyebrow="legacy_unscoped" title="Portfolio" description="Legacy global positions and P/L. This operational view is not account valuation." actions={<span className="status-pill warning">legacy_unscoped</span>} />
       <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Portfolio' }]} />
       <section className="panel">
         <StaleBanner show={realtimeStale || realtime.status === 'disconnected' || realtime.status === 'degraded'} message="Portfolio data may be stale after realtime position/order activity. Values are display-only." />
@@ -338,20 +329,10 @@ export function PortfolioPage() {
 
       {activeTab === 'positions' ? <>
 
-      <section className="operations-metrics panel" aria-label="Portfolio summary">
-        <div><span>Open positions</span><strong>{summaryQuery.data?.open_positions ?? '—'}</strong></div>
-        <div><span>Unrealized P/L</span><strong className={pnlClass(summaryQuery.data?.unrealized_pnl)}>{summaryQuery.data ? money(summaryQuery.data.unrealized_pnl) : '—'}</strong></div>
-        <div><span>Realized P/L</span><strong className={pnlClass(summaryQuery.data?.realized_pnl)}>{summaryQuery.data ? money(summaryQuery.data.realized_pnl) : '—'}</strong></div>
-        <div><span>Total P/L</span><strong className={pnlClass(summaryQuery.data?.total_pnl ?? undefined)}>{summaryQuery.data ? money(summaryQuery.data.total_pnl ?? undefined) : '—'}</strong></div>
-      </section>
-      {summaryQuery.data?.unmarked_positions ? <Alert variant="warning">Valuation unavailable for {summaryQuery.data.unmarked_positions} of {summaryQuery.data.open_positions} open positions. Unrealized and total P/L remain incomplete until all positions are marked.</Alert> : null}
-      {summaryQuery.isLoading ? <LoadingState label="Loading portfolio summary…" /> : null}
-      {summaryQuery.error ? <ErrorState error={summaryQuery.error} onRetry={() => void summaryQuery.refetch()} /> : null}
-
       <section className="panel" aria-labelledby="open-positions-heading">
         <div className="panel-header">
           <div><p className="eyebrow">Exposure ledger</p><h2 id="open-positions-heading">Open positions</h2><p className="muted">Inspect current quantity, entry value, and mark-to-market exposure.</p>{realtimeStale ? <Alert variant="warning">Data may be stale</Alert> : null}</div>
-          <div className="panel-actions">{positionsQuery.data ? <LastUpdated date={positionsQuery.dataUpdatedAt} /> : null}<button type="button" className="secondary-button" onClick={() => { void summaryQuery.refetch(); void positionsQuery.refetch(); setRealtimeStale(false) }} aria-label="Refresh portfolio data"><RefreshCw size={16} /> Refresh</button></div>
+          <div className="panel-actions">{positionsQuery.data ? <LastUpdated date={positionsQuery.dataUpdatedAt} /> : null}<button type="button" className="secondary-button" onClick={() => { void positionsQuery.refetch(); setRealtimeStale(false) }} aria-label="Refresh portfolio data"><RefreshCw size={16} /> Refresh</button></div>
         </div>
         <form className="filter-bar" aria-label="Position filters" onSubmit={(event) => event.preventDefault()} style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
           <label>Ticker<input value={searchParams.get('ticker') ?? ''} onChange={(event) => updateFilters({ ticker: event.target.value.toUpperCase() })} placeholder="AUGR" /></label>

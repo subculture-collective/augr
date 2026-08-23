@@ -62,6 +62,17 @@ func TestBuildPortfolioProjectionDepositAndMarkedLong(t *testing.T) {
 	if err := decoder.Decode(&payload); err != nil {
 		t.Fatalf("canonical payload is not JSON: %v", err)
 	}
+	checkpoint := projection.Checkpoint()
+	checkpoint.AttestationKeyID = "test-key"
+	checkpoint.AttestationHMAC = make([]byte, 32)
+	valuation, err := DecodeProjectionValuation(checkpoint)
+	if err != nil {
+		t.Fatalf("DecodeProjectionValuation() error = %v", err)
+	}
+	assertProjectionDecimal(t, "decoded total P&L", valuation.Totals.TotalPnL, "1.75")
+	if len(valuation.Positions) != 1 || valuation.Positions[0].MarkObservationID != mark.ID {
+		t.Fatalf("decoded positions = %+v", valuation.Positions)
+	}
 }
 
 func TestBuildPortfolioProjectionMatchesFIFOAcrossLotsAndCrossesDirection(t *testing.T) {

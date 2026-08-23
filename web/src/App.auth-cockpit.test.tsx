@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
 import { setTokenSnapshot } from '@/shared/auth/tokenStore'
-import { buildAuthResponse, buildRiskBreakers, buildRiskCockpit, buildRiskStatus, buildSettings, mockRefreshToken } from '@/test/fixtures'
+import { buildAuthResponse, buildPortfolioSummary, buildRiskBreakers, buildRiskCockpit, buildRiskStatus, buildSettings, mockRefreshToken } from '@/test/fixtures'
 import { apiBaseUrl, FakeWebSocket, installAppTestHarness, resetApp, server, state } from '@/test/app-harness'
 
 describe('authentication and cockpit', () => {
@@ -140,7 +140,8 @@ describe('authentication and cockpit', () => {
 
     expect(await screen.findByText(/Cockpit classification: degraded/i)).toBeTruthy()
     expect(await screen.findByRole('heading', { name: /System health/i })).toBeTruthy()
-    expect(await screen.findByRole('table', { name: /cockpit open positions/i })).toBeTruthy()
+    expect(screen.queryByRole('table', { name: /cockpit open positions/i })).toBeNull()
+    expect(await screen.findByText(/operational decision data below is legacy_unscoped/i)).toBeTruthy()
     expect(await screen.findByRole('table', { name: /cockpit recent orders/i })).toBeTruthy()
     expect(await screen.findByRole('table', { name: /cockpit recent trades/i })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /open notional exposure/i })).toBeTruthy()
@@ -242,6 +243,23 @@ describe('authentication and cockpit', () => {
 
     await waitFor(() => expect(FakeWebSocket.instances[0]?.readyState).toBe(1))
     expect(await screen.findByText(/Cockpit classification: safe/i)).toBeTruthy()
+  })
+
+  it('degrades without a server-authorized canonical valuation and does not send URL account IDs', async () => {
+    resetApp('/cockpit?account_id=00000000-0000-4000-8000-000000000099')
+    setTokenSnapshot(buildAuthResponse())
+    let requestedAccount = ''
+    server.use(
+      http.get(`${apiBaseUrl}/portfolio/summary`, ({ request }) => {
+        requestedAccount = new URL(request.url).searchParams.get('account_id') ?? ''
+        return HttpResponse.json(buildPortfolioSummary({ account_id: null, as_of: null, reconciliation_passed: false, total_pnl: null, unavailable_reasons: ['server_account_binding_unavailable'] }))
+      }),
+    )
+    render(<App />)
+
+    expect(await screen.findByText(/Cockpit classification: degraded/i)).toBeTruthy()
+    expect(await screen.findByText(/server_account_binding_unavailable/i)).toBeTruthy()
+    expect(requestedAccount).toBe('')
   })
 
   it('shows empty active-runs state', async () => {

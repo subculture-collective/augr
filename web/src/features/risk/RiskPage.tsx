@@ -95,15 +95,13 @@ function ExposureRows({ cockpit }: { cockpit: RiskCockpitSummary }) {
     <>
       <div className="table-wrap">
         <table aria-label="Risk exposures">
-          <thead><tr><th>Market</th><th>Open positions</th><th>Current approved</th><th>Current rejected</th><th>Historical rejected</th><th>Gross exposure</th><th>Net expected value</th></tr></thead>
+			<thead><tr><th>Market</th><th>Current approved</th><th>Current rejected</th><th>Historical rejected</th><th>Net expected value</th></tr></thead>
           <tbody>{exposures.map((exposure) => (
             <tr key={exposure.market_type}>
               <td><StatusPill value={exposure.market_type} known={['stock', 'crypto', 'options', 'polymarket', 'kalshi']} /></td>
-              <td>{exposure.open_positions}</td>
               <td>{exposure.approved_decisions}</td>
               <td>{exposure.rejected_decisions}</td>
               <td>{historicalCounts[exposure.market_type]?.rejected ?? 0}</td>
-              <td>{numberValue(exposure.gross_exposure)}</td>
               <td>{numberValue(exposure.net_expected_value)}</td>
             </tr>
           ))}</tbody>
@@ -113,7 +111,7 @@ function ExposureRows({ cockpit }: { cockpit: RiskCockpitSummary }) {
         {exposures.map((exposure) => (
           <article className="strategy-card" key={exposure.market_type}>
             <h3>{displayEnum(exposure.market_type)}</h3>
-            <p>{exposure.open_positions} open positions · {numberValue(exposure.gross_exposure)} gross exposure</p>
+			<p>{exposure.approved_decisions} approved decisions in current window</p>
             <p>{exposure.approved_decisions} approved / {exposure.rejected_decisions} rejected in current window</p>
             <p>{historicalCounts[exposure.market_type]?.rejected ?? 0} historical rejections</p>
           </article>
@@ -174,7 +172,7 @@ function MarketStopRows({ rows, canUseControls, busyMarket, onStop, onResume }: 
   return (
     <div className="table-wrap">
       <table aria-label="Per-market kill switch controls">
-        <thead><tr><th>Market</th><th>Status</th><th>Reason</th><th>Open positions</th><th>Gross exposure</th><th>Actions</th></tr></thead>
+		<thead><tr><th>Market</th><th>Status</th><th>Reason</th><th>Current approvals</th><th>Net expected value</th><th>Actions</th></tr></thead>
         <tbody>{rows.map((row) => {
           const busy = busyMarket === row.marketType
           return (
@@ -182,8 +180,8 @@ function MarketStopRows({ rows, canUseControls, busyMarket, onStop, onResume }: 
               <td><StatusPill value={row.marketType} known={[...marketTypes]} /></td>
               <td><span className={`status-pill ${row.active ? 'warning' : 'normal'}`}>{row.active ? 'Stopped' : 'Open'}</span></td>
               <td>{row.reason ?? '—'}</td>
-              <td>{row.exposure?.open_positions ?? '—'}</td>
-              <td>{row.exposure ? numberValue(row.exposure.gross_exposure) : '—'}</td>
+				<td>{row.exposure?.approved_decisions ?? '—'}</td>
+				<td>{row.exposure ? numberValue(row.exposure.net_expected_value) : '—'}</td>
               <td>
                 <div className="action-row compact-actions">
                   <button type="button" className="danger-button" disabled={!canUseControls || row.active || busy} onClick={() => onStop(row.marketType)}>{busy ? 'Working…' : `Stop ${displayEnum(row.marketType)} market`}</button>
@@ -442,7 +440,7 @@ export function RiskPage() {
   return (
     <div className="detail-stack">
       <nav className="breadcrumbs" aria-label="Breadcrumbs"><Link to="/cockpit">Cockpit</Link><span aria-hidden="true">/</span><span>Risk</span></nav>
-      <PageHeader eyebrow="Safety console" title="Risk" description="Inspect current exposure, safety controls, and conditions that require operator attention." actions={<span className={`status-pill ${cockpitQuery.data?.valuation_status === 'complete' && cockpitQuery.data?.reconciliation_status === 'complete' ? 'success' : 'warning'}`}>{cockpitQuery.data ? cockpitQuery.data.valuation_status === 'complete' && cockpitQuery.data.reconciliation_status === 'complete' ? 'Risk data complete' : 'Risk data incomplete' : 'Risk data loading'}</span>} />
+      <PageHeader eyebrow="Safety console" title="Risk" description="Inspect legacy_unscoped operational decisions and safety controls. This view is not account valuation." actions={<span className="status-pill warning">legacy_unscoped</span>} />
       <section className="panel">
         <StaleBanner show={realtimeStale || realtime.status === 'disconnected' || realtime.status === 'degraded'} message="Risk console data is read-only and may be stale after realtime risk or execution activity." />
         {verifiedMessage ? <Alert variant="success">{verifiedMessage}</Alert> : null}

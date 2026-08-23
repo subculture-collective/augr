@@ -124,9 +124,11 @@ type Server struct {
 	reportMetrics ReportMetrics
 
 	// Milestone evidence (optional; read-only inspection).
-	milestoneEvidence MilestoneEvidenceSource
-	economicAccounts  EconomicAccountReader
-	economicLedger    EconomicLedgerReader
+	milestoneEvidence   MilestoneEvidenceSource
+	economicAccounts    EconomicAccountReader
+	economicLedger      EconomicLedgerReader
+	projections         repository.ProjectionReader
+	projectionAccountID *uuid.UUID
 
 	// Services — constructed from deps in NewServer.
 	backtestSvc     *service.BacktestService
@@ -190,16 +192,17 @@ func (f HealthCheckFunc) Check(ctx context.Context) error {
 
 // ServerConfig holds configuration for the API server.
 type ServerConfig struct {
-	Host            string
-	Port            int
-	CORSConfig      CORSConfig
-	RateLimit       int           // requests per window
-	RateWindow      time.Duration // window duration
-	TrustedProxies  []string      // CIDR ranges of trusted reverse proxies
-	JWTSecret       string
-	RefreshTokenTTL time.Duration
-	APIKeyRateLimit int
-	APIKeyWindow    time.Duration
+	Host                string
+	Port                int
+	CORSConfig          CORSConfig
+	RateLimit           int           // requests per window
+	RateWindow          time.Duration // window duration
+	TrustedProxies      []string      // CIDR ranges of trusted reverse proxies
+	JWTSecret           string
+	RefreshTokenTTL     time.Duration
+	APIKeyRateLimit     int
+	APIKeyWindow        time.Duration
+	ProjectionAccountID *uuid.UUID
 }
 
 // DefaultServerConfig returns a sensible default server configuration.
@@ -288,6 +291,7 @@ type Deps struct {
 	MilestoneEvidence MilestoneEvidenceSource
 	EconomicAccounts  EconomicAccountReader
 	EconomicLedger    EconomicLedgerReader
+	Projections       repository.ProjectionReader
 }
 
 // NewServer creates a new API server with all routes and middleware registered.
@@ -422,6 +426,8 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		milestoneEvidence:     deps.MilestoneEvidence,
 		economicAccounts:      deps.EconomicAccounts,
 		economicLedger:        deps.EconomicLedger,
+		projections:           deps.Projections,
+		projectionAccountID:   cfg.ProjectionAccountID,
 	}
 	// Construct services from the assembled deps.
 	s.backtestSvc = service.NewBacktestService(
