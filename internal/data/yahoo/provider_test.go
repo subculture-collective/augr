@@ -190,6 +190,46 @@ func TestProviderGetOHLCVEmptyResults(t *testing.T) {
 	}
 }
 
+func TestProviderGetOHLCVNotFoundIsEmptyCoverage(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{
+			"chart": {
+				"result": null,
+				"error": {
+					"code": "Not Found",
+					"description": "No data found, symbol may be delisted"
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	provider := NewProvider(discardLogger())
+	provider.baseURL = server.URL
+	provider.httpClient = server.Client()
+
+	got, err := provider.GetOHLCV(
+		context.Background(),
+		"DELISTED",
+		data.Timeframe1d,
+		time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2024, time.January, 2, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("GetOHLCV() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetOHLCV() = nil, want empty slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("GetOHLCV() len = %d, want 0", len(got))
+	}
+}
+
 func TestProviderGetOHLCVErrorResponses(t *testing.T) {
 	t.Parallel()
 

@@ -159,6 +159,16 @@ func (p *Provider) GetOHLCV(ctx context.Context, ticker string, timeframe data.T
 	if err != nil {
 		var apiErr *data.APIError
 		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusNotFound {
+				var response chartResponse
+				if json.Unmarshal(apiErr.Body, &response) == nil &&
+					response.Chart.Error != nil &&
+					strings.TrimSpace(response.Chart.Error.Code) == "Not Found" &&
+					strings.TrimSpace(response.Chart.Error.Description) == "No data found, symbol may be delisted" {
+					return []domain.OHLCV{}, nil
+				}
+			}
+
 			message := strings.TrimSpace(string(apiErr.Body))
 			if message == "" {
 				message = http.StatusText(apiErr.StatusCode)
