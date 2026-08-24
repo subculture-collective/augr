@@ -126,6 +126,28 @@ export type ReleaseReadiness = {
   generated_at: ISODate
 }
 
+export type CutoverStatus = {
+  generated_at: ISODate
+  promotion_ready: boolean
+  account_trusted: boolean
+  account_id?: UUID
+  scope_id?: UUID
+  scoped_artifacts: number
+  quarantined_legacy_rows: number
+  canonical_lots: number
+  scope_mismatches: number
+  missing_canonical_links: number
+  fresh_marks: number
+  stale_marks: number
+  unavailable_marks: number
+  reconciliation_available: boolean
+  reconciliation_passed: boolean
+  reconciliation_venue?: string
+  reconciliation_external_account_id?: string
+  unavailable_reasons: string[]
+  promotion_block_reasons: string[]
+}
+
 export type MilestoneEvidenceRef = {
   kind: string
   id: UUID

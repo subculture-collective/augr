@@ -450,6 +450,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		ReportMetrics:          appMetrics,
 		MilestoneEvidence:      milestoneEvidenceRepo,
 		Projections:            pgrepo.NewProjectionReader(db.Pool),
+		CutoverEvidence:        pgrepo.NewProjectionReader(db.Pool),
 		PolymarketClient:       nil,
 		KalshiWatchedRepo:      pgrepo.NewKalshiWatchedMarketsRepo(db.Pool),
 		KalshiSnapshotsRepo:    pgrepo.NewKalshiMarketSnapshotsRepo(db.Pool),

@@ -33,6 +33,7 @@ export const queryKeys = {
   automationDetail: (name: string) => ['automation', 'detail', name] as const,
   health: ['health'] as const,
   releaseReadiness: ['release', 'readiness'] as const,
+  cutoverStatus: ['release', 'cutover-status'] as const,
   economicAccounts: ['economic', 'accounts'] as const,
   economicAccount: (id: string) => ['economic', 'accounts', id] as const,
   economicCapitalSummary: (id: string) => ['economic', 'accounts', id, 'capital-summary'] as const,

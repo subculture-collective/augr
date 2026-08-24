@@ -32,6 +32,7 @@ type Request struct {
 	AssessmentID    uuid.UUID
 	Policy          *Policy
 	PriorDecisionID uuid.UUID
+	Readiness       Readiness
 }
 
 // Evaluate reloads all exact parents and derives the outcome. The request has
@@ -40,6 +41,9 @@ func (service *Service) Evaluate(ctx context.Context, request Request) (*Decisio
 	if service == nil || service.store == nil || request.DeploymentID == uuid.Nil || request.AssessmentID == uuid.Nil || request.Policy == nil {
 		return nil, fmt.Errorf("promotion request requires deployment, assessment, and policy")
 	}
+	if !request.Readiness.Ready() {
+		return nil, fmt.Errorf("promotion blocked: %v", request.Readiness.BlockReasons())
+	}
 	deployment, err := service.store.GetDeployment(ctx, request.DeploymentID)
 	if err != nil {
 		return nil, fmt.Errorf("load promotion deployment: %w", err)
@@ -47,6 +51,9 @@ func (service *Service) Evaluate(ctx context.Context, request Request) (*Decisio
 	assessment, err := service.store.GetAssessment(ctx, request.AssessmentID)
 	if err != nil {
 		return nil, fmt.Errorf("load promotion assessment: %w", err)
+	}
+	if deployment.AccountID() != request.Readiness.AccountID() || assessment.ScopeID() == uuid.Nil || assessment.ScopeID() != request.Readiness.ScopeID() {
+		return nil, fmt.Errorf("promotion readiness does not match deployment account and assessment scope")
 	}
 	var prior *Decision
 	if request.PriorDecisionID != uuid.Nil {

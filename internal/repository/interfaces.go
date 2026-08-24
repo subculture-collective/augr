@@ -138,15 +138,37 @@ type ProjectionRepository interface {
 // ProjectionSnapshot is one canonical account-scoped checkpoint and the
 // reconciliation result tied to that exact checkpoint.
 type ProjectionSnapshot struct {
-	Checkpoint              *ledger.ProjectionCheckpoint
-	Valuation               *ledger.ProjectionValuation
-	ReconciliationAvailable bool
-	ReconciliationPassed    bool
+	Checkpoint                      *ledger.ProjectionCheckpoint
+	Valuation                       *ledger.ProjectionValuation
+	ReconciliationAvailable         bool
+	ReconciliationPassed            bool
+	ReconciliationAccountID         uuid.UUID
+	ReconciliationProvider          string
+	ReconciliationExternalAccountID string
+	ReconciliationGeneratedAt       time.Time
+	FreshMarks                      int
+	StaleMarks                      int
+	UnavailableMarks                int
 }
 
 // ProjectionReader exposes no mark or checkpoint write authority.
 type ProjectionReader interface {
 	GetLatestPortfolioProjection(context.Context, uuid.UUID, time.Time) (*ProjectionSnapshot, error)
+}
+
+// CutoverEvidenceInventory counts immutable scoped evaluation evidence without
+// granting any promotion or mutation authority.
+type CutoverEvidenceInventory struct {
+	ScopeID               uuid.UUID
+	ScopeAccountID        uuid.UUID
+	ScopedArtifacts       int
+	LegacyArtifacts       int
+	ScopeMismatchCount    int
+	MissingCanonicalLinks int
+}
+
+type CutoverEvidenceReader interface {
+	GetCutoverEvidenceInventory(context.Context, uuid.UUID) (*CutoverEvidenceInventory, error)
 }
 
 // CanonicalOpenLot identifies an account-scoped open position whose Kalshi

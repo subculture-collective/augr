@@ -106,7 +106,7 @@ func promotionParents(t *testing.T, pass bool) (*strategycatalog.Deployment, *ro
 		cost := promotionReport(t, versionID, start, perturbed, "cost"+string(rune(index)))
 		folds[index] = robustness.FoldInput{TrainStart: start.Add(-6 * 24 * time.Hour), TrainEnd: start.Add(-2 * 24 * time.Hour), Baseline: baseline, Perturbations: []robustness.ScenarioInput{{Kind: "cost_up", Severity: "double_cost", Report: cost}}}
 	}
-	assessment, err := robustness.NewAssessment(robustness.AssessmentInput{Family: family, Policy: policy, Mode: strategycatalog.ExperimentPaperScored, Candidates: []robustness.CandidateInput{{VersionID: versionID, Folds: folds}}})
+	assessment, err := robustness.NewAssessment(robustness.AssessmentInput{Family: family, Policy: policy, ScopeID: uuid.MustParse("30600000-0000-4000-8000-000000000004"), Mode: strategycatalog.ExperimentPaperScored, Candidates: []robustness.CandidateInput{{VersionID: versionID, Folds: folds}}})
 	if err != nil {
 		t.Fatal(err)
 	}

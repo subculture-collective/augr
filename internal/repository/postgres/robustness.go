@@ -151,8 +151,8 @@ func (repo *RobustnessRepo) RecordAssessment(ctx context.Context, value *robustn
 	defer func() { _ = tx.Rollback(ctx) }()
 	created := databaseNow()
 	candidates := value.Candidates()
-	_, err = tx.Exec(ctx, `INSERT INTO statistical_robustness_assessments(id,schema_name,state,family_id,family_sha256,policy_id,policy_sha256,mode,candidate_count,sha256,canonical_bytes,canonical_json,created_at)
-		VALUES($1,'statistical-robustness-assessment-v1','completed',$2,$3,$4,$5,$6,$7,$8,$9,convert_from($9,'UTF8')::jsonb,$10) ON CONFLICT(id) DO NOTHING`, value.ID(), value.FamilyID(), value.FamilyDigest(), value.PolicyID(), value.PolicyDigest(), value.Mode(), len(candidates), value.Digest(), value.CanonicalBytes(), created)
+	_, err = tx.Exec(ctx, `INSERT INTO statistical_robustness_assessments(id,schema_name,state,family_id,family_sha256,policy_id,policy_sha256,scope_id,mode,candidate_count,sha256,canonical_bytes,canonical_json,created_at)
+		VALUES($1,'statistical-robustness-assessment-v1','completed',$2,$3,$4,$5,NULLIF($6,'00000000-0000-0000-0000-000000000000')::uuid,$7,$8,$9,$10,convert_from($10,'UTF8')::jsonb,$11) ON CONFLICT(id) DO NOTHING`, value.ID(), value.FamilyID(), value.FamilyDigest(), value.PolicyID(), value.PolicyDigest(), value.ScopeID(), value.Mode(), len(candidates), value.Digest(), value.CanonicalBytes(), created)
 	if err != nil {
 		return nil, evaluationWriteError("insert robustness assessment", err)
 	}
@@ -213,7 +213,7 @@ func (repo *RobustnessRepo) RecordAssessment(ctx context.Context, value *robustn
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(got.CanonicalBytes(), value.CanonicalBytes()) {
+	if !bytes.Equal(got.CanonicalBytes(), value.CanonicalBytes()) || got.ScopeID() != value.ScopeID() {
 		return nil, fmt.Errorf("postgres: robustness assessment conflict: %w", repository.ErrIdempotencyConflict)
 	}
 	return got, nil
@@ -223,7 +223,8 @@ func (repo *RobustnessRepo) GetAssessment(ctx context.Context, id uuid.UUID) (*r
 	var digest string
 	var raw []byte
 	var familyID, policyID uuid.UUID
-	err := repo.pool.QueryRow(ctx, `SELECT sha256,canonical_bytes,family_id,policy_id FROM statistical_robustness_assessments WHERE id=$1`, id).Scan(&digest, &raw, &familyID, &policyID)
+	var scopeID *uuid.UUID
+	err := repo.pool.QueryRow(ctx, `SELECT sha256,canonical_bytes,family_id,policy_id,scope_id FROM statistical_robustness_assessments WHERE id=$1`, id).Scan(&digest, &raw, &familyID, &policyID, &scopeID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, repository.ErrNotFound
 	}
@@ -255,7 +256,11 @@ func (repo *RobustnessRepo) GetAssessment(ctx context.Context, id uuid.UUID) (*r
 			return nil, err
 		}
 	}
-	value, err := robustness.AssessmentFromCanonical(id, digest, raw, family, policy, reports)
+	persistedScopeID := uuid.Nil
+	if scopeID != nil {
+		persistedScopeID = *scopeID
+	}
+	value, err := robustness.AssessmentFromCanonical(id, digest, raw, family, policy, reports, persistedScopeID)
 	if err != nil {
 		return nil, err
 	}

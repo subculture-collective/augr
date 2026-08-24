@@ -175,6 +175,19 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       })
     }),
 
+    http.get(endpoint(apiBaseUrl, '/release/cutover-status'), async ({ request }) => {
+      await applyScenarioDelay(state)
+      const authError = authGuard(request, state)
+      if (authError) return authError
+      return HttpResponse.json({
+        generated_at: fixtureDate, promotion_ready: true, account_trusted: true,
+        account_id: '00000000-0000-4000-8000-0000000000a1', scope_id: '00000000-0000-4000-8000-0000000000e1',
+        scoped_artifacts: 2, quarantined_legacy_rows: 17, canonical_lots: 2, scope_mismatches: 0, missing_canonical_links: 0,
+        fresh_marks: 2, stale_marks: 0, unavailable_marks: 0, reconciliation_available: true, reconciliation_passed: true,
+        reconciliation_venue: 'kalshi', reconciliation_external_account_id: 'paper-scored', unavailable_reasons: [], promotion_block_reasons: [],
+      })
+    }),
+
     http.get(endpoint(apiBaseUrl, '/economic/accounts'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)

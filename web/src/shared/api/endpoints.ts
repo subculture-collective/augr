@@ -57,10 +57,11 @@ import {
   economicLedgerTransactionSchema,
   milestoneAssessmentSchema,
   releaseReadinessSchema,
+  cutoverStatusSchema,
 } from '@/shared/api/schemas'
 import type { ListResponse, PortfolioSummary } from '@/shared/types/api'
 import type { AuthResponse, LoginRequest } from '@/shared/types/auth'
-import type { AgentDecision, AgentEvent, AllocationDecision, AllocatorDiagnostics, AllocatorOpportunity, AllocatorSummary, AutomationHealthResponse, AutomationJobRun, AutomationJobStatus, BacktestConfig, BacktestRun, BreakerResetRequest, BreakerResetResponse, CopyLeader, CopyLeaderDetail, CopyLeaderSource, CopyPreview, CopyRebalanceResult, CopyRefreshResult, CopySubscription, CopyTradeIntent, EconomicAccount, EconomicCapitalFlow, EconomicCapitalSummary, EconomicLedgerTransaction, EventMarketsSummaryResponse, HealthStatusResponse, KillSwitchToggleRequest, KillSwitchToggleResponse, MarketKillSwitchRequest, MarketKillSwitchResponse, MilestoneAssessment, OptionSnapshot, Order, OrderDetailResponse, PipelineRun, PolymarketDataStatus, Position, ReleaseReadiness, ReplayDecision, ReportArtifact, ReportLatestResponse, RiskBreakersResponse, RiskCockpitSummary, RiskEngineStatus, RunSnapshot, Strategy, StrategyCreateRequest, StrategyRunAcceptedResponse, StrategyUpdateRequest, Trade, TradeDecision, User } from '@/shared/types/domain'
+import type { AgentDecision, AgentEvent, AllocationDecision, AllocatorDiagnostics, AllocatorOpportunity, AllocatorSummary, AutomationHealthResponse, AutomationJobRun, AutomationJobStatus, BacktestConfig, BacktestRun, BreakerResetRequest, BreakerResetResponse, CopyLeader, CopyLeaderDetail, CopyLeaderSource, CopyPreview, CopyRebalanceResult, CopyRefreshResult, CopySubscription, CopyTradeIntent, CutoverStatus, EconomicAccount, EconomicCapitalFlow, EconomicCapitalSummary, EconomicLedgerTransaction, EventMarketsSummaryResponse, HealthStatusResponse, KillSwitchToggleRequest, KillSwitchToggleResponse, MarketKillSwitchRequest, MarketKillSwitchResponse, MilestoneAssessment, OptionSnapshot, Order, OrderDetailResponse, PipelineRun, PolymarketDataStatus, Position, ReleaseReadiness, ReplayDecision, ReportArtifact, ReportLatestResponse, RiskBreakersResponse, RiskCockpitSummary, RiskEngineStatus, RunSnapshot, Strategy, StrategyCreateRequest, StrategyRunAcceptedResponse, StrategyUpdateRequest, Trade, TradeDecision, User } from '@/shared/types/domain'
 import type { SettingsResponse } from '@/shared/types/settings'
 
 export type StrategyListParams = {
@@ -191,6 +192,10 @@ export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
 
 export function getReleaseReadiness(signal?: AbortSignal): Promise<ReleaseReadiness> {
   return api.get<ReleaseReadiness>('/release/readiness', { schema: releaseReadinessSchema as never, signal })
+}
+
+export function getCutoverStatus(signal?: AbortSignal): Promise<CutoverStatus> {
+  return api.get<CutoverStatus>('/release/cutover-status', { schema: cutoverStatusSchema as never, signal })
 }
 
 export function getEconomicAccounts(signal?: AbortSignal): Promise<ListResponse<EconomicAccount>> {

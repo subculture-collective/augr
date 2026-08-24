@@ -375,6 +375,7 @@ type CandidateInput struct {
 type AssessmentInput struct {
 	Family     *Family
 	Policy     *Policy
+	ScopeID    uuid.UUID
 	Mode       strategycatalog.ExperimentMode
 	Candidates []CandidateInput
 }
@@ -435,6 +436,7 @@ type assessmentCanonical struct {
 
 type Assessment struct {
 	canonical assessmentCanonical
+	scopeID   uuid.UUID
 	bytes     json.RawMessage
 	digest    string
 	id        uuid.UUID
@@ -458,12 +460,12 @@ func NewAssessment(input AssessmentInput) (*Assessment, error) {
 	encoded, _ := json.Marshal(canonical)
 	digest := hash(encoded)
 	return &Assessment{
-		canonical: canonical, bytes: encoded, digest: digest,
+		canonical: canonical, scopeID: input.ScopeID, bytes: encoded, digest: digest,
 		id: economicid.DeterministicUUID("statistical-robustness-assessment", AssessmentSchemaV1+"@sha256:"+digest),
 	}, nil
 }
 
-func AssessmentFromCanonical(id uuid.UUID, digest string, raw []byte, family *Family, policy *Policy, reports map[uuid.UUID]*evaluation.Report) (*Assessment, error) {
+func AssessmentFromCanonical(id uuid.UUID, digest string, raw []byte, family *Family, policy *Policy, reports map[uuid.UUID]*evaluation.Report, persistedScopeID ...uuid.UUID) (*Assessment, error) {
 	if id == uuid.Nil || family == nil || policy == nil || !digestPattern.MatchString(digest) || hash(raw) != digest {
 		return nil, fmt.Errorf("robustness assessment envelope is invalid")
 	}
@@ -495,7 +497,11 @@ func AssessmentFromCanonical(id uuid.UUID, digest string, raw []byte, family *Fa
 		}
 		candidates[candidateIndex] = CandidateInput{VersionID: versionID, Folds: folds}
 	}
-	value, err := NewAssessment(AssessmentInput{Family: family, Policy: policy, Mode: canonical.Mode, Candidates: candidates})
+	var scopeID uuid.UUID
+	if len(persistedScopeID) > 0 {
+		scopeID = persistedScopeID[0]
+	}
+	value, err := NewAssessment(AssessmentInput{Family: family, Policy: policy, ScopeID: scopeID, Mode: canonical.Mode, Candidates: candidates})
 	if err != nil || canonical.Schema != AssessmentSchemaV1 || canonical.State != "completed" || canonical.FamilyID != family.ID().String() ||
 		canonical.FamilySHA256 != family.Digest() || canonical.PolicyID != policy.ID().String() || canonical.PolicySHA256 != policy.Digest() ||
 		value.ID() != id || value.Digest() != digest || !bytes.Equal(value.bytes, raw) {
@@ -606,6 +612,13 @@ func (a *Assessment) PolicyID() uuid.UUID {
 		return uuid.Nil
 	}
 	return uuid.MustParse(a.canonical.PolicyID)
+}
+
+func (a *Assessment) ScopeID() uuid.UUID {
+	if a == nil {
+		return uuid.Nil
+	}
+	return a.scopeID
 }
 
 func (a *Assessment) FamilyDigest() string {

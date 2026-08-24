@@ -128,6 +128,7 @@ type Server struct {
 	economicAccounts    EconomicAccountReader
 	economicLedger      EconomicLedgerReader
 	projections         repository.ProjectionReader
+	cutoverEvidence     repository.CutoverEvidenceReader
 	projectionAccountID *uuid.UUID
 
 	// Services — constructed from deps in NewServer.
@@ -292,6 +293,7 @@ type Deps struct {
 	EconomicAccounts  EconomicAccountReader
 	EconomicLedger    EconomicLedgerReader
 	Projections       repository.ProjectionReader
+	CutoverEvidence   repository.CutoverEvidenceReader
 }
 
 // NewServer creates a new API server with all routes and middleware registered.
@@ -427,6 +429,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		economicAccounts:      deps.EconomicAccounts,
 		economicLedger:        deps.EconomicLedger,
 		projections:           deps.Projections,
+		cutoverEvidence:       deps.CutoverEvidence,
 		projectionAccountID:   cfg.ProjectionAccountID,
 	}
 	// Construct services from the assembled deps.
@@ -662,6 +665,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 
 		// Backtests
 		v1.Get("/release/readiness", s.handleReleaseReadiness)
+		v1.Get("/release/cutover-status", s.handleCutoverStatus)
 		v1.Get("/backtest/divergence", s.handleGetBacktestDivergence)
 		v1.Route("/backtests", func(bt chi.Router) {
 			bt.Get("/divergence", s.handleGetBacktestDivergence)

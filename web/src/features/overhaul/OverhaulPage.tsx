@@ -21,6 +21,7 @@ import {
 import { PageHeader } from '@/components/ui/page-header'
 import {
   getEconomicAccounts,
+  getCutoverStatus,
   getEconomicCapitalFlows,
   getEconomicCapitalSummary,
   getEconomicLedgerTransaction,
@@ -125,6 +126,35 @@ function CapabilityCard({ capability }: { capability: ReleaseCapability }) {
       <span className={`status-pill ${capability.ready ? 'success' : 'warning'}`}>{capability.ready ? 'ready' : 'blocked'}</span>
       {capability.blockers?.length ? <p title={capability.blockers.join(', ')}>{capability.blockers.join(' · ')}</p> : null}
     </article>
+  )
+}
+
+function CutoverStatusPanel() {
+  const query = useQuery({ queryKey: queryKeys.cutoverStatus, queryFn: ({ signal }) => getCutoverStatus(signal), refetchInterval: 60_000 })
+  return (
+    <section className="panel" aria-labelledby="cutover-status-title">
+      <div className="panel-header">
+        <div><p className="eyebrow">Promotion evidence</p><h2 id="cutover-status-title">Controlled cutover</h2></div>
+        <span className="read-only-chip"><LockKeyhole size={13} /> Read only</span>
+      </div>
+      {query.isLoading ? <LoadingState label="Loading cutover status…" /> : null}
+      {query.isError ? <QueryError error={query.error} retry={() => void query.refetch()} /> : null}
+      {query.data ? <>
+        <div className={`readiness-verdict ${query.data.promotion_ready ? 'ready' : 'blocked'}`}>
+          {query.data.promotion_ready ? <ShieldCheck aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
+          <div><strong>{query.data.promotion_ready ? 'Promotion evidence is ready' : 'Promotion is blocked'}</strong><span>{query.data.account_trusted ? 'Configured scored account trusted' : 'Configured scored account unavailable or untrusted'}</span></div>
+        </div>
+        <div className="capital-metrics" aria-label="cutover evidence counts">
+          <div><span>Canonical lots</span><strong>{query.data.canonical_lots}</strong></div>
+          <div><span>Fresh marks</span><strong>{query.data.fresh_marks}</strong></div>
+          <div><span>Stale / unavailable</span><strong>{query.data.stale_marks} / {query.data.unavailable_marks}</strong></div>
+          <div><span>Legacy quarantined</span><strong>{query.data.quarantined_legacy_rows}</strong></div>
+        </div>
+        <p className={query.data.reconciliation_passed ? 'qualified-line' : 'muted'}>{query.data.reconciliation_passed ? <Check /> : <AlertTriangle size={15} />} {query.data.reconciliation_venue ?? 'Configured venue'} / {query.data.reconciliation_external_account_id ?? 'unknown account'} reconciliation {query.data.reconciliation_passed ? 'matched' : 'not proven'}</p>
+        {query.data.promotion_block_reasons.length ? <div className="blocker-list"><strong>Promotion blockers</strong><ul>{query.data.promotion_block_reasons.map((reason) => <li key={reason}>{reason.replaceAll('_', ' ')}</li>)}</ul></div> : null}
+        <LastUpdated date={query.data.generated_at} />
+      </> : null}
+    </section>
   )
 }
 
@@ -339,6 +369,7 @@ export function OverhaulPage() {
       </section>
 
       <ReadinessPanel />
+      <CutoverStatusPanel />
       <EconomicWorkspace />
       <EvidenceInspector />
 

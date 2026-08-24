@@ -102,6 +102,28 @@ export const releaseReadinessSchema = z.object({
   generated_at: isoDateSchema,
 }).passthrough()
 
+export const cutoverStatusSchema = z.object({
+  generated_at: isoDateSchema,
+  promotion_ready: z.boolean(),
+  account_trusted: z.boolean(),
+  account_id: uuidSchema.optional(),
+  scope_id: uuidSchema.optional(),
+  scoped_artifacts: z.number().int().nonnegative(),
+  quarantined_legacy_rows: z.number().int().nonnegative(),
+  canonical_lots: z.number().int().nonnegative(),
+  scope_mismatches: z.number().int().nonnegative(),
+  missing_canonical_links: z.number().int().nonnegative(),
+  fresh_marks: z.number().int().nonnegative(),
+  stale_marks: z.number().int().nonnegative(),
+  unavailable_marks: z.number().int().nonnegative(),
+  reconciliation_available: z.boolean(),
+  reconciliation_passed: z.boolean(),
+  reconciliation_venue: z.string().optional(),
+  reconciliation_external_account_id: z.string().optional(),
+  unavailable_reasons: z.array(z.string()),
+  promotion_block_reasons: z.array(z.string()),
+}).passthrough()
+
 export const milestoneAssessmentSchema = z.object({
   id: uuidSchema,
   sha256: z.string().regex(/^[a-f0-9]{64}$/i),

@@ -27,6 +27,8 @@ describe('total-overhaul operator workspace', () => {
     expect(screen.getByText('R6')).toBeTruthy()
     expect(await screen.findByRole('list', { name: /economic accounts/i })).toBeTruthy()
     expect(await screen.findByText('USD 515.00000000')).toBeTruthy()
+    expect(await screen.findByText(/promotion evidence is ready/i)).toBeTruthy()
+    expect(screen.getByText(/kalshi \/ paper-scored reconciliation matched/i)).toBeTruthy()
     expect(screen.getByText(/promotion eligible evidence/i)).toBeTruthy()
     expect(screen.getByText(/inspection is not activation/i)).toBeTruthy()
     expect(screen.getAllByText(/read only/i).length).toBeGreaterThan(0)
