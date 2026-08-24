@@ -101,7 +101,7 @@ export function AutomationDetailPage() {
         </div>
         {runsQuery.isLoading ? <LoadingState label="Loading automation history…" /> : null}
         {runsQuery.error ? <ErrorState error={runsQuery.error} onRetry={() => void runsQuery.refetch()} /> : null}
-        {!runsQuery.isLoading && !runsQuery.error && runs.length === 0 ? <EmptyState title="No post-deployment runs" message="This job has no persisted run after deployment 3c937ff75a9e in the latest 100 automation job runs." /> : null}
+        {!runsQuery.isLoading && !runsQuery.error && runs.length === 0 ? <EmptyState title="No post-deployment runs" message={`This job has no persisted run after deployment ${automationCutover.deployment} in the latest 100 automation job runs.`} /> : null}
         {runs.length > 0 ? (
           <div className="table-wrap" role="region" aria-label="Automation run history" tabIndex={0}>
             <table aria-label="Automation run history">

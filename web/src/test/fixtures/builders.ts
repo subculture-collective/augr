@@ -29,8 +29,8 @@ import type { WebSocketEventEnvelope } from '@/shared/types/websocket'
 
 import { fixtureDate, fixtureId, fixtureLaterDate } from '@/test/fixtures/ids'
 
-const automationFixtureDate: ISODate = '2026-08-22T12:00:00Z'
-const automationFixtureLaterDate: ISODate = '2026-08-22T12:05:00Z'
+const automationFixtureDate: ISODate = '2026-08-24T12:00:00Z'
+const automationFixtureLaterDate: ISODate = '2026-08-24T12:05:00Z'
 
 export const mockAccessToken = 'dev-paper-access-token'
 export const mockRefreshToken = 'dev-paper-refresh-token'

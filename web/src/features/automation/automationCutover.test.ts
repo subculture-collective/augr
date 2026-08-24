@@ -6,8 +6,8 @@ const job = (overrides: Record<string, unknown> = {}) => ({
   name: 'current_data_refresh',
   description: 'Refreshes current data.',
   schedule: '*/15 * * * 1-5',
-  last_run: '2026-08-21T21:12:44Z',
-  last_error_at: '2026-08-21T21:12:44Z',
+  last_run: '2026-08-24T11:26:32Z',
+  last_error_at: '2026-08-24T11:26:32Z',
   last_result: 'error',
   run_count: 12,
   error_count: 6,
@@ -19,8 +19,8 @@ const job = (overrides: Record<string, unknown> = {}) => ({
 
 describe('automation cutover', () => {
   it('excludes runs before the deployment', () => {
-    expect(isPostAutomationCutover('2026-08-21T21:12:44Z')).toBe(false)
-    expect(isPostAutomationCutover('2026-08-21T21:12:45Z')).toBe(true)
+    expect(isPostAutomationCutover('2026-08-24T11:26:32Z')).toBe(false)
+    expect(isPostAutomationCutover('2026-08-24T11:26:33Z')).toBe(true)
     expect(isPostAutomationCutover()).toBe(false)
   })
 
@@ -32,7 +32,7 @@ describe('automation cutover', () => {
   })
 
   it('retains post-deployment failures as operational failures', () => {
-    const currentFailure = job({ last_run: '2026-08-22T00:00:00Z', last_error_at: '2026-08-22T00:00:00Z' })
+    const currentFailure = job({ last_run: '2026-08-24T11:26:34Z', last_error_at: '2026-08-24T11:26:34Z' })
 
     expect(automationOperationalState(currentFailure)).toBe('failing')
     expect(currentAutomationErrorCount(currentFailure)).toBe(6)
