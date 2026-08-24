@@ -23,10 +23,14 @@ import type {
   User,
 } from '@/shared/types/domain'
 import type { PortfolioSummary } from '@/shared/types/api'
+import type { ISODate } from '@/shared/types/primitives'
 import type { SettingsResponse } from '@/shared/types/settings'
 import type { WebSocketEventEnvelope } from '@/shared/types/websocket'
 
 import { fixtureDate, fixtureId, fixtureLaterDate } from '@/test/fixtures/ids'
+
+const automationFixtureDate: ISODate = '2026-08-22T12:00:00Z'
+const automationFixtureLaterDate: ISODate = '2026-08-22T12:05:00Z'
 
 export const mockAccessToken = 'dev-paper-access-token'
 export const mockRefreshToken = 'dev-paper-refresh-token'
@@ -392,7 +396,7 @@ export function buildAutomationHealth(overrides: Partial<AutomationHealthRespons
         name: 'dev-paper-pipeline',
         enabled: true,
         running: false,
-        last_run: fixtureDate,
+        last_run: automationFixtureDate,
         error_count: 0,
         consecutive_failures: 0,
         run_count: 3,
@@ -413,7 +417,7 @@ export function buildAutomationJobStatus(overrides: Partial<AutomationJobStatus>
     schedule: 'Every hour (market hours only), skip holidays',
     enabled: true,
     running: false,
-    last_run: fixtureDate,
+    last_run: automationFixtureDate,
     last_result: 'completed',
     last_summary: { scanned: 12, triggered: 1 },
     error_count: 0,
@@ -428,11 +432,11 @@ export function buildAutomationJobRun(overrides: Partial<AutomationJobRun> = {})
     id: fixtureId(70),
     job_name: 'deep_scan',
     status: 'completed',
-    started_at: fixtureDate,
-    completed_at: fixtureLaterDate,
+    started_at: automationFixtureDate,
+    completed_at: automationFixtureLaterDate,
     duration_ns: 2_000_000_000,
     consecutive_failures: 0,
-    created_at: fixtureDate,
+    created_at: automationFixtureDate,
     ...overrides,
   }
 }
