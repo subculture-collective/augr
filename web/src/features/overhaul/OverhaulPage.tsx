@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -6,7 +6,6 @@ import {
   ArrowUpRight,
   BookOpenCheck,
   Check,
-  CircleDollarSign,
   Database,
   FileSearch,
   Fingerprint,
@@ -37,13 +36,13 @@ import type { EconomicAccount, ReleaseCapability } from '@/shared/types/domain'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 const adoptionStages = [
-  { id: 'R0', title: 'Evidence inspection', state: 'available', detail: 'Read-only milestone assessments are runtime-wired.' },
-  { id: 'R1', title: 'Accounts & ledger', state: 'available', detail: 'Read-only economic projections are opt-in and fail closed.' },
-  { id: 'R2', title: 'Execution & reconciliation', state: 'planned', detail: 'Lifecycle projections and paper execution remain unwired.' },
-  { id: 'R3', title: 'Research lifecycle', state: 'planned', detail: 'Immutable manifests and promotion decisions remain unwired.' },
-  { id: 'R4', title: 'Copy & prediction', state: 'planned', detail: 'Runtime adoption requires licensed evidence and venue gates.' },
-  { id: 'R5', title: 'Unattended control plane', state: 'planned', detail: 'Scheduler, supervisor, costs, and daily brief remain unwired.' },
-  { id: 'R6', title: 'Elapsed evidence', state: 'external', detail: 'Real 30–90 day campaigns require separate authorization.' },
+  { id: 'R0', title: 'Evidence inspection', detail: 'Milestone assessment lookup and evidence records.' },
+  { id: 'R1', title: 'Accounts & ledger', detail: 'Account, capital-flow, and ledger inspection.' },
+  { id: 'R2', title: 'Execution & reconciliation', detail: 'Execution lifecycle and reconciliation boundaries.' },
+  { id: 'R3', title: 'Research lifecycle', detail: 'Research manifests and promotion decisions.' },
+  { id: 'R4', title: 'Copy & prediction', detail: 'Copy and prediction-market boundaries.' },
+  { id: 'R5', title: 'Unattended control plane', detail: 'Scheduling, supervision, costs, and briefing.' },
+  { id: 'R6', title: 'Elapsed evidence', detail: 'Time-bounded campaign evidence.' },
 ] as const
 
 function statusClass(value: string | boolean) {
@@ -69,7 +68,7 @@ function shortId(id: string) {
 
 function QueryError({ error, retry }: { error: unknown; retry: () => void }) {
   if (isApiClientError(error) && error.kind === 'not_implemented') {
-    return <FeatureUnavailable message="This read model is disabled on the current runtime. Enable its server-side inspection gate to expose it." />
+    return <FeatureUnavailable message="Endpoint disabled or not implemented on this runtime. No live status can be inferred from this response." />
   }
   return <ErrorState error={error} onRetry={retry} />
 }
@@ -87,25 +86,26 @@ function ReadinessPanel() {
     <section className="overhaul-readiness panel" aria-labelledby="release-readiness-title">
       <div className="panel-header">
         <div>
-          <p className="eyebrow">Current runtime</p>
-          <h2 id="release-readiness-title">Release readiness</h2>
+          <p className="eyebrow">Live API · prerequisite report</p>
+          <h2 id="release-readiness-title">Prerequisite checks</h2>
         </div>
         <button type="button" className="btn-icon" onClick={() => void query.refetch()} aria-label="Reload release readiness"><RefreshCw size={15} /></button>
       </div>
-      {query.isLoading ? <LoadingState label="Loading release readiness…" /> : null}
+      {query.isLoading ? <LoadingState label="Loading prerequisite checks…" /> : null}
       {query.isError ? <QueryError error={query.error} retry={() => void query.refetch()} /> : null}
       {query.data ? (
         <>
           <div className={`readiness-verdict ${query.data.release_ready ? 'ready' : 'blocked'}`}>
             {query.data.release_ready ? <ShieldCheck aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
             <div>
-              <strong>{query.data.release_ready ? 'Paper release gates are ready' : 'Paper release is blocked'}</strong>
-              <span>{ready} of {required.length} required capabilities ready</span>
+              <strong>{query.data.release_ready ? 'Required prerequisite checks are passing' : 'Required prerequisite checks are incomplete'}</strong>
+              <span>{ready} of {required.length} required checks are passing</span>
             </div>
-            <span className={`status-pill ${query.data.live_trading_enabled ? 'danger' : 'success'}`}>
-              Live {query.data.live_trading_enabled ? 'enabled' : 'disabled'}
+            <span className={`status-pill ${query.data.live_trading_enabled ? 'danger' : 'unknown'}`}>
+              Live flag: {query.data.live_trading_enabled ? 'enabled' : 'disabled'}
             </span>
           </div>
+          <p className="evidence-caveat">These prerequisite checks combine configuration and dependency checks with limited live checks, such as a database ping and scheduler registration. They do not prove provider connectivity, successful execution, or deployment approval.</p>
           <div className="capability-grid" aria-label="release capabilities">
             {query.data.capabilities.map((capability) => <CapabilityCard key={capability.name} capability={capability} />)}
           </div>
@@ -123,7 +123,7 @@ function CapabilityCard({ capability }: { capability: ReleaseCapability }) {
         <strong>{capability.name.replaceAll('_', ' ')}</strong>
         <span>{capability.mode} · {capability.required ? 'required' : 'optional'}</span>
       </div>
-      <span className={`status-pill ${capability.ready ? 'success' : 'warning'}`}>{capability.ready ? 'ready' : 'blocked'}</span>
+      <span className={`status-pill ${capability.ready ? 'success' : 'warning'}`}>{capability.ready ? 'passing' : 'not passing'}</span>
       {capability.blockers?.length ? <p title={capability.blockers.join(', ')}>{capability.blockers.join(' · ')}</p> : null}
     </article>
   )
@@ -131,10 +131,11 @@ function CapabilityCard({ capability }: { capability: ReleaseCapability }) {
 
 function CutoverStatusPanel() {
   const query = useQuery({ queryKey: queryKeys.cutoverStatus, queryFn: ({ signal }) => getCutoverStatus(signal), refetchInterval: 60_000 })
+  const evidenceSnapshotAvailable = Boolean(query.data?.scope_id)
   return (
     <section className="panel" aria-labelledby="cutover-status-title">
       <div className="panel-header">
-        <div><p className="eyebrow">Promotion evidence</p><h2 id="cutover-status-title">Controlled cutover</h2></div>
+        <div><p className="eyebrow">Live API · promotion evidence</p><h2 id="cutover-status-title">Cutover evidence check</h2></div>
         <span className="read-only-chip"><LockKeyhole size={13} /> Read only</span>
       </div>
       {query.isLoading ? <LoadingState label="Loading cutover status…" /> : null}
@@ -142,15 +143,23 @@ function CutoverStatusPanel() {
       {query.data ? <>
         <div className={`readiness-verdict ${query.data.promotion_ready ? 'ready' : 'blocked'}`}>
           {query.data.promotion_ready ? <ShieldCheck aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
-          <div><strong>{query.data.promotion_ready ? 'Promotion evidence is ready' : 'Promotion is blocked'}</strong><span>{query.data.account_trusted ? 'Configured scored account trusted' : 'Configured scored account unavailable or untrusted'}</span></div>
+          <div><strong>{query.data.promotion_ready ? 'Cutover evidence predicate passes' : 'Cutover evidence predicate is blocked'}</strong><span>This status does not switch a reader or activate trading.</span></div>
         </div>
-        <div className="capital-metrics" aria-label="cutover evidence counts">
-          <div><span>Canonical lots</span><strong>{query.data.canonical_lots}</strong></div>
-          <div><span>Fresh marks</span><strong>{query.data.fresh_marks}</strong></div>
-          <div><span>Stale / unavailable</span><strong>{query.data.stale_marks} / {query.data.unavailable_marks}</strong></div>
-          <div><span>Legacy quarantined</span><strong>{query.data.quarantined_legacy_rows}</strong></div>
+        <div className="cutover-identities">
+          <div><span>Configured projection account</span><strong>{query.data.account_id ? shortId(query.data.account_id) : 'Not reported'}</strong><small>{query.data.account_trusted ? 'Account record trusted for this check' : 'Account record unavailable or untrusted'}</small></div>
+          <div><span>Evidence scope</span><strong>{query.data.scope_id ? shortId(query.data.scope_id) : 'Not reported'}</strong><small>{query.data.scope_id ? `${query.data.scoped_artifacts} scoped artifact${query.data.scoped_artifacts === 1 ? '' : 's'}` : 'Evidence snapshot unavailable'}</small></div>
         </div>
-        <p className={query.data.reconciliation_passed ? 'qualified-line' : 'muted'}>{query.data.reconciliation_passed ? <Check /> : <AlertTriangle size={15} />} {query.data.reconciliation_venue ?? 'Configured venue'} / {query.data.reconciliation_external_account_id ?? 'unknown account'} reconciliation {query.data.reconciliation_passed ? 'matched' : 'not proven'}</p>
+        <div className="capital-metrics" aria-label="cutover evidence snapshot">
+          <div><span>Canonical open lots</span><strong>{evidenceSnapshotAvailable ? query.data.canonical_lots : 'Not reported'}</strong></div>
+          <div><span>Fresh marks</span><strong>{evidenceSnapshotAvailable ? query.data.fresh_marks : 'Not reported'}</strong></div>
+          <div><span>Stale / unavailable marks</span><strong>{evidenceSnapshotAvailable ? `${query.data.stale_marks} / ${query.data.unavailable_marks}` : 'Not reported'}</strong></div>
+          <div><span>Quarantined legacy rows</span><strong>{evidenceSnapshotAvailable ? query.data.quarantined_legacy_rows : 'Not reported'}</strong></div>
+        </div>
+        <div className="reconciliation-line">
+          {query.data.reconciliation_available && query.data.reconciliation_passed ? <Check aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
+          <div><strong>{query.data.reconciliation_available ? `Reconciliation evidence ${query.data.reconciliation_passed ? 'passed' : 'did not pass'}` : 'Reconciliation evidence unavailable'}</strong><span>{query.data.reconciliation_available ? `Observed target: ${query.data.reconciliation_venue ?? 'venue not reported'} / ${query.data.reconciliation_external_account_id ?? 'external account not reported'}` : 'No provider or external-account observation is available.'}</span></div>
+        </div>
+        {query.data.unavailable_reasons.length ? <div className="blocker-list unavailable-list"><strong>Unavailable data</strong><ul>{query.data.unavailable_reasons.map((reason) => <li key={reason}>{reason.replaceAll('_', ' ')}</li>)}</ul></div> : null}
         {query.data.promotion_block_reasons.length ? <div className="blocker-list"><strong>Promotion blockers</strong><ul>{query.data.promotion_block_reasons.map((reason) => <li key={reason}>{reason.replaceAll('_', ' ')}</li>)}</ul></div> : null}
         <LastUpdated date={query.data.generated_at} />
       </> : null}
@@ -206,8 +215,8 @@ function EconomicWorkspace() {
     <section className="economic-workspace panel" aria-labelledby="economic-accounts-title">
       <div className="panel-header">
         <div>
-          <p className="eyebrow">Schema 64–65 projections</p>
-          <h2 id="economic-accounts-title">Economic accounts</h2>
+          <p className="eyebrow">Live API · stored projections</p>
+          <h2 id="economic-accounts-title">Economic account records</h2>
         </div>
         <span className="read-only-chip"><LockKeyhole size={13} /> Read only</span>
       </div>
@@ -226,12 +235,13 @@ function EconomicWorkspace() {
                 <div><span>Starting capital</span><strong>{formatExactMoney(summary.data.starting_capital, summary.data.currency)}</strong></div>
                 <div><span>Deposits</span><strong className="success">{formatExactMoney(summary.data.deposits, summary.data.currency)}</strong></div>
                 <div><span>Withdrawals</span><strong className="warning">{formatExactMoney(summary.data.withdrawals, summary.data.currency)}</strong></div>
-                <div><span>Net capital</span><strong>{formatExactMoney(summary.data.net_capital, summary.data.currency)}</strong></div>
+                <div><span>Net contributed capital</span><strong>{formatExactMoney(summary.data.net_capital, summary.data.currency)}</strong></div>
               </div>
             ) : null}
+            {summary.data ? <p className="evidence-caveat">Net contributed capital is deposits, including opening capital, minus withdrawals. This summary does not report cash, equity, P&amp;L, or spendable buying power.</p> : null}
             <div className="flow-section">
               <div className="subsection-heading">
-                <div><p className="eyebrow">Append-only history</p><h3>Capital flows</h3></div>
+                <div><p className="eyebrow">Stored account records</p><h3>Capital flow records</h3></div>
                 {summary.data ? <span>{summary.data.flow_count} recorded</span> : null}
               </div>
               {flows.isLoading ? <LoadingState label="Loading capital flows…" /> : null}
@@ -267,7 +277,7 @@ function AccountIdentity({ account }: { account: EconomicAccount }) {
       <dl>
         <div><dt>Namespace</dt><dd>{account.storage_namespace}</dd></div>
         <div><dt>Account ID</dt><dd title={account.id}>{shortId(account.id)}</dd></div>
-        <div><dt>Buying power</dt><dd>{account.buying_power_multiplier}×</dd></div>
+        <div><dt>Stored policy multiplier</dt><dd title="Stored account policy value, not current buying power">{account.buying_power_multiplier}×</dd></div>
         <div><dt>Created by</dt><dd>{account.created_by}</dd></div>
       </dl>
     </div>
@@ -318,18 +328,18 @@ function EvidenceInspector() {
       </section>
 
       <section className="panel inspector-panel" aria-labelledby="ledger-inspector-title">
-        <div className="panel-header"><div><p className="eyebrow">Balanced transaction</p><h2 id="ledger-inspector-title">Ledger trace</h2></div><BookOpenCheck /></div>
+        <div className="panel-header"><div><p className="eyebrow">Stored transaction</p><h2 id="ledger-inspector-title">Ledger trace</h2></div><BookOpenCheck /></div>
         <form onSubmit={(event) => { event.preventDefault(); if (UUID_PATTERN.test(ledgerInput.trim())) setLedgerId(ledgerInput.trim()) }}>
           <label htmlFor="ledger-id">Transaction UUID</label>
           <div className="lookup-control"><input id="ledger-id" value={ledgerInput} onChange={(event) => setLedgerInput(event.target.value)} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" aria-invalid={!ledgerValid} /><button type="submit" disabled={!UUID_PATTERN.test(ledgerInput.trim())}><Search size={14} /> Trace</button></div>
           {!ledgerValid ? <span className="field-error">Enter a valid UUID.</span> : null}
         </form>
-        {!ledgerId ? <div className="inspector-placeholder"><Database /><p>Trace an immutable ledger transaction to its origin, observation time, and signed posting lines.</p></div> : null}
+        {!ledgerId ? <div className="inspector-placeholder"><Database /><p>Trace a stored ledger transaction to its reported origin, observation time, and posting amounts.</p></div> : null}
         {ledger.isLoading ? <LoadingState label="Loading ledger transaction…" /> : null}
         {ledger.isError ? <QueryError error={ledger.error} retry={() => void ledger.refetch()} /> : null}
         {ledger.data ? (
           <div className="ledger-result">
-            <div className="result-verdict"><span className="status-pill success">balanced record</span><strong>{ledger.data.event_type}</strong></div>
+            <div className="result-verdict"><span className="status-pill unknown">stored record</span><strong>{ledger.data.event_type}</strong></div>
             <dl className="compact-evidence"><div><dt>Origin</dt><dd>{ledger.data.origin_type} / {ledger.data.origin_id}</dd></div><div><dt>Effective</dt><dd>{new Date(ledger.data.effective_at).toLocaleString()}</dd></div><div><dt>Observed</dt><dd>{new Date(ledger.data.observed_at).toLocaleString()}</dd></div></dl>
             <div className="posting-list">{ledger.data.postings.map((posting) => <div key={posting.id}><span>{posting.ledger_account}<small>{posting.unit_kind} · {posting.unit}</small></span><strong className={posting.amount.startsWith('-') ? 'warning' : 'success'}>{posting.amount}</strong></div>)}</div>
           </div>
@@ -340,12 +350,10 @@ function EvidenceInspector() {
 }
 
 export function OverhaulPage() {
-  const stageCounts = useMemo(() => ({ available: adoptionStages.filter((stage) => stage.state === 'available').length, gated: adoptionStages.filter((stage) => stage.state !== 'available').length }), [])
-
   return (
     <div className="overhaul-page">
       <PageHeader
-        eyebrow="Total-overhaul runtime adoption"
+        eyebrow="Operator inspection workspace"
         title="Capital & evidence"
         description="Inspect the new exact economic boundary and deterministic evidence chain without creating accounts, moving capital, enabling schedulers, or implying live-trading authority."
         actions={<Breadcrumbs items={[{ label: 'System' }, { label: 'Capital & evidence' }]} />}
@@ -353,21 +361,25 @@ export function OverhaulPage() {
 
       <section className="overhaul-hero" aria-labelledby="adoption-title">
         <div className="overhaul-hero-copy">
-          <span className="hero-kicker"><GitBranch /> Runtime adoption R1</span>
-          <h2 id="adoption-title">The new foundations are inspectable. Later stages remain fenced.</h2>
-          <p>The application now exposes read-only accounts, exact capital history, balanced ledger transactions, release readiness, and persisted milestone assessments. The UI keeps every later mechanism visibly gated until it is wired and proven.</p>
-          <div className="hero-facts"><span><CircleDollarSign /> Exact decimal economics</span><span><Fingerprint /> SHA-256 evidence</span><span><LockKeyhole /> No mutation authority</span></div>
+          <span className="hero-kicker"><GitBranch /> Evidence, not adoption claims</span>
+          <h2 id="adoption-title">Read each live endpoint on its own terms.</h2>
+          <p>The roadmap is static orientation. Runtime facts appear only in the live API panels below, with disabled endpoints, blockers, timestamps, and unavailable data left visible.</p>
+          <div className="hero-facts"><span><Database /> Independent API reports</span><span><AlertTriangle /> Missing data stays unknown</span><span><LockKeyhole /> No mutation authority</span></div>
         </div>
-        <div className="adoption-score">
-          <div><strong>{stageCounts.available}</strong><span>runtime stages exposed</span></div>
-          <div><strong>{stageCounts.gated}</strong><span>stages still gated</span></div>
+        <div className="evidence-provenance" aria-label="information sources">
+          <div><strong>Static</strong><span>R0–R6 roadmap<br />orientation only</span></div>
+          <div><strong>Live</strong><span>Endpoint reports<br />status below</span></div>
         </div>
       </section>
 
-      <section className="adoption-rail" aria-label="overhaul runtime adoption stages">
-        {adoptionStages.map((stage) => <article key={stage.id} className={stage.state}><span>{stage.id}</span><div><strong>{stage.title}</strong><p>{stage.detail}</p></div><span className={`status-pill ${statusClass(stage.state)}`}>{stage.state}</span></article>)}
+      <section className="roadmap-section" aria-labelledby="roadmap-title">
+        <div className="section-intro"><div><p className="eyebrow">Static reference · not runtime evidence</p><h2 id="roadmap-title">R0–R6 roadmap</h2></div><p>Sequence labels describe intended work areas. They do not report implementation, deployment, or operational status.</p></div>
+        <div className="adoption-rail" aria-label="static overhaul roadmap">
+          {adoptionStages.map((stage) => <article key={stage.id}><span>{stage.id}</span><div><strong>{stage.title}</strong><p>{stage.detail}</p></div><small>Roadmap reference</small></article>)}
+        </div>
       </section>
 
+      <div className="section-intro live-evidence-intro"><div><p className="eyebrow">Authenticated read-only requests</p><h2>Live endpoint evidence</h2></div><p>Each panel can succeed, fail, or be disabled independently. No aggregate runtime verdict is inferred.</p></div>
       <ReadinessPanel />
       <CutoverStatusPanel />
       <EconomicWorkspace />
