@@ -27,8 +27,10 @@ func TestNewPaperEvaluationScopeCanonicalIdentityCoversEveryField(t *testing.T) 
 	if first.CanonicalSHA256 != fmt.Sprintf("%x", digest) {
 		t.Fatal("canonical digest does not hash canonical bytes")
 	}
-	for _, want := range []string{input.AccountID.String(), input.CapitalBindingID.String(), input.ManifestSHA256,
-		input.QualitySHA256, input.SimulationPolicySHA256, input.CapitalPolicySHA256, "paper-evaluation-scope-v1"} {
+	for _, want := range []string{
+		input.AccountID.String(), input.CapitalBindingID.String(), input.ManifestSHA256,
+		input.QualitySHA256, input.SimulationPolicySHA256, input.CapitalPolicySHA256, "paper-evaluation-scope-v1",
+	} {
 		if !bytes.Contains(first.CanonicalBytes, []byte(want)) {
 			t.Fatalf("canonical bytes omit %q: %s", want, first.CanonicalBytes)
 		}

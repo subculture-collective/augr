@@ -92,8 +92,10 @@ func TestPaperEvaluationScopesMigrationEnforcesScopedEvidenceEndToEnd(t *testing
 		t.Fatalf("legacy relabel error=%v", err)
 	}
 
-	config := &domain.BacktestConfig{ScopeID: &scope.ID, StrategyID: strategyID, Name: "scoped", StartDate: scope.EvaluationStart,
-		EndDate: scope.EvaluationEnd, Simulation: domain.BacktestSimulationParameters{InitialCapital: 500}}
+	config := &domain.BacktestConfig{
+		ScopeID: &scope.ID, StrategyID: strategyID, Name: "scoped", StartDate: scope.EvaluationStart,
+		EndDate: scope.EvaluationEnd, Simulation: domain.BacktestSimulationParameters{InitialCapital: 500},
+	}
 	// The fixture intentionally bypasses cross-artifact scope registration above;
 	// disable config fact validation only while inserting that synthetic identity.
 	if _, err := pool.Exec(ctx, `ALTER TABLE backtest_configs DISABLE TRIGGER trg_backtest_configs_validate_scope`); err != nil {
@@ -109,8 +111,10 @@ func TestPaperEvaluationScopesMigrationEnforcesScopedEvidenceEndToEnd(t *testing
 	if _, err := pool.Exec(ctx, `ALTER TABLE backtest_configs ENABLE TRIGGER trg_backtest_configs_validate_scope`); err != nil {
 		t.Fatal(err)
 	}
-	run := &domain.BacktestRun{BacktestConfigID: config.ID, Metrics: json.RawMessage(`{"total_return":0.1}`), TradeLog: json.RawMessage(`[]`),
-		EquityCurve: json.RawMessage(`[]`), RunTimestamp: scope.EvaluationEnd, PromptVersion: "rules-v1", PromptVersionHash: "hash"}
+	run := &domain.BacktestRun{
+		BacktestConfigID: config.ID, Metrics: json.RawMessage(`{"total_return":0.1}`), TradeLog: json.RawMessage(`[]`),
+		EquityCurve: json.RawMessage(`[]`), RunTimestamp: scope.EvaluationEnd, PromptVersion: "rules-v1", PromptVersionHash: "hash",
+	}
 	if err := pgrepo.NewBacktestRunRepo(pool).Create(ctx, run); err != nil {
 		t.Fatal(err)
 	}
@@ -135,9 +139,11 @@ func TestPaperEvaluationScopesMigrationEnforcesScopedEvidenceEndToEnd(t *testing
 	reportBytes := []byte(`{"decision":"GO"}`)
 	reportHash := sha256.Sum256(reportBytes)
 	completed := scope.EvaluationEnd
-	artifact := &pgrepo.ReportArtifact{StrategyID: strategyID, ScopeID: &scope.ID, BacktestRunID: &run.ID,
+	artifact := &pgrepo.ReportArtifact{
+		StrategyID: strategyID, ScopeID: &scope.ID, BacktestRunID: &run.ID,
 		ReportType: "paper_validation", TimeBucket: scope.EvaluationEnd.Truncate(24 * time.Hour), Status: "completed",
-		ReportJSON: reportBytes, ReportBytes: reportBytes, ReportSHA256: hex.EncodeToString(reportHash[:]), CompletedAt: &completed}
+		ReportJSON: reportBytes, ReportBytes: reportBytes, ReportSHA256: hex.EncodeToString(reportHash[:]), CompletedAt: &completed,
+	}
 	if err := reportRepo.Upsert(ctx, artifact); err != nil {
 		t.Fatal(err)
 	}
@@ -168,9 +174,11 @@ func insertScopeMigrationStrategy(t *testing.T, ctx context.Context, pool *pgxpo
 
 func seedScopeCapitalBinding(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (*domain.Account, *capital.Binding, *capital.Policy) {
 	t.Helper()
-	account, err := domain.NewAccount(domain.AccountInput{Name: "scope account", Environment: domain.AccountEnvironmentPaperScored,
+	account, err := domain.NewAccount(domain.AccountInput{
+		Name: "scope account", Environment: domain.AccountEnvironmentPaperScored,
 		Venue: "internal", BaseCurrency: "USD", StorageNamespace: "paper_scored/" + uuid.NewString(), StartingCapital: decimal.NewFromInt(500),
-		BuyingPowerMultiplier: decimal.NewFromInt(2), MarginProfile: domain.MarginProfileRegT, CreatedBy: "migration-106", CreationMetadata: json.RawMessage(`{}`)})
+		BuyingPowerMultiplier: decimal.NewFromInt(2), MarginProfile: domain.MarginProfileRegT, CreatedBy: "migration-106", CreationMetadata: json.RawMessage(`{}`),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

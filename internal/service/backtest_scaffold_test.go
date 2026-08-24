@@ -31,17 +31,22 @@ type rejectUnboundScope struct{}
 func (rejectUnboundScope) ValidateBacktestConfigScope(context.Context, *domain.BacktestConfig) error {
 	return nil
 }
+
 func (rejectUnboundScope) ScopedExecutionBinding(context.Context, uuid.UUID) (bool, string, error) {
 	return false, "historical loader is not manifest-bound", nil
 }
 
 func TestRunBacktestRejectsScopedExecutionWithoutImmutableDatasetBinding(t *testing.T) {
 	scopeID := uuid.New()
-	strategy := domain.Strategy{ID: uuid.New(), Name: "scoped", Ticker: "SPY", MarketType: domain.MarketTypeStock,
-		Status: domain.StrategyStatusActive, Config: domain.StrategyConfig(`{"rules_engine":{}}`)}
-	config := domain.BacktestConfig{ID: uuid.New(), ScopeID: &scopeID, StrategyID: strategy.ID, Name: "scoped",
+	strategy := domain.Strategy{
+		ID: uuid.New(), Name: "scoped", Ticker: "SPY", MarketType: domain.MarketTypeStock,
+		Status: domain.StrategyStatusActive, Config: domain.StrategyConfig(`{"rules_engine":{}}`),
+	}
+	config := domain.BacktestConfig{
+		ID: uuid.New(), ScopeID: &scopeID, StrategyID: strategy.ID, Name: "scoped",
 		StartDate: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), EndDate: time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
-		Simulation: domain.BacktestSimulationParameters{InitialCapital: 500}}
+		Simulation: domain.BacktestSimulationParameters{InitialCapital: 500},
+	}
 	svc := service.NewBacktestService(stubBacktestConfigRepo{config: &config}, &recordingBacktestRunRepo{},
 		&stubStrategyRepo{strategy: &strategy}, nil, nil, nil, slog.Default(), rejectUnboundScope{})
 	_, err := svc.RunBacktest(context.Background(), config.ID, "tester")
@@ -50,6 +55,7 @@ func TestRunBacktestRejectsScopedExecutionWithoutImmutableDatasetBinding(t *test
 		t.Fatalf("error = %v, want surfaced immutable binding rejection", err)
 	}
 }
+
 func (allowBoundScope) ScopedExecutionBinding(context.Context, uuid.UUID) (bool, string, error) {
 	return true, "", nil
 }
