@@ -111,7 +111,7 @@ services:
       APP_HOST: 0.0.0.0
       APP_PORT: 8080
       ENABLE_POLYMARKET_AUTOMATION: "false"
-      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@augr-postgres:5432/${POSTGRES_DB:-tradingagent}?sslmode=disable
+      DATABASE_URL: ${APP_DATABASE_URL:?APP_DATABASE_URL is required}
       OLLAMA_BASE_URL: http://10.0.0.50:11434/v1
       OPENCODE_BASE_URL: http://opencode:4096
       REDIS_URL: redis://augr-redis:6379/0
