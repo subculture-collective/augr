@@ -152,4 +152,4 @@ func (s *Server) loadPortfolioValuation(ctx context.Context, accountID *uuid.UUI
 	return result
 }
 
-func decimalPointer(value decimal.Decimal) *decimal.Decimal { copy := value; return &copy }
+func decimalPointer(value decimal.Decimal) *decimal.Decimal { cloned := value; return &cloned }

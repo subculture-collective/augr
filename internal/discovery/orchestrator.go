@@ -467,7 +467,6 @@ func createOrReuseDiscoveryStrategy(
 	// Keep the strategy paused and do not attempt a DB insert that could be
 	// mistaken for scoped evidence.
 	return persisted, created, fmt.Errorf("create backtest config skipped: discovery has no immutable paper evaluation scope")
-
 }
 
 func recordDiscoveryDeploymentOutcome(result *DiscoveryResult, dryRun, created bool) {

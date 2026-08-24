@@ -303,10 +303,14 @@ func DecodeProjectionValuation(checkpoint *ProjectionCheckpoint) (*ProjectionVal
 		name, raw string
 		target    *decimal.Decimal
 	}{
-		{"cash", payload.Totals.Cash, &result.Totals.Cash}, {"net capital", payload.Totals.NetCapital, &result.Totals.NetCapital},
-		{"fees", payload.Totals.Fees, &result.Totals.Fees}, {"rebates", payload.Totals.Rebates, &result.Totals.Rebates},
-		{"realized P&L", payload.Totals.RealizedPnL, &result.Totals.RealizedPnL}, {"unrealized P&L", payload.Totals.UnrealizedPnL, &result.Totals.UnrealizedPnL},
-		{"market value", payload.Totals.MarketValue, &result.Totals.MarketValue}, {"equity", payload.Totals.Equity, &result.Totals.Equity},
+		{"cash", payload.Totals.Cash, &result.Totals.Cash},
+		{"net capital", payload.Totals.NetCapital, &result.Totals.NetCapital},
+		{"fees", payload.Totals.Fees, &result.Totals.Fees},
+		{"rebates", payload.Totals.Rebates, &result.Totals.Rebates},
+		{"realized P&L", payload.Totals.RealizedPnL, &result.Totals.RealizedPnL},
+		{"unrealized P&L", payload.Totals.UnrealizedPnL, &result.Totals.UnrealizedPnL},
+		{"market value", payload.Totals.MarketValue, &result.Totals.MarketValue},
+		{"equity", payload.Totals.Equity, &result.Totals.Equity},
 		{"total P&L", payload.Totals.TotalPnL, &result.Totals.TotalPnL},
 	}
 	for _, value := range values {

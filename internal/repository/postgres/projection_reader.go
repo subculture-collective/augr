@@ -17,8 +17,10 @@ import (
 // ProjectionReader is the HTTP runtime's read-only canonical valuation seam.
 type ProjectionReader struct{ pool *pgxpool.Pool }
 
-var _ repository.ProjectionReader = (*ProjectionReader)(nil)
-var _ repository.CutoverEvidenceReader = (*ProjectionReader)(nil)
+var (
+	_ repository.ProjectionReader      = (*ProjectionReader)(nil)
+	_ repository.CutoverEvidenceReader = (*ProjectionReader)(nil)
+)
 
 func NewProjectionReader(pool *pgxpool.Pool) *ProjectionReader { return &ProjectionReader{pool: pool} }
 
