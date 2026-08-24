@@ -43,8 +43,14 @@ var (
 )
 
 func (o *JobOrchestrator) registerPreMarketJobs() {
-	o.Register("gap_scanner", "Detect overnight gaps and unusual volume", gapScannerSpec, o.gapScanner)
-	o.Register("discovery_run", "Full strategy discovery on top watchlist tickers", discoveryRunSpec, o.discoveryRun, "gap_scanner")
+	if o.deps.Universe != nil {
+		if o.deps.PolygonBulkSnapshotsEnabled && o.deps.Polygon != nil {
+			o.Register("gap_scanner", "Detect overnight gaps and unusual volume", gapScannerSpec, o.gapScanner)
+			o.Register("discovery_run", "Full strategy discovery on top watchlist tickers", discoveryRunSpec, o.discoveryRun, "gap_scanner")
+		} else {
+			o.Register("discovery_run", "Full strategy discovery on top watchlist tickers", discoveryRunSpec, o.discoveryRun)
+		}
+	}
 	o.Register("position_review", "Review open positions before market open", positionReviewSpec, o.positionReview)
 }
 

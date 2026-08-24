@@ -34,6 +34,7 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	t.Setenv("LLM_BUDGET_TOKENS_DAY", "456789")
 	t.Setenv("LLM_THROTTLE_CONCURRENCY", "8")
 	t.Setenv("POLYGON_API_KEY", "polygon-key")
+	t.Setenv("POLYGON_BULK_SNAPSHOTS_ENABLED", "true")
 	t.Setenv("ALPHA_VANTAGE_RATE_LIMIT_PER_MINUTE", "7")
 	t.Setenv("FINNHUB_RATE_LIMIT_PER_MINUTE", "20")
 	t.Setenv("ALPACA_PAPER_MODE", "false")
@@ -135,6 +136,9 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 
 	if cfg.DataProviders.Polygon.APIKey != "polygon-key" {
 		t.Fatalf("cfg.DataProviders.Polygon.APIKey = %q, want %q", cfg.DataProviders.Polygon.APIKey, "polygon-key")
+	}
+	if !cfg.DataProviders.PolygonBulkSnapshotsEnabled {
+		t.Fatal("cfg.DataProviders.PolygonBulkSnapshotsEnabled = false, want true")
 	}
 
 	if cfg.DataProviders.Finnhub.RateLimitPerMinute != 20 {
@@ -301,6 +305,9 @@ func TestLoadAppliesResilienceDefaults(t *testing.T) {
 	}
 	if len(cfg.LiveTradingAllowedBrokers) != 0 {
 		t.Fatalf("len(cfg.LiveTradingAllowedBrokers) = %d, want 0", len(cfg.LiveTradingAllowedBrokers))
+	}
+	if cfg.DataProviders.PolygonBulkSnapshotsEnabled {
+		t.Fatal("cfg.DataProviders.PolygonBulkSnapshotsEnabled = true, want default false")
 	}
 }
 
@@ -919,6 +926,7 @@ func clearConfigEnv(t *testing.T) {
 		"OPENCODE_SERVER_PASSWORD",
 		"OPENCODE_MODEL",
 		"POLYGON_API_KEY",
+		"POLYGON_BULK_SNAPSHOTS_ENABLED",
 		"ALPHA_VANTAGE_API_KEY",
 		"ALPHA_VANTAGE_RATE_LIMIT_PER_MINUTE",
 		"FINNHUB_API_KEY",

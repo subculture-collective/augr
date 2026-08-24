@@ -127,12 +127,13 @@ type EmbeddingConfig struct {
 
 // DataProviderConfigs contains external data provider settings.
 type DataProviderConfigs struct {
-	Polygon      DataProviderConfig
-	AlphaVantage DataProviderConfig
-	Finnhub      DataProviderConfig
-	FMP          DataProviderConfig
-	NewsAPI      DataProviderConfig
-	Tradier      TradierConfig
+	Polygon                     DataProviderConfig
+	PolygonBulkSnapshotsEnabled bool
+	AlphaVantage                DataProviderConfig
+	Finnhub                     DataProviderConfig
+	FMP                         DataProviderConfig
+	NewsAPI                     DataProviderConfig
+	Tradier                     TradierConfig
 }
 
 // TradierConfig contains Tradier-specific settings.
@@ -411,6 +412,11 @@ func loadFromEnvironment() (Config, error) {
 	}
 
 	fmpRateLimit, err := getEnvInt("FMP_RATE_LIMIT_PER_MINUTE", 4)
+	if err != nil {
+		return Config{}, err
+	}
+
+	polygonBulkSnapshotsEnabled, err := getEnvBool("POLYGON_BULK_SNAPSHOTS_ENABLED", false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -706,6 +712,7 @@ func loadFromEnvironment() (Config, error) {
 			Timeout: embeddingTimeout,
 		},
 		DataProviders: DataProviderConfigs{
+			PolygonBulkSnapshotsEnabled: polygonBulkSnapshotsEnabled,
 			Polygon: DataProviderConfig{
 				APIKey: os.Getenv("POLYGON_API_KEY"),
 			},

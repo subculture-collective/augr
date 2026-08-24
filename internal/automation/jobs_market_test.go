@@ -32,14 +32,65 @@ func TestCurrentDataRefreshSkipsPredictionMarketPositions(t *testing.T) {
 func TestMarketJobCadenceRunsDependenciesBeforeConsumers(t *testing.T) {
 	t.Parallel()
 
-	if currentDataRefreshSpec.Cron != "*/15 * * * 1-5" {
+	if currentDataRefreshSpec.Cron != "30 * * * 1-5" {
 		t.Fatalf("current refresh cron = %q", currentDataRefreshSpec.Cron)
 	}
-	if hotScanSpec.Cron != "5-59/15 * * * 1-5" {
-		t.Fatalf("hot scan cron = %q, want five-minute dependency offset", hotScanSpec.Cron)
+	if hotScanSpec.Cron != "0 * * * 1-5" {
+		t.Fatalf("hot scan cron = %q, want minute 0", hotScanSpec.Cron)
 	}
-	if deepScanSpec.Cron != "10 * * * 1-5" {
-		t.Fatalf("deep scan cron = %q, want post-hot-scan offset", deepScanSpec.Cron)
+	if deepScanSpec.Cron != "25 * * * 1-5" {
+		t.Fatalf("deep scan cron = %q, want minute 25", deepScanSpec.Cron)
+	}
+}
+
+func TestMarketPipelineDependenciesRequireCurrentHourlyCycle(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		consumer    string
+		now         time.Time
+		dependency  string
+		completedAt time.Time
+		wantBlocked bool
+	}{
+		{
+			name: "opening hot scan accepts refresh at previous half-hour boundary", consumer: "hot_scan", dependency: "current_data_refresh",
+			now: time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime),
+		},
+		{
+			name: "hot scan rejects refresh before previous half-hour boundary", consumer: "hot_scan", dependency: "current_data_refresh", wantBlocked: true,
+			now: time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 29, 59, 999999999, easternTime),
+		},
+		{
+			name: "manual hot scan after half-hour accepts current boundary", consumer: "hot_scan", dependency: "current_data_refresh",
+			now: time.Date(2026, time.August, 6, 10, 45, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 10, 30, 0, 0, easternTime),
+		},
+		{
+			name: "deep scan accepts hot scan at current hour boundary", consumer: "deep_scan", dependency: "hot_scan",
+			now: time.Date(2026, time.August, 6, 10, 25, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime),
+		},
+		{
+			name: "deep scan rejects hot scan before current hour boundary", consumer: "deep_scan", dependency: "hot_scan", wantBlocked: true,
+			now: time.Date(2026, time.August, 6, 10, 25, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 59, 59, 999999999, easternTime),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			orch := NewJobOrchestrator(OrchestratorDeps{})
+			orch.Register(test.dependency, "dependency", currentDataRefreshSpec, func(context.Context) error { return nil })
+			orch.Register(test.consumer, "consumer", hotScanSpec, func(context.Context) error { return nil }, test.dependency)
+			dependency := orch.jobs[test.dependency]
+			dependency.mu.Lock()
+			dependency.LastRun = &test.completedAt
+			dependency.LastResult = "success"
+			dependency.mu.Unlock()
+
+			blockedBy, _ := orch.dependencyBlocker(orch.jobs[test.consumer], test.now)
+			if got := blockedBy != ""; got != test.wantBlocked {
+				t.Fatalf("dependency blocked = %t, want %t", got, test.wantBlocked)
+			}
+		})
 	}
 }
 

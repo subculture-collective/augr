@@ -204,6 +204,71 @@ func TestJobOrchestratorPersistsRunningRowBeforeExecuting(t *testing.T) {
 	}
 }
 
+func TestJobOrchestratorDirectRunUsesOneTerminalTimestampAcrossHourlyBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		jobErr error
+	}{
+		{name: "success"},
+		{name: "error", jobErr: errors.New("boom")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repo := newRecordingAutomationJobRunRepo()
+			orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+			orch.Register("current_data_refresh", "upstream", currentDataRefreshSpec, func(context.Context) error {
+				return test.jobErr
+			})
+			orch.Register("deep_scan", "consumer", deepScanSpec, func(context.Context) error { return nil }, "current_data_refresh")
+
+			startedAt := time.Date(2026, time.August, 6, 9, 59, 58, 0, easternTime)
+			terminalAt := startedAt.Add(time.Second)
+			boundary := terminalAt.Add(time.Second)
+			calls := 0
+			orch.now = func() time.Time {
+				calls++
+				switch calls {
+				case 1:
+					return startedAt
+				case 2:
+					return terminalAt
+				default:
+					return boundary
+				}
+			}
+
+			orch.runDirect(orch.jobs["current_data_refresh"])
+			status := singleJobStatus(t, orch, "current_data_refresh")
+			persisted := repo.singleRun(t)
+			if status.LastRun == nil || persisted.CompletedAt == nil || !status.LastRun.Equal(*persisted.CompletedAt) {
+				t.Fatalf("live LastRun = %v, persisted CompletedAt = %v", status.LastRun, persisted.CompletedAt)
+			}
+			if !status.LastRun.Equal(terminalAt) {
+				t.Fatalf("terminal timestamp = %v, want %v", status.LastRun, terminalAt)
+			}
+			if test.jobErr != nil && (status.LastErrorAt == nil || !status.LastErrorAt.Equal(terminalAt)) {
+				t.Fatalf("LastErrorAt = %v, want %v", status.LastErrorAt, terminalAt)
+			}
+
+			if test.jobErr == nil {
+				liveDep, liveReason := orch.dependencyBlocker(orch.jobs["deep_scan"], boundary)
+				hydratedRepo := newRecordingAutomationJobRunRepo()
+				hydratedRepo.summaries = []pgrepo.JobRunSummary{{JobName: "current_data_refresh", LastRun: persisted.CompletedAt, LastResult: "ok", RunCount: 1}}
+				hydrated := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: hydratedRepo})
+				hydrated.Register("current_data_refresh", "upstream", currentDataRefreshSpec, func(context.Context) error { return nil })
+				hydrated.Register("deep_scan", "consumer", deepScanSpec, func(context.Context) error { return nil }, "current_data_refresh")
+				hydrated.hydrateFromDB()
+				hydratedDep, hydratedReason := hydrated.dependencyBlocker(hydrated.jobs["deep_scan"], boundary)
+				if liveDep != "current_data_refresh" || liveReason != "latest successful run is from a prior hourly cycle" {
+					t.Fatalf("live blocker = (%q, %q)", liveDep, liveReason)
+				}
+				if hydratedDep != liveDep || hydratedReason != liveReason {
+					t.Fatalf("hydrated blocker = (%q, %q), live = (%q, %q)", hydratedDep, hydratedReason, liveDep, liveReason)
+				}
+			}
+		})
+	}
+}
+
 func TestJobOrchestratorDoesNotExecuteWithoutDurableRunningRow(t *testing.T) {
 	t.Parallel()
 	repo := newRecordingAutomationJobRunRepo()
@@ -626,6 +691,37 @@ func TestDependencyBlockerRequiresSuccessfulSameDayRun(t *testing.T) {
 	upstream.LastResult = "ok in 2s"
 	if dep, reason := orch.dependencyBlocker(consumer, now); dep != "" || reason != "" {
 		t.Fatalf("successful blocker = (%q, %q), want none", dep, reason)
+	}
+}
+
+func TestMarketDependencyCycleCheckMatchesHydratedState(t *testing.T) {
+	t.Parallel()
+
+	completedAt := time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime)
+	now := time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime)
+	newOrchestrator := func(repo AutomationJobRunRepository) *JobOrchestrator {
+		orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+		orch.Register("current_data_refresh", "upstream", currentDataRefreshSpec, func(context.Context) error { return nil })
+		orch.Register("hot_scan", "consumer", hotScanSpec, func(context.Context) error { return nil }, "current_data_refresh")
+		return orch
+	}
+
+	inMemory := newOrchestrator(nil)
+	upstream := inMemory.jobs["current_data_refresh"]
+	upstream.mu.Lock()
+	upstream.LastRun = &completedAt
+	upstream.LastResult = "ok"
+	upstream.mu.Unlock()
+	inMemoryDep, inMemoryReason := inMemory.dependencyBlocker(inMemory.jobs["hot_scan"], now)
+
+	repo := newRecordingAutomationJobRunRepo()
+	repo.summaries = []pgrepo.JobRunSummary{{JobName: "current_data_refresh", LastRun: &completedAt, LastResult: "ok", RunCount: 1}}
+	hydrated := newOrchestrator(repo)
+	hydrated.hydrateFromDB()
+	hydratedDep, hydratedReason := hydrated.dependencyBlocker(hydrated.jobs["hot_scan"], now)
+
+	if hydratedDep != inMemoryDep || hydratedReason != inMemoryReason || hydratedDep != "" {
+		t.Fatalf("hydrated blocker = (%q, %q), in-memory = (%q, %q)", hydratedDep, hydratedReason, inMemoryDep, inMemoryReason)
 	}
 }
 

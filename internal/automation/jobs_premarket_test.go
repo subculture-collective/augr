@@ -3,12 +3,15 @@ package automation
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/data/polygon"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 	"github.com/google/uuid"
 )
 
@@ -83,6 +86,43 @@ func TestGapScannerFailsWhenProvidersAreNotConfigured(t *testing.T) {
 	orch := NewJobOrchestrator(OrchestratorDeps{})
 	if err := orch.gapScanner(context.Background()); err == nil || !strings.Contains(err.Error(), "providers are required") {
 		t.Fatalf("gapScanner() error = %v, want missing providers", err)
+	}
+}
+
+func TestGapScannerRegistrationRequiresEnabledPolygonBulkSnapshots(t *testing.T) {
+	t.Parallel()
+
+	client := polygon.NewClient("test-key", nil)
+	univ := universe.NewUniverse(nil, client, nil)
+	tests := []struct {
+		name          string
+		deps          OrchestratorDeps
+		wantGap       bool
+		wantDiscovery bool
+		wantDeps      []string
+	}{
+		{name: "disabled with client", deps: OrchestratorDeps{Polygon: client}},
+		{name: "enabled without client", deps: OrchestratorDeps{PolygonBulkSnapshotsEnabled: true}},
+		{name: "enabled without universe", deps: OrchestratorDeps{Polygon: client, PolygonBulkSnapshotsEnabled: true}},
+		{name: "universe without bulk snapshots", deps: OrchestratorDeps{Universe: univ, Polygon: client}, wantDiscovery: true},
+		{name: "enabled with all dependencies", deps: OrchestratorDeps{Universe: univ, Polygon: client, PolygonBulkSnapshotsEnabled: true}, wantGap: true, wantDiscovery: true, wantDeps: []string{"gap_scanner"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			orch := NewJobOrchestrator(test.deps)
+			orch.registerPreMarketJobs()
+			_, gotGap := orch.jobs["gap_scanner"]
+			if gotGap != test.wantGap {
+				t.Fatalf("gap_scanner registered = %t, want %t", gotGap, test.wantGap)
+			}
+			discoveryJob := orch.jobs["discovery_run"]
+			if (discoveryJob != nil) != test.wantDiscovery {
+				t.Fatalf("discovery_run registered = %t, want %t", discoveryJob != nil, test.wantDiscovery)
+			}
+			if discoveryJob != nil && !reflect.DeepEqual(discoveryJob.DependsOn, test.wantDeps) {
+				t.Fatalf("discovery_run dependencies = %#v, want %#v", discoveryJob.DependsOn, test.wantDeps)
+			}
+		})
 	}
 }
 

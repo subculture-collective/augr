@@ -208,7 +208,7 @@ func (r *JobRunRepo) Summaries(ctx context.Context) ([]JobRunSummary, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT
 			job_name,
-			MAX(started_at) AS last_run,
+			MAX(COALESCE(completed_at, started_at)) AS last_run,
 			COUNT(*) AS run_count,
 			COUNT(*) FILTER (WHERE status = 'error') AS error_count
 		 FROM automation_job_runs
@@ -241,7 +241,9 @@ func (r *JobRunRepo) Summaries(ctx context.Context) ([]JobRunSummary, error) {
 		err := r.pool.QueryRow(ctx,
 			`SELECT status, error, last_error_at, consecutive_failures
 			 FROM automation_job_runs
-			 WHERE job_name = $1 ORDER BY started_at DESC LIMIT 1`,
+			 WHERE job_name = $1
+			 ORDER BY COALESCE(completed_at, started_at) DESC, started_at DESC
+			 LIMIT 1`,
 			s.JobName,
 		).Scan(&status, &errStr, &lastErrAt, &consecutiveFailures)
 		if err == nil {

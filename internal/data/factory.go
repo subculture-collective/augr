@@ -51,6 +51,7 @@ func NewProviderRegistry() *ProviderRegistry {
 type DataService struct {
 	selection       SelectionPolicy
 	stockChain      DataProvider
+	stockOHLCVChain DataProvider
 	cryptoChain     DataProvider
 	polymarketChain DataProvider
 	kalshiChain     DataProvider
@@ -83,6 +84,7 @@ func NewDataService(cfg config.Config, reg *ProviderRegistry, cacheRepo reposito
 	return &DataService{
 		selection:       selection,
 		stockChain:      NewProviderChain(logger, chains.Stock...),
+		stockOHLCVChain: NewProviderChain(logger, chains.StockOHLCV...),
 		cryptoChain:     NewProviderChain(logger, chains.Crypto...),
 		polymarketChain: NewProviderChain(logger, chains.Polymarket...),
 		kalshiChain:     NewProviderChain(logger, chains.Kalshi...),
@@ -99,7 +101,7 @@ func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType
 	fromUTC := from.UTC()
 	toUTC := to.UTC()
 
-	_, chain, err := s.resolveChain(marketType)
+	_, chain, err := s.resolveOHLCVChain(marketType)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +269,7 @@ func (s *DataService) DownloadHistoricalOHLCVWithStats(
 		return nil, fmt.Errorf("data: invalid historical range %s > %s", fromUTC, toUTC)
 	}
 
-	providerName, chain, err := s.resolveChain(marketType)
+	providerName, chain, err := s.resolveOHLCVChain(marketType)
 	if err != nil {
 		return nil, err
 	}
@@ -573,6 +575,17 @@ func (s *DataService) ListHistoricalOHLCV(
 
 func (s *DataService) resolveChain(marketType domain.MarketType) (string, DataProvider, error) {
 	return s.selection.ResolveMarketChain(marketType, s.stockChain, s.cryptoChain, s.polymarketChain, s.kalshiChain)
+}
+
+func (s *DataService) resolveOHLCVChain(marketType domain.MarketType) (string, DataProvider, error) {
+	if normalizeMarketType(marketType) == domain.MarketTypeStock {
+		chain := s.stockOHLCVChain
+		if chain == nil {
+			chain = s.stockChain
+		}
+		return cacheProviderStockChain, chain, nil
+	}
+	return s.resolveChain(marketType)
 }
 
 func (s *DataService) loadCachedOHLCV(ctx context.Context, key repository.MarketDataCacheKey) ([]domain.OHLCV, bool) {

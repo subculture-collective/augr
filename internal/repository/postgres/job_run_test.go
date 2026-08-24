@@ -141,6 +141,13 @@ func TestJobRunLifecycleIntegration(t *testing.T) {
 	if len(stored) != 1 || stored[0].ID != run.ID || stored[0].Status != "ok" || stored[0].CompletedAt == nil || stored[0].Result["items"] != 3 {
 		t.Fatalf("completed row = %+v", stored)
 	}
+	summaries, err := repo.Summaries(ctx)
+	if err != nil {
+		t.Fatalf("Summaries() error = %v", err)
+	}
+	if len(summaries) != 1 || summaries[0].LastRun == nil || !summaries[0].LastRun.Equal(completed) || summaries[0].LastResult != "ok" {
+		t.Fatalf("completed summary = %+v, want terminal time %v", summaries, completed)
+	}
 
 	orphan := &JobRun{JobName: "orphaned_job", Status: "running", StartedAt: started}
 	if err := repo.Create(ctx, orphan); err != nil {
@@ -160,6 +167,22 @@ func TestJobRunLifecycleIntegration(t *testing.T) {
 	}
 	if len(orphans) != 1 || orphans[0].Status != "error" || orphans[0].CompletedAt == nil || orphans[0].Error != "process restarted" || orphans[0].ConsecutiveFailures != 1 {
 		t.Fatalf("recovered row = %+v", orphans)
+	}
+	summaries, err = repo.Summaries(ctx)
+	if err != nil {
+		t.Fatalf("Summaries() after recovery error = %v", err)
+	}
+	foundOrphan := false
+	for _, summary := range summaries {
+		if summary.JobName == orphan.JobName {
+			foundOrphan = true
+			if summary.LastRun == nil || !summary.LastRun.Equal(recoveredAt) || summary.LastResult != "error" {
+				t.Fatalf("recovered summary = %+v, want terminal time %v", summary, recoveredAt)
+			}
+		}
+	}
+	if !foundOrphan {
+		t.Fatalf("Summaries() = %+v, missing %q", summaries, orphan.JobName)
 	}
 }
 

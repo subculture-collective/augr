@@ -76,6 +76,9 @@ func TestSelectionPolicyBuildProviderChainsAndCacheRouting(t *testing.T) {
 	if got, want := providerNames(t, chains.Stock), []string{"yahoo", "polygon", "finnhub", "fmp", "alpha", "newsapi"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("stock providers = %v, want %v", got, want)
 	}
+	if got, want := providerNames(t, chains.StockOHLCV), []string{"yahoo", "polygon"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stock OHLCV providers = %v, want %v", got, want)
+	}
 	if got, want := providerNames(t, chains.Crypto), []string{"binance"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("crypto providers = %v, want %v", got, want)
 	}

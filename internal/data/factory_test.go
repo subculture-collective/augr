@@ -854,6 +854,49 @@ func TestNewDataServiceSkipsProvidersWithoutAPIKeys(t *testing.T) {
 	}
 }
 
+func TestDataServiceStockOHLCVDoesNotCallExcludedProviders(t *testing.T) {
+	yahoo := &serviceStubProvider{name: "yahoo", ohlcvErr: errors.New("yahoo unavailable")}
+	polygon := &serviceStubProvider{name: "polygon", ohlcvErr: errors.New("polygon unavailable")}
+	finnhub := &serviceStubProvider{name: "finnhub", ohlcv: []domain.OHLCV{{Close: 1}}}
+	fmp := &serviceStubProvider{name: "fmp", ohlcv: []domain.OHLCV{{Close: 1}}}
+	alpha := &serviceStubProvider{name: "alpha", ohlcv: []domain.OHLCV{{Close: 1}}}
+	service := NewDataService(config.Config{DataProviders: config.DataProviderConfigs{
+		Polygon:      config.DataProviderConfig{APIKey: "polygon-key"},
+		Finnhub:      config.DataProviderConfig{APIKey: "finnhub-key"},
+		FMP:          config.DataProviderConfig{APIKey: "fmp-key"},
+		AlphaVantage: config.DataProviderConfig{APIKey: "alpha-key"},
+	}}, &ProviderRegistry{
+		Yahoo:        func(ProviderConfig) DataProvider { return yahoo },
+		Polygon:      func(ProviderConfig) DataProvider { return polygon },
+		Finnhub:      func(ProviderConfig) DataProvider { return finnhub },
+		FMP:          func(ProviderConfig) DataProvider { return fmp },
+		AlphaVantage: func(ProviderConfig) DataProvider { return alpha },
+	}, nil, discardLogger(), nil)
+
+	to := time.Now().UTC()
+	from := to.Add(-24 * time.Hour)
+	_, err := service.GetOHLCV(context.Background(), domain.MarketTypeStock, "AAPL", Timeframe1d, from, to)
+	if err == nil {
+		t.Fatal("GetOHLCV() error = nil, want Yahoo/Polygon failure")
+	}
+	if yahoo.ohlcvCalls != 1 || polygon.ohlcvCalls != 1 {
+		t.Fatalf("OHLCV provider calls Yahoo/Polygon = %d/%d, want 1/1", yahoo.ohlcvCalls, polygon.ohlcvCalls)
+	}
+	if finnhub.ohlcvCalls != 0 || fmp.ohlcvCalls != 0 || alpha.ohlcvCalls != 0 {
+		t.Fatalf("excluded OHLCV provider calls Finnhub/FMP/Alpha = %d/%d/%d, want 0/0/0", finnhub.ohlcvCalls, fmp.ohlcvCalls, alpha.ohlcvCalls)
+	}
+
+	polygon.ohlcvErr = nil
+	polygon.ohlcv = []domain.OHLCV{{Timestamp: from, Close: 1}}
+	service.historyRepo = newFakeHistoricalOHLCVRepo()
+	if _, err := service.DownloadHistoricalOHLCVWithStats(context.Background(), domain.MarketTypeStock, []string{"AAPL"}, Timeframe1d, from, to, false); err != nil {
+		t.Fatalf("DownloadHistoricalOHLCVWithStats() error = %v", err)
+	}
+	if finnhub.ohlcvCalls != 0 || fmp.ohlcvCalls != 0 || alpha.ohlcvCalls != 0 {
+		t.Fatalf("excluded historical OHLCV provider calls Finnhub/FMP/Alpha = %d/%d/%d, want 0/0/0", finnhub.ohlcvCalls, fmp.ohlcvCalls, alpha.ohlcvCalls)
+	}
+}
+
 func TestOHLCVCacheTimeframeStableAcrossNanoseconds(t *testing.T) {
 	t.Parallel()
 

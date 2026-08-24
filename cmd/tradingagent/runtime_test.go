@@ -432,6 +432,31 @@ func TestNewAPIServerWiresAlpacaReconcileAutomationJob(t *testing.T) {
 	}
 }
 
+func TestRuntimeShouldInitializeUniverseRequiresPolygonKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		cfg  config.Config
+		want bool
+	}{
+		{name: "neither"},
+		{name: "ticker discovery without key", cfg: config.Config{Features: config.FeatureFlags{EnableTickerDiscovery: true}}},
+		{name: "bulk snapshots without key", cfg: config.Config{DataProviders: config.DataProviderConfigs{PolygonBulkSnapshotsEnabled: true}}},
+		{name: "key without capability", cfg: config.Config{DataProviders: config.DataProviderConfigs{Polygon: config.DataProviderConfig{APIKey: "polygon-key"}}}, want: true},
+		{name: "ticker discovery", cfg: config.Config{Features: config.FeatureFlags{EnableTickerDiscovery: true}, DataProviders: config.DataProviderConfigs{Polygon: config.DataProviderConfig{APIKey: "polygon-key"}}}, want: true},
+		{name: "bulk snapshots", cfg: config.Config{DataProviders: config.DataProviderConfigs{Polygon: config.DataProviderConfig{APIKey: "polygon-key"}, PolygonBulkSnapshotsEnabled: true}}, want: true},
+		{name: "both", cfg: config.Config{Features: config.FeatureFlags{EnableTickerDiscovery: true}, DataProviders: config.DataProviderConfigs{Polygon: config.DataProviderConfig{APIKey: "polygon-key"}, PolygonBulkSnapshotsEnabled: true}}, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := runtimeShouldInitializeUniverse(test.cfg); got != test.want {
+				t.Fatalf("runtimeShouldInitializeUniverse() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNewAPIServerWiresPolymarketReconcileAutomationJob(t *testing.T) {
 	origNewDB := runtimeNewDB
 	origCurrentSchemaVersion := runtimeCurrentSchemaVersion

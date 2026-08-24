@@ -34,6 +34,7 @@ type SelectionPolicy struct{}
 // service chains.
 type ProviderChains struct {
 	Stock      []DataProvider
+	StockOHLCV []DataProvider
 	Crypto     []DataProvider
 	Polymarket []DataProvider
 	Kalshi     []DataProvider
@@ -70,6 +71,7 @@ func (SelectionPolicy) BuildProviderChains(cfg config.Config, reg *ProviderRegis
 
 	chains := ProviderChains{
 		Stock:      make([]DataProvider, 0, 6),
+		StockOHLCV: make([]DataProvider, 0, 2),
 		Crypto:     make([]DataProvider, 0, 1),
 		Polymarket: make([]DataProvider, 0, 1),
 		Kalshi:     make([]DataProvider, 0, 1),
@@ -77,10 +79,14 @@ func (SelectionPolicy) BuildProviderChains(cfg config.Config, reg *ProviderRegis
 	}
 
 	if reg.Yahoo != nil {
-		chains.Stock = append(chains.Stock, reg.Yahoo(ProviderConfig{Logger: logger}))
+		provider := reg.Yahoo(ProviderConfig{Logger: logger})
+		chains.Stock = append(chains.Stock, provider)
+		chains.StockOHLCV = append(chains.StockOHLCV, provider)
 	}
 	if apiKey := strings.TrimSpace(cfg.DataProviders.Polygon.APIKey); apiKey != "" && reg.Polygon != nil {
-		chains.Stock = append(chains.Stock, reg.Polygon(ProviderConfig{APIKey: apiKey, Logger: logger}))
+		provider := reg.Polygon(ProviderConfig{APIKey: apiKey, Logger: logger})
+		chains.Stock = append(chains.Stock, provider)
+		chains.StockOHLCV = append(chains.StockOHLCV, provider)
 	}
 	if apiKey := strings.TrimSpace(cfg.DataProviders.Finnhub.APIKey); apiKey != "" && reg.Finnhub != nil {
 		chains.Stock = append(chains.Stock, reg.Finnhub(ProviderConfig{APIKey: apiKey, RateLimitPerMinute: cfg.DataProviders.Finnhub.RateLimitPerMinute, Logger: logger}))

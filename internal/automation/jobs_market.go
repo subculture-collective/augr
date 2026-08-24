@@ -20,19 +20,19 @@ import (
 var (
 	currentDataRefreshSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,
-		Cron:         "*/15 * * * 1-5",
+		Cron:         "30 * * * 1-5", // opening refresh at 9:30 AM ET, then hourly
 		SkipWeekends: true,
 		SkipHolidays: true,
 	}
 	hotScanSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,
-		Cron:         "5-59/15 * * * 1-5", // five minutes after current_data_refresh
+		Cron:         "0 * * * 1-5", // hourly after the preceding :30 refresh
 		SkipWeekends: true,
 		SkipHolidays: true,
 	}
 	deepScanSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,
-		Cron:         "10 * * * 1-5", // after the :05 hot scan
+		Cron:         "25 * * * 1-5", // after the current hour's hot scan
 		SkipWeekends: true,
 		SkipHolidays: true,
 	}

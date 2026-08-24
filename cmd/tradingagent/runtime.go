@@ -738,7 +738,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			}
 		}
 
-		if cfg.Features.EnableTickerDiscovery && strings.TrimSpace(cfg.DataProviders.Polygon.APIKey) != "" {
+		if runtimeShouldInitializeUniverse(cfg) {
 			polygonClient := polygon.NewClient(cfg.DataProviders.Polygon.APIKey, logger, polygonLimiter)
 			universeRepo := pgrepo.NewUniverseRepo(db.Pool)
 			deps.Universe = universe.NewUniverse(universeRepo, polygonClient, logger)
@@ -812,14 +812,15 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					PaperBroker:            strategyRunner.localPaperBroker,
 				})
 				orch := automation.NewJobOrchestrator(automation.OrchestratorDeps{
-					Universe:         deps.Universe,
-					Polygon:          polygonClientForAuto,
-					DataService:      dataService,
-					AlpacaReconciler: alpacaReconciler,
-					OptionsProvider:  deps.OptionsProvider,
-					LLMProvider:      deps.LLMProvider,
-					LLMQuickModel:    cfg.LLM.QuickThinkModel,
-					GeneratorMetrics: appMetrics,
+					Universe:                    deps.Universe,
+					Polygon:                     polygonClientForAuto,
+					PolygonBulkSnapshotsEnabled: cfg.DataProviders.PolygonBulkSnapshotsEnabled,
+					DataService:                 dataService,
+					AlpacaReconciler:            alpacaReconciler,
+					OptionsProvider:             deps.OptionsProvider,
+					LLMProvider:                 deps.LLMProvider,
+					LLMQuickModel:               cfg.LLM.QuickThinkModel,
+					GeneratorMetrics:            appMetrics,
 					TickerDiscovery: automation.TickerDiscoveryJobConfig{
 						Enabled:    cfg.Features.EnableTickerDiscovery,
 						Cron:       cfg.TickerDiscovery.Cron,
@@ -1074,6 +1075,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		closeKalshiProjectionDB()
 		runtimeCloseDB(db)
 	}, nil
+}
+
+func runtimeShouldInitializeUniverse(cfg config.Config) bool {
+	return strings.TrimSpace(cfg.DataProviders.Polygon.APIKey) != ""
 }
 
 func polymarketL2Configured(pm config.PolymarketConfig) bool {

@@ -78,33 +78,34 @@ type TickerDiscoveryJobConfig struct {
 
 // OrchestratorDeps bundles external dependencies required by the orchestrator.
 type OrchestratorDeps struct {
-	Universe               *universe.Universe
-	Polygon                *polygon.Client
-	DataService            *data.DataService
-	AlpacaReconciler       *AlpacaReconciler
-	OptionsProvider        data.OptionsDataProvider
-	LLMProvider            llm.Provider
-	LLMQuickModel          string
-	GeneratorMetrics       discovery.GeneratorMetrics
-	TickerDiscovery        TickerDiscoveryJobConfig
-	EmbeddingProvider      embedding.Provider // optional; nil = skip embedding during triage
-	EventsProvider         data.EventsProvider
-	StrategyRepo           repository.StrategyRepository
-	PositionRepo           repository.PositionRepository
-	OrderRepo              repository.OrderRepository
-	TradeRepo              repository.TradeRepository
-	OptionSettlementRepo   repository.OptionSettlementRepository
-	OpportunityRepo        repository.OpportunityRepository
-	AllocationDecisionRepo repository.AllocationDecisionRepository
-	RunRepo                repository.PipelineRunRepository
-	JobRunRepo             AutomationJobRunRepository
-	JobControlRepo         repository.AutomationJobControlRepository
-	OptionsScanRepo        *pgrepo.OptionsScanRepo
-	NewsFeedRepo           *pgrepo.NewsFeedRepo
-	StrategyTrigger        StrategyTrigger                        // optional; nil = no event-driven triggers
-	PolymarketAccountRepo  repository.PolymarketAccountRepository // optional; nil = skip profiling job
-	PolymarketReconciler   *polymarketexecution.Reconciler        // optional; nil = skip reconciliation job
-	PredictionSettler      interface {
+	Universe                    *universe.Universe
+	Polygon                     *polygon.Client
+	PolygonBulkSnapshotsEnabled bool
+	DataService                 *data.DataService
+	AlpacaReconciler            *AlpacaReconciler
+	OptionsProvider             data.OptionsDataProvider
+	LLMProvider                 llm.Provider
+	LLMQuickModel               string
+	GeneratorMetrics            discovery.GeneratorMetrics
+	TickerDiscovery             TickerDiscoveryJobConfig
+	EmbeddingProvider           embedding.Provider // optional; nil = skip embedding during triage
+	EventsProvider              data.EventsProvider
+	StrategyRepo                repository.StrategyRepository
+	PositionRepo                repository.PositionRepository
+	OrderRepo                   repository.OrderRepository
+	TradeRepo                   repository.TradeRepository
+	OptionSettlementRepo        repository.OptionSettlementRepository
+	OpportunityRepo             repository.OpportunityRepository
+	AllocationDecisionRepo      repository.AllocationDecisionRepository
+	RunRepo                     repository.PipelineRunRepository
+	JobRunRepo                  AutomationJobRunRepository
+	JobControlRepo              repository.AutomationJobControlRepository
+	OptionsScanRepo             *pgrepo.OptionsScanRepo
+	NewsFeedRepo                *pgrepo.NewsFeedRepo
+	StrategyTrigger             StrategyTrigger                        // optional; nil = no event-driven triggers
+	PolymarketAccountRepo       repository.PolymarketAccountRepository // optional; nil = skip profiling job
+	PolymarketReconciler        *polymarketexecution.Reconciler        // optional; nil = skip reconciliation job
+	PredictionSettler           interface {
 		PendingMarkets(context.Context, domain.MarketType) ([]string, error)
 		SettlePreview(context.Context, domain.MarketType, string) (*prediction.SettlementPreview, error)
 		PreviewMarket(context.Context, domain.MarketType, string) (int, error)
@@ -244,6 +245,13 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 		logger: logger,
 		now:    time.Now,
 	}
+}
+
+func (o *JobOrchestrator) currentTime() time.Time {
+	if o.now != nil {
+		return o.now()
+	}
+	return time.Now()
 }
 
 func (o *JobOrchestrator) jobContext() (context.Context, context.CancelFunc) {
@@ -435,14 +443,11 @@ func (o *JobOrchestrator) RunJob(ctx context.Context, name string) error {
 	if !enabled {
 		return fmt.Errorf("automation: job %q is disabled", name)
 	}
-	now := time.Now()
-	if o.now != nil {
-		now = o.now()
-	}
+	now := o.currentTime()
 	if !schedule.ShouldFire(now) {
 		return fmt.Errorf("automation: job %q is outside configured session (%s)", name, schedule.Describe())
 	}
-	startedAt := time.Now()
+	startedAt := now
 	if err := claimManualJob(job, startedAt); err != nil {
 		return err
 	}
@@ -453,7 +458,7 @@ func (o *JobOrchestrator) RunJob(ctx context.Context, name string) error {
 
 // runDirect runs a job immediately without checking ShouldFire (for manual triggers).
 func (o *JobOrchestrator) runDirect(job *RegisteredJob) {
-	startedAt := time.Now()
+	startedAt := o.currentTime()
 	if err := claimManualJob(job, startedAt); err != nil {
 		o.logger.Info("automation: manual run not admitted", slog.String("job", job.Name), slog.Any("error", err))
 		return
@@ -491,7 +496,7 @@ func (o *JobOrchestrator) runClaimedDirect(job *RegisteredJob, startedAt time.Ti
 	}()
 	run, beginErr := o.beginRun(job, startedAt)
 	if beginErr != nil {
-		now := time.Now()
+		now := o.currentTime()
 		_ = o.applyRunPersistenceFailure(job, now, beginErr)
 		o.logger.Error("automation: failed to persist running job", slog.String("job", job.Name), slog.Any("error", beginErr))
 		return
@@ -505,14 +510,14 @@ func (o *JobOrchestrator) runClaimedDirect(job *RegisteredJob, startedAt time.Ti
 	elapsed := time.Since(start)
 
 	job.mu.Lock()
-	now := time.Now()
-	job.LastRun = &now
+	completedAt := o.currentTime()
+	job.LastRun = &completedAt
 	job.RunCount++
 	if err != nil {
 		job.ErrorCount++
 		job.LastResult = "failed"
 		job.LastError = err.Error()
-		job.LastErrorAt = &now
+		job.LastErrorAt = &completedAt
 		job.ConsecutiveFailures++
 		o.logger.Error("automation: job failed", slog.String("job", job.Name), slog.Duration("elapsed", elapsed), slog.Any("error", err))
 		if o.metrics != nil {
@@ -533,10 +538,10 @@ func (o *JobOrchestrator) runClaimedDirect(job *RegisteredJob, startedAt time.Ti
 	}
 	job.mu.Unlock()
 
-	if persistErr := o.completeRun(run, job, time.Now(), elapsed, err); persistErr != nil {
+	if persistErr := o.completeRun(run, job, completedAt, elapsed, err); persistErr != nil {
 		o.logger.Error("automation: failed to persist job run", slog.String("job", job.Name), slog.Any("error", persistErr))
 		if err == nil {
-			_ = o.applyRunPersistenceFailure(job, now, persistErr)
+			_ = o.applyRunPersistenceFailure(job, completedAt, persistErr)
 		}
 	}
 }
@@ -616,7 +621,7 @@ func settlementGateStatusFromState(state *domain.KalshiSettlementGateState) *Set
 
 // wrapAndRun is the common wrapper that checks preconditions and runs the job.
 func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
-	now := time.Now()
+	now := o.currentTime()
 
 	job.mu.Lock()
 	if !job.Enabled {
@@ -632,7 +637,7 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 		o.logger.Warn("automation: skipping overlapping run", slog.String("job", job.Name))
 		return
 	}
-	startedAt := time.Now()
+	startedAt := now
 	job.Running = true
 	job.StartedAt = &startedAt
 	job.mu.Unlock()
@@ -650,7 +655,7 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 	}()
 	run, beginErr := o.beginRun(job, startedAt)
 	if beginErr != nil {
-		_ = o.applyRunPersistenceFailure(job, time.Now(), beginErr)
+		_ = o.applyRunPersistenceFailure(job, o.currentTime(), beginErr)
 		o.logger.Error("automation: failed to persist running job", slog.String("job", job.Name), slog.Any("error", beginErr))
 		return
 	}
@@ -663,14 +668,15 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 	err := invokeAutomationJob(ctx, job.Fn)
 
 	elapsed := time.Since(start)
+	completedAt := o.currentTime()
 
 	job.mu.Lock()
-	job.LastRun = &now
+	job.LastRun = &completedAt
 	job.RunCount++
 	if err != nil {
 		job.ErrorCount++
 		job.LastError = err.Error()
-		job.LastErrorAt = &now
+		job.LastErrorAt = &completedAt
 		job.ConsecutiveFailures++
 		job.LastResult = fmt.Sprintf("error after %s", elapsed.Truncate(time.Millisecond))
 		if o.metrics != nil {
@@ -690,10 +696,10 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 	}
 	job.mu.Unlock()
 
-	if persistErr := o.completeRun(run, job, time.Now(), elapsed, err); persistErr != nil {
+	if persistErr := o.completeRun(run, job, completedAt, elapsed, err); persistErr != nil {
 		o.logger.Error("automation: failed to persist job run", slog.String("job", job.Name), slog.Any("error", persistErr))
 		if err == nil {
-			err = o.applyRunPersistenceFailure(job, now, persistErr)
+			err = o.applyRunPersistenceFailure(job, completedAt, persistErr)
 		}
 	}
 
@@ -735,9 +741,27 @@ func (o *JobOrchestrator) dependencyBlocker(job *RegisteredJob, now time.Time) (
 			return dep, "latest run is from a prior automation day"
 		case !successfulJobResult(lastResult):
 			return dep, "latest run was not successful"
+		case marketPipelineCycleStart(job.Name, now).After(*lastRun):
+			return dep, "latest successful run is from a prior hourly cycle"
 		}
 	}
 	return "", ""
+}
+
+func marketPipelineCycleStart(jobName string, now time.Time) time.Time {
+	nowET := now.In(easternTime)
+	hour := nowET.Truncate(time.Hour)
+	switch jobName {
+	case "hot_scan":
+		if nowET.Minute() >= 30 {
+			return hour.Add(30 * time.Minute)
+		}
+		return hour.Add(-30 * time.Minute)
+	case "deep_scan":
+		return hour
+	default:
+		return time.Time{}
+	}
 }
 
 func successfulJobResult(result string) bool {
