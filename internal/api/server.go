@@ -28,6 +28,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 // Server is the HTTP REST API server that exposes all system functionality.
@@ -87,6 +88,7 @@ type Server struct {
 	settings          SettingsService
 	prompts           *PromptSettingsService
 	runner            StrategyRunner
+	runGroup          *runcontrol.Group
 
 	auth *AuthManager
 
@@ -132,11 +134,12 @@ type Server struct {
 	projectionAccountID *uuid.UUID
 
 	// Services — constructed from deps in NewServer.
-	backtestSvc     *service.BacktestService
+	backtestSvc     BacktestRunner
 	conversationSvc *service.ConversationService
 	runSvc          *service.RunService
 	researchSvc     service.ResearchScannerService
 	copyTrading     *copytrading.Service
+	copyRebalancer  CopyRebalancer
 }
 
 // StrategyRunResult captures the persisted artifacts created by a manual run.
@@ -150,6 +153,14 @@ type StrategyRunResult struct {
 // StrategyRunner triggers a strategy pipeline run on demand.
 type StrategyRunner interface {
 	RunStrategy(ctx context.Context, strategy domain.Strategy) (*StrategyRunResult, error)
+}
+
+type BacktestRunner interface {
+	RunBacktest(context.Context, uuid.UUID, string) (*domain.BacktestRun, error)
+}
+
+type CopyRebalancer interface {
+	Rebalance(context.Context, uuid.UUID) (*copytrading.RebalanceResult, error)
 }
 
 // MilestoneEvidenceSource loads an immutable, recursively revalidated
@@ -223,6 +234,7 @@ func DefaultServerConfig() ServerConfig {
 type Deps struct {
 	Strategies             repository.StrategyRepository
 	Runs                   repository.PipelineRunRepository
+	RunRegistry            service.RunCanceller
 	Decisions              repository.AgentDecisionRepository
 	OpportunityRepo        repository.OpportunityRepository
 	AllocationDecisionRepo repository.AllocationDecisionRepository
@@ -264,6 +276,7 @@ type Deps struct {
 	Settings               SettingsService
 	Prompts                *PromptSettingsService
 	Runner                 StrategyRunner
+	RunGroup               *runcontrol.Group
 	ResearchScanner        service.ResearchScannerService
 	CopyTrading            *copytrading.Service
 	DBHealth               HealthCheck
@@ -408,10 +421,12 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		settings:              settingsService,
 		prompts:               promptService,
 		runner:                deps.Runner,
+		runGroup:              deps.RunGroup,
 		auth:                  authManager,
 		hub:                   hub,
 		researchSvc:           deps.ResearchScanner,
 		copyTrading:           deps.CopyTrading,
+		copyRebalancer:        deps.CopyTrading,
 		wsUpgrader:            newUpgrader(cfg.CORSConfig.AllowedOrigins),
 		metricsHandler:        deps.MetricsHandler,
 		signalStore:           deps.SignalStore,
@@ -441,7 +456,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		deps.Conversations, deps.Decisions, deps.Snapshots, deps.Memories,
 		deps.LLMProvider, logger,
 	)
-	s.runSvc = service.NewRunService(deps.Runs)
+	s.runSvc = service.NewRunService(deps.Runs, deps.RunRegistry)
 
 	r := chi.NewRouter()
 

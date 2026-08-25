@@ -3,8 +3,10 @@ package trader
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -199,6 +201,35 @@ func (t *Trader) Trade(ctx context.Context, input agent.TradingInput) (agent.Tra
 	storedOutput := content
 	var tradingPlan agent.TradingPlan
 	plan, parseErr := ParseTradingPlan(content)
+	if isNumericEntryTypeError(parseErr) {
+		messages = append(messages,
+			llm.Message{Role: "assistant", Content: content},
+			llm.Message{Role: "user", Content: "The previous response used a numeric value for entry_type, which is invalid. Return the complete JSON object again with entry_type as the string \"market\" or \"limit\". Do not infer or coerce the numeric value. Return JSON only."},
+		)
+		correctionPromptText := agent.PromptTextFromMessages(messages)
+		correctedResp, correctionErr := t.provider.Complete(ctx, llm.CompletionRequest{
+			Model:          t.model,
+			Messages:       messages,
+			ResponseFormat: &llm.ResponseFormat{Type: llm.ResponseFormatJSONObject},
+		})
+		switch {
+		case correctionErr != nil:
+			plan = nil
+			parseErr = fmt.Errorf("entry_type correction completion failed: %w", correctionErr)
+		case correctedResp == nil:
+			plan = nil
+			parseErr = errors.New("entry_type correction completion returned nil response")
+		case strings.TrimSpace(correctedResp.Content) == "":
+			plan = nil
+			parseErr = errors.New("entry_type correction completion returned empty response")
+		default:
+			resp = correctedResp
+			promptText = correctionPromptText
+			content = correctedResp.Content
+			storedOutput = content
+			plan, parseErr = ParseTradingPlan(content)
+		}
+	}
 	structured := agent.BuildDecisionIntegrityEnvelope("trading_plan/v1", plan, parseErr, parseErr == nil, parseErr != nil)
 	if parseErr != nil {
 		t.logger.Warn("trader: failed to parse structured output; storing default hold plan",
@@ -250,6 +281,14 @@ func (t *Trader) Trade(ctx context.Context, input agent.TradingInput) (agent.Tra
 		return output, fmt.Errorf("trader (trading): invalid structured output: %w", parseErr)
 	}
 	return output, nil
+}
+
+func isNumericEntryTypeError(err error) bool {
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr) &&
+		typeErr.Field == "entry_type" &&
+		typeErr.Value == "number" &&
+		typeErr.Type == reflect.TypeOf("")
 }
 
 // buildUserPromptFromInput constructs the user message from a TradingInput,

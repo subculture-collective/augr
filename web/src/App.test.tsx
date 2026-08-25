@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import App from '@/App'
 import { setTokenSnapshot } from '@/shared/auth/tokenStore'
-import { buildAuthResponse, buildOrder, buildPortfolioSummary, buildPosition, buildRiskStatus, buildRun, buildStrategy, fixtureDate } from '@/test/fixtures'
+import { buildAutomationJobStatus, buildAuthResponse, buildOrder, buildPortfolioSummary, buildPosition, buildRiskStatus, buildRun, buildStrategy, fixtureDate } from '@/test/fixtures'
 import { apiBaseUrl, FakeWebSocket, installAppTestHarness, resetApp, server, state, strategyId } from '@/test/app-harness'
 
 describe('first vertical slice app', () => {
@@ -47,6 +47,33 @@ describe('first vertical slice app', () => {
     expect(screen.getByText(/"scanned": 12/i)).toBeTruthy()
     expect(await screen.findByRole('table', { name: /automation run history/i })).toBeTruthy()
     expect(screen.getAllByText('completed').length).toBeGreaterThan(0)
+  })
+
+  it('separates daily review findings from review job success', async () => {
+    resetApp('/automation/daily_review')
+    setTokenSnapshot(buildAuthResponse())
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([
+        buildAutomationJobStatus({
+          name: 'daily_review',
+          description: 'Review daily pipeline completion and decision quality',
+          last_result: 'ok in 12.345ms',
+          last_summary: { runs: 120, completed: 116, failed: 4, running: 0, cancelled: 0, completed_without_signal: 2, query_errors: 0 },
+          error_count: 0,
+          consecutive_failures: 0,
+        }),
+      ])),
+    )
+    render(<App />)
+
+    const findings = (await screen.findByRole('heading', { name: /review findings/i })).closest('section') as HTMLElement
+    expect(within(findings).getByText(/operationally successful/i)).toHaveClass('completed')
+    const failedFinding = within(findings).getByText('Failed findings').closest('.nested-panel') as HTMLElement
+    expect(within(failedFinding).getByText('4')).toBeTruthy()
+    expect(within(findings).getByText(/do not mean the daily review job failed/i)).toBeTruthy()
+    expect(within(findings).getByText(/current operational history starts at cutover/i)).toHaveTextContent('c7a4c45cded9')
+    expect(within(findings).queryByText(/"failed": 4/i)).toBeNull()
+    expect(screen.queryByText(/^failing$/i)).toBeNull()
   })
 
   it('renders unsafe-looking event text as escaped content', async () => {
@@ -528,6 +555,8 @@ describe('first vertical slice app', () => {
     expect(await screen.findByRole('table', { name: /allocator opportunities/i })).toBeTruthy()
     expect(await screen.findByRole('table', { name: /allocator decisions/i })).toBeTruthy()
     expect(screen.getByText(/account_balance_unavailable/i)).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /all-time legacy pipeline statuses/i })).toBeTruthy()
+    expect(screen.getByText(/global, unscoped counts/i)).toHaveTextContent(/selected account or the current day/i)
     expect(screen.getAllByRole('link', { name: /Strategy/i })[0]).toHaveAttribute('href', '/strategies/00000000-0000-4000-8000-000000000010?from=%2Fportfolio%3Ftab%3Dallocator')
     expect(screen.getAllByRole('link', { name: /Run/i }).some((link) => link.getAttribute('href') === '/runs/00000000-0000-4000-8000-000000000020?from=%2Fportfolio%3Ftab%3Dallocator')).toBe(true)
   })

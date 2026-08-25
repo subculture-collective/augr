@@ -173,6 +173,9 @@ func TestPipelineEventTypesCoverUserVisibleTransitions(t *testing.T) {
 	if got := agent.AgentEventKindPipelineFailed.String(); got != "pipeline_failed" {
 		t.Fatalf("AgentEventKindPipelineFailed.String() = %q, want %q", got, "pipeline_failed")
 	}
+	if got := agent.AgentEventKindPipelineCancelled.String(); got != "pipeline_cancelled" {
+		t.Fatalf("AgentEventKindPipelineCancelled.String() = %q", got)
+	}
 
 	if string(event.Payload) != string(finalSignalPayload) {
 		t.Fatalf("Payload = %s, want %s", event.Payload, finalSignalPayload)

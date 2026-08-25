@@ -18,10 +18,14 @@ type lifecycleRepo struct {
 	startOnce   sync.Once
 }
 
-func (r *lifecycleRepo) InsertTicks(_ context.Context, ticks []domain.PolymarketTick) error {
+func (r *lifecycleRepo) InsertTicks(ctx context.Context, ticks []domain.PolymarketTick) error {
 	r.signalStart()
 	if r.blockInsert != nil {
-		<-r.blockInsert
+		select {
+		case <-r.blockInsert:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -29,10 +33,14 @@ func (r *lifecycleRepo) InsertTicks(_ context.Context, ticks []domain.Polymarket
 	return nil
 }
 
-func (r *lifecycleRepo) InsertBookSnapshots(_ context.Context, snaps []domain.PolymarketBookSnapshot) error {
+func (r *lifecycleRepo) InsertBookSnapshots(ctx context.Context, snaps []domain.PolymarketBookSnapshot) error {
 	r.signalStart()
 	if r.blockInsert != nil {
-		<-r.blockInsert
+		select {
+		case <-r.blockInsert:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -93,7 +101,7 @@ func (m *lifecycleMetrics) IncDropped(kind string, n int) {
 func TestPolymarketLifecycleFlushesOnBatchSize(t *testing.T) {
 	repo := &lifecycleRepo{}
 	metrics := &lifecycleMetrics{}
-	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 2, FlushInterval: time.Hour}, metrics)
+	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 2, FlushInterval: time.Hour}, nil, metrics)
 	l.Start()
 	defer l.Close()
 
@@ -114,7 +122,7 @@ func TestPolymarketLifecycleFlushesOnBatchSize(t *testing.T) {
 func TestPolymarketLifecycleFlushesOnInterval(t *testing.T) {
 	repo := &lifecycleRepo{}
 	metrics := &lifecycleMetrics{}
-	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 10, FlushInterval: 20 * time.Millisecond}, metrics)
+	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 10, FlushInterval: 20 * time.Millisecond}, nil, metrics)
 	l.Start()
 	defer l.Close()
 
@@ -130,7 +138,7 @@ func TestPolymarketLifecycleFlushesOnInterval(t *testing.T) {
 func TestPolymarketLifecycleFlushesOnShutdown(t *testing.T) {
 	repo := &lifecycleRepo{}
 	metrics := &lifecycleMetrics{}
-	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 10, FlushInterval: time.Hour}, metrics)
+	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 10, FlushInterval: time.Hour}, nil, metrics)
 	l.Start()
 
 	l.SubmitTick(domain.PolymarketTick{Slug: "btc", ReceivedAt: time.Now().UTC()})
@@ -148,7 +156,7 @@ func TestPolymarketLifecycleDropsWhenInputFull(t *testing.T) {
 	started := make(chan struct{})
 	repo := &lifecycleRepo{blockInsert: release, insertStart: started}
 	metrics := &lifecycleMetrics{}
-	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 1, FlushInterval: time.Hour}, metrics)
+	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 1, FlushInterval: time.Hour}, nil, metrics)
 	l.Start()
 	defer l.Close()
 	defer close(release)
@@ -182,7 +190,7 @@ func TestPolymarketLifecycleDropsWhenInputFull(t *testing.T) {
 func TestPolymarketLifecycleObservesLag(t *testing.T) {
 	repo := &lifecycleRepo{}
 	metrics := &lifecycleMetrics{}
-	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 10, FlushInterval: 20 * time.Millisecond}, metrics)
+	l := newPolymarketLifecycle(repo, RecorderConfig{BatchSize: 10, FlushInterval: 20 * time.Millisecond}, nil, metrics)
 	l.Start()
 	defer l.Close()
 

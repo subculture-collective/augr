@@ -90,8 +90,8 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 }
 
 func dailyReviewCompletionError(summary map[string]int) error {
-	findings := summary["query_errors"] + summary[domain.PipelineStatusFailed.String()] + summary[domain.PipelineStatusRunning.String()] + summary["completed_without_signal"]
-	if findings == 0 {
+	incompleteEvidence := summary["query_errors"] + summary[domain.PipelineStatusRunning.String()] + summary["completed_without_signal"]
+	if incompleteEvidence == 0 {
 		return nil
 	}
 	return fmt.Errorf("daily_review: incomplete daily runs: query_errors=%d failed=%d running=%d completed_without_signal=%d",

@@ -74,8 +74,11 @@ func (m *mockPipelineRunRepo) Count(_ context.Context, _ repository.PipelineRunF
 	return 0, nil
 }
 
-func (m *mockPipelineRunRepo) UpdateStatus(context.Context, uuid.UUID, time.Time, repository.PipelineRunStatusUpdate) error {
-	return nil
+func (m *mockPipelineRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
+}
+func (m *mockPipelineRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
 type mockDecisionRepo struct {

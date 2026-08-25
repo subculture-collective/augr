@@ -21,8 +21,10 @@ import (
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 func withNativeAuditDeps(runner *realStrategyRunner) *realStrategyRunner {
@@ -100,6 +102,30 @@ func TestRunStrategy_KalshiUsesNativePathBeforeLegacyOHLCV(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "kalshi native data used") {
 		t.Fatalf("RunStrategy() error = %v, want native market-data error", err)
+	}
+}
+
+func TestRunKalshiNativeFailureReturnsRecognizedCancellationWinner(t *testing.T) {
+	for _, cause := range []runcontrol.Cause{runcontrol.Operator, runcontrol.Shutdown, runcontrol.KillSwitch} {
+		cause := cause
+		t.Run(string(cause), func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			runRepo := &stubPipelineRunRepo{}
+			runner := &realStrategyRunner{
+				runRepo:   runRepo,
+				eventRepo: &recordingStrategyPreparationEventRepo{},
+				kalshiMarketData: cancelingKalshiMarketData{cancel: func() {
+					cancel(cause)
+				}},
+			}
+			result, err := runner.runKalshiNative(ctx, domain.Strategy{ID: uuid.New(), Ticker: "KXTEST", MarketType: domain.MarketTypeKalshi, IsPaper: true})
+			if !errors.Is(err, cause) || result == nil || result.Run.Status != domain.PipelineStatusCancelled {
+				t.Fatalf("runKalshiNative() = (%+v, %v), want persisted cancellation matching %v", result, err, cause)
+			}
+			if len(runRepo.updates) != 1 || runRepo.updates[0].Status != domain.PipelineStatusCancelled {
+				t.Fatalf("finalizations = %+v, want one cancelled winner", runRepo.updates)
+			}
+		})
 	}
 }
 
@@ -315,8 +341,9 @@ func TestRunStrategy_KalshiSafeHoldPath(t *testing.T) {
 	}
 	snapshotRepo := &recordingNativeSnapshotRepo{}
 	eventRepo := &recordingStrategyPreparationEventRepo{}
+	runRepo := &stubPipelineRunRepo{}
 	runner := &realStrategyRunner{
-		runRepo:      &stubPipelineRunRepo{},
+		runRepo:      runRepo,
 		eventRepo:    eventRepo,
 		snapshotRepo: snapshotRepo,
 		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{
@@ -340,9 +367,147 @@ func TestRunStrategy_KalshiSafeHoldPath(t *testing.T) {
 	if len(snapshotRepo.snapshots) != 1 || snapshotRepo.snapshots[0].DataType != "kalshi_native_snapshot" {
 		t.Fatalf("snapshots = %+v, want one kalshi_native_snapshot", snapshotRepo.snapshots)
 	}
-	if len(eventRepo.events) != 2 || eventRepo.events[0].EventKind != agent.AgentEventKindPipelineStarted.String() || eventRepo.events[1].EventKind != agent.AgentEventKindPipelineCompleted.String() {
-		t.Fatalf("events = %+v, want pipeline_started then pipeline_completed", eventRepo.events)
+	if len(eventRepo.events) != 1 || eventRepo.events[0].EventKind != agent.AgentEventKindPipelineStarted.String() || len(runRepo.updates) != 1 || runRepo.updates[0].Event.EventKind != agent.AgentEventKindPipelineCompleted.String() {
+		t.Fatalf("start events = %+v finalizations = %+v", eventRepo.events, runRepo.updates)
 	}
+}
+
+func TestRunStrategy_KalshiCancellationWinnerPreventsExecutionEffects(t *testing.T) {
+	strategy := domain.Strategy{
+		ID:         uuid.New(),
+		Name:       "kalshi cancellation race",
+		Ticker:     "KXTEST-YESNO",
+		MarketType: domain.MarketTypeKalshi,
+		Status:     domain.StrategyStatusActive,
+		IsPaper:    true,
+		Config:     mustKalshiConfig(t, map[string]any{"template": "microstructure", "direction": "YES", "confidence": 0.72, "entry_price_max": 0.60}),
+	}
+	winner := domain.PipelineRun{Status: domain.PipelineStatusCancelled, Signal: domain.PipelineSignalHold, ErrorMessage: "operator cancelled"}
+	runRepo := &stubPipelineRunRepo{receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
+	opportunities := &recordingOpportunityRepo{}
+	runner := &realStrategyRunner{
+		runRepo:         runRepo,
+		eventRepo:       &recordingStrategyPreparationEventRepo{},
+		snapshotRepo:    &recordingNativeSnapshotRepo{},
+		opportunityRepo: opportunities,
+		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{
+			Ticker: "KXTEST-YESNO", Title: "Will test happen?", Status: "active",
+			BestBidYes: 0.45, BestAskYes: 0.47, BestBidNo: 0.53, BestAskNo: 0.55,
+			Volume: 1500, CloseTime: time.Now().UTC().Add(24 * time.Hour), FetchedAt: time.Now().UTC(),
+		}},
+		logger: slogDiscardLogger(),
+	}
+
+	result, err := runner.RunStrategy(context.Background(), strategy)
+	if err == nil || !strings.Contains(err.Error(), "terminal finalization lost") {
+		t.Fatalf("RunStrategy() error = %v, want terminal-authority conflict", err)
+	}
+	if result == nil || result.Run.Status != domain.PipelineStatusCancelled || result.Signal != domain.PipelineSignalHold {
+		t.Fatalf("RunStrategy() result = %+v, want canonical cancellation winner", result)
+	}
+	if len(opportunities.queued) != 0 {
+		t.Fatalf("opportunities after cancellation = %+v", opportunities.queued)
+	}
+}
+
+func TestRunStrategy_KalshiCompletedWinnerLoserPreventsExecutionEffects(t *testing.T) {
+	strategy := domain.Strategy{
+		ID: uuid.New(), Name: "kalshi completed race", Ticker: "KXTEST-YESNO", MarketType: domain.MarketTypeKalshi,
+		Status: domain.StrategyStatusActive, IsPaper: true,
+		Config: mustKalshiConfig(t, map[string]any{"template": "microstructure", "direction": "YES", "confidence": 0.72, "entry_price_max": 0.60}),
+	}
+	winner := domain.PipelineRun{Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
+	runRepo := &stubPipelineRunRepo{receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
+	opportunities := &recordingOpportunityRepo{}
+	runner := &realStrategyRunner{
+		runRepo: runRepo, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: &recordingNativeSnapshotRepo{}, opportunityRepo: opportunities,
+		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{
+			Ticker: "KXTEST-YESNO", Title: "Will test happen?", Status: "active", BestBidYes: 0.45, BestAskYes: 0.47,
+			BestBidNo: 0.53, BestAskNo: 0.55, Volume: 1500, CloseTime: time.Now().UTC().Add(24 * time.Hour), FetchedAt: time.Now().UTC(),
+		}},
+		logger: slogDiscardLogger(),
+	}
+
+	result, err := runner.RunStrategy(context.Background(), strategy)
+	if err == nil || !strings.Contains(err.Error(), "terminal finalization lost") {
+		t.Fatalf("RunStrategy() error = %v, want terminal-authority conflict", err)
+	}
+	if result == nil || result.Run.Status != domain.PipelineStatusCompleted || result.Signal != winner.Signal {
+		t.Fatalf("RunStrategy() result = %+v, want canonical completed winner", result)
+	}
+	if len(opportunities.queued) != 0 {
+		t.Fatalf("opportunities after lost authority = %+v", opportunities.queued)
+	}
+}
+
+type postTerminalOrderRepo struct {
+	repository.OrderRepository
+	err error
+}
+
+func (r postTerminalOrderRepo) GetByRun(context.Context, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
+	return nil, r.err
+}
+
+type postTerminalPositionRepo struct {
+	stubPositionRepo
+	err error
+}
+
+func (r postTerminalPositionRepo) GetByStrategy(context.Context, uuid.UUID, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return nil, r.err
+}
+
+func TestRunStrategy_KalshiPostTerminalErrorsReturnCanonicalResult(t *testing.T) {
+	strategy := domain.Strategy{
+		ID: uuid.New(), Name: "kalshi post-terminal", Ticker: "KXTEST-YESNO", MarketType: domain.MarketTypeKalshi,
+		Status: domain.StrategyStatusActive, IsPaper: true,
+		Config: mustKalshiConfig(t, map[string]any{
+			"template": "microstructure", "direction": "YES", "confidence": 0.72, "fair_probability": 0.72,
+			"calibration": "external_model_v1", "source_references": []string{"model_run:test-1"}, "time_horizon": "days", "entry_price_max": 0.50,
+		}),
+	}
+	snapshot := staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{
+		Ticker: "KXTEST-YESNO", Title: "Will test happen?", Status: "active",
+		BestBidYes: 0.45, BestAskYes: 0.47, BestBidNo: 0.53, BestAskNo: 0.55,
+		Volume: 1500, CloseTime: time.Now().UTC().Add(24 * time.Hour), FetchedAt: time.Now().UTC(),
+	}}
+
+	for _, tc := range []struct {
+		name        string
+		opportunity *recordingOpportunityRepo
+		orderErr    error
+		positionErr error
+	}{
+		{name: "opportunity", opportunity: &recordingOpportunityRepo{err: errors.New("opportunity unavailable")}},
+		{name: "order read", opportunity: &recordingOpportunityRepo{}, orderErr: errors.New("orders unavailable")},
+		{name: "position read", opportunity: &recordingOpportunityRepo{}, positionErr: errors.New("positions unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := &realStrategyRunner{
+				runRepo: &stubPipelineRunRepo{}, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: &recordingNativeSnapshotRepo{},
+				orderRepo: postTerminalOrderRepo{err: tc.orderErr}, positionRepo: postTerminalPositionRepo{err: tc.positionErr},
+				opportunityRepo: tc.opportunity, portfolioAllocatorMode: portfolio.AllocatorModePaper,
+				kalshiMarketData: snapshot, localPaperBroker: paper.NewPaperBroker(100_000, 0, 0), logger: slogDiscardLogger(),
+			}
+
+			result, err := runner.RunStrategy(context.Background(), strategy)
+			if err == nil {
+				t.Fatal("RunStrategy() error = nil, want post-terminal error")
+			}
+			if result == nil || result.Run.Status != domain.PipelineStatusCompleted || result.Signal != result.Run.Signal {
+				t.Fatalf("RunStrategy() result = %+v, want canonical completed result", result)
+			}
+		})
+	}
+}
+
+func TestRecordAgentTerminalMetricsSkipsCASLoser(t *testing.T) {
+	runner := &realStrategyRunner{metrics: metrics.New()}
+	runner.recordAgentTerminalMetrics(&agent.RunResult{
+		Run:             domain.PipelineRun{Ticker: "AAPL", Status: domain.PipelineStatusCancelled},
+		TerminalApplied: false,
+	})
 }
 
 type recordingOpportunityRepo struct {
@@ -450,10 +615,10 @@ func TestCompleteNativeRunPersistsTerminalEvent(t *testing.T) {
 	if len(runRepo.updates) != 1 || runRepo.updates[0].Status != domain.PipelineStatusFailed {
 		t.Fatalf("run updates = %+v, want one failed update", runRepo.updates)
 	}
-	if len(eventRepo.events) != 1 || eventRepo.events[0].EventKind != agent.AgentEventKindPipelineFailed.String() {
-		t.Fatalf("terminal events = %+v, want one pipeline_failed", eventRepo.events)
+	if runRepo.updates[0].Event == nil || runRepo.updates[0].Event.EventKind != agent.AgentEventKindPipelineFailed.String() {
+		t.Fatalf("terminal event = %+v, want pipeline_failed", runRepo.updates[0].Event)
 	}
-	encoded, err := json.Marshal(eventRepo.events[0])
+	encoded, err := json.Marshal(runRepo.updates[0].Event)
 	if err != nil {
 		t.Fatalf("marshal terminal event: %v", err)
 	}
@@ -462,10 +627,10 @@ func TestCompleteNativeRunPersistsTerminalEvent(t *testing.T) {
 	}
 }
 
-func TestCompleteNativeRunEventFailureReclassifiesCompletion(t *testing.T) {
+func TestCompleteNativeRunTransactionFailureDoesNotReclassifyCompletion(t *testing.T) {
 	t.Parallel()
 
-	runRepo := &stubPipelineRunRepo{}
+	runRepo := &stubPipelineRunRepo{updateErr: errors.New("event store unavailable")}
 	runner := &realStrategyRunner{
 		runRepo:   runRepo,
 		eventRepo: &recordingStrategyPreparationEventRepo{err: errors.New("event store unavailable")},
@@ -473,14 +638,39 @@ func TestCompleteNativeRunEventFailureReclassifiesCompletion(t *testing.T) {
 	run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC()}
 
 	err := runner.completeNativeRun(context.Background(), "kalshi", &run, domain.PipelineStatusCompleted, domain.PipelineSignalHold, "")
-	if err == nil || !strings.Contains(err.Error(), "persist terminal event") {
-		t.Fatalf("completeNativeRun() error = %v, want event persistence failure", err)
+	if err == nil || !strings.Contains(err.Error(), "finalize run") {
+		t.Fatalf("completeNativeRun() error = %v, want transaction failure", err)
 	}
-	if len(runRepo.updates) != 2 || runRepo.updates[0].Status != domain.PipelineStatusCompleted || runRepo.updates[1].Status != domain.PipelineStatusFailed {
-		t.Fatalf("run updates = %+v, want completed then failed fallback", runRepo.updates)
+	if len(runRepo.updates) != 1 || runRepo.updates[0].Status != domain.PipelineStatusCompleted {
+		t.Fatalf("run finalizations = %+v, want one completed attempt", runRepo.updates)
 	}
-	if run.Status != domain.PipelineStatusFailed {
-		t.Fatalf("run status = %q, want failed", run.Status)
+	if run.Status != "" {
+		t.Fatalf("run status = %q, want unchanged", run.Status)
+	}
+}
+
+func TestCompleteNativeRunCancellationDuringCompletedFinalizeWins(t *testing.T) {
+	for _, cause := range []runcontrol.Cause{runcontrol.Operator, runcontrol.Shutdown, runcontrol.KillSwitch} {
+		cause := cause
+		t.Run(string(cause), func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			runRepo := &stubPipelineRunRepo{}
+			runRepo.finalizeHook = func(finalizeCtx context.Context, update repository.PipelineRunFinalization, call int) error {
+				if call != 1 || update.Status != domain.PipelineStatusCompleted {
+					return nil
+				}
+				cancel(cause)
+				<-finalizeCtx.Done()
+				return finalizeCtx.Err()
+			}
+			runner := &realStrategyRunner{runRepo: runRepo}
+			run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}
+
+			err := runner.completeNativeRun(ctx, "kalshi", &run, domain.PipelineStatusCompleted, domain.PipelineSignalBuy, "")
+			if !errors.Is(err, cause) || run.Status != domain.PipelineStatusCancelled || len(runRepo.updates) != 2 {
+				t.Fatalf("completeNativeRun() = (%+v, %v), updates=%+v; want cancellation winner matching %v", run, err, runRepo.updates, cause)
+			}
+		})
 	}
 }
 
@@ -503,6 +693,92 @@ func TestStartNativeRunEventFailureMarksRunFailed(t *testing.T) {
 	}
 	if run.Status != domain.PipelineStatusFailed {
 		t.Fatalf("run status = %q, want failed", run.Status)
+	}
+	if run.ErrorMessage != "event store unavailable" || runRepo.updates[0].Event.EventKind != agent.AgentEventKindPipelineFailed.String() {
+		t.Fatalf("ordinary event failure finalization = %+v", runRepo.updates[0])
+	}
+}
+
+func TestStartNativeRunEventFailureUsesTypedCancellation(t *testing.T) {
+	for _, cause := range []runcontrol.Cause{runcontrol.Operator, runcontrol.Shutdown, runcontrol.KillSwitch} {
+		cause := cause
+		t.Run(string(cause), func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			runRepo := &stubPipelineRunRepo{}
+			eventRepo := &recordingStrategyPreparationEventRepo{createHook: func(context.Context) error {
+				cancel(cause)
+				return errors.New("event store unavailable")
+			}}
+			runner := &realStrategyRunner{runRepo: runRepo, eventRepo: eventRepo}
+			run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}
+
+			err := runner.startNativeRun(ctx, "kalshi", &run)
+			if err == nil || !errors.Is(err, cause) || len(runRepo.updates) != 1 {
+				t.Fatalf("startNativeRun() error=%v updates=%+v", err, runRepo.updates)
+			}
+			update := runRepo.updates[0]
+			if update.Status != domain.PipelineStatusCancelled || update.ErrorMessage != cause.Error() || update.Event.EventKind != agent.AgentEventKindPipelineCancelled.String() {
+				t.Fatalf("finalization = %+v, want cancelled with reason %q", update, cause.Error())
+			}
+			if run.Status != domain.PipelineStatusCancelled || run.ErrorMessage != cause.Error() {
+				t.Fatalf("canonical run = %+v", run)
+			}
+		})
+	}
+}
+
+func TestRecognizedRunControlErrorPreservesOnlyOperatorCancellationCauses(t *testing.T) {
+	baseErr := errors.New("operation failed")
+	tests := []struct {
+		name      string
+		cause     error
+		wantMatch error
+	}{
+		{name: "operator", cause: runcontrol.Operator, wantMatch: runcontrol.Operator},
+		{name: "shutdown", cause: runcontrol.Shutdown, wantMatch: runcontrol.Shutdown},
+		{name: "kill switch", cause: runcontrol.KillSwitch, wantMatch: runcontrol.KillSwitch},
+		{name: "stale", cause: runcontrol.Stale},
+		{name: "bare cancellation", cause: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cancel(test.cause)
+			err := recognizedRunControlError(ctx, baseErr)
+			if !errors.Is(err, baseErr) {
+				t.Fatalf("error = %v, want original failure", err)
+			}
+			if test.wantMatch != nil && !errors.Is(err, test.wantMatch) {
+				t.Fatalf("error = %v, want cause %v", err, test.wantMatch)
+			}
+			if test.wantMatch == nil && err != baseErr {
+				t.Fatalf("error = %v, want unchanged original failure", err)
+			}
+		})
+	}
+}
+
+func TestStartNativeRunEventFailureLosesTerminalAuthority(t *testing.T) {
+	for _, status := range []domain.PipelineStatus{domain.PipelineStatusCompleted, domain.PipelineStatusFailed, domain.PipelineStatusCancelled} {
+		status := status
+		t.Run(string(status), func(t *testing.T) {
+			winner := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: status, Signal: domain.PipelineSignalHold}
+			runRepo := &stubPipelineRunRepo{receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
+			runner := &realStrategyRunner{runRepo: runRepo, eventRepo: &recordingStrategyPreparationEventRepo{err: errors.New("event store unavailable")}}
+			run := domain.PipelineRun{ID: winner.ID, StrategyID: winner.StrategyID, TradeDate: winner.TradeDate, Status: domain.PipelineStatusRunning}
+
+			err := runner.startNativeRun(context.Background(), "kalshi", &run)
+			if !errors.Is(err, agent.ErrLostTerminalAuthority) {
+				t.Fatalf("startNativeRun() error = %v, want lost terminal authority", err)
+			}
+			if run.Status != status || run.ID != winner.ID {
+				t.Fatalf("startNativeRun() run = %+v, want canonical %s winner", run, status)
+			}
+			if len(runRepo.updates) != 1 {
+				t.Fatalf("finalizations = %d, want 1", len(runRepo.updates))
+			}
+		})
 	}
 }
 
@@ -590,6 +866,13 @@ type failingKalshiMarketData struct{ err error }
 
 func (f failingKalshiMarketData) LoadSnapshot(context.Context, string) (kalshiexecution.Snapshot, error) {
 	return kalshiexecution.Snapshot{}, f.err
+}
+
+type cancelingKalshiMarketData struct{ cancel func() }
+
+func (f cancelingKalshiMarketData) LoadSnapshot(context.Context, string) (kalshiexecution.Snapshot, error) {
+	f.cancel()
+	return kalshiexecution.Snapshot{}, errors.New("native data failed")
 }
 
 type staticKalshiMarketData struct{ snapshot kalshiexecution.Snapshot }
@@ -834,11 +1117,15 @@ func TestValidateRequiredAnalysisInputs(t *testing.T) {
 }
 
 type recordingStrategyPreparationEventRepo struct {
-	events []domain.AgentEvent
-	err    error
+	events     []domain.AgentEvent
+	err        error
+	createHook func(context.Context) error
 }
 
-func (r *recordingStrategyPreparationEventRepo) Create(_ context.Context, event *domain.AgentEvent) error {
+func (r *recordingStrategyPreparationEventRepo) Create(ctx context.Context, event *domain.AgentEvent) error {
+	if r.createHook != nil {
+		return r.createHook(ctx)
+	}
 	if r.err != nil {
 		return r.err
 	}

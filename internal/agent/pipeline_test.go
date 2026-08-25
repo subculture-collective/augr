@@ -20,6 +20,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 // Compile-time check that NoopPersister satisfies DecisionPersister.
@@ -30,22 +31,108 @@ type capturePersister struct {
 	completedAt   time.Time
 	completedStat domain.PipelineStatus
 	completeErr   error
+	startErr      error
 	eventErr      error
+	receipt       *repository.PipelineRunFinalizationReceipt
+	startHook     func()
+	eventHook     func(context.Context, *domain.AgentEvent)
+	finalizeHook  func(context.Context, repository.PipelineRunFinalization) error
+	decisions     []persistedPipelineDecision
+}
+
+type persistedPipelineDecision struct {
+	output      string
+	llmResponse *DecisionLLMResponse
 }
 
 func (p *capturePersister) RecordRunStart(_ context.Context, run *domain.PipelineRun) error {
+	if p.startHook != nil {
+		p.startHook()
+	}
 	cp := *run
 	p.startRun = &cp
-	return nil
+	return p.startErr
 }
 
-func (p *capturePersister) RecordRunComplete(_ context.Context, _ uuid.UUID, _ time.Time, status domain.PipelineStatus, completedAt time.Time, _ string, _ json.RawMessage) error {
-	if p.completeErr != nil {
-		return p.completeErr
+func TestPipelinePersistenceErrorsPreserveRecognizedRunControlCause(t *testing.T) {
+	for _, cause := range []runcontrol.Cause{runcontrol.Operator, runcontrol.Shutdown, runcontrol.KillSwitch} {
+		cause := cause
+		for _, stage := range []string{"start", "completed terminal"} {
+			stage := stage
+			t.Run(string(cause)+"/"+stage, func(t *testing.T) {
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				persister := &capturePersister{}
+				switch stage {
+				case "start":
+					persister.startHook = func() { cancel(cause) }
+					persister.startErr = errors.New("start persistence failed")
+				case "completed terminal":
+					persister.finalizeHook = func(context.Context, repository.PipelineRunFinalization) error {
+						cancel(cause)
+						return errors.New("terminal persistence failed")
+					}
+				}
+				pipeline := NewPipeline(PipelineConfig{SkipPhases: map[Phase]bool{PhaseAnalysis: true, PhaseResearchDebate: true, PhaseTrading: true, PhaseRiskDebate: true}}, persister, nil, nil)
+
+				_, err := pipeline.Execute(ctx, uuid.New(), "TEST")
+				if !errors.Is(err, cause) || !strings.Contains(err.Error(), "persistence failed") {
+					t.Fatalf("Execute() error = %v, want persistence error matching %v", err, cause)
+				}
+			})
+		}
 	}
-	p.completedStat = status
-	p.completedAt = completedAt
-	return nil
+}
+
+func (p *capturePersister) FinalizeRun(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	if p.finalizeHook != nil {
+		if err := p.finalizeHook(ctx, finalization); err != nil {
+			return repository.PipelineRunFinalizationReceipt{}, err
+		}
+	}
+	if p.completeErr != nil {
+		return repository.PipelineRunFinalizationReceipt{}, p.completeErr
+	}
+	if p.eventErr != nil {
+		return repository.PipelineRunFinalizationReceipt{}, p.eventErr
+	}
+	if p.receipt != nil {
+		return *p.receipt, nil
+	}
+	p.completedStat = finalization.Status
+	p.completedAt = finalization.CompletedAt
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
+}
+
+func TestPipelineCancellationDuringCompletedFinalizeWins(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	persister := &capturePersister{}
+	persister.finalizeHook = func(finalizeCtx context.Context, finalization repository.PipelineRunFinalization) error {
+		if finalization.Status != domain.PipelineStatusCompleted {
+			return nil
+		}
+		cancel(runcontrol.Operator)
+		<-finalizeCtx.Done()
+		return finalizeCtx.Err()
+	}
+	pipeline := NewPipeline(PipelineConfig{SkipPhases: map[Phase]bool{PhaseAnalysis: true, PhaseResearchDebate: true, PhaseTrading: true, PhaseRiskDebate: true}}, persister, nil, nil)
+	state, err := pipeline.Execute(ctx, uuid.New(), "TEST")
+	if !errors.Is(err, runcontrol.Operator) || state == nil || persister.completedStat != domain.PipelineStatusCancelled {
+		t.Fatalf("Execute() = (%+v, %v), terminal status=%s; want operator cancellation", state, err, persister.completedStat)
+	}
+}
+
+func TestPipelineSuccessCASLoserReturnsConflict(t *testing.T) {
+	for _, status := range []domain.PipelineStatus{domain.PipelineStatusCancelled, domain.PipelineStatusCompleted} {
+		t.Run(status.String(), func(t *testing.T) {
+			persister := &capturePersister{receipt: &repository.PipelineRunFinalizationReceipt{Run: domain.PipelineRun{Status: status, Signal: domain.PipelineSignalHold}}}
+			pipeline := NewPipeline(PipelineConfig{SkipPhases: map[Phase]bool{PhaseAnalysis: true, PhaseResearchDebate: true, PhaseTrading: true, PhaseRiskDebate: true}}, persister, nil, nil)
+			_, err := pipeline.Execute(context.Background(), uuid.New(), "TEST")
+			if !errors.Is(err, ErrLostTerminalAuthority) {
+				t.Fatalf("Execute() error = %v, want ErrLostTerminalAuthority", err)
+			}
+		})
+	}
 }
 
 func TestPipelineExecute_TerminalPersistenceFailureFailsClosed(t *testing.T) {
@@ -72,8 +159,8 @@ func TestPipelineExecute_TerminalPersistenceFailureFailsClosed(t *testing.T) {
 			failed++
 		}
 	}
-	if completed != 0 || failed == 0 {
-		t.Fatalf("terminal events: completed=%d failed=%d, want completed=0 failed>0", completed, failed)
+	if completed != 0 || failed != 0 {
+		t.Fatalf("terminal events: completed=%d failed=%d, want none", completed, failed)
 	}
 }
 
@@ -87,7 +174,7 @@ func TestPipelineExecute_TerminalEventFailureFailsClosed(t *testing.T) {
 	}}, persister, events, slog.Default())
 
 	_, err := pipeline.Execute(context.Background(), uuid.New(), "TEST")
-	if err == nil || !strings.Contains(err.Error(), "persist completed terminal event") {
+	if err == nil || !strings.Contains(err.Error(), "persist completed terminal status") {
 		t.Fatalf("Execute() error = %v, want terminal event failure", err)
 	}
 
@@ -101,7 +188,8 @@ func TestPipelineExecute_TerminalEventFailureFailsClosed(t *testing.T) {
 
 func (*capturePersister) SupportsSnapshots() bool { return false }
 
-func (*capturePersister) PersistDecision(context.Context, uuid.UUID, Node, *int, string, *DecisionLLMResponse) error {
+func (p *capturePersister) PersistDecision(_ context.Context, _ uuid.UUID, _ Node, _ *int, output string, llmResponse *DecisionLLMResponse) error {
+	p.decisions = append(p.decisions, persistedPipelineDecision{output: output, llmResponse: llmResponse})
 	return nil
 }
 
@@ -109,8 +197,63 @@ func (*capturePersister) PersistSnapshot(context.Context, *domain.PipelineRunSna
 	return nil
 }
 
-func (p *capturePersister) PersistEvent(context.Context, *domain.AgentEvent) error {
+func (p *capturePersister) PersistEvent(ctx context.Context, event *domain.AgentEvent) error {
+	if p.eventHook != nil {
+		p.eventHook(ctx, event)
+	}
 	return p.eventErr
+}
+
+func TestPipelineExecute_FinalPhaseCancellationCannotComplete(t *testing.T) {
+	tests := []struct {
+		name       string
+		newContext func() (context.Context, func())
+		wantStatus domain.PipelineStatus
+		wantCause  error
+	}{
+		{name: "operator", newContext: func() (context.Context, func()) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			return ctx, func() { cancel(runcontrol.Operator) }
+		}, wantStatus: domain.PipelineStatusCancelled, wantCause: runcontrol.Operator},
+		{name: "shutdown", newContext: func() (context.Context, func()) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			return ctx, func() { cancel(runcontrol.Shutdown) }
+		}, wantStatus: domain.PipelineStatusCancelled, wantCause: runcontrol.Shutdown},
+		{name: "kill switch", newContext: func() (context.Context, func()) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			return ctx, func() { cancel(runcontrol.KillSwitch) }
+		}, wantStatus: domain.PipelineStatusCancelled, wantCause: runcontrol.KillSwitch},
+		{name: "bare cancellation", newContext: func() (context.Context, func()) {
+			ctx, cancel := context.WithCancel(context.Background())
+			return ctx, cancel
+		}, wantStatus: domain.PipelineStatusFailed},
+		{name: "deadline", newContext: func() (context.Context, func()) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			return ctx, func() { <-ctx.Done(); cancel() }
+		}, wantStatus: domain.PipelineStatusFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancelAtCompletion := test.newContext()
+			persister := &capturePersister{}
+			persister.eventHook = func(_ context.Context, event *domain.AgentEvent) {
+				if event.EventKind == AgentEventKindPhaseCompleted.String() {
+					cancelAtCompletion()
+				}
+			}
+			pipeline := NewPipeline(PipelineConfig{SkipPhases: map[Phase]bool{PhaseResearchDebate: true, PhaseTrading: true, PhaseRiskDebate: true}}, persister, nil, nil)
+			_, err := pipeline.Execute(ctx, uuid.New(), "TEST")
+			if err == nil {
+				t.Fatal("Execute() error = nil, want terminal context error")
+			}
+			if persister.completedStat != test.wantStatus {
+				t.Fatalf("final status = %s, want %s", persister.completedStat, test.wantStatus)
+			}
+			if test.wantCause != nil && !errors.Is(err, test.wantCause) {
+				t.Fatalf("Execute() error = %v, want cause %v", err, test.wantCause)
+			}
+		})
+	}
 }
 
 // mockAnalystNode is a test double for a PhaseAnalysis Node.
@@ -1264,9 +1407,10 @@ func TestExecuteRiskDebatePhase_FinalSignalExtractedFromRiskManager(t *testing.T
 
 // mockPipelineRunRepo is a test double for repository.PipelineRunRepository.
 type mockPipelineRunRepo struct {
-	createFn       func(ctx context.Context, run *domain.PipelineRun) error
-	getByIDFn      func(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error)
-	updateStatusFn func(ctx context.Context, id uuid.UUID, tradeDate time.Time, update repository.PipelineRunStatusUpdate) error
+	createFn      func(ctx context.Context, run *domain.PipelineRun) error
+	getByIDFn     func(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error)
+	finalizeFn    func(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error)
+	finalizations []repository.PipelineRunFinalization
 }
 
 type mockAgentDecisionRepo struct {
@@ -1368,8 +1512,8 @@ func (*blockingSnapshotPersister) RecordRunStart(context.Context, *domain.Pipeli
 	return nil
 }
 
-func (*blockingSnapshotPersister) RecordRunComplete(context.Context, uuid.UUID, time.Time, domain.PipelineStatus, time.Time, string, json.RawMessage) error {
-	return nil
+func (*blockingSnapshotPersister) FinalizeRun(_ context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
 }
 
 func (*blockingSnapshotPersister) SupportsSnapshots() bool { return true }
@@ -1412,11 +1556,16 @@ func (m *mockPipelineRunRepo) Count(_ context.Context, _ repository.PipelineRunF
 	return 0, nil
 }
 
-func (m *mockPipelineRunRepo) UpdateStatus(ctx context.Context, id uuid.UUID, tradeDate time.Time, update repository.PipelineRunStatusUpdate) error {
-	if m.updateStatusFn != nil {
-		return m.updateStatusFn(ctx, id, tradeDate, update)
+func (m *mockPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	m.finalizations = append(m.finalizations, finalization)
+	if m.finalizeFn != nil {
+		return m.finalizeFn(ctx, id, tradeDate, finalization)
 	}
-	return nil
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
+}
+
+func (*mockPipelineRunRepo) RefineCompletedSignal(_ context.Context, id uuid.UUID, tradeDate time.Time, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}}, nil
 }
 
 // mockPhaseNode is a flexible test double that can represent any phase/role combination.
@@ -1557,9 +1706,9 @@ func TestExecute_HappyPath(t *testing.T) {
 			createdRun = run
 			return nil
 		},
-		updateStatusFn: func(_ context.Context, _ uuid.UUID, _ time.Time, update repository.PipelineRunStatusUpdate) error {
-			updatedStatus = update.Status
-			return nil
+		finalizeFn: func(_ context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+			updatedStatus = finalization.Status
+			return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
 		},
 	}
 
@@ -1729,10 +1878,11 @@ func TestExecute_HappyPath(t *testing.T) {
 func TestExecute_PersistsStructuredEventsInOrder(t *testing.T) {
 	stratID := uuid.New()
 	eventRepo := &mockAgentEventRepo{}
+	runRepo := &mockPipelineRunRepo{}
 
 	pipeline := NewPipeline(
 		PipelineConfig{ResearchDebateRounds: 1, RiskDebateRounds: 1},
-		NewRepoPersister(&mockPipelineRunRepo{}, nil, nil, eventRepo, nil),
+		NewRepoPersister(runRepo, nil, nil, eventRepo, nil),
 		nil,
 		slog.Default(),
 	)
@@ -1746,6 +1896,7 @@ func TestExecute_PersistsStructuredEventsInOrder(t *testing.T) {
 	for _, event := range eventRepo.created {
 		gotKinds = append(gotKinds, event.EventKind)
 	}
+	gotKinds = append(gotKinds, runRepo.finalizations[0].Event.EventKind)
 
 	wantKinds := []string{
 		AgentEventKindPipelineStarted.String(),
@@ -1941,10 +2092,11 @@ func TestExecute_PersistsPipelineFailedStructuredEvent(t *testing.T) {
 	stratID := uuid.New()
 	eventRepo := &mockAgentEventRepo{}
 	tradeErr := errors.New("simulated trading failure")
+	runRepo := &mockPipelineRunRepo{}
 
 	pipeline := NewPipeline(
 		PipelineConfig{ResearchDebateRounds: 1, RiskDebateRounds: 1},
-		NewRepoPersister(&mockPipelineRunRepo{}, nil, nil, eventRepo, nil),
+		NewRepoPersister(runRepo, nil, nil, eventRepo, nil),
 		nil,
 		slog.Default(),
 	)
@@ -1962,7 +2114,7 @@ func TestExecute_PersistsPipelineFailedStructuredEvent(t *testing.T) {
 		t.Fatal("expected structured events to be persisted")
 	}
 
-	lastEvent := eventRepo.created[len(eventRepo.created)-1]
+	lastEvent := runRepo.finalizations[0].Event
 	if lastEvent.EventKind != AgentEventKindPipelineFailed.String() {
 		t.Fatalf("last event kind = %q, want %q", lastEvent.EventKind, AgentEventKindPipelineFailed.String())
 	}
@@ -2070,10 +2222,10 @@ func TestExecute_PhaseFailureUpdatesRunStatus(t *testing.T) {
 	var updatedErrMsg string
 
 	repo := &mockPipelineRunRepo{
-		updateStatusFn: func(_ context.Context, _ uuid.UUID, _ time.Time, update repository.PipelineRunStatusUpdate) error {
-			updatedStatus = update.Status
-			updatedErrMsg = update.ErrorMessage
-			return nil
+		finalizeFn: func(_ context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+			updatedStatus = finalization.Status
+			updatedErrMsg = finalization.ErrorMessage
+			return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt, ErrorMessage: finalization.ErrorMessage}}, nil
 		},
 	}
 
@@ -2180,9 +2332,9 @@ func TestExecute_ContextCancellationStopsExecution(t *testing.T) {
 	var updatedStatus domain.PipelineStatus
 
 	repo := &mockPipelineRunRepo{
-		updateStatusFn: func(_ context.Context, _ uuid.UUID, _ time.Time, update repository.PipelineRunStatusUpdate) error {
-			updatedStatus = update.Status
-			return nil
+		finalizeFn: func(_ context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+			updatedStatus = finalization.Status
+			return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
 		},
 	}
 
@@ -2221,9 +2373,9 @@ func TestExecute_PipelineTimeoutTriggersCancellation(t *testing.T) {
 	var updatedStatus domain.PipelineStatus
 
 	repo := &mockPipelineRunRepo{
-		updateStatusFn: func(_ context.Context, _ uuid.UUID, _ time.Time, update repository.PipelineRunStatusUpdate) error {
-			updatedStatus = update.Status
-			return nil
+		finalizeFn: func(_ context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+			updatedStatus = finalization.Status
+			return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
 		},
 	}
 
@@ -2675,5 +2827,37 @@ func TestExecuteTradingPhase_TypedTraderNodeDispatch(t *testing.T) {
 	}
 	if d.OutputText != `{"action":"buy","ticker":"META"}` {
 		t.Errorf("OutputText = %q, want stored JSON", d.OutputText)
+	}
+}
+
+func TestExecuteTradingPhase_PersistsTypedFallbackBeforeReturningError(t *testing.T) {
+	wantErr := errors.New("trader correction exhausted")
+	wantOutput := `{"action":"hold","ticker":"META","rationale":"original invalid response preserved"}`
+	wantLLM := &DecisionLLMResponse{Provider: "test-provider", PromptText: "fallback prompt"}
+	node := &typedTraderNode{name: "typed_trader", role: AgentRoleTrader, fn: func(context.Context, TradingInput) (TradingOutput, error) {
+		return TradingOutput{
+			Plan:         TradingPlan{Action: PipelineSignalHold, Ticker: "META"},
+			StoredOutput: wantOutput,
+			LLMResponse:  wantLLM,
+		}, wantErr
+	}}
+	persister := &capturePersister{}
+	pipeline := NewPipeline(PipelineConfig{}, persister, nil, nil)
+	pipeline.RegisterNode(node)
+	state := &PipelineState{PipelineRunID: uuid.New(), StrategyID: uuid.New(), Ticker: "META", mu: &sync.Mutex{}}
+
+	err := pipeline.executeTradingPhase(context.Background(), state)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("executeTradingPhase() error = %v, want %v", err, wantErr)
+	}
+	if state.TradingPlan.Action != PipelineSignalHold || state.TradingPlan.Ticker != "META" {
+		t.Fatalf("TradingPlan = %+v, want persisted HOLD fallback", state.TradingPlan)
+	}
+	decision, ok := state.Decision(AgentRoleTrader, PhaseTrading, nil)
+	if !ok || decision.OutputText != wantOutput || decision.LLMResponse != wantLLM {
+		t.Fatalf("state decision = %+v, %v; want fallback output and provenance", decision, ok)
+	}
+	if len(persister.decisions) != 1 || persister.decisions[0].output != wantOutput || persister.decisions[0].llmResponse != wantLLM {
+		t.Fatalf("persisted decisions = %+v, want exact fallback output and provenance", persister.decisions)
 	}
 }

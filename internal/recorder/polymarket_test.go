@@ -80,3 +80,29 @@ func TestRecorderFlushOnIntervalAndClose(t *testing.T) {
 		t.Fatal("expected interval or close flush")
 	}
 }
+
+func TestRecorderCloseBoundsBlockedFinalFlush(t *testing.T) {
+	started := make(chan struct{})
+	repo := &lifecycleRepo{blockInsert: make(chan struct{}), insertStart: started}
+	r := New(&fakeFeed{}, repo, RecorderConfig{BatchSize: 10, FlushInterval: time.Hour, FlushTimeout: 20 * time.Millisecond}, nil, nil)
+	r.Start(context.Background())
+	if !r.lifecycle.SubmitTick(domain.PolymarketTick{Slug: "btc"}) {
+		t.Fatal("tick submission failed")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		r.Close()
+		close(closed)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not attempt final flush")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close hung on blocked final flush")
+	}
+}

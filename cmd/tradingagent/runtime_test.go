@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,11 +31,14 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
+	polymarketws "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/notification"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
+	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -217,8 +221,8 @@ func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
 	if server == nil {
 		t.Fatal("newAPIServer() server = nil, want non-nil")
 	}
-	if sched != nil {
-		t.Fatalf("newAPIServer() scheduler = %v, want nil when scheduler disabled", sched)
+	if sched == nil {
+		t.Fatal("newAPIServer() lifecycle = nil, want composite lifecycle when scheduler disabled")
 	}
 	smokeServer, smokeSched, smokeCleanup, err := newAPIServer(
 		context.Background(), config.Config{Environment: "smoke"}, slogDiscardLogger(),
@@ -229,8 +233,8 @@ func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
 	if smokeServer == nil || smokeCleanup == nil {
 		t.Fatal("newAPIServer(smoke) did not construct server and cleanup")
 	}
-	if smokeSched != nil {
-		t.Fatalf("newAPIServer(smoke) scheduler = %v, want nil when scheduler disabled", smokeSched)
+	if smokeSched == nil {
+		t.Fatal("newAPIServer(smoke) lifecycle = nil, want composite lifecycle when scheduler disabled")
 	}
 	if cleanup == nil {
 		t.Fatal("newAPIServer() cleanup = nil, want non-nil")
@@ -302,6 +306,221 @@ func TestNewAPIServerSchemaDBUnreachableFailsBeforeSchemaGate(t *testing.T) {
 	}
 	if closed.Load() {
 		t.Fatal("runtime closed db on DB startup failure before a db handle existed")
+	}
+}
+
+func TestRuntimeTeardownStopsAndJoinsBeforeClosingDBOnce(t *testing.T) {
+	runs := runcontrol.NewGroup()
+	workerDone := make(chan struct{})
+	if err := runs.Go(context.Background(), func(ctx context.Context) {
+		<-ctx.Done()
+		close(workerDone)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var order []string
+	record := func(name string) func() {
+		return func() {
+			mu.Lock()
+			defer mu.Unlock()
+			order = append(order, name)
+			if name == "db" {
+				select {
+				case <-workerDone:
+				default:
+					t.Error("primary DB closed before worker joined")
+				}
+			}
+		}
+	}
+	teardown := &runtimeTeardown{
+		runs:             runs,
+		stopSignal:       record("signal"),
+		stopAutomation:   record("automation"),
+		stopScheduler:    record("scheduler"),
+		stopReconciler:   record("stale"),
+		stopWorkers:      record("workers"),
+		closeSecondaries: record("secondary"),
+		closePrimaryDB:   record("db"),
+	}
+	teardown.Stop()
+	teardown.Stop()
+
+	want := []string{"signal", "automation", "scheduler", "stale", "workers", "secondary", "db"}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("teardown order = %v, want %v", order, want)
+	}
+	if _, _, err := runs.Admit(context.Background()); !errors.Is(err, runcontrol.ErrDraining) {
+		t.Fatalf("post-teardown admission error = %v, want %v", err, runcontrol.ErrDraining)
+	}
+}
+
+func TestRuntimeLifecycleWorkerStartFailureTearsDown(t *testing.T) {
+	startErr := errors.New("signal start failed")
+	var order []string
+	teardown := &runtimeTeardown{
+		runs:           runcontrol.NewGroup(),
+		stopAutomation: func() { order = append(order, "stop automation") },
+		stopSignal:     func() { order = append(order, "stop signal") },
+		closePrimaryDB: func() { order = append(order, "close db") },
+	}
+	lifecycle := &runtimeLifecycle{
+		teardown: teardown,
+		startAutomation: func() error {
+			order = append(order, "start automation")
+			return nil
+		},
+		startSignal: func() error {
+			order = append(order, "start signal")
+			return startErr
+		},
+	}
+	if err := lifecycle.Start(); !errors.Is(err, startErr) {
+		t.Fatalf("Start() error = %v, want %v", err, startErr)
+	}
+	want := []string{"start automation", "start signal", "stop signal", "stop automation", "close db"}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("startup/teardown order = %v, want %v", order, want)
+	}
+}
+
+func TestRuntimeLifecycleWithoutSchedulerStartsAndDrainsIndependentWorkers(t *testing.T) {
+	runs := runcontrol.NewGroup()
+	runDone := make(chan struct{})
+	if err := runs.Go(context.Background(), func(ctx context.Context) {
+		<-ctx.Done()
+		close(runDone)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var order []string
+	lifecycle := &runtimeLifecycle{
+		teardown: &runtimeTeardown{
+			runs:           runs,
+			stopReconciler: func() { order = append(order, "stop reconciler") },
+			closeSecondaries: func() {
+				select {
+				case <-runDone:
+				default:
+					t.Fatal("secondary resources closed before manual run drained")
+				}
+				order = append(order, "close secondary")
+			},
+			closePrimaryDB: func() { order = append(order, "close db") },
+		},
+		startPolymarket: func() error { order = append(order, "start polymarket"); return nil },
+		startReconciler: func() error { order = append(order, "start reconciler"); return nil },
+	}
+
+	if err := lifecycle.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	lifecycle.Stop()
+
+	want := []string{"start polymarket", "start reconciler", "stop reconciler", "close secondary", "close db"}
+	if fmt.Sprint(order) != fmt.Sprint(want) {
+		t.Fatalf("lifecycle order = %v, want %v", order, want)
+	}
+	if _, _, err := runs.Admit(context.Background()); !errors.Is(err, runcontrol.ErrDraining) {
+		t.Fatalf("manual admission after stop = %v, want %v", err, runcontrol.ErrDraining)
+	}
+}
+
+func TestRuntimeLifecycleSchedulerFailureDoesNotStartWorkers(t *testing.T) {
+	var workerStarts atomic.Int32
+	closed := atomic.Bool{}
+	teardown := &runtimeTeardown{runs: runcontrol.NewGroup(), closePrimaryDB: func() { closed.Store(true) }}
+	lifecycle := &runtimeLifecycle{
+		scheduler: scheduler.NewScheduler(nil, nil, nil, slogDiscardLogger()),
+		teardown:  teardown,
+		startAutomation: func() error {
+			workerStarts.Add(1)
+			return nil
+		},
+		startSignal: func() error {
+			workerStarts.Add(1)
+			return nil
+		},
+		startPolymarket: func() error {
+			workerStarts.Add(1)
+			return nil
+		},
+		startReconciler: func() error {
+			workerStarts.Add(1)
+			return nil
+		},
+	}
+	if err := lifecycle.Start(); err == nil {
+		t.Fatal("Start() error = nil, want scheduler prerequisite failure")
+	}
+	if workerStarts.Load() != 0 {
+		t.Fatalf("worker starts = %d, want 0", workerStarts.Load())
+	}
+	if !closed.Load() {
+		t.Fatal("scheduler startup failure did not close resources")
+	}
+}
+
+func TestNewAPIServerInvalidProjectionAccountFailsBeforeDBAllocation(t *testing.T) {
+	origNewDB := runtimeNewDB
+	defer func() { runtimeNewDB = origNewDB }()
+	var allocations atomic.Int32
+	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) {
+		allocations.Add(1)
+		return nil, errors.New("unexpected DB allocation")
+	}
+
+	cfg := config.Config{Server: config.ServerConfig{ProjectionAccountID: "not-a-uuid"}}
+	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	if err == nil || !strings.Contains(err.Error(), "PROJECTION_ACCOUNT_ID") {
+		t.Fatalf("newAPIServer() error = %v, want projection account validation error", err)
+	}
+	if cleanup != nil {
+		t.Fatal("cleanup returned for pre-allocation validation failure")
+	}
+	if allocations.Load() != 0 {
+		t.Fatalf("DB allocations = %d, want 0", allocations.Load())
+	}
+}
+
+func TestNewAPIServerPaperBootstrapFailureClosesDBExactlyOnce(t *testing.T) {
+	origNewDB := runtimeNewDB
+	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
+	origNewPaperAccountRepo := runtimeNewPaperAccountRepo
+	origCloseDB := runtimeCloseDB
+	defer func() {
+		runtimeNewDB = origNewDB
+		runtimeCurrentSchemaVersion = origCurrentSchemaVersion
+		runtimeNewPaperAccountRepo = origNewPaperAccountRepo
+		runtimeCloseDB = origCloseDB
+	}()
+
+	pool, err := pgxpool.New(context.Background(), "postgres://postgres:postgres@127.0.0.1:1/postgres?sslmode=disable&connect_timeout=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	startupErr := errors.New("paper account bootstrap failed")
+	var closes atomic.Int32
+	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) { return &pgrepo.DB{Pool: pool}, nil }
+	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) { return pgrepo.RequiredSchemaVersion, nil }
+	runtimeNewPaperAccountRepo = func(*pgrepo.DB) repository.PaperAccountRepository {
+		return failingPaperAccountRepo{err: startupErr}
+	}
+	runtimeCloseDB = func(*pgrepo.DB) { closes.Add(1) }
+
+	_, _, cleanup, err := newAPIServer(context.Background(), config.Config{Environment: "development"}, slogDiscardLogger())
+	if !errors.Is(err, startupErr) {
+		t.Fatalf("newAPIServer() error = %v, want %v", err, startupErr)
+	}
+	if cleanup != nil {
+		cleanup()
+	}
+	if closes.Load() != 1 {
+		t.Fatalf("primary DB closes = %d, want 1", closes.Load())
 	}
 }
 
@@ -750,6 +969,51 @@ func TestBootstrapPolymarketStopGuardsFiltersAndPaginates(t *testing.T) {
 	}
 }
 
+func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
+	t.Parallel()
+
+	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
+	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client)})
+	if err != nil {
+		t.Fatalf("NewStopGuard() error = %v", err)
+	}
+	workerCtx, stopWorkers := context.WithCancel(context.Background())
+	runner := &realStrategyRunner{
+		polymarketStopGuard:  guard,
+		polymarketWorkerCtx:  workerCtx,
+		polymarketWorkerStop: stopWorkers,
+		logger:               slogDiscardLogger(),
+	}
+	defer runner.stopPolymarketTickWorkers()
+
+	position := domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)}
+	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{{position}}}
+	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
+		t.Fatalf("initial bootstrapPolymarketStopGuards() error = %v", err)
+	}
+	if got := guard.Active(); got != 1 {
+		t.Fatalf("guard.Active() before feed = %d, want 1", got)
+	}
+	if _, loaded := runner.polymarketWorkers.Load("market-one"); loaded {
+		t.Fatal("tick worker started before feed binding")
+	}
+
+	repo.calls.Store(0)
+	feed := newDelayedFeedStub()
+	if err := startDelayedPolymarketFeed(context.Background(), feed, runner, repo, slogDiscardLogger()); err != nil {
+		t.Fatalf("startDelayedPolymarketFeed() error = %v", err)
+	}
+	select {
+	case <-feed.subscribed:
+	case <-time.After(time.Second):
+		t.Fatal("tick worker did not subscribe after delayed feed start")
+	}
+	if got := guard.Active(); got != 1 {
+		t.Fatalf("guard.Active() after replay = %d, want 1", got)
+	}
+}
+
 func TestNewNotificationManager_DiscordAlertDispatch(t *testing.T) {
 	t.Parallel()
 
@@ -917,15 +1181,22 @@ type stubPipelineRunRepo struct {
 	createErr    error
 	updateErr    error
 	created      *domain.PipelineRun
-	updates      []repository.PipelineRunStatusUpdate
+	updates      []repository.PipelineRunFinalization
 	getByID      bool
 	getCalled    bool
 	listCalled   bool
 	countCalled  bool
 	updateCalled bool
+	receipt      *repository.PipelineRunFinalizationReceipt
+	panicCreate  bool
+	refineCalled bool
+	finalizeHook func(context.Context, repository.PipelineRunFinalization, int) error
 }
 
 func (r *stubPipelineRunRepo) Create(_ context.Context, run *domain.PipelineRun) error {
+	if r.panicCreate {
+		panic("create panic")
+	}
 	if r.createErr != nil {
 		return r.createErr
 	}
@@ -962,13 +1233,87 @@ func (r *stubPipelineRunRepo) CountByStatus(context.Context, repository.Pipeline
 	return map[domain.PipelineStatus]int{}, nil
 }
 
-func (r *stubPipelineRunRepo) UpdateStatus(_ context.Context, _ uuid.UUID, _ time.Time, update repository.PipelineRunStatusUpdate) error {
+func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, update repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	r.updateCalled = true
 	r.updates = append(r.updates, update)
-	return r.updateErr
+	if r.finalizeHook != nil {
+		if err := r.finalizeHook(ctx, update, len(r.updates)); err != nil {
+			return repository.PipelineRunFinalizationReceipt{}, err
+		}
+	}
+	if r.updateErr != nil {
+		return repository.PipelineRunFinalizationReceipt{}, r.updateErr
+	}
+	if r.receipt != nil {
+		return *r.receipt, nil
+	}
+	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: update.Status, CompletedAt: &update.CompletedAt, ErrorMessage: update.ErrorMessage}
+	if update.Signal != nil {
+		run.Signal = *update.Signal
+	}
+	r.run = &run
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
+}
+
+func (r *stubPipelineRunRepo) RefineCompletedSignal(_ context.Context, id uuid.UUID, tradeDate time.Time, _ domain.PipelineSignal, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	r.refineCalled = true
+	r.updateCalled = true
+	if r.updateErr != nil {
+		return repository.PipelineRunFinalizationReceipt{}, r.updateErr
+	}
+	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}
+	if r.run != nil {
+		run = *r.run
+		run.Signal = signal
+	}
+	r.run = &run
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
 }
 
 var _ repository.PipelineRunRepository = (*stubPipelineRunRepo)(nil)
+
+func TestSmokeStrategyRunnerReturnsCanonicalTerminalResultAndBlocksDownstream(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		panicCreate bool
+		status      domain.PipelineStatus
+	}{
+		{name: "panic CAS loser", panicCreate: true, status: domain.PipelineStatusCancelled},
+		{name: "completion CAS loser", status: domain.PipelineStatusCancelled},
+		{name: "completed winner CAS loser", status: domain.PipelineStatusCompleted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			winner := domain.PipelineRun{ID: uuid.New(), TradeDate: time.Now().UTC(), Status: tc.status, Signal: domain.PipelineSignalHold, ErrorMessage: "canonical winner"}
+			repo := &stubPipelineRunRepo{panicCreate: tc.panicCreate, receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
+			core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
+			runner := &smokeStrategyRunner{runner: core, runRepo: repo, logger: slogDiscardLogger()}
+			result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true})
+			if err == nil {
+				t.Fatal("RunStrategy() error = nil, want terminal authority error")
+			}
+			if result == nil || result.Run.ID != winner.ID || result.Run.Status != winner.Status || result.Signal != winner.Signal {
+				t.Fatalf("RunStrategy() result = %+v, want canonical winner %+v", result, winner)
+			}
+			if repo.refineCalled {
+				t.Fatal("CAS loser continued to signal refinement")
+			}
+		})
+	}
+}
+
+func TestSmokeStrategyRunnerPostTerminalReadErrorReturnsCanonicalResult(t *testing.T) {
+	repo := &stubPipelineRunRepo{err: errors.New("run read unavailable")}
+	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
+	runner := &smokeStrategyRunner{runner: core, runRepo: repo, logger: slogDiscardLogger()}
+
+	result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true})
+	if err == nil || !strings.Contains(err.Error(), "run read unavailable") {
+		t.Fatalf("RunStrategy() error = %v, want post-terminal read error", err)
+	}
+	if result == nil || result.Run.Status != domain.PipelineStatusCompleted || result.Signal != result.Run.Signal {
+		t.Fatalf("RunStrategy() result = %+v, want canonical completed result", result)
+	}
+}
 
 func TestSmokeStrategyRunnerDispatchNotifications_RoutesSignalAndDecisionsToN8NAndDiscord(t *testing.T) {
 	t.Parallel()
@@ -1181,6 +1526,15 @@ func (stubPositionRepo) GrossExposureOpen(context.Context, repository.PositionFi
 
 type stubPaperAccountRepo struct{}
 
+type failingPaperAccountRepo struct {
+	stubPaperAccountRepo
+	err error
+}
+
+func (r failingPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context) (uint64, error) {
+	return 0, r.err
+}
+
 func (stubPaperAccountRepo) ListPaperTrades(context.Context, int, int) ([]domain.Trade, error) {
 	return nil, nil
 }
@@ -1253,6 +1607,30 @@ type bootstrapPolymarketPositionRepoStub struct {
 	stubPositionRepo
 	pages [][]domain.Position
 	calls atomic.Int32
+}
+
+type delayedFeedStub struct {
+	started    atomic.Bool
+	subscribed chan struct{}
+	ticks      chan polymarketws.Tick
+	once       sync.Once
+}
+
+func newDelayedFeedStub() *delayedFeedStub {
+	return &delayedFeedStub{subscribed: make(chan struct{}), ticks: make(chan polymarketws.Tick)}
+}
+
+func (f *delayedFeedStub) Start(context.Context) error {
+	f.started.Store(true)
+	return nil
+}
+
+func (f *delayedFeedStub) Ticks(string) <-chan polymarketws.Tick {
+	if !f.started.Load() {
+		panic("tick worker subscribed before feed start")
+	}
+	f.once.Do(func() { close(f.subscribed) })
+	return f.ticks
 }
 
 func (r *bootstrapPolymarketPositionRepoStub) GetOpen(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {

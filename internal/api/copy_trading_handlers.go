@@ -8,6 +8,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -274,7 +275,25 @@ func (s *Server) handleRebalanceCopySubscription(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	result, err := s.copyTrading.Rebalance(r.Context(), id)
+	rebalanceCtx := r.Context()
+	if s.runGroup != nil {
+		admittedCtx, lease, admitErr := s.runGroup.Admit(rebalanceCtx)
+		if admitErr != nil {
+			if errors.Is(admitErr, runcontrol.ErrDraining) {
+				respondError(w, http.StatusServiceUnavailable, "copy trading runtime is shutting down", ErrCodeInternal)
+				return
+			}
+			respondError(w, http.StatusInternalServerError, "failed to admit copy rebalance", ErrCodeInternal)
+			return
+		}
+		rebalanceCtx = admittedCtx
+		defer lease.Done()
+	}
+	rebalancer := s.copyRebalancer
+	if rebalancer == nil {
+		rebalancer = s.copyTrading
+	}
+	result, err := rebalancer.Rebalance(rebalanceCtx, id)
 	if err != nil {
 		s.respondCopyTradingError(w, err)
 		return

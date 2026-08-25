@@ -38,6 +38,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
@@ -48,7 +49,7 @@ const (
 	postCloseDataGrace     = 30 * time.Minute
 	requiredNewsMaxAge     = 36 * time.Hour
 	requiredNewsMinDirect  = 3
-	nativeTerminalTimeout  = 5 * time.Second
+	nativeTerminalTimeout  = 10 * time.Second
 )
 
 var defaultAnalysisRoles = []agent.AgentRole{
@@ -82,6 +83,8 @@ type polymarketTickFeed interface {
 }
 
 type realStrategyRunner struct {
+	runGroupMu             sync.Mutex
+	runGroup               *runcontrol.Group
 	cfg                    config.Config
 	globals                agent.GlobalSettings
 	dataService            marketDataService
@@ -151,6 +154,7 @@ func newRealStrategyRunner(
 
 	workerCtx, workerStop := context.WithCancel(context.Background())
 	runner := &realStrategyRunner{
+		runGroup:              runcontrol.NewGroup(),
 		cfg:                   cfg,
 		globals:               globalSettingsFromConfig(cfg),
 		dataService:           dataService,
@@ -210,6 +214,15 @@ func newRealStrategyRunner(
 }
 
 func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+	group := r.strategyRunGroup()
+	if !group.HasLease(ctx) {
+		admittedCtx, lease, err := group.Admit(ctx)
+		if err != nil {
+			return nil, err
+		}
+		ctx = admittedCtx
+		defer lease.Done()
+	}
 	if strategy.MarketType.Normalize() == domain.MarketTypeKalshi {
 		return r.runKalshiNative(ctx, strategy)
 	}
@@ -223,35 +236,57 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy)
 	if err != nil {
 		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, err); persistErr != nil {
-			return nil, errors.Join(err, persistErr)
+			return nil, recognizedRunControlError(ctx, errors.Join(err, persistErr))
 		}
-		return nil, err
+		return nil, recognizedRunControlError(ctx, err)
 	}
 
 	// Drain phase events to the WebSocket hub in a background goroutine.
 	// The channel is closed after runner.Run returns so the goroutine exits naturally.
+	var eventDrainer sync.WaitGroup
+	var finishEventDrainer sync.Once
+	finishDrainer := func() {
+		finishEventDrainer.Do(func() {
+			if eventsCh != nil {
+				close(eventsCh)
+				eventDrainer.Wait()
+			}
+		})
+	}
+	defer finishDrainer()
 	if eventsCh != nil {
-		go r.drainPipelineEvents(eventsCh)
+		eventDrainer.Add(1)
+		go func() {
+			defer eventDrainer.Done()
+			r.drainPipelineEvents(eventsCh)
+		}()
 	}
 
 	result, err := runner.Run(ctx, prepared)
-
-	// Close the channel regardless of success/failure — the drainer exits via range.
-	if eventsCh != nil {
-		close(eventsCh)
-	}
-	defer r.refreshExecutionMetrics(context.Background())
-	if result != nil {
-		r.recordPipelineMetrics(result.Run)
-	}
-
+	finishDrainer()
 	if err != nil {
-		return nil, err
+		if result == nil {
+			return nil, err
+		}
+		r.recordAgentTerminalMetrics(result)
+		return &api.StrategyRunResult{Run: result.Run, Signal: result.Signal}, err
 	}
+	if result == nil {
+		return nil, errors.New("strategy runner returned no result")
+	}
+	canonical := &api.StrategyRunResult{Run: result.Run, Signal: result.Signal}
+	if !result.TerminalApplied {
+		err := fmt.Errorf("strategy runner: %w: durable status=%s signal=%s", agent.ErrLostTerminalAuthority, result.Run.Status, result.Run.Signal)
+		if result.Run.Status == domain.PipelineStatusCancelled {
+			err = runcontrol.JoinCauseFromErrorMessage(err, result.Run.ErrorMessage)
+		}
+		return canonical, err
+	}
+	r.recordAgentTerminalMetrics(result)
 
 	run, err := r.findRun(ctx, result.Run.ID)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	agent.ApplyStrategyRiskOverridesToResult(result, strategyConfig)
@@ -262,26 +297,26 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		planTicker = strategy.Ticker
 	}
 
-	update := repository.PipelineRunStatusUpdate{
-		Status:       run.Status,
-		Signal:       &signal,
-		CompletedAt:  run.CompletedAt,
-		ErrorMessage: run.ErrorMessage,
+	receipt, err := r.runRepo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, run.Signal, signal)
+	if err != nil {
+		return canonical, err
 	}
-	if err := r.runRepo.UpdateStatus(ctx, run.ID, run.TradeDate, update); err != nil {
-		return nil, err
+	if !receipt.Applied {
+		canonical = &api.StrategyRunResult{Run: receipt.Run, Signal: receipt.Run.Signal}
+		return canonical, fmt.Errorf("pipeline run signal refinement lost: durable status=%s signal=%s", receipt.Run.Status, receipt.Run.Signal)
 	}
-	run.Signal = signal
+	run = &receipt.Run
+	canonical = &api.StrategyRunResult{Run: *run, Signal: run.Signal}
 
 	if strategy.MarketType.Normalize() == domain.MarketTypePolymarket {
 		normalizedSide, err := normalizePolymarketStrategySide(result.State.TradingPlan.Side)
 		if err != nil {
-			return nil, fmt.Errorf("polymarket strategy %s: %w", strategy.Name, err)
+			return canonical, fmt.Errorf("polymarket strategy %s: %w", strategy.Name, err)
 		}
 		result.State.TradingPlan.Side = normalizedSide
 		entryPrice := result.State.TradingPlan.EntryPrice
 		if entryPrice > 0 && entryPrice > 1 {
-			return nil, fmt.Errorf("polymarket strategy %s: entry price %.4f outside valid range [0,1]", strategy.Name, entryPrice)
+			return canonical, fmt.Errorf("polymarket strategy %s: entry price %.4f outside valid range [0,1]", strategy.Name, entryPrice)
 		}
 	}
 
@@ -306,19 +341,19 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	}
 	if strategy.MarketType.Normalize() == domain.MarketTypeOptions {
 		if err := r.executeOptionsSignal(ctx, strategy, run.ID, finalSignal); err != nil {
-			return nil, err
+			return canonical, err
 		}
 	} else if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
 		orderManager, err := r.newOrderManager(ctx, strategy, prepared.Config, strategyConfig)
 		if err != nil {
-			return nil, err
+			return canonical, err
 		}
 		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
-			return nil, err
+			return canonical, err
 		}
 	}
 	if err := r.recordPortfolioOpportunity(ctx, strategy, run, finalSignal, tradingPlan); err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	// Notification delivery is an optional side effect and must not monopolize a
@@ -331,11 +366,11 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 
 	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	return &api.StrategyRunResult{
@@ -344,6 +379,15 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		Orders:    orders,
 		Positions: positions,
 	}, nil
+}
+
+func (r *realStrategyRunner) strategyRunGroup() *runcontrol.Group {
+	r.runGroupMu.Lock()
+	defer r.runGroupMu.Unlock()
+	if r.runGroup == nil {
+		r.runGroup = runcontrol.NewGroup()
+	}
+	return r.runGroup
 }
 
 func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy domain.Strategy, runID uuid.UUID, signal execution.FinalSignal) error {
@@ -627,7 +671,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
 	if err != nil {
-		return nil, err
+		return nil, recognizedRunControlError(ctx, err)
 	}
 	resolved := agent.ResolveConfig(strategyConfig, r.globals)
 	now := time.Now().UTC()
@@ -640,18 +684,28 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		StartedAt:      now,
 		ConfigSnapshot: strategy.Config,
 	}
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	if r.runRegistry != nil {
+		if err := r.runRegistry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
+			return nil, fmt.Errorf("polymarket native: register run context: %w", err)
+		}
+		defer r.runRegistry.Deregister(run.ID, run.TradeDate)
+	}
+	ctx = runCtx
 	if err := r.startNativeRun(ctx, "polymarket", &run); err != nil {
-		return nil, err
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, recognizedRunControlError(ctx, err)
 	}
 
 	completeRun := func(status domain.PipelineStatus, signal domain.PipelineSignal, errMsg string) error {
 		return r.completeNativeRun(ctx, "polymarket", &run, status, signal, errMsg)
 	}
 	failRun := func(err error) (*api.StrategyRunResult, error) {
-		if updateErr := completeRun(domain.PipelineStatusFailed, domain.PipelineSignalHold, err.Error()); updateErr != nil {
+		status, message := nativeFailure(ctx, err)
+		if updateErr := completeRun(status, domain.PipelineSignalHold, message); updateErr != nil {
 			err = errors.Join(err, updateErr)
 		}
-		return nil, err
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, recognizedRunControlError(ctx, err)
 	}
 
 	if r.polymarketMarketData == nil {
@@ -711,32 +765,38 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		Features:   predictionNativeFeatures(decision),
 		RegimeTags: []string{"event_market", "deterministic_execution", decision.Template},
 	}
+	if err := ctx.Err(); err != nil {
+		return failRun(err)
+	}
+	if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	if run.Status != domain.PipelineStatusCompleted {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, fmt.Errorf("polymarket native: completed terminal authority required: durable status=%s signal=%s", run.Status, run.Signal)
+	}
+	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
 		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
-			return failRun(err)
+			return canonical, err
 		}
 	}
-
-	if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
-		return nil, err
-	}
 	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
-		return nil, err
+		return canonical, err
 	}
 	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 	if !executionStrategy.IsPaper {
-		if err := r.registerPolymarketPositions(positions); err != nil && r.logger != nil {
-			r.logger.WarnContext(ctx, "polymarket stop guard registration failed", "error", err, "strategy_id", strategy.ID)
+		if err := r.registerPolymarketPositions(positions); err != nil {
+			return canonical, err
 		}
 	}
-	return &api.StrategyRunResult{Run: run, Signal: signal, Orders: orders, Positions: positions}, nil
+	return &api.StrategyRunResult{Run: run, Signal: run.Signal, Orders: orders, Positions: positions}, nil
 }
 
 func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
@@ -750,18 +810,28 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 		StartedAt:      now,
 		ConfigSnapshot: strategy.Config,
 	}
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	if r.runRegistry != nil {
+		if err := r.runRegistry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
+			return nil, fmt.Errorf("kalshi native: register run context: %w", err)
+		}
+		defer r.runRegistry.Deregister(run.ID, run.TradeDate)
+	}
+	ctx = runCtx
 	if err := r.startNativeRun(ctx, "kalshi", &run); err != nil {
-		return nil, err
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, recognizedRunControlError(ctx, err)
 	}
 
 	completeRun := func(status domain.PipelineStatus, signal domain.PipelineSignal, errMsg string) error {
 		return r.completeNativeRun(ctx, "kalshi", &run, status, signal, errMsg)
 	}
 	failRun := func(err error) (*api.StrategyRunResult, error) {
-		if updateErr := completeRun(domain.PipelineStatusFailed, domain.PipelineSignalHold, err.Error()); updateErr != nil {
+		status, message := nativeFailure(ctx, err)
+		if updateErr := completeRun(status, domain.PipelineSignalHold, message); updateErr != nil {
 			err = errors.Join(err, updateErr)
 		}
-		return nil, err
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, recognizedRunControlError(ctx, err)
 	}
 
 	if r.kalshiMarketData == nil {
@@ -811,10 +881,16 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 
 	if signal == domain.PipelineSignalHold {
-		if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
-			return nil, err
+		if err := ctx.Err(); err != nil {
+			return failRun(err)
 		}
-		return &api.StrategyRunResult{Run: run, Signal: signal}, nil
+		if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
+			return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+		}
+		if run.Status != domain.PipelineStatusCompleted {
+			return &api.StrategyRunResult{Run: run, Signal: run.Signal}, fmt.Errorf("kalshi native: completed terminal authority required: durable status=%s signal=%s", run.Status, run.Signal)
+		}
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, nil
 	}
 
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
@@ -828,35 +904,58 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 	finalSignal := execution.FinalSignal{Signal: signal, Confidence: decision.Confidence}
 	tradingPlan := kalshiTradingPlan(signal, snapshot, decision, strategy.Ticker)
+	if err := ctx.Err(); err != nil {
+		return failRun(err)
+	}
+	if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	if run.Status != domain.PipelineStatusCompleted {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, fmt.Errorf("kalshi native: completed terminal authority required: durable status=%s signal=%s", run.Status, run.Signal)
+	}
+	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
 		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
-			return failRun(err)
+			return canonical, err
 		}
 	}
-
-	if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
-		return nil, err
-	}
 	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	var orders []domain.Order
 	if r.orderRepo != nil {
 		orders, err = r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
 		if err != nil {
-			return nil, err
+			return canonical, err
 		}
 	}
 	var positions []domain.Position
 	if r.positionRepo != nil {
 		positions, err = r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
 		if err != nil {
-			return nil, err
+			return canonical, err
 		}
 	}
 
-	return &api.StrategyRunResult{Run: run, Signal: signal, Orders: orders, Positions: positions}, nil
+	return &api.StrategyRunResult{Run: run, Signal: run.Signal, Orders: orders, Positions: positions}, nil
+}
+
+func nativeFailure(ctx context.Context, err error) (domain.PipelineStatus, string) {
+	if runcontrol.IsCancelled(ctx) {
+		return domain.PipelineStatusCancelled, context.Cause(ctx).Error()
+	}
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return domain.PipelineStatusFailed, cause.Error()
+	}
+	return domain.PipelineStatusFailed, err.Error()
+}
+
+func recognizedRunControlError(ctx context.Context, err error) error {
+	if cause, ok := runcontrol.TypedCause(ctx); ok && cause != runcontrol.Stale && !errors.Is(err, cause) {
+		return errors.Join(err, context.Cause(ctx))
+	}
+	return err
 }
 
 func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, run *domain.PipelineRun) error {
@@ -872,7 +971,7 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	if err := r.runRepo.Create(persistCtx, run); err != nil {
 		cancel()
-		return fmt.Errorf("%s native: create run: %w", source, err)
+		return recognizedRunControlError(ctx, fmt.Errorf("%s native: create run: %w", source, err))
 	}
 	cancel()
 
@@ -898,24 +997,32 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 
 	completedAt := time.Now().UTC()
 	fallbackSignal := domain.PipelineSignalHold
-	fallbackErr := fmt.Errorf("%s native: start audit event persistence failed", source)
-	run.Status = domain.PipelineStatusFailed
-	run.Signal = fallbackSignal
-	run.CompletedAt = &completedAt
-	run.ErrorMessage = fallbackErr.Error()
-	update := repository.PipelineRunStatusUpdate{
-		Status: domain.PipelineStatusFailed, Signal: &fallbackSignal, CompletedAt: &completedAt, ErrorMessage: fallbackErr.Error(),
+	status, message := nativeFailure(ctx, eventErr)
+	terminalEvent, terminalEventErr := nativeTerminalEvent(source, run, status, fallbackSignal)
+	if terminalEventErr != nil {
+		return recognizedRunControlError(ctx, errors.Join(fmt.Errorf("%s native: persist start event: %w", source, eventErr), terminalEventErr))
 	}
 	updateCtx, updateCancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-	updateErr := r.runRepo.UpdateStatus(updateCtx, run.ID, run.TradeDate, update)
+	receipt, updateErr := r.runRepo.Finalize(updateCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, Signal: &fallbackSignal, CompletedAt: completedAt, ErrorMessage: message, Event: terminalEvent})
 	updateCancel()
 	if updateErr != nil {
-		return errors.Join(
+		return recognizedRunControlError(ctx, errors.Join(
 			fmt.Errorf("%s native: persist start event: %w", source, eventErr),
 			fmt.Errorf("%s native: persist start-event failure status: %w", source, updateErr),
-		)
+		))
 	}
-	return fmt.Errorf("%s native: persist start event: %w", source, eventErr)
+	*run = receipt.Run
+	if !receipt.Applied {
+		lostErr := fmt.Errorf("%s native: %w: durable status=%s signal=%s", source, agent.ErrLostTerminalAuthority, receipt.Run.Status, receipt.Run.Signal)
+		if receipt.Run.Status == domain.PipelineStatusCancelled {
+			lostErr = runcontrol.JoinCauseFromErrorMessage(lostErr, receipt.Run.ErrorMessage)
+		}
+		return recognizedRunControlError(ctx, errors.Join(
+			fmt.Errorf("%s native: persist start event: %w", source, eventErr),
+			lostErr,
+		))
+	}
+	return recognizedRunControlError(ctx, fmt.Errorf("%s native: persist start event: %w", source, eventErr))
 }
 
 func (r *realStrategyRunner) completeNativeRun(
@@ -934,58 +1041,55 @@ func (r *realStrategyRunner) completeNativeRun(
 	}
 
 	completedAt := time.Now().UTC()
-	run.Status = status
-	run.Signal = signal
-	run.CompletedAt = &completedAt
-	run.ErrorMessage = errMsg
-	update := repository.PipelineRunStatusUpdate{
-		Status: status, Signal: &signal, CompletedAt: &completedAt, ErrorMessage: errMsg,
-	}
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-	err := r.runRepo.UpdateStatus(persistCtx, run.ID, run.TradeDate, update)
-	cancel()
+	event, err := nativeTerminalEvent(source, run, status, signal)
 	if err != nil {
-		return fmt.Errorf("%s native: persist terminal run status: %w", source, err)
+		return err
 	}
-
-	eventErr := r.persistNativeTerminalEvent(ctx, source, run, status, signal)
-	if eventErr == nil {
+	finalization := repository.PipelineRunFinalization{Status: status, Signal: &signal, CompletedAt: completedAt, ErrorMessage: errMsg, Event: event}
+	persistParent := context.WithoutCancel(ctx)
+	if status == domain.PipelineStatusCompleted {
+		persistParent = ctx
+	}
+	persistCtx, cancel := context.WithTimeout(persistParent, nativeTerminalTimeout)
+	receipt, err := r.runRepo.Finalize(persistCtx, run.ID, run.TradeDate, finalization)
+	cancel()
+	if err != nil && status == domain.PipelineStatusCompleted && ctx.Err() != nil {
+		fallbackStatus, fallbackMessage := nativeFailure(ctx, ctx.Err())
+		fallbackSignal := domain.PipelineSignalHold
+		fallbackEvent, eventErr := nativeTerminalEvent(source, run, fallbackStatus, fallbackSignal)
+		if eventErr != nil {
+			return recognizedRunControlError(ctx, errors.Join(fmt.Errorf("%s native: finalize run: %w", source, err), eventErr))
+		}
+		fallbackCtx, fallbackCancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
+		receipt, err = r.runRepo.Finalize(fallbackCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: fallbackStatus, Signal: &fallbackSignal, CompletedAt: time.Now().UTC(), ErrorMessage: fallbackMessage, Event: fallbackEvent})
+		fallbackCancel()
+	}
+	if err != nil {
+		return recognizedRunControlError(ctx, fmt.Errorf("%s native: finalize run: %w", source, err))
+	}
+	*run = receipt.Run
+	if !receipt.Applied {
+		err := fmt.Errorf("%s native: terminal finalization lost: %w: durable status=%s signal=%s", source, agent.ErrLostTerminalAuthority, receipt.Run.Status, receipt.Run.Signal)
+		if receipt.Run.Status == domain.PipelineStatusCancelled {
+			err = runcontrol.JoinCauseFromErrorMessage(err, receipt.Run.ErrorMessage)
+		}
+		return recognizedRunControlError(ctx, err)
+	}
+	if status == domain.PipelineStatusCompleted && receipt.Run.Status == domain.PipelineStatusCompleted {
 		return nil
 	}
-	if status != domain.PipelineStatusCompleted {
-		return eventErr
+	if status == domain.PipelineStatusCompleted && receipt.Applied && ctx.Err() != nil {
+		return context.Cause(ctx)
 	}
-
-	// A completed row without its terminal audit event is not auditable. Mark
-	// it failed before returning so downstream execution cannot treat it as a
-	// successful native pipeline.
-	fallbackErr := fmt.Errorf("%s native: terminal audit event persistence failed", source)
-	fallbackSignal := domain.PipelineSignalHold
-	run.Status = domain.PipelineStatusFailed
-	run.Signal = fallbackSignal
-	run.ErrorMessage = fallbackErr.Error()
-	fallback := repository.PipelineRunStatusUpdate{
-		Status: domain.PipelineStatusFailed, Signal: &fallbackSignal, CompletedAt: &completedAt, ErrorMessage: fallbackErr.Error(),
-	}
-	fallbackCtx, fallbackCancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-	updateErr := r.runRepo.UpdateStatus(fallbackCtx, run.ID, run.TradeDate, fallback)
-	fallbackCancel()
-	if updateErr != nil {
-		return errors.Join(eventErr, fmt.Errorf("%s native: persist terminal-event failure status: %w", source, updateErr))
-	}
-	return eventErr
+	return nil
 }
 
-func (r *realStrategyRunner) persistNativeTerminalEvent(
-	ctx context.Context,
+func nativeTerminalEvent(
 	source string,
 	run *domain.PipelineRun,
 	status domain.PipelineStatus,
 	signal domain.PipelineSignal,
-) error {
-	if r.eventRepo == nil {
-		return fmt.Errorf("%s native: agent event repository is required", source)
-	}
+) (*domain.AgentEvent, error) {
 	eventKind := agent.AgentEventKindPipelineFailed.String()
 	title := "Pipeline failed"
 	tags := []string{"pipeline", "failed", "native", source}
@@ -993,6 +1097,10 @@ func (r *realStrategyRunner) persistNativeTerminalEvent(
 		eventKind = agent.AgentEventKindPipelineCompleted.String()
 		title = "Pipeline completed"
 		tags = []string{"pipeline", "completed", "native", source}
+	} else if status == domain.PipelineStatusCancelled {
+		eventKind = agent.AgentEventKindPipelineCancelled.String()
+		title = "Pipeline cancelled"
+		tags = []string{"pipeline", "cancelled", "native", source}
 	}
 	metadata, err := json.Marshal(map[string]string{
 		"execution_path": source + "_native",
@@ -1000,7 +1108,7 @@ func (r *realStrategyRunner) persistNativeTerminalEvent(
 		"status":         string(status),
 	})
 	if err != nil {
-		return fmt.Errorf("%s native: marshal terminal event: %w", source, err)
+		return nil, fmt.Errorf("%s native: marshal terminal event: %w", source, err)
 	}
 	event := &domain.AgentEvent{
 		PipelineRunID: &run.ID,
@@ -1011,12 +1119,7 @@ func (r *realStrategyRunner) persistNativeTerminalEvent(
 		Tags:          tags,
 		Metadata:      metadata,
 	}
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-	defer cancel()
-	if err := r.eventRepo.Create(persistCtx, event); err != nil {
-		return fmt.Errorf("%s native: persist terminal event: %w", source, err)
-	}
-	return nil
+	return event, nil
 }
 
 func predictionNativeEvidence(provider string, snapshot, decision any) json.RawMessage {
@@ -2112,6 +2215,14 @@ func (r *realStrategyRunner) recordPipelineMetrics(run domain.PipelineRun) {
 	if run.CompletedAt != nil {
 		r.metrics.ObservePipelineDuration(run.Ticker, run.CompletedAt.Sub(run.StartedAt).Seconds())
 	}
+}
+
+func (r *realStrategyRunner) recordAgentTerminalMetrics(result *agent.RunResult) {
+	if result == nil || !result.TerminalApplied {
+		return
+	}
+	r.recordPipelineMetrics(result.Run)
+	r.refreshExecutionMetrics(context.Background())
 }
 
 func (r *realStrategyRunner) refreshExecutionMetrics(ctx context.Context) {

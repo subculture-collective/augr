@@ -16,6 +16,8 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 // AnalysisAgent is the runner-facing contract for analysis participants.
@@ -142,11 +144,14 @@ type StateView struct {
 
 // RunResult is the runner output for one completed or failed run.
 type RunResult struct {
-	Run      domain.PipelineRun
-	Signal   domain.PipelineSignal
-	State    StateView
-	Warnings []RunWarning
+	Run             domain.PipelineRun
+	Signal          domain.PipelineSignal
+	State           StateView
+	Warnings        []RunWarning
+	TerminalApplied bool
 }
+
+var ErrLostTerminalAuthority = errors.New("lost terminal authority")
 
 // Runner owns immutable run preparation and execution.
 type Runner struct {
@@ -256,59 +261,56 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 
 		panicType := fmt.Sprintf("%T", recovered)
 		panicErr := fmt.Errorf("agent/runner: panic recovered (%s)", panicType)
-		r.logger.Error("agent/runner: recovered panic",
-			slog.String("panic_type", panicType),
-			slog.String("stack", string(debug.Stack())),
-		)
+		stack := debug.Stack()
 
 		completedAt := r.currentTime().UTC()
 		phaseTimingsJSON, _ := json.Marshal(phaseTimings)
+		applied := false
 		if run.ID != uuid.Nil {
-			if persistErr := r.persister.RecordRunComplete(
-				context.Background(),
-				run.ID,
-				run.TradeDate,
-				domain.PipelineStatusFailed,
-				completedAt,
-				panicErr.Error(),
-				phaseTimingsJSON,
-			); persistErr != nil {
+			event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, AgentEventKindPipelineFailed, "", "Pipeline failed", panicErr.Error(), map[string]any{"phase": "panic", "error_message": panicErr.Error()}, []string{"pipeline", "failed"})
+			receipt, persistErr := finalizeRunBounded(r.persister, context.Background(), run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusFailed, CompletedAt: completedAt, ErrorMessage: panicErr.Error(), PhaseTimings: phaseTimingsJSON, Event: event})
+			if persistErr != nil {
 				panicErr = errors.Join(panicErr, fmt.Errorf("agent/runner: persist panic terminal status: %w", persistErr))
+			} else {
+				run = receipt.Run
+				applied = receipt.Applied
 			}
 		}
-		if cacheStatsCollector != nil {
-			r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
-		}
-		if run.ID != uuid.Nil {
-			if eventErr := r.helper.persistStructuredTerminalEvent(r.helper.newStructuredEvent(
-				run.ID,
-				prepared.Strategy.ID,
-				AgentEventKindPipelineFailed,
-				"",
-				"Pipeline failed",
-				panicErr.Error(),
-				map[string]any{"phase": "panic", "error_message": panicErr.Error()},
-				[]string{"pipeline", "failed"},
-			)); eventErr != nil {
-				panicErr = errors.Join(panicErr, eventErr)
+		if applied {
+			r.logger.Error("agent/runner: recovered panic",
+				slog.String("panic_type", panicType),
+				slog.String("stack", string(stack)),
+			)
+			if cacheStatsCollector != nil {
+				r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
 			}
+			r.helper.emitEvent(PipelineEvent{
+				Type:          PipelineError,
+				PipelineRunID: run.ID,
+				StrategyID:    prepared.Strategy.ID,
+				Ticker:        prepared.Strategy.Ticker,
+				Error:         panicErr.Error(),
+				OccurredAt:    r.currentTime().UTC(),
+			})
 		}
-		r.helper.emitEvent(PipelineEvent{
-			Type:          PipelineError,
-			PipelineRunID: run.ID,
-			StrategyID:    prepared.Strategy.ID,
-			Ticker:        prepared.Strategy.Ticker,
-			Error:         panicErr.Error(),
-			OccurredAt:    r.currentTime().UTC(),
-		})
 
-		run.Status = domain.PipelineStatusFailed
-		run.CompletedAt = &completedAt
-		run.ErrorMessage = panicErr.Error()
-		result = &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}
-		runErr = panicErr
+		if run.ID == uuid.Nil {
+			run.Status = domain.PipelineStatusFailed
+			run.CompletedAt = &completedAt
+			run.ErrorMessage = panicErr.Error()
+		}
+		resultState := snapshotState(state)
+		resultState.FinalSignal.Signal = run.Signal
+		result = &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings, TerminalApplied: applied}
+		runErr = executionError(ctx, panicErr)
+		if run.ID != uuid.Nil && !applied {
+			runErr = executionError(ctx, errors.Join(runErr, lostTerminalAuthorityError("agent/runner", run)))
+		}
 	}()
 
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	ctx = runCtx
 	var cancel context.CancelFunc
 	if prepared.Runtime.PipelineTimeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, prepared.Runtime.PipelineTimeout)
@@ -332,14 +334,22 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 	}
 	if prepared.RunID != uuid.Nil {
 		run.ID = prepared.RunID
-	} else {
-		if err := r.persister.RecordRunStart(ctx, &run); err != nil {
-			return nil, err
-		}
 	}
+	registered := false
 	if r.runRegistry != nil {
-		r.runRegistry.Register(run.ID, cancel)
-		defer r.runRegistry.Deregister(run.ID)
+		if err := r.runRegistry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
+			return nil, fmt.Errorf("agent/runner: register run context: %w", err)
+		}
+		registered = true
+		defer r.runRegistry.Deregister(run.ID, run.TradeDate)
+	}
+	if prepared.RunID == uuid.Nil {
+		if err := r.persister.RecordRunStart(ctx, &run); err != nil {
+			if registered {
+				r.runRegistry.Deregister(run.ID, run.TradeDate)
+			}
+			return nil, executionError(ctx, err)
+		}
 	}
 
 	state = &PipelineState{
@@ -402,35 +412,31 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 			phaseTimings[phase.name+"_ms"] = time.Since(phaseStart).Milliseconds()
 			completedAt := r.currentTime().UTC()
 			phaseTimingsJSON, _ := json.Marshal(phaseTimings)
-			if persistErr := r.persister.RecordRunComplete(ctx, run.ID, run.TradeDate, domain.PipelineStatusFailed, completedAt, err.Error(), phaseTimingsJSON); persistErr != nil {
-				err = errors.Join(err, fmt.Errorf("agent/runner: persist failed terminal status: %w", persistErr))
+			status, eventKind, eventType, terminalErr := classifyRunFailure(ctx, err)
+			event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, eventKind, "", terminalTitle(status), terminalErr, map[string]any{"phase": phase.name, "error_message": terminalErr}, []string{"pipeline", string(status)})
+			receipt, persistErr := finalizeRunBounded(r.persister, ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, CompletedAt: completedAt, ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON, Event: event})
+			if persistErr != nil {
+				return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, executionError(ctx, errors.Join(err, fmt.Errorf("agent/runner: persist terminal status: %w", persistErr)))
+			}
+			run = receipt.Run
+			resultState := snapshotState(state)
+			resultState.FinalSignal.Signal = run.Signal
+			if !receipt.Applied {
+				return &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings}, executionError(ctx, lostTerminalAuthorityError("agent/runner", run))
 			}
 			r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
-			if eventErr := r.helper.persistStructuredTerminalEvent(r.helper.newStructuredEvent(
-				run.ID,
-				prepared.Strategy.ID,
-				AgentEventKindPipelineFailed,
-				"",
-				"Pipeline failed",
-				err.Error(),
-				map[string]any{"phase": phase.name, "error_message": err.Error()},
-				[]string{"pipeline", "failed"},
-			)); eventErr != nil {
-				err = errors.Join(err, eventErr)
+			if receipt.Applied {
+				r.helper.emitEvent(PipelineEvent{
+					Type:          eventType,
+					PipelineRunID: run.ID,
+					StrategyID:    prepared.Strategy.ID,
+					Ticker:        prepared.Strategy.Ticker,
+					Error:         terminalErr,
+					OccurredAt:    r.currentTime().UTC(),
+				})
 			}
-			r.helper.emitEvent(PipelineEvent{
-				Type:          PipelineError,
-				PipelineRunID: run.ID,
-				StrategyID:    prepared.Strategy.ID,
-				Ticker:        prepared.Strategy.Ticker,
-				Error:         err.Error(),
-				OccurredAt:    r.currentTime().UTC(),
-			})
-			run.Status = domain.PipelineStatusFailed
-			run.CompletedAt = &completedAt
-			run.ErrorMessage = err.Error()
-			result = &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}
-			runErr = err
+			result = &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings, TerminalApplied: true}
+			runErr = executionError(ctx, err)
 			return result, runErr
 		}
 		phaseTimings[phase.name+"_ms"] = time.Since(phaseStart).Milliseconds()
@@ -446,77 +452,135 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 		))
 	}
 
+	if err := ctx.Err(); err != nil {
+		completedAt := r.currentTime().UTC()
+		phaseTimingsJSON, _ := json.Marshal(phaseTimings)
+		status, eventKind, eventType, terminalErr := classifyRunFailure(ctx, err)
+		event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, eventKind, "", terminalTitle(status), terminalErr, map[string]any{"phase": "completion", "error_message": terminalErr}, []string{"pipeline", string(status)})
+		receipt, persistErr := finalizeRunBounded(r.persister, ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, CompletedAt: completedAt, ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON, Event: event})
+		if persistErr != nil {
+			return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, executionError(ctx, errors.Join(err, fmt.Errorf("agent/runner: persist terminal status: %w", persistErr)))
+		}
+		run = receipt.Run
+		resultState := snapshotState(state)
+		resultState.FinalSignal.Signal = run.Signal
+		if !receipt.Applied {
+			return &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings}, executionError(ctx, lostTerminalAuthorityError("agent/runner", run))
+		}
+		r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
+		r.helper.emitEvent(PipelineEvent{Type: eventType, PipelineRunID: run.ID, StrategyID: prepared.Strategy.ID, Ticker: prepared.Strategy.Ticker, Error: terminalErr, OccurredAt: r.currentTime().UTC()})
+		return &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings, TerminalApplied: true}, executionError(ctx, err)
+	}
+
 	completedAt := r.currentTime().UTC()
 	phaseTimingsJSON, _ := json.Marshal(phaseTimings)
-	if persistErr := r.persister.RecordRunComplete(ctx, run.ID, run.TradeDate, domain.PipelineStatusCompleted, completedAt, "", phaseTimingsJSON); persistErr != nil {
-		err := fmt.Errorf("agent/runner: persist completed terminal status: %w", persistErr)
-		r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
-		if eventErr := r.helper.persistStructuredTerminalEvent(r.helper.newStructuredEvent(
-			run.ID,
-			prepared.Strategy.ID,
-			AgentEventKindPipelineFailed,
-			"",
-			"Pipeline failed",
-			err.Error(),
-			map[string]any{"phase": "terminal_persistence", "error_message": err.Error()},
-			[]string{"pipeline", "failed"},
-		)); eventErr != nil {
-			err = errors.Join(err, eventErr)
+	signal := r.canonicalSignal(state)
+	event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, AgentEventKindPipelineCompleted, "", "Pipeline completed", "", nil, []string{"pipeline", "completed"})
+	completedFinalization := repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: completedAt, Signal: &signal, PhaseTimings: phaseTimingsJSON, Event: event}
+	receipt, persistErr := finalizeCompletedRun(r.persister, ctx, run.ID, run.TradeDate, completedFinalization, func() repository.PipelineRunFinalization {
+		status, eventKind, _, terminalErr := classifyRunFailure(ctx, ctx.Err())
+		return repository.PipelineRunFinalization{
+			Status: status, CompletedAt: r.currentTime().UTC(), ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON,
+			Event: r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, eventKind, "", terminalTitle(status), terminalErr, map[string]any{"phase": "completion", "error_message": terminalErr}, []string{"pipeline", string(status)}),
 		}
-		r.helper.emitEvent(PipelineEvent{
-			Type:          PipelineError,
-			PipelineRunID: run.ID,
-			StrategyID:    prepared.Strategy.ID,
-			Ticker:        prepared.Strategy.Ticker,
-			Error:         err.Error(),
-			OccurredAt:    r.currentTime().UTC(),
-		})
-		run.Status = domain.PipelineStatusFailed
-		run.CompletedAt = &completedAt
-		run.ErrorMessage = err.Error()
-		return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, err
-	}
-	r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
-	if eventErr := r.helper.persistStructuredTerminalEvent(r.helper.newStructuredEvent(
-		run.ID,
-		prepared.Strategy.ID,
-		AgentEventKindPipelineCompleted,
-		"",
-		"Pipeline completed",
-		"",
-		nil,
-		[]string{"pipeline", "completed"},
-	)); eventErr != nil {
-		err := fmt.Errorf("agent/runner: persist completed terminal event: %w", eventErr)
-		if persistErr := r.persister.RecordRunComplete(ctx, run.ID, run.TradeDate, domain.PipelineStatusFailed, completedAt, err.Error(), phaseTimingsJSON); persistErr != nil {
-			err = errors.Join(err, fmt.Errorf("agent/runner: persist terminal-event failure status: %w", persistErr))
-		}
-		r.helper.emitEvent(PipelineEvent{
-			Type:          PipelineError,
-			PipelineRunID: run.ID,
-			StrategyID:    prepared.Strategy.ID,
-			Ticker:        prepared.Strategy.Ticker,
-			Error:         err.Error(),
-			OccurredAt:    r.currentTime().UTC(),
-		})
-		run.Status = domain.PipelineStatusFailed
-		run.CompletedAt = &completedAt
-		run.ErrorMessage = err.Error()
-		return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, err
-	}
-	r.helper.emitEvent(PipelineEvent{
-		Type:          PipelineCompleted,
-		PipelineRunID: run.ID,
-		StrategyID:    prepared.Strategy.ID,
-		Ticker:        prepared.Strategy.Ticker,
-		OccurredAt:    r.currentTime().UTC(),
 	})
-	run.Status = domain.PipelineStatusCompleted
-	run.CompletedAt = &completedAt
+	if persistErr != nil {
+		err := fmt.Errorf("agent/runner: persist completed terminal status: %w", persistErr)
+		return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, executionError(ctx, err)
+	}
+	run = receipt.Run
+	resultState := snapshotState(state)
+	resultState.FinalSignal.Signal = run.Signal
+	if !receipt.Applied {
+		return &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings}, executionError(ctx, lostTerminalAuthorityError("agent/runner", run))
+	}
+	if run.Status != domain.PipelineStatusCompleted {
+		if receipt.Applied && ctx.Err() != nil {
+			_, _, eventType, terminalErr := classifyRunFailure(ctx, ctx.Err())
+			r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
+			r.helper.emitEvent(PipelineEvent{Type: eventType, PipelineRunID: run.ID, StrategyID: prepared.Strategy.ID, Ticker: prepared.Strategy.Ticker, Error: terminalErr, OccurredAt: r.currentTime().UTC()})
+			return &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings, TerminalApplied: true}, context.Cause(ctx)
+		}
+		return &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings}, executionError(ctx, lostTerminalAuthorityError("agent/runner", run))
+	}
+	if receipt.Applied {
+		r.helper.emitCacheStats(state, cacheStatsCollector, run.ID, prepared.Strategy.ID, prepared.Strategy.Ticker)
+		r.helper.emitEvent(PipelineEvent{
+			Type:          PipelineCompleted,
+			PipelineRunID: run.ID,
+			StrategyID:    prepared.Strategy.ID,
+			Ticker:        prepared.Strategy.Ticker,
+			OccurredAt:    r.currentTime().UTC(),
+		})
+	}
 
-	result = &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}
+	result = &RunResult{Run: run, Signal: run.Signal, State: resultState, Warnings: warnings, TerminalApplied: receipt.Applied}
 	runErr = nil
 	return result, runErr
+}
+
+const terminalFinalizeTimeout = 10 * time.Second
+
+func finalizeRunBounded(persister DecisionPersister, ctx context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalFinalizeTimeout)
+	defer cancel()
+	return persister.FinalizeRun(persistCtx, runID, tradeDate, finalization)
+}
+
+func finalizeCompletedRun(
+	persister DecisionPersister,
+	ctx context.Context,
+	runID uuid.UUID,
+	tradeDate time.Time,
+	completed repository.PipelineRunFinalization,
+	cancelled func() repository.PipelineRunFinalization,
+) (repository.PipelineRunFinalizationReceipt, error) {
+	persistCtx, cancel := context.WithTimeout(ctx, terminalFinalizeTimeout)
+	receipt, err := persister.FinalizeRun(persistCtx, runID, tradeDate, completed)
+	cancel()
+	if err == nil || ctx.Err() == nil {
+		return receipt, err
+	}
+	fallbackReceipt, fallbackErr := finalizeRunBounded(persister, ctx, runID, tradeDate, cancelled())
+	if fallbackErr != nil {
+		return fallbackReceipt, errors.Join(err, fallbackErr)
+	}
+	return fallbackReceipt, nil
+}
+
+func lostTerminalAuthorityError(component string, run domain.PipelineRun) error {
+	err := fmt.Errorf("%s: %w: durable status=%s signal=%s", component, ErrLostTerminalAuthority, run.Status, run.Signal)
+	if run.Status == domain.PipelineStatusCancelled {
+		return runcontrol.JoinCauseFromErrorMessage(err, run.ErrorMessage)
+	}
+	return err
+}
+
+func classifyRunFailure(ctx context.Context, err error) (domain.PipelineStatus, AgentEventKind, PipelineEventType, string) {
+	if runcontrol.IsCancelled(ctx) {
+		return domain.PipelineStatusCancelled, AgentEventKindPipelineCancelled, PipelineCancelled, context.Cause(ctx).Error()
+	}
+	if errors.Is(context.Cause(ctx), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return domain.PipelineStatusFailed, AgentEventKindPipelineFailed, PipelineError, "pipeline timeout: " + err.Error()
+	}
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return domain.PipelineStatusFailed, AgentEventKindPipelineFailed, PipelineError, cause.Error()
+	}
+	return domain.PipelineStatusFailed, AgentEventKindPipelineFailed, PipelineError, err.Error()
+}
+
+func executionError(ctx context.Context, err error) error {
+	if cause, ok := runcontrol.TypedCause(ctx); ok && cause != runcontrol.Stale && !errors.Is(err, cause) {
+		return errors.Join(err, context.Cause(ctx))
+	}
+	return err
+}
+
+func terminalTitle(status domain.PipelineStatus) string {
+	if status == domain.PipelineStatusCancelled {
+		return "Pipeline cancelled"
+	}
+	return "Pipeline failed"
 }
 
 func (r *Runner) runExecutionGate(_ context.Context, state *PipelineState, prepared PreparedRun, _ *[]RunWarning, _ *sync.Mutex) error {

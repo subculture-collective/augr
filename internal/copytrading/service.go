@@ -13,6 +13,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data/edgar"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/google/uuid"
 )
 
@@ -40,16 +41,21 @@ type PaperOrderExecutor interface {
 }
 
 type ServiceDeps struct {
-	Repo       repository.CopyTradingRepository
-	OriginRuns copyorigin.Store
-	Strategies repository.StrategyRepository
-	Runs       repository.PipelineRunRepository
-	Positions  repository.PositionRepository
-	EDGAR      ThirteenFFetcher
-	Prices     PriceProvider
-	Executor   PaperOrderExecutor
-	Logger     *slog.Logger
-	Now        func() time.Time
+	Repo        repository.CopyTradingRepository
+	OriginRuns  copyorigin.PlannedStore
+	Strategies  repository.StrategyRepository
+	Runs        repository.PipelineRunRepository
+	Events      repository.AgentEventRepository
+	RunRegistry interface {
+		Register(uuid.UUID, time.Time, context.CancelCauseFunc) error
+		Deregister(uuid.UUID, time.Time)
+	}
+	Positions repository.PositionRepository
+	EDGAR     ThirteenFFetcher
+	Prices    PriceProvider
+	Executor  PaperOrderExecutor
+	Logger    *slog.Logger
+	Now       func() time.Time
 }
 
 type Service struct{ deps ServiceDeps }
@@ -411,9 +417,6 @@ func (s *Service) Sync13FSubscriptions(ctx context.Context) (SyncSummary, error)
 }
 
 func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult, error) {
-	if s.deps.Runs == nil {
-		return nil, fmt.Errorf("pipeline run repository is unavailable")
-	}
 	subscription, err := s.deps.Repo.GetSubscription(ctx, id)
 	if err != nil {
 		return nil, err
@@ -434,109 +437,246 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 		if runErr != nil {
 			return nil, runErr
 		}
-		for i := range intents {
-			created, createErr := s.deps.Repo.CreateIntent(ctx, &intents[i])
-			if createErr != nil {
-				return nil, createErr
-			}
-			if !created {
-				existing, listErr := s.deps.Repo.ListIntents(ctx, subscription.ID, 1000, 0)
-				if listErr != nil {
-					return nil, listErr
-				}
-				matched := false
-				for _, value := range existing {
-					if value.ID == intents[i].ID {
-						intents[i], matched = value, true
-						break
-					}
-				}
-				if !matched {
-					return nil, fmt.Errorf("copy origin intent retry did not reconstruct")
-				}
-			}
-		}
-		persisted, persistErr := s.deps.OriginRuns.RegisterRun(ctx, run)
+		persisted, intents, persistErr := s.deps.OriginRuns.RegisterPlannedRun(ctx, run, intents)
 		if persistErr != nil {
 			return nil, persistErr
 		}
 		return &RebalanceResult{OriginRunID: persisted.ID(), OriginRunSHA256: persisted.Digest(), Preview: *preview, Intents: intents}, nil
 	}
+	if s.deps.Runs == nil {
+		return nil, fmt.Errorf("pipeline run repository is unavailable")
+	}
 	now := s.deps.Now().UTC()
 	config, _ := json.Marshal(map[string]any{"copy_subscription_id": id, "source_observation_id": preview.Observation.ID, "calculation_version": CalculationVersion})
 	run := domain.PipelineRun{StrategyID: *subscription.LegacyStrategyID, Ticker: "13F:" + subscription.SourceID.String(), TradeDate: now, Status: domain.PipelineStatusRunning, StartedAt: now, ConfigSnapshot: config}
+	run.ID = uuid.New()
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
+	if s.deps.RunRegistry != nil {
+		if err := s.deps.RunRegistry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
+			return nil, fmt.Errorf("copy rebalance: register run context: %w", err)
+		}
+		defer s.deps.RunRegistry.Deregister(run.ID, run.TradeDate)
+	}
+	ctx = runCtx
 	if err := s.deps.Runs.Create(ctx, &run); err != nil {
 		return nil, err
 	}
 	result := &RebalanceResult{Run: run, Preview: *preview, Intents: make([]domain.CopyTradeIntent, 0, len(preview.Intents))}
-	createdOrders := 0
+	planned := append([]domain.CopyTradeIntent(nil), preview.Intents...)
 	buyOrders := 0
 	sellOrders := 0
-	unexpectedErrors := 0
-	for _, candidate := range preview.Intents {
+	approvedOrders := 0
+	for i := range planned {
+		planned[i].PipelineRunID = &run.ID
+		if planned[i].PolicyStatus != "approved" {
+			continue
+		}
+		approvedOrders++
+		if planned[i].Side == domain.OrderSideSell {
+			sellOrders++
+		} else {
+			buyOrders++
+		}
+	}
+
+	status := domain.PipelineStatusCompleted
+	signal := domain.PipelineSignalHold
+	message := ""
+	var planningErr error
+	if approvedOrders > 0 {
+		signal = domain.PipelineSignalBuy
+		if sellOrders > 0 && buyOrders == 0 {
+			signal = domain.PipelineSignalSell
+		}
+		if s.deps.Executor == nil {
+			status = domain.PipelineStatusFailed
+			message = "paper executor is unavailable"
+			planningErr = errors.New(message)
+		}
+	}
+	if ctx.Err() != nil {
+		status = domain.PipelineStatusFailed
+		message = ctx.Err().Error()
+		planningErr = ctx.Err()
+		if runcontrol.IsCancelled(ctx) {
+			status = domain.PipelineStatusCancelled
+			message = context.Cause(ctx).Error()
+			planningErr = context.Cause(ctx)
+		} else if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			message = cause.Error()
+			planningErr = cause
+		}
+	}
+
+	eventKind, title, tag := "pipeline_completed", "Copy plan authorized", "completed"
+	if status == domain.PipelineStatusFailed {
+		eventKind, title, tag = "pipeline_failed", "Pipeline failed", "failed"
+	} else if status == domain.PipelineStatusCancelled {
+		eventKind, title, tag = "pipeline_cancelled", "Pipeline cancelled", "cancelled"
+	}
+	completionMetadata, _ := json.Marshal(map[string]any{
+		"completion_scope":      "planning_authority",
+		"source_observation_id": preview.Observation.ID,
+		"planned_intent_count":  len(planned),
+		"approved_intent_count": approvedOrders,
+	})
+	event := &domain.AgentEvent{PipelineRunID: &run.ID, StrategyID: &run.StrategyID, EventKind: eventKind, Title: title, Summary: message, Tags: []string{"pipeline", tag, "copy_trading"}}
+	if status == domain.PipelineStatusCompleted {
+		event.Metadata = completionMetadata
+	}
+	finalization := repository.PipelineRunFinalization{Status: status, Signal: &signal, CompletedAt: s.deps.Now().UTC(), ErrorMessage: message, Event: event}
+	persistParent := context.WithoutCancel(ctx)
+	if status == domain.PipelineStatusCompleted {
+		persistParent = ctx
+	}
+	persistCtx, persistCancel := context.WithTimeout(persistParent, 10*time.Second)
+	receipt, err := s.deps.Runs.Finalize(persistCtx, run.ID, run.TradeDate, finalization)
+	persistCancel()
+	if err != nil && status == domain.PipelineStatusCompleted && ctx.Err() != nil {
+		status = domain.PipelineStatusFailed
+		message = ctx.Err().Error()
+		planningErr = ctx.Err()
+		if runcontrol.IsCancelled(ctx) {
+			status = domain.PipelineStatusCancelled
+			message = context.Cause(ctx).Error()
+			planningErr = context.Cause(ctx)
+		} else if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			message = cause.Error()
+			planningErr = cause
+		}
+		eventKind, title, tag = "pipeline_failed", "Pipeline failed", "failed"
+		if status == domain.PipelineStatusCancelled {
+			eventKind, title, tag = "pipeline_cancelled", "Pipeline cancelled", "cancelled"
+		}
+		event = &domain.AgentEvent{PipelineRunID: &run.ID, StrategyID: &run.StrategyID, EventKind: eventKind, Title: title, Summary: message, Tags: []string{"pipeline", tag, "copy_trading"}}
+		fallbackSignal := domain.PipelineSignalHold
+		fallbackCtx, fallbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		receipt, err = s.deps.Runs.Finalize(fallbackCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, Signal: &fallbackSignal, CompletedAt: s.deps.Now().UTC(), ErrorMessage: message, Event: event})
+		fallbackCancel()
+	}
+	if err != nil {
+		return result, err
+	}
+	result.Run = receipt.Run
+	if !receipt.Applied {
+		err := fmt.Errorf("copy rebalance: lost terminal authority: durable status=%s signal=%s", receipt.Run.Status, receipt.Run.Signal)
+		if receipt.Run.Status == domain.PipelineStatusCancelled {
+			err = runcontrol.JoinCauseFromErrorMessage(err, receipt.Run.ErrorMessage)
+		}
+		return result, err
+	}
+	if receipt.Run.Status != domain.PipelineStatusCompleted {
+		if planningErr != nil {
+			return result, planningErr
+		}
+		return result, fmt.Errorf("copy rebalance: completed terminal authority required: durable status=%s signal=%s", receipt.Run.Status, receipt.Run.Signal)
+	}
+
+	var effectErrs []error
+	for _, candidate := range planned {
 		candidate.PipelineRunID = &run.ID
 		created, createErr := s.deps.Repo.CreateIntent(ctx, &candidate)
 		if createErr != nil {
-			unexpectedErrors++
+			effectErr := fmt.Errorf("persist copy intent %s: %w", candidate.ID, createErr)
+			effectErrs = append(effectErrs, errors.Join(effectErr, s.recordEffectFailure(ctx, receipt.Run, candidate, effectFailure{
+				stage: "create_intent", err: createErr,
+			})))
 			continue
 		}
 		if !created {
-			continue // idempotent replay of an already-processed source observation
+			// An existing intent is the execution fence. It is intentionally not
+			// replayed without downstream order idempotency.
+			continue
 		}
 		if candidate.PolicyStatus != "approved" {
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
-		if s.deps.Executor == nil {
-			candidate.Status = "failed"
+		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, Run: receipt.Run})
+		candidate.OrderID = executionResult.OrderID
+		if executeErr != nil {
+			candidate.Status = "risk_rejected"
 			candidate.RiskStatus = "rejected"
-			candidate.RiskReasons = []string{"paper_executor_unavailable"}
-			unexpectedErrors++
+			candidate.RiskReasons = []string{executeErr.Error()}
 		} else {
-			executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, Run: run})
-			if executeErr != nil {
-				candidate.Status = "risk_rejected"
-				candidate.RiskStatus = "rejected"
-				candidate.RiskReasons = []string{executeErr.Error()}
-			} else {
-				candidate.OrderID = executionResult.OrderID
-				candidate.RiskStatus = "approved"
-				candidate.Status = "ordered"
-				if executionResult.Status == domain.OrderStatusFilled {
-					candidate.Status = "filled"
-				}
-				createdOrders++
-				if candidate.Side == domain.OrderSideSell {
-					sellOrders++
-				} else {
-					buyOrders++
-				}
+			candidate.RiskStatus = "approved"
+			candidate.Status = "ordered"
+			if executionResult.Status == domain.OrderStatusFilled {
+				candidate.Status = "filled"
 			}
 		}
 		if updateErr := s.deps.Repo.UpdateIntent(ctx, &candidate); updateErr != nil {
-			unexpectedErrors++
+			effectErr := fmt.Errorf("update copy intent %s: %w", candidate.ID, updateErr)
+			effectErrs = append(effectErrs, errors.Join(effectErr, s.recordEffectFailure(ctx, receipt.Run, candidate, effectFailure{
+				stage:           "update_intent",
+				err:             updateErr,
+				returnedOrderID: executionResult.OrderID,
+				precedingStage:  effectStage(executeErr, "execute_order"),
+				precedingError:  executeErr,
+			})))
 		}
 		result.Intents = append(result.Intents, candidate)
 	}
-	completed := s.deps.Now().UTC()
-	status := domain.PipelineStatusCompleted
-	signal := domain.PipelineSignalHold
-	if createdOrders > 0 {
-		signal = domain.PipelineSignalBuy
-		if sellOrders > 0 && buyOrders == 0 {
-			signal = domain.PipelineSignalSell
-		}
+	if len(effectErrs) > 0 {
+		return result, fmt.Errorf("copy rebalance execution: %w", errors.Join(effectErrs...))
 	}
-	message := ""
-	if unexpectedErrors > 0 {
-		status = domain.PipelineStatusFailed
-		message = fmt.Sprintf("%d unexpected copy-rebalance error(s)", unexpectedErrors)
-	}
-	if err := s.deps.Runs.UpdateStatus(ctx, run.ID, run.TradeDate, repository.PipelineRunStatusUpdate{Status: status, Signal: &signal, CompletedAt: &completed, ErrorMessage: message}); err != nil {
-		return nil, err
-	}
-	result.Run.Status, result.Run.Signal, result.Run.CompletedAt, result.Run.ErrorMessage = status, signal, &completed, message
 	return result, nil
+}
+
+type effectFailure struct {
+	stage           string
+	err             error
+	returnedOrderID *uuid.UUID
+	precedingStage  string
+	precedingError  error
+}
+
+func effectStage(err error, stage string) string {
+	if err == nil {
+		return ""
+	}
+	return stage
+}
+
+func (s *Service) recordEffectFailure(ctx context.Context, run domain.PipelineRun, intent domain.CopyTradeIntent, failure effectFailure) error {
+	metadata := map[string]any{
+		"intent_id":              intent.ID,
+		"stage":                  failure.stage,
+		"error":                  failure.err.Error(),
+		"observed_intent_status": intent.Status,
+	}
+	if failure.returnedOrderID != nil {
+		metadata["returned_order_id"] = *failure.returnedOrderID
+	}
+	if failure.precedingError != nil {
+		metadata["preceding_failure_stage"] = failure.precedingStage
+		metadata["preceding_failure_error"] = failure.precedingError.Error()
+	}
+	encoded, _ := json.Marshal(metadata)
+	event := &domain.AgentEvent{
+		PipelineRunID: &run.ID,
+		StrategyID:    &run.StrategyID,
+		EventKind:     "copy_rebalance_effects_failed",
+		Title:         "Copy rebalance effects failed",
+		Summary:       fmt.Sprintf("Copy intent %s failed during %s", intent.ID, failure.stage),
+		Tags:          []string{"pipeline", "copy_trading", "effects_failed"},
+		Metadata:      encoded,
+	}
+	var err error
+	if s.deps.Events == nil {
+		err = errors.New("agent event repository is unavailable")
+	} else {
+		eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		err = s.deps.Events.Create(eventCtx, event)
+		cancel()
+	}
+	if err == nil {
+		return nil
+	}
+	observabilityErr := fmt.Errorf("persist copy rebalance failure event: %w", err)
+	s.deps.Logger.Error("copy rebalance failure event persistence failed", slog.Any("error", observabilityErr), slog.String("intent_id", intent.ID.String()), slog.String("stage", failure.stage))
+	return observabilityErr
 }
 
 func (s *Service) ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error) {

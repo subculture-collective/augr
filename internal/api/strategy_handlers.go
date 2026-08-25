@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 func (s *Server) handleListStrategies(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +109,24 @@ func (s *Server) handleRunStrategy(w http.ResponseWriter, r *http.Request) {
 	// Run the strategy asynchronously so the HTTP client disconnect does not
 	// cancel the pipeline context.  Return 202 Accepted immediately.
 	runCtx := context.WithoutCancel(r.Context())
+	var release func()
+	if s.runGroup != nil {
+		admittedCtx, lease, err := s.runGroup.Admit(runCtx)
+		if err != nil {
+			if errors.Is(err, runcontrol.ErrDraining) {
+				respondError(w, http.StatusServiceUnavailable, "strategy runtime is shutting down", ErrCodeInternal)
+				return
+			}
+			respondError(w, http.StatusInternalServerError, "failed to admit strategy run", ErrCodeInternal)
+			return
+		}
+		runCtx = admittedCtx
+		release = lease.Done
+	}
 	go func() {
+		if release != nil {
+			defer release()
+		}
 		result, err := s.runner.RunStrategy(runCtx, *strategy)
 		if err != nil {
 			slog.Error("async strategy run failed", slog.String("strategy_id", id.String()), slog.String("error", err.Error()))

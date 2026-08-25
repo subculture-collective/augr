@@ -80,6 +80,9 @@ export const statusConfig: Record<AppStatus, StatusConfig> = {
 export function normalizeStatus(value: string | undefined | null): AppStatus {
   if (!value) return 'unknown'
   const normalized = value.toLowerCase()
+  const duration = '(?:0|(?:\\d+(?:\\.\\d+)?(?:ns|µs|us|ms|s|m|h))+)'
+  if (new RegExp(`^ok in ${duration}$`).test(normalized)) return 'success'
+  if (new RegExp(`^error after ${duration}$`).test(normalized)) return 'danger'
   if (['ok', 'safe', 'normal', 'closed', 'connected', 'healthy', 'completed', 'success', 'active', 'synced'].includes(normalized)) return 'success'
   if (['running', 'live', 'executing', 'started'].includes(normalized)) return 'running'
   if (['processing', 'queued', 'transforming', 'loading', 'pending'].includes(normalized)) return 'processing'

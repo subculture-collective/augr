@@ -16,6 +16,7 @@ const (
 	DebateRoundCompleted  PipelineEventType = "debate_round_completed"
 	LLMCacheStatsReported PipelineEventType = "llm_cache_stats_reported"
 	PipelineCompleted     PipelineEventType = "pipeline_completed"
+	PipelineCancelled     PipelineEventType = "pipeline_cancelled"
 	PipelineError         PipelineEventType = "pipeline_error"
 )
 
@@ -37,6 +38,7 @@ const (
 	AgentEventKindPipelineStarted      AgentEventKind = "pipeline_started"
 	AgentEventKindPipelineCompleted    AgentEventKind = "pipeline_completed"
 	AgentEventKindPipelineFailed       AgentEventKind = "pipeline_failed"
+	AgentEventKindPipelineCancelled    AgentEventKind = "pipeline_cancelled"
 )
 
 // String returns the string representation of an AgentEventKind.

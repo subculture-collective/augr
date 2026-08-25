@@ -272,13 +272,21 @@ type PipelineRunFilter struct {
 	StartedBefore *time.Time
 }
 
-// PipelineRunStatusUpdate defines the fields that may change when updating run status.
-type PipelineRunStatusUpdate struct {
+// PipelineRunFinalization defines an atomic running-to-terminal transition.
+type PipelineRunFinalization struct {
 	Status       domain.PipelineStatus
-	Signal       *domain.PipelineSignal
-	CompletedAt  *time.Time
+	CompletedAt  time.Time
 	ErrorMessage string
+	Signal       *domain.PipelineSignal
 	PhaseTimings json.RawMessage
+	Event        *domain.AgentEvent
+}
+
+// PipelineRunFinalizationReceipt reports whether a compare-and-set operation
+// was applied and the canonical durable row that won the race.
+type PipelineRunFinalizationReceipt struct {
+	Applied bool
+	Run     domain.PipelineRun
 }
 
 // AgentDecisionFilter defines supported filters when retrieving agent decisions.
@@ -541,7 +549,8 @@ type PipelineRunRepository interface {
 	List(ctx context.Context, filter PipelineRunFilter, limit, offset int) ([]domain.PipelineRun, error)
 	// Count returns the total number of pipeline runs matching the filter (ignoring pagination).
 	Count(ctx context.Context, filter PipelineRunFilter) (int, error)
-	UpdateStatus(ctx context.Context, id uuid.UUID, tradeDate time.Time, update PipelineRunStatusUpdate) error
+	Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization PipelineRunFinalization) (PipelineRunFinalizationReceipt, error)
+	RefineCompletedSignal(ctx context.Context, id uuid.UUID, tradeDate time.Time, expected, signal domain.PipelineSignal) (PipelineRunFinalizationReceipt, error)
 }
 
 // PipelineRunSnapshotRepository provides access to snapshots captured during a run.

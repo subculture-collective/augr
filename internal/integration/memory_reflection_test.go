@@ -52,12 +52,12 @@ func TestIntegration_MemoryReflection_EndToEnd(t *testing.T) {
 	// Mark the pipeline run as completed.
 	completedAt := run.StartedAt.Add(30 * time.Minute)
 	buySignal := domain.PipelineSignalBuy
-	if err := r.PipelineRun.UpdateStatus(ctx, run.ID, run.TradeDate, repository.PipelineRunStatusUpdate{
+	if _, err := r.PipelineRun.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
 		Status:      domain.PipelineStatusCompleted,
 		Signal:      &buySignal,
-		CompletedAt: &completedAt,
+		CompletedAt: completedAt,
 	}); err != nil {
-		t.Fatalf("UpdateStatus(): %v", err)
+		t.Fatalf("Finalize(): %v", err)
 	}
 
 	// 4. Create agent decisions for this run (the 5 reflection roles).
@@ -344,12 +344,12 @@ func TestIntegration_PipelineExecution_PersistRunAndDecisions(t *testing.T) {
 	// 4. Complete the pipeline run.
 	completedAt := run.StartedAt.Add(5 * time.Minute)
 	buySignal := domain.PipelineSignalBuy
-	if err := r.PipelineRun.UpdateStatus(ctx, run.ID, run.TradeDate, repository.PipelineRunStatusUpdate{
+	if _, err := r.PipelineRun.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
 		Status:      domain.PipelineStatusCompleted,
 		Signal:      &buySignal,
-		CompletedAt: &completedAt,
+		CompletedAt: completedAt,
 	}); err != nil {
-		t.Fatalf("UpdateStatus(): %v", err)
+		t.Fatalf("Finalize(): %v", err)
 	}
 
 	// 5. Verify the pipeline run is persisted and completed.
@@ -412,12 +412,12 @@ func TestIntegration_PipelineExecution_FailedRun(t *testing.T) {
 
 	// Mark as failed.
 	completedAt := run.StartedAt.Add(2 * time.Minute)
-	if err := r.PipelineRun.UpdateStatus(ctx, run.ID, run.TradeDate, repository.PipelineRunStatusUpdate{
+	if _, err := r.PipelineRun.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
 		Status:       domain.PipelineStatusFailed,
-		CompletedAt:  &completedAt,
+		CompletedAt:  completedAt,
 		ErrorMessage: "LLM provider timeout after 30s",
 	}); err != nil {
-		t.Fatalf("UpdateStatus(): %v", err)
+		t.Fatalf("Finalize(): %v", err)
 	}
 
 	got, err := r.PipelineRun.Get(ctx, run.ID, run.TradeDate)

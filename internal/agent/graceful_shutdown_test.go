@@ -18,30 +18,20 @@ import (
 // Graceful-shutdown invariant: pipeline run status is never left at "running"
 // --------------------------------------------------------------------------
 
-// TestRepoPersister_RecordRunCompleteSucceedsWithCancelledContext verifies the
-// key invariant that makes graceful shutdown safe: RepoPersister.RecordRunComplete
-// uses an independent context.Background() for its DB write, so the status
-// update succeeds even when the pipeline's execution context has been cancelled
-// (e.g. because SIGTERM was received).
-//
-// Without this property a pipeline run interrupted by SIGTERM could be left
-// permanently stuck at status="running" in the database.
-func TestRepoPersister_RecordRunCompleteSucceedsWithCancelledContext(t *testing.T) {
+func TestRepoPersister_FinalizeRunUsesCallerDetachedContext(t *testing.T) {
 	t.Parallel()
 
 	repo := &captureUpdateRunRepo{}
 
 	persister := NewRepoPersister(repo, nil, nil, nil, nil)
 
-	cancelledCtx, cancel := context.WithCancel(context.Background())
-	cancel() // already cancelled before we call RecordRunComplete
-
 	runID := uuid.New()
 	tradeDate := time.Now().UTC().Truncate(24 * time.Hour)
-
-	err := persister.RecordRunComplete(cancelledCtx, runID, tradeDate, domain.PipelineStatusFailed, time.Now(), "context canceled", nil)
+	detachedCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := persister.FinalizeRun(detachedCtx, runID, tradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusFailed, CompletedAt: time.Now(), ErrorMessage: "context canceled"})
 	if err != nil {
-		t.Fatalf("RecordRunComplete with cancelled context returned error: %v; pipeline run would be stuck at 'running'", err)
+		t.Fatalf("FinalizeRun with cancelled context returned error: %v; pipeline run would be stuck at 'running'", err)
 	}
 
 	if !repo.updateCalled.Load() {
@@ -52,10 +42,7 @@ func TestRepoPersister_RecordRunCompleteSucceedsWithCancelledContext(t *testing.
 	}
 }
 
-// TestRepoPersister_RecordRunCompleteCompletedStatusWithCancelledContext
-// verifies the same property for the "completed" path (all phases succeeded but
-// shutdown happened concurrently).
-func TestRepoPersister_RecordRunCompleteCompletedStatusWithCancelledContext(t *testing.T) {
+func TestRepoPersister_FinalizeRunCompletedObservesCallerCancellation(t *testing.T) {
 	t.Parallel()
 
 	repo := &captureUpdateRunRepo{}
@@ -68,16 +55,12 @@ func TestRepoPersister_RecordRunCompleteCompletedStatusWithCancelledContext(t *t
 	runID := uuid.New()
 	tradeDate := time.Now().UTC().Truncate(24 * time.Hour)
 
-	err := persister.RecordRunComplete(cancelledCtx, runID, tradeDate, domain.PipelineStatusCompleted, time.Now(), "", nil)
-	if err != nil {
-		t.Fatalf("RecordRunComplete (completed) with cancelled context returned error: %v; pipeline run would be stuck at 'running'", err)
+	_, err := persister.FinalizeRun(cancelledCtx, runID, tradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: time.Now()})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("FinalizeRun() error = %v, want caller cancellation", err)
 	}
-
-	if !repo.updateCalled.Load() {
-		t.Fatal("UpdateStatus was not called for completed run")
-	}
-	if repo.lastStatus != domain.PipelineStatusCompleted {
-		t.Fatalf("persisted status = %q, want %q", repo.lastStatus, domain.PipelineStatusCompleted)
+	if repo.updateCalled.Load() {
+		t.Fatal("completed finalization ignored caller cancellation")
 	}
 }
 
@@ -109,28 +92,29 @@ func (r *captureUpdateRunRepo) Count(_ context.Context, _ repository.PipelineRun
 	return 0, nil
 }
 
-func (r *captureUpdateRunRepo) UpdateStatus(ctx context.Context, _ uuid.UUID, _ time.Time, update repository.PipelineRunStatusUpdate) error {
-	// Return an error if the context is already cancelled so that the test
-	// fails if RecordRunComplete forwards the caller's context instead of
-	// using an independent context.Background() for the DB write.
+func (r *captureUpdateRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return repository.PipelineRunFinalizationReceipt{}, ctx.Err()
 	}
 	if r.updateErr != nil {
-		return r.updateErr
+		return repository.PipelineRunFinalizationReceipt{}, r.updateErr
 	}
 	r.updateCalled.Store(true)
-	r.lastStatus = update.Status
-	return nil
+	r.lastStatus = finalization.Status
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
 }
 
-func TestRepoPersister_RecordRunCompletePropagatesUpdateFailure(t *testing.T) {
+func (*captureUpdateRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{}, nil
+}
+
+func TestRepoPersister_FinalizeRunPropagatesFailure(t *testing.T) {
 	t.Parallel()
 
 	repo := &captureUpdateRunRepo{updateErr: errors.New("database unavailable")}
 	persister := NewRepoPersister(repo, nil, nil, nil, nil)
-	err := persister.RecordRunComplete(context.Background(), uuid.New(), time.Now().UTC(), domain.PipelineStatusCompleted, time.Now().UTC(), "", nil)
-	if err == nil || !strings.Contains(err.Error(), "update run status") {
-		t.Fatalf("RecordRunComplete() error = %v, want propagated update failure", err)
+	_, err := persister.FinalizeRun(context.Background(), uuid.New(), time.Now().UTC(), repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: time.Now().UTC()})
+	if err == nil || !strings.Contains(err.Error(), "finalize run") {
+		t.Fatalf("FinalizeRun() error = %v, want propagated failure", err)
 	}
 }

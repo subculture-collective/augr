@@ -23,9 +23,6 @@ func TestEasternDayStartUTCUsesTradingDayAcrossUTCMidnight(t *testing.T) {
 func TestPostMarketCompletionErrorsExposePartialCoverage(t *testing.T) {
 	t.Parallel()
 
-	if err := dailyReviewCompletionError(map[string]int{"query_errors": 1}); err == nil || !strings.Contains(err.Error(), "query_errors=1") {
-		t.Fatalf("dailyReviewCompletionError() = %v, want query coverage error", err)
-	}
 	if err := strategyResweepCompletionError(2); err == nil || !strings.Contains(err.Error(), "strategies failed") {
 		t.Fatalf("strategyResweepCompletionError() = %v, want sweep coverage error", err)
 	}
@@ -33,12 +30,6 @@ func TestPostMarketCompletionErrorsExposePartialCoverage(t *testing.T) {
 		t.Fatalf("optionsScanCompletionError() = %v, want complete failure counts", err)
 	}
 
-	if err := dailyReviewCompletionError(map[string]int{}); err != nil {
-		t.Fatalf("dailyReviewCompletionError(empty) = %v, want nil", err)
-	}
-	if err := dailyReviewCompletionError(map[string]int{"failed": 2, "completed_without_signal": 1}); err == nil || !strings.Contains(err.Error(), "failed=2") {
-		t.Fatalf("dailyReviewCompletionError(findings) = %v", err)
-	}
 	if err := strategyResweepCompletionError(0); err != nil {
 		t.Fatalf("strategyResweepCompletionError(0) = %v, want nil", err)
 	}
@@ -47,6 +38,42 @@ func TestPostMarketCompletionErrorsExposePartialCoverage(t *testing.T) {
 	}
 	if err := optionsScanCompletionError(map[string]int{"optionable": 10, "chain_insufficient": 10}); err == nil || !strings.Contains(err.Error(), "no_usable_chains=1") {
 		t.Fatalf("optionsScanCompletionError(no chains) = %v", err)
+	}
+}
+
+func TestDailyReviewCompletionErrorOnlyRejectsIncompleteEvidence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		summary     map[string]int
+		wantErr     bool
+		wantMessage string
+	}{
+		{name: "failed only succeeds", summary: map[string]int{"failed": 2}},
+		{name: "query errors fail", summary: map[string]int{"query_errors": 1}, wantErr: true, wantMessage: "query_errors=1"},
+		{name: "running fails", summary: map[string]int{"running": 1}, wantErr: true, wantMessage: "running=1"},
+		{name: "completed without signal fails", summary: map[string]int{"completed_without_signal": 1}, wantErr: true, wantMessage: "completed_without_signal=1"},
+		{
+			name:        "failed plus incomplete evidence fails",
+			summary:     map[string]int{"failed": 2, "running": 1},
+			wantErr:     true,
+			wantMessage: "failed=2 running=1",
+		},
+		{name: "zero succeeds", summary: map[string]int{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := dailyReviewCompletionError(tt.summary)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("dailyReviewCompletionError(%v) = %v, wantErr %v", tt.summary, err, tt.wantErr)
+			}
+			if tt.wantMessage != "" && !strings.Contains(err.Error(), tt.wantMessage) {
+				t.Fatalf("dailyReviewCompletionError(%v) = %q, want substring %q", tt.summary, err, tt.wantMessage)
+			}
+		})
 	}
 }
 

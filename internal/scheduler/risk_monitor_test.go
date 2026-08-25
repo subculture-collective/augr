@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 func TestRiskMonitor_KillSwitchInactive(t *testing.T) {
@@ -41,9 +43,11 @@ func TestRiskMonitor_KillSwitchActiveCancelsContext(t *testing.T) {
 
 	select {
 	case <-ctx.Done():
-		// Success: context was cancelled.
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for context cancellation after kill switch activation")
+	}
+	if !errors.Is(context.Cause(ctx), runcontrol.KillSwitch) {
+		t.Fatalf("context cause = %v, want %v", context.Cause(ctx), runcontrol.KillSwitch)
 	}
 }
 
@@ -60,9 +64,11 @@ func TestRiskMonitor_ErrorCancelsContextFailClosed(t *testing.T) {
 
 	select {
 	case <-ctx.Done():
-		// Unknown kill-switch state must stop the pipeline.
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for context cancellation after poll error")
+	}
+	if cause := context.Cause(ctx); cause == nil || cause.Error() != "scheduler: poll kill switch: network error" || errors.Is(cause, runcontrol.KillSwitch) {
+		t.Fatalf("context cause = %v, want distinct poll failure", cause)
 	}
 }
 
@@ -79,9 +85,11 @@ func TestRiskMonitor_PanicCancelsContextFailClosed(t *testing.T) {
 
 	select {
 	case <-ctx.Done():
-		// The panic is contained and the unmonitored pipeline is cancelled.
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for context cancellation after monitor panic")
+	}
+	if cause := context.Cause(ctx); cause == nil || cause.Error() != "scheduler: kill-switch monitor panic: sensitive provider detail" || errors.Is(cause, runcontrol.KillSwitch) {
+		t.Fatalf("context cause = %v, want distinct panic failure", cause)
 	}
 }
 
@@ -101,8 +109,39 @@ func TestRiskMonitor_ParentCancelStopsMonitor(t *testing.T) {
 
 	select {
 	case <-ctx.Done():
-		// Success: derived context cancelled when parent cancelled.
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for context cancellation after parent cancel")
+	}
+	if !errors.Is(context.Cause(ctx), context.Canceled) {
+		t.Fatalf("context cause = %v, want parent cancellation", context.Cause(ctx))
+	}
+}
+
+func TestRiskMonitor_CleanupJoinsInProgressPoll(t *testing.T) {
+	entered := make(chan struct{})
+	finish := make(chan struct{})
+	mon := &riskMonitor{
+		riskEngine:   &mockRiskEngine{enteredCh: entered, finishKillSwitch: finish},
+		pollInterval: time.Millisecond,
+		logger:       testLogger(),
+	}
+
+	_, cleanup := mon.monitorContext(context.Background())
+	<-entered
+	cleaned := make(chan struct{})
+	go func() {
+		cleanup()
+		close(cleaned)
+	}()
+	select {
+	case <-cleaned:
+		t.Fatal("cleanup returned while risk poll was running")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(finish)
+	select {
+	case <-cleaned:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not join completed risk poll")
 	}
 }

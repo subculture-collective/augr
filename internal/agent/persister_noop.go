@@ -2,12 +2,12 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
 // NoopPersister is a DecisionPersister that does nothing. Useful for tests
@@ -15,8 +15,14 @@ import (
 type NoopPersister struct{}
 
 func (NoopPersister) RecordRunStart(context.Context, *domain.PipelineRun) error { return nil }
-func (NoopPersister) RecordRunComplete(context.Context, uuid.UUID, time.Time, domain.PipelineStatus, time.Time, string, json.RawMessage) error {
-	return nil
+
+func (NoopPersister) FinalizeRun(_ context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	run := domain.PipelineRun{ID: runID, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt, ErrorMessage: finalization.ErrorMessage}
+	run.PhaseTimings = append(run.PhaseTimings, finalization.PhaseTimings...)
+	if finalization.Signal != nil {
+		run.Signal = *finalization.Signal
+	}
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
 }
 
 func (NoopPersister) SupportsSnapshots() bool { return false }

@@ -22,6 +22,8 @@ type PolygonMempoolSourceConfig struct {
 	MaxSeenTxs     int
 }
 
+const polygonMempoolWriteTimeout = 5 * time.Second
+
 type PolygonMempoolSource struct {
 	cfg    PolygonMempoolSourceConfig
 	logger *slog.Logger
@@ -89,8 +91,42 @@ func (p *PolygonMempoolSource) runOnce(ctx context.Context, out chan<- RawSignal
 	if err != nil {
 		return err
 	}
-	defer func() { _ = conn.Close() }()
-	if err := conn.WriteJSON(map[string]any{"id": 1, "jsonrpc": "2.0", "method": "eth_subscribe", "params": []any{"newPendingTransactions"}}); err != nil {
+	return p.runConnection(ctx, out, conn)
+}
+
+type polygonWebsocketConn interface {
+	SetWriteDeadline(time.Time) error
+	WriteJSON(any) error
+	ReadJSON(any) error
+	Close() error
+}
+
+func (p *PolygonMempoolSource) runConnection(ctx context.Context, out chan<- RawSignalEvent, conn polygonWebsocketConn) error {
+	var closeOnce sync.Once
+	closeConn := func() {
+		closeOnce.Do(func() { _ = conn.Close() })
+	}
+	stopWatcher := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-ctx.Done():
+			closeConn()
+		case <-stopWatcher:
+		}
+	}()
+	defer func() {
+		close(stopWatcher)
+		<-watcherDone
+		closeConn()
+	}()
+
+	if err := conn.SetWriteDeadline(time.Now().Add(polygonMempoolWriteTimeout)); err != nil {
+		return err
+	}
+	err := conn.WriteJSON(map[string]any{"id": 1, "jsonrpc": "2.0", "method": "eth_subscribe", "params": []any{"newPendingTransactions"}})
+	if err != nil {
 		return err
 	}
 	var subResp map[string]any

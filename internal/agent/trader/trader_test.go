@@ -12,14 +12,165 @@ import (
 )
 
 type mockProvider struct {
-	response *llm.CompletionResponse
-	err      error
-	lastReq  llm.CompletionRequest
+	response  *llm.CompletionResponse
+	err       error
+	responses []*llm.CompletionResponse
+	errors    []error
+	requests  []llm.CompletionRequest
+	lastReq   llm.CompletionRequest
 }
 
 func (m *mockProvider) Complete(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
 	m.lastReq = req
+	m.requests = append(m.requests, req)
+	index := len(m.requests) - 1
+	if index < len(m.responses) {
+		var err error
+		if index < len(m.errors) {
+			err = m.errors[index]
+		}
+		return m.responses[index], err
+	}
 	return m.response, m.err
+}
+
+const validAAPLTradingPlan = `{"action":"buy","ticker":"AAPL","entry_type":"market","entry_price":180,"position_size":5000,"stop_loss":170,"take_profit":200,"time_horizon":"swing","confidence":0.7,"rationale":"Strong momentum supports entry.","risk_reward":2.0}`
+
+func TestTraderTradeRetriesNumericEntryTypeOnce(t *testing.T) {
+	numericEntryType := strings.Replace(validAAPLTradingPlan, `"entry_type":"market"`, `"entry_type":1`, 1)
+	mock := &mockProvider{responses: []*llm.CompletionResponse{
+		{Content: numericEntryType},
+		{Content: validAAPLTradingPlan},
+	}}
+
+	output, err := NewTrader(mock, "test-provider", "test-model", slog.Default()).Trade(context.Background(), agent.TradingInput{Ticker: "AAPL"})
+	if err != nil {
+		t.Fatalf("Trade() error = %v, want nil", err)
+	}
+	if output.Plan.EntryType != "market" {
+		t.Fatalf("Plan.EntryType = %q, want market", output.Plan.EntryType)
+	}
+	if len(mock.requests) != 2 {
+		t.Fatalf("completion calls = %d, want 2", len(mock.requests))
+	}
+
+	correctionMessages := mock.requests[1].Messages
+	if len(correctionMessages) < 2 || correctionMessages[len(correctionMessages)-2].Content != numericEntryType {
+		t.Fatal("correction request does not include the prior response")
+	}
+	correctionPrompt := correctionMessages[len(correctionMessages)-1].Content
+	for _, required := range []string{"numeric value for entry_type", `string "market" or "limit"`, "Do not infer or coerce", "complete JSON object"} {
+		if !strings.Contains(correctionPrompt, required) {
+			t.Errorf("correction prompt = %q, want it to contain %q", correctionPrompt, required)
+		}
+	}
+}
+
+func TestTraderTradeNumericEntryTypeInvalidCorrectionDefaultsHold(t *testing.T) {
+	numericEntryType := strings.Replace(validAAPLTradingPlan, `"entry_type":"market"`, `"entry_type":1`, 1)
+	invalidCorrection := strings.Replace(validAAPLTradingPlan, `"entry_type":"market"`, `"entry_type":"stop"`, 1)
+	mock := &mockProvider{responses: []*llm.CompletionResponse{
+		{Content: numericEntryType},
+		{Content: invalidCorrection},
+	}}
+
+	output, err := NewTrader(mock, "test-provider", "test-model", slog.Default()).Trade(context.Background(), agent.TradingInput{Ticker: "AAPL"})
+	if err == nil {
+		t.Fatal("Trade() error = nil, want structured-output error")
+	}
+	if output.Plan.Action != agent.PipelineSignalHold {
+		t.Fatalf("Plan.Action = %q, want hold", output.Plan.Action)
+	}
+	if len(mock.requests) != 2 {
+		t.Fatalf("completion calls = %d, want 2", len(mock.requests))
+	}
+	if !strings.Contains(string(output.LLMResponse.OutputStructured), `"parse_status":"failed"`) {
+		t.Fatalf("integrity envelope = %s, want failed status", output.LLMResponse.OutputStructured)
+	}
+	wantPrompt := agent.PromptTextFromMessages(mock.requests[1].Messages)
+	if output.LLMResponse.PromptText != wantPrompt || output.LLMResponse.Response != mock.responses[1] {
+		t.Fatalf("provenance paired prompt/response = (%q, %p), want correction (%q, %p)", output.LLMResponse.PromptText, output.LLMResponse.Response, wantPrompt, mock.responses[1])
+	}
+}
+
+func TestTraderTradeNumericEntryTypeCorrectionErrorDefaultsHold(t *testing.T) {
+	numericEntryType := strings.Replace(validAAPLTradingPlan, `"entry_type":"market"`, `"entry_type":1`, 1)
+	mock := &mockProvider{
+		responses: []*llm.CompletionResponse{{Content: numericEntryType}, nil},
+		errors:    []error{nil, errors.New("service unavailable")},
+	}
+
+	output, err := NewTrader(mock, "test-provider", "test-model", slog.Default()).Trade(context.Background(), agent.TradingInput{Ticker: "AAPL"})
+	if err == nil || !strings.Contains(err.Error(), "entry_type correction completion failed: service unavailable") {
+		t.Fatalf("Trade() error = %v, want contextual correction error", err)
+	}
+	if output.Plan.Action != agent.PipelineSignalHold {
+		t.Fatalf("Plan.Action = %q, want hold", output.Plan.Action)
+	}
+	if len(mock.requests) != 2 {
+		t.Fatalf("completion calls = %d, want 2", len(mock.requests))
+	}
+	if !strings.Contains(string(output.LLMResponse.OutputStructured), `"parse_status":"failed"`) {
+		t.Fatalf("integrity envelope = %s, want failed status", output.LLMResponse.OutputStructured)
+	}
+	wantPrompt := agent.PromptTextFromMessages(mock.requests[0].Messages)
+	if output.LLMResponse.PromptText != wantPrompt || output.LLMResponse.Response != mock.responses[0] {
+		t.Fatalf("provenance paired prompt/response = (%q, %p), want original (%q, %p)", output.LLMResponse.PromptText, output.LLMResponse.Response, wantPrompt, mock.responses[0])
+	}
+}
+
+func TestTraderTradeNumericEntryTypeEmptyCorrectionPreservesOriginalProvenance(t *testing.T) {
+	numericEntryType := strings.Replace(validAAPLTradingPlan, `"entry_type":"market"`, `"entry_type":1`, 1)
+	mock := &mockProvider{responses: []*llm.CompletionResponse{{Content: numericEntryType}, {Content: ""}}}
+
+	output, err := NewTrader(mock, "test-provider", "test-model", slog.Default()).Trade(context.Background(), agent.TradingInput{Ticker: "AAPL"})
+	if err == nil || !strings.Contains(err.Error(), "entry_type correction completion returned empty response") {
+		t.Fatalf("Trade() error = %v, want contextual empty-correction error", err)
+	}
+	if output.Plan.Action != agent.PipelineSignalHold {
+		t.Fatalf("Plan.Action = %q, want hold", output.Plan.Action)
+	}
+	if output.StoredOutput != numericEntryType || output.StoredOutput == "" {
+		t.Fatalf("StoredOutput = %q, want original response %q", output.StoredOutput, numericEntryType)
+	}
+	if len(mock.requests) != 2 {
+		t.Fatalf("completion calls = %d, want exactly 2", len(mock.requests))
+	}
+	wantPrompt := agent.PromptTextFromMessages(mock.requests[0].Messages)
+	if output.LLMResponse.PromptText != wantPrompt || output.LLMResponse.Response != mock.responses[0] {
+		t.Fatalf("provenance paired prompt/response = (%q, %p), want original (%q, %p)", output.LLMResponse.PromptText, output.LLMResponse.Response, wantPrompt, mock.responses[0])
+	}
+}
+
+func TestTraderTradeInvalidStringEntryTypeDoesNotRetry(t *testing.T) {
+	invalidEntryType := strings.Replace(validAAPLTradingPlan, `"entry_type":"market"`, `"entry_type":"stop"`, 1)
+	mock := &mockProvider{response: &llm.CompletionResponse{Content: invalidEntryType}}
+
+	output, err := NewTrader(mock, "test-provider", "test-model", slog.Default()).Trade(context.Background(), agent.TradingInput{Ticker: "AAPL"})
+	if err == nil {
+		t.Fatal("Trade() error = nil, want structured-output error")
+	}
+	if output.Plan.Action != agent.PipelineSignalHold {
+		t.Fatalf("Plan.Action = %q, want hold", output.Plan.Action)
+	}
+	if len(mock.requests) != 1 {
+		t.Fatalf("completion calls = %d, want 1", len(mock.requests))
+	}
+}
+
+func TestTraderTradeMalformedJSONDoesNotRetry(t *testing.T) {
+	mock := &mockProvider{response: &llm.CompletionResponse{Content: "not JSON"}}
+
+	output, err := NewTrader(mock, "test-provider", "test-model", slog.Default()).Trade(context.Background(), agent.TradingInput{Ticker: "AAPL"})
+	if err == nil {
+		t.Fatal("Trade() error = nil, want structured-output error")
+	}
+	if output.Plan.Action != agent.PipelineSignalHold {
+		t.Fatalf("Plan.Action = %q, want hold", output.Plan.Action)
+	}
+	if len(mock.requests) != 1 {
+		t.Fatalf("completion calls = %d, want 1", len(mock.requests))
+	}
 }
 
 func TestNewTraderNilLogger(t *testing.T) {

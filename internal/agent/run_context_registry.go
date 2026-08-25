@@ -2,55 +2,71 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 )
 
+var ErrRunAlreadyRegistered = errors.New("pipeline run context already registered")
+
+type runContextKey struct {
+	id        uuid.UUID
+	tradeDate time.Time
+}
+
 // RunContextRegistry tracks active run cancellation functions for best-effort cleanup.
 type RunContextRegistry struct {
 	mu      sync.Mutex
-	cancels map[uuid.UUID]context.CancelFunc
+	cancels map[runContextKey]context.CancelCauseFunc
 }
 
-// NewRunContextRegistry creates an empty active-run registry.
 func NewRunContextRegistry() *RunContextRegistry {
-	return &RunContextRegistry{cancels: make(map[uuid.UUID]context.CancelFunc)}
+	return &RunContextRegistry{cancels: make(map[runContextKey]context.CancelCauseFunc)}
 }
 
-// Register stores the cancel func for a running pipeline.
-func (r *RunContextRegistry) Register(runID uuid.UUID, cancel context.CancelFunc) {
+func normalizeTradeDate(value time.Time) time.Time {
+	value = value.UTC()
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func (r *RunContextRegistry) Register(runID uuid.UUID, tradeDate time.Time, cancel context.CancelCauseFunc) error {
 	if r == nil || cancel == nil {
-		return
+		return nil
 	}
+	key := runContextKey{runID, normalizeTradeDate(tradeDate)}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cancels[runID] = cancel
+	if _, exists := r.cancels[key]; exists {
+		return ErrRunAlreadyRegistered
+	}
+	r.cancels[key] = cancel
+	return nil
 }
 
-// Deregister removes a pipeline from the registry after it exits.
-func (r *RunContextRegistry) Deregister(runID uuid.UUID) {
+func (r *RunContextRegistry) Deregister(runID uuid.UUID, tradeDate time.Time) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.cancels, runID)
+	delete(r.cancels, runContextKey{runID, normalizeTradeDate(tradeDate)})
+	r.mu.Unlock()
 }
 
-// Cancel invokes the cancel func for an active pipeline if one is registered.
-func (r *RunContextRegistry) Cancel(runID uuid.UUID) bool {
+func (r *RunContextRegistry) Cancel(runID uuid.UUID, tradeDate time.Time, cause error) bool {
 	if r == nil {
 		return false
 	}
+	key := runContextKey{runID, normalizeTradeDate(tradeDate)}
 	r.mu.Lock()
-	cancel, ok := r.cancels[runID]
+	cancel, ok := r.cancels[key]
 	if ok {
-		delete(r.cancels, runID)
+		delete(r.cancels, key)
 	}
 	r.mu.Unlock()
 	if ok {
-		cancel()
+		cancel(cause)
 	}
 	return ok
 }

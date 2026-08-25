@@ -22,6 +22,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 const (
@@ -357,6 +358,7 @@ type mockRiskEngine struct {
 	killSwitchErr    error
 	panicKillSwitch  bool
 	blockKillSwitch  bool
+	finishKillSwitch chan struct{}
 	enteredCh        chan struct{}
 	enteredOnce      sync.Once
 	mu               sync.Mutex
@@ -394,6 +396,9 @@ func (m *mockRiskEngine) IsKillSwitchActive(ctx context.Context) (bool, error) {
 	if m.blockKillSwitch {
 		<-ctx.Done()
 		return false, ctx.Err()
+	}
+	if m.finishKillSwitch != nil {
+		<-m.finishKillSwitch
 	}
 	return m.killSwitchActive, m.killSwitchErr
 }
@@ -1006,6 +1011,7 @@ func TestSchedulerMetrics(t *testing.T) {
 	t.Run("backtest", func(t *testing.T) {
 		metrics := &mockSchedulerMetrics{}
 		s := NewScheduler(&mockStrategyRepo{}, &mockPipeline{}, &mockRiskEngine{}, testLogger(), WithMetrics(metrics))
+		s.ctx = context.Background()
 		s.backtestRunner = &mockBacktestRunner{result: &backtest.OrchestratorResult{}}
 		s.backtestPersister = backtest.NewRepoPersister(&mockBacktestRunRepo{})
 
@@ -1015,6 +1021,103 @@ func TestSchedulerMetrics(t *testing.T) {
 			t.Fatalf("metrics calls = %#v, want [backtest]", got)
 		}
 	})
+}
+
+func TestSchedulerStopCancelsAndWaitsForAdmittedBacktestCallback(t *testing.T) {
+	config := domain.BacktestConfig{ID: uuid.New(), StrategyID: uuid.New(), Name: "nightly", ScheduleCron: testScheduleSpec}
+	entered := make(chan struct{})
+	exited := make(chan struct{})
+	runner := backtestRunnerFunc(func(ctx context.Context, _ domain.BacktestConfig) (*backtest.OrchestratorResult, error) {
+		close(entered)
+		<-ctx.Done()
+		close(exited)
+		return nil, ctx.Err()
+	})
+	fakeCron := &fakeCronEngine{}
+	s := NewScheduler(
+		&mockStrategyRepo{},
+		&mockPipeline{},
+		&mockRiskEngine{},
+		testLogger(),
+		WithBacktestScheduling(&mockBacktestConfigRepo{configs: []domain.BacktestConfig{config}}, backtest.NewRepoPersister(&mockBacktestRunRepo{}), runner),
+	)
+	s.newCron = func() cronEngine { return fakeCron }
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	callbackDone := make(chan struct{})
+	go func() {
+		fakeCron.Run(0)
+		close(callbackDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("backtest callback did not enter runner")
+	}
+	if got := s.InFlightCount(); got != 1 {
+		t.Fatalf("InFlightCount() = %d, want 1", got)
+	}
+
+	stopDone := make(chan struct{})
+	go func() {
+		s.Stop()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("Stop() did not cancel and join backtest callback")
+	}
+	select {
+	case <-exited:
+	default:
+		t.Fatal("Stop() returned before backtest runner exited")
+	}
+	select {
+	case <-callbackDone:
+	default:
+		t.Fatal("Stop() returned before cron callback joined")
+	}
+	if got := s.InFlightCount(); got != 0 {
+		t.Fatalf("InFlightCount() = %d after Stop, want 0", got)
+	}
+}
+
+func TestSchedulerRejectsBacktestCallbackAfterDrainWithoutLeaks(t *testing.T) {
+	config := domain.BacktestConfig{ID: uuid.New(), StrategyID: uuid.New(), Name: "nightly", ScheduleCron: testScheduleSpec}
+	var calls atomic.Int32
+	runner := backtestRunnerFunc(func(context.Context, domain.BacktestConfig) (*backtest.OrchestratorResult, error) {
+		calls.Add(1)
+		return &backtest.OrchestratorResult{}, nil
+	})
+	fakeCron := &fakeCronEngine{}
+	s := NewScheduler(
+		&mockStrategyRepo{},
+		&mockPipeline{},
+		&mockRiskEngine{},
+		testLogger(),
+		WithBacktestScheduling(&mockBacktestConfigRepo{configs: []domain.BacktestConfig{config}}, backtest.NewRepoPersister(&mockBacktestRunRepo{}), runner),
+	)
+	s.newCron = func() cronEngine { return fakeCron }
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	s.runGroup.Stop(runcontrol.Shutdown)
+
+	fakeCron.Run(0)
+	s.StopDispatch()
+
+	if calls.Load() != 0 {
+		t.Fatalf("backtest runner calls = %d, want 0", calls.Load())
+	}
+	if got := s.InFlightCount(); got != 0 {
+		t.Fatalf("InFlightCount() = %d, want 0", got)
+	}
+	if got := s.backtestDedup.Count(); got != 0 {
+		t.Fatalf("backtest dedup count = %d, want 0", got)
+	}
 }
 
 func TestRunStrategy_PausedIsSkipped(t *testing.T) {

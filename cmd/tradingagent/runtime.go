@@ -68,6 +68,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/PatrickFanella/get-rich-quick/internal/service"
 	"github.com/PatrickFanella/get-rich-quick/internal/signal"
@@ -105,6 +106,21 @@ type watchedMarketsLoaderAdapter struct {
 	repo repository.PolymarketWatchedMarketsRepository
 }
 
+type delayedPolymarketFeed interface {
+	polymarketTickFeed
+	Start(context.Context) error
+}
+
+func startDelayedPolymarketFeed(ctx context.Context, feed delayedPolymarketFeed, runner *realStrategyRunner, positionRepo repository.PositionRepository, logger *slog.Logger) error {
+	if runner != nil {
+		runner.polymarketFeed = feed
+	}
+	if err := feed.Start(ctx); err != nil {
+		return err
+	}
+	return bootstrapPolymarketStopGuards(ctx, runner, positionRepo, logger)
+}
+
 func newRuntimeKalshiClients(cfg config.Config, appMetrics *metrics.Metrics, logger *slog.Logger, cooldownStore provgov.CooldownStore) (*kalshidata.Client, *kalshidata.Client, *provgov.ProviderGovernor, error) {
 	_ = logger
 	baseURL := strings.TrimSpace(cfg.Brokers.Kalshi.APIBaseURL)
@@ -135,16 +151,16 @@ func newRuntimeKalshiClients(cfg config.Config, appMetrics *metrics.Metrics, log
 }
 
 type polymarketStatusSource struct {
-	feed    *polymarketws.Feed
+	feed    func() *polymarketws.Feed
 	metrics *observability.SurfersMetrics
 }
 
 func (s polymarketStatusSource) PolymarketStatus(ctx context.Context) (api.PolymarketStatus, error) {
 	_ = ctx
-	if s.feed == nil {
+	if s.feed == nil || s.feed() == nil {
 		return api.PolymarketStatus{Enabled: false}, nil
 	}
-	stats := s.feed.Stats()
+	stats := s.feed().Stats()
 	return api.PolymarketStatus{
 		Enabled:       true,
 		WSConnections: stats.Pool.Members,
@@ -195,6 +211,72 @@ var (
 		OpenCode:   runtimeOpenCodeProvider,
 	})
 )
+
+type runtimeLifecycle struct {
+	scheduler       *scheduler.Scheduler
+	startPolymarket func() error
+	startReconciler func() error
+	startAutomation func() error
+	startSignal     func() error
+	teardown        *runtimeTeardown
+}
+
+func (l *runtimeLifecycle) Start() error {
+	if l.scheduler != nil {
+		if err := l.scheduler.Start(); err != nil {
+			l.teardown.Stop()
+			return err
+		}
+	}
+	for _, start := range []func() error{l.startPolymarket, l.startReconciler, l.startAutomation, l.startSignal} {
+		if start != nil {
+			if err := start(); err != nil {
+				l.teardown.Stop()
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (l *runtimeLifecycle) Stop() {
+	l.teardown.Stop()
+}
+
+func (l *runtimeLifecycle) InFlightCount() int { return l.teardown.runs.InFlight() }
+
+type runtimeTeardown struct {
+	runs             *runcontrol.Group
+	stopSignal       func()
+	stopAutomation   func()
+	stopScheduler    func()
+	stopReconciler   func()
+	stopWorkers      func()
+	closeSecondaries func()
+	closePrimaryDB   func()
+	once             sync.Once
+}
+
+func (t *runtimeTeardown) Stop() {
+	t.once.Do(func() {
+		t.runs.Stop(runcontrol.Shutdown)
+		for _, stop := range []func(){t.stopSignal, t.stopAutomation, t.stopScheduler, t.stopReconciler} {
+			if stop != nil {
+				stop()
+			}
+		}
+		t.runs.Wait()
+		if t.stopWorkers != nil {
+			t.stopWorkers()
+		}
+		if t.closeSecondaries != nil {
+			t.closeSecondaries()
+		}
+		if t.closePrimaryDB != nil {
+			t.closePrimaryDB()
+		}
+	})
+}
 
 func newRuntimeKalshiProjectionRepo(ctx context.Context, cfg config.KalshiConfig, generalDatabaseURL string, logger *slog.Logger) (repository.ProjectionRepository, func()) {
 	databaseURL := strings.TrimSpace(cfg.ProjectionDatabaseURL)
@@ -316,13 +398,26 @@ func ensureRuntimeSchemaCompatible(ctx context.Context, db *pgrepo.DB) (int, int
 }
 
 func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*api.Server, cli.SchedulerLifecycle, func(), error) {
+	if cfg.Server.ProjectionAccountID != "" {
+		accountID, err := uuid.Parse(cfg.Server.ProjectionAccountID)
+		if err != nil || accountID == uuid.Nil {
+			return nil, nil, nil, fmt.Errorf("parse PROJECTION_ACCOUNT_ID: valid non-zero UUID required")
+		}
+	}
 	db, err := runtimeNewDB(ctx, cfg.Database.URL)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	runGroup := runcontrol.NewGroup()
+	teardown := &runtimeTeardown{runs: runGroup, closePrimaryDB: func() { runtimeCloseDB(db) }}
+	startupComplete := false
+	defer func() {
+		if !startupComplete {
+			teardown.Stop()
+		}
+	}()
 	currentSchemaVersion, requiredSchemaVersion, schemaStatus, err := ensureRuntimeSchemaCompatible(ctx, db)
 	if err != nil {
-		runtimeCloseDB(db)
 		return nil, nil, nil, err
 	}
 	runtimeAfterSchemaGate()
@@ -413,6 +508,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	deps := api.Deps{
 		Strategies:             strategyRepo,
 		Runs:                   runRepo,
+		RunRegistry:            runRegistry,
+		RunGroup:               runGroup,
 		Decisions:              decisionRepo,
 		Orders:                 orderRepo,
 		Positions:              positionRepo,
@@ -456,6 +553,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		KalshiSnapshotsRepo:    pgrepo.NewKalshiMarketSnapshotsRepo(db.Pool),
 		KalshiDiscoveryRuns:    pgrepo.NewKalshiDiscoveryRunRepo(db.Pool),
 	}
+	teardown.stopAutomation = func() {
+		if deps.Automation != nil {
+			deps.Automation.Stop()
+		}
+	}
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("OVERHAUL_ACCOUNTS_READ_ENABLED")), "true") {
 		deps.EconomicAccounts = pgrepo.NewAccountRepo(db.Pool)
 		deps.EconomicLedger = pgrepo.NewLedgerRepo(db.Pool)
@@ -472,8 +574,25 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		deps.PolymarketClient = polymarketReadClient
 	}
 	var polymarketFeed *polymarketws.Feed
+	var buildPolymarketFeed func() (*polymarketws.Feed, error)
 	var polymarketRecorder *recorder.Recorder
+	var polymarketRecorderConfig recorder.RecorderConfig
 	var strategyRunner *realStrategyRunner
+	teardown.stopWorkers = func() {
+		if strategyRunner != nil {
+			strategyRunner.stopPolymarketTickWorkers()
+		}
+	}
+	teardown.closeSecondaries = func() {
+		if polymarketRecorder != nil {
+			polymarketRecorder.Close()
+		}
+		if polymarketFeed != nil {
+			polymarketFeed.Close()
+		}
+		closeRedis()
+		closeKalshiProjectionDB()
+	}
 	if cfg.Features.EnablePolymarketAutomation && strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_WS_ENABLED")), "true") {
 		pcfg := polymarketws.DefaultConfig()
 		if v := strings.TrimSpace(os.Getenv("POLYMARKET_WS_URL")); v != "" {
@@ -488,33 +607,26 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			pcfg.PerMarketSlugs = splitCSV(v)
 		}
 		pcfg.Metrics = surfersMetrics.FeedMetrics()
-		var err error
-		resolvedIDs, assetIDToSlug, resolveErr := resolvePolymarketAssetIDs(ctx, pcfg.PerMarketSlugs)
-		if resolveErr != nil {
-			logger.Warn("polymarket ws resolution failed; feed disabled", slog.String("error", resolveErr.Error()))
-		} else {
+		polymarketRecorderConfig = recorder.RecorderConfig{BatchSize: 5000, FlushInterval: 500 * time.Millisecond, Slugs: pcfg.PerMarketSlugs}
+		buildPolymarketFeed = func() (*polymarketws.Feed, error) {
+			resolvedIDs, assetIDToSlug, resolveErr := resolvePolymarketAssetIDs(ctx, pcfg.PerMarketSlugs)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("resolve polymarket ws assets: %w", resolveErr)
+			}
 			pcfg.AssetIDs = resolvedIDs
 			pcfg.AssetIDToSlug = assetIDToSlug
-			polymarketFeed, err = runtimeNewPolymarketFeed(pcfg)
-			if err != nil {
-				logger.Warn("polymarket ws feed construction failed; feed disabled", slog.String("error", err.Error()))
-			} else if err := polymarketFeed.Start(ctx); err != nil {
-				logger.Warn("polymarket ws feed start failed; feed disabled", slog.String("error", err.Error()))
-				polymarketFeed.Close()
-				polymarketFeed = nil
-			} else {
-				logger.Info("polymarket ws feed started", slog.Int("connections", pcfg.ConnectionsPerFeed), slog.Int("slug_count", len(pcfg.PerMarketSlugs)))
-				if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_RECORDER_ENABLED")), "true") {
-					polymarketRecorder = recorder.New(polymarketFeed, pgrepo.NewPolymarketMarketDataRepo(db.Pool), recorder.RecorderConfig{BatchSize: 5000, FlushInterval: 500 * time.Millisecond, Slugs: pcfg.PerMarketSlugs}, logger, surfersMetrics.RecorderMetrics())
-					polymarketRecorder.Start(ctx)
-				}
-			}
+			return runtimeNewPolymarketFeed(pcfg)
 		}
 	}
-	deps.MarketDataStatus = polymarketStatusSource{feed: polymarketFeed, metrics: surfersMetrics}
+	deps.MarketDataStatus = polymarketStatusSource{feed: func() *polymarketws.Feed { return polymarketFeed }, metrics: surfersMetrics}
 	notificationManager := newNotificationManager(cfg)
 
 	var sched *scheduler.Scheduler
+	teardown.stopScheduler = func() {
+		if sched != nil {
+			sched.StopDispatch()
+		}
+	}
 	// serverRef is populated after api.NewServer returns. The scheduler only
 	// starts (via cli.Execute → runServeLifecycle) after newAPIServer returns,
 	// so any closure that reads serverRef will see the final non-nil value.
@@ -523,7 +635,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 	if strings.EqualFold(cfg.Environment, "smoke") {
 		pipeline := newSmokePipeline(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)
-		runner := newSmokeRunner(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)
+		runner := newSmokeRunner(runRepo, snapshotRepo, decisionRepo, eventRepo, runRegistry, logger)
 		strategyRunner := newSmokeStrategyRunner(runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, db, notificationManager, tradeDecisionRecorder, logger)
 		deps.Runner = strategyRunner
 		if cfg.Features.EnableScheduler {
@@ -535,6 +647,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				scheduler.WithJobTimeout(cfg.Features.SchedulerJobTimeout),
 				scheduler.WithMetrics(appMetrics),
 				scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...),
+				scheduler.WithRunGroup(runGroup),
 				scheduler.WithStrategyExecution(func(ctx context.Context, strategy domain.Strategy) error {
 					_, err := strategyRunner.RunStrategy(ctx, strategy)
 					return err
@@ -679,6 +792,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			polymarketFeed,
 			logger,
 		)
+		strategyRunner.runGroup = runGroup
 		portfolioAllocatorMode := portfolioAllocatorModeFromEnv()
 		strategyRunner.opportunityRepo = opportunityRepo
 		strategyRunner.optionsProvider = deps.OptionsProvider
@@ -699,12 +813,14 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			logger.Warn("copy trading SEC refresh disabled: SEC_EDGAR_APP_EMAIL is not configured")
 		}
 		deps.CopyTrading = copytrading.NewService(copytrading.ServiceDeps{
-			Repo:       copyTradingRepo,
-			OriginRuns: pgrepo.NewCopyOriginRepo(db.Pool),
-			Strategies: strategyRepo,
-			Runs:       runRepo,
-			Positions:  positionRepo,
-			EDGAR:      edgarProvider,
+			Repo:        copyTradingRepo,
+			OriginRuns:  pgrepo.NewCopyOriginRepo(db.Pool),
+			Strategies:  strategyRepo,
+			Runs:        runRepo,
+			Events:      eventRepo,
+			RunRegistry: runRegistry,
+			Positions:   positionRepo,
+			EDGAR:       edgarProvider,
 			Prices: copytrading.CanonicalQuoteProvider{
 				Instruments: instrumentRepo, Quotes: quoteSnapshotRepo,
 				Liquidity:     copytrading.OHLCVPriceProvider{Source: dataService},
@@ -763,7 +879,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				nil,
 				riskEngine,
 				logger,
-				append([]scheduler.Option{scheduler.WithJobTimeout(cfg.Features.SchedulerJobTimeout), scheduler.WithMetrics(appMetrics), scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...)}, schedOpts...)...,
+				append([]scheduler.Option{scheduler.WithJobTimeout(cfg.Features.SchedulerJobTimeout), scheduler.WithMetrics(appMetrics), scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...), scheduler.WithRunGroup(runGroup)}, schedOpts...)...,
 			)
 		}
 
@@ -885,11 +1001,6 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						return syncErr
 					})
 				}
-				if err := orch.Start(); err != nil {
-					logger.Warn("automation: failed to start job orchestrator", slog.Any("error", err))
-				} else {
-					logger.Info("automation: job orchestrator started", slog.Int("jobs", len(orch.Status())))
-				}
 				deps.Automation = orch
 			}
 		}
@@ -962,16 +1073,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			Logger:           logger,
 		},
 	)
-	if sched != nil {
-		if err := sigOrch.Start(ctx); err != nil {
-			logger.Warn("signal hub: failed to start", slog.Any("error", err))
-		} else {
-			logger.Info("signal intelligence: hub started", slog.Int("sources", len(signalSources)))
-		}
-	}
 	deps.SignalStore = sigOrch.Store()
 	deps.WatchIndex = sigOrch.WatchIndex()
 	signalShutdown := sigOrch.Stop
+	teardown.stopSignal = signalShutdown
 
 	// Wire universe to API deps if not already set (non-discovery path).
 	if deps.Universe == nil && strings.TrimSpace(cfg.DataProviders.Polygon.APIKey) != "" {
@@ -988,10 +1093,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	apiCfg.JWTSecret = cfg.Server.JWTSecret
 	apiCfg.RefreshTokenTTL = 24 * time.Hour
 	if cfg.Server.ProjectionAccountID != "" {
-		accountID, parseErr := uuid.Parse(cfg.Server.ProjectionAccountID)
-		if parseErr != nil || accountID == uuid.Nil {
-			return nil, nil, nil, fmt.Errorf("parse PROJECTION_ACCOUNT_ID: valid non-zero UUID required")
-		}
+		accountID, _ := uuid.Parse(cfg.Server.ProjectionAccountID)
 		apiCfg.ProjectionAccountID = &accountID
 	}
 
@@ -1021,9 +1123,6 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	})
 	server, err := runtimeNewServer(apiCfg, deps, logger)
 	if err != nil {
-		closeRedis()
-		closeKalshiProjectionDB()
-		runtimeCloseDB(db)
 		return nil, nil, nil, err
 	}
 
@@ -1037,15 +1136,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 	// Avoid the Go nil-interface trap: explicitly return a nil interface when
 	// there is no scheduler so that the caller's nil check works correctly.
-	var schedLifecycle cli.SchedulerLifecycle
-	if sched != nil {
-		schedLifecycle = sched
-	}
-
 	staleRunTTL := loadStaleRunTTL(logger)
-	var staleRunReconcilerCancel context.CancelFunc = func() {}
+	var staleRunReconciler *agent.StaleRunReconciler
 	if staleRunTTL > 0 {
-		reconciler := agent.NewStaleRunReconciler(
+		staleRunReconciler = agent.NewStaleRunReconciler(
 			runRepo,
 			auditLogRepo,
 			runRegistry,
@@ -1053,28 +1147,56 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			logger,
 			agent.StaleRunReconcilerConfig{TTL: staleRunTTL, Interval: time.Minute},
 		)
-		var reconcileCtx context.Context
-		reconcileCtx, staleRunReconcilerCancel = context.WithCancel(context.Background())
-		reconciler.Start(reconcileCtx)
-		logger.Info("stale run reconciler started", slog.Duration("ttl", staleRunTTL), slog.Duration("interval", time.Minute))
 	}
-
-	return server, schedLifecycle, func() {
-		if strategyRunner != nil {
-			strategyRunner.stopPolymarketTickWorkers()
+	if staleRunReconciler != nil {
+		teardown.stopReconciler = staleRunReconciler.StopAndWait
+	}
+	lifecycle := &runtimeLifecycle{scheduler: sched, teardown: teardown}
+	if buildPolymarketFeed != nil {
+		lifecycle.startPolymarket = func() error {
+			var err error
+			polymarketFeed, err = buildPolymarketFeed()
+			if err != nil {
+				return fmt.Errorf("build polymarket ws feed: %w", err)
+			}
+			if err := startDelayedPolymarketFeed(ctx, polymarketFeed, strategyRunner, positionRepo, logger); err != nil {
+				return fmt.Errorf("start polymarket ws feed: %w", err)
+			}
+			logger.Info("polymarket ws feed started")
+			if strings.EqualFold(strings.TrimSpace(os.Getenv("POLYMARKET_RECORDER_ENABLED")), "true") {
+				polymarketRecorder = recorder.New(polymarketFeed, pgrepo.NewPolymarketMarketDataRepo(db.Pool), polymarketRecorderConfig, logger, surfersMetrics.RecorderMetrics())
+				polymarketRecorder.Start(ctx)
+			}
+			return nil
 		}
-		if polymarketRecorder != nil {
-			polymarketRecorder.Close()
+	}
+	if staleRunReconciler != nil {
+		lifecycle.startReconciler = func() error {
+			staleRunReconciler.Start(context.Background())
+			logger.Info("stale run reconciler started", slog.Duration("ttl", staleRunTTL), slog.Duration("interval", time.Minute))
+			return nil
 		}
-		if polymarketFeed != nil {
-			polymarketFeed.Close()
+	}
+	if deps.Automation != nil {
+		lifecycle.startAutomation = func() error {
+			if err := deps.Automation.Start(); err != nil {
+				return fmt.Errorf("start automation workers: %w", err)
+			}
+			logger.Info("automation: job orchestrator started", slog.Int("jobs", len(deps.Automation.Status())))
+			return nil
 		}
-		staleRunReconcilerCancel()
-		signalShutdown()
-		closeRedis()
-		closeKalshiProjectionDB()
-		runtimeCloseDB(db)
-	}, nil
+	}
+	if sched != nil {
+		lifecycle.startSignal = func() error {
+			if err := sigOrch.Start(ctx); err != nil {
+				return fmt.Errorf("start signal workers: %w", err)
+			}
+			logger.Info("signal intelligence: hub started", slog.Int("sources", len(signalSources)))
+			return nil
+		}
+	}
+	startupComplete = true
+	return server, lifecycle, lifecycle.Stop, nil
 }
 
 func runtimeShouldInitializeUniverse(cfg config.Config) bool {
@@ -1333,12 +1455,26 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 
 	result, err := r.runner.RunStrategy(ctx, strategy, agent.GlobalSettings{})
 	if err != nil {
-		return nil, err
+		if result == nil {
+			return nil, err
+		}
+		return &api.StrategyRunResult{Run: result.Run, Signal: result.Signal}, err
+	}
+	if result == nil {
+		return nil, errors.New("smoke strategy runner returned no result")
+	}
+	canonical := &api.StrategyRunResult{Run: result.Run, Signal: result.Signal}
+	if !result.TerminalApplied {
+		err := fmt.Errorf("smoke strategy runner: %w: durable status=%s signal=%s", agent.ErrLostTerminalAuthority, result.Run.Status, result.Run.Signal)
+		if result.Run.Status == domain.PipelineStatusCancelled {
+			err = runcontrol.JoinCauseFromErrorMessage(err, result.Run.ErrorMessage)
+		}
+		return canonical, err
 	}
 
 	run, err := r.findRun(ctx, result.Run.ID)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	signal := result.Signal
@@ -1347,20 +1483,20 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	if planTicker == "" {
 		planTicker = strategy.Ticker
 	}
-	update := repository.PipelineRunStatusUpdate{
-		Status:       run.Status,
-		Signal:       &signal,
-		CompletedAt:  run.CompletedAt,
-		ErrorMessage: run.ErrorMessage,
+	receipt, err := r.runRepo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, run.Signal, signal)
+	if err != nil {
+		return canonical, err
 	}
-	if err := r.runRepo.UpdateStatus(ctx, run.ID, run.TradeDate, update); err != nil {
-		return nil, err
+	if !receipt.Applied {
+		canonical = &api.StrategyRunResult{Run: receipt.Run, Signal: receipt.Run.Signal}
+		return canonical, fmt.Errorf("pipeline run signal refinement lost: durable status=%s signal=%s", receipt.Run.Status, receipt.Run.Signal)
 	}
-	run.Signal = signal
+	run = &receipt.Run
+	canonical = &api.StrategyRunResult{Run: *run, Signal: run.Signal}
 
 	orderManager, err := r.newOrderManager(ctx, strategy, strategyConfig, resolved)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	if err := orderManager.ProcessSignal(
@@ -1388,7 +1524,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 		strategy.ID,
 		run.ID,
 	); err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	if err := r.dispatchNotifications(ctx, strategy, run, state); err != nil {
@@ -1397,11 +1533,11 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 
 	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
 	if err != nil {
-		return nil, err
+		return canonical, err
 	}
 
 	return &api.StrategyRunResult{
@@ -1637,6 +1773,7 @@ func newSmokeRunner(
 	snapshotRepo repository.PipelineRunSnapshotRepository,
 	decisionRepo repository.AgentDecisionRepository,
 	eventRepo repository.AgentEventRepository,
+	runRegistry *agent.RunContextRegistry,
 	logger *slog.Logger,
 ) *agent.Runner {
 	return agent.NewRunner(
@@ -1666,8 +1803,9 @@ func newSmokeRunner(
 			},
 		},
 		agent.Dependencies{
-			Persister: agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger),
-			Logger:    logger,
+			Persister:   agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger),
+			Logger:      logger,
+			RunRegistry: runRegistry,
 		},
 	)
 }

@@ -23,6 +23,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 // ---------------------------------------------------------------------------
@@ -1080,6 +1081,47 @@ func TestRunStrategy(t *testing.T) {
 	}
 	if body["strategy_id"] != stratA.ID.String() {
 		t.Fatalf("strategy_id = %q, want %q", body["strategy_id"], stratA.ID.String())
+	}
+}
+
+func TestRunStrategyRejectsDuringDrain(t *testing.T) {
+	deps := testDeps()
+	deps.Runner = &stubStrategyRunner{}
+	deps.RunGroup = runcontrol.NewGroup()
+	deps.RunGroup.Stop(runcontrol.Shutdown)
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+}
+
+func TestRunStrategyDrainWaitsForDetachedRun(t *testing.T) {
+	runner := &blockingStrategyRunner{started: make(chan struct{}), finish: make(chan struct{})}
+	group := runcontrol.NewGroup()
+	deps := testDeps()
+	deps.Runner = runner
+	deps.RunGroup = group
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusAccepted)
+	}
+	<-runner.started
+	drained := make(chan struct{})
+	go func() { group.StopAndWait(runcontrol.Shutdown); close(drained) }()
+	select {
+	case <-drained:
+		t.Fatal("drain returned before detached run exited")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(runner.finish)
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("drain did not join detached run")
 	}
 }
 
@@ -2613,13 +2655,28 @@ func (s *stubRunRepo) Count(_ context.Context, _ repository.PipelineRunFilter) (
 	return len(s.runs), nil
 }
 
-func (*stubRunRepo) UpdateStatus(context.Context, uuid.UUID, time.Time, repository.PipelineRunStatusUpdate) error {
-	return nil
+func (*stubRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
+}
+func (*stubRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
 type stubStrategyRunner struct {
 	result *StrategyRunResult
 	err    error
+}
+
+type blockingStrategyRunner struct {
+	started chan struct{}
+	finish  chan struct{}
+}
+
+func (r *blockingStrategyRunner) RunStrategy(ctx context.Context, _ domain.Strategy) (*StrategyRunResult, error) {
+	close(r.started)
+	<-ctx.Done()
+	<-r.finish
+	return nil, context.Cause(ctx)
 }
 
 func (s *stubStrategyRunner) RunStrategy(context.Context, domain.Strategy) (*StrategyRunResult, error) {

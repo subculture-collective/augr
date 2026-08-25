@@ -52,37 +52,65 @@ func (h *SignalHub) Start(ctx context.Context) error {
 	}
 
 	merged := make(chan RawSignalEvent, 256)
-	var wg sync.WaitGroup
+	var sourceWG sync.WaitGroup
+	var workerWG sync.WaitGroup
 	for _, src := range h.sources {
 		ch, err := src.Start(runCtx)
 		if err != nil {
 			cancel()
+			workerWG.Wait()
+			close(h.stopped)
+			h.cancel = nil
+			h.stopped = nil
 			return err
 		}
-		wg.Add(1)
+		sourceWG.Add(1)
+		workerWG.Add(1)
 		go func(c <-chan RawSignalEvent) {
-			defer wg.Done()
-			for evt := range c {
+			defer sourceWG.Done()
+			defer workerWG.Done()
+			for {
 				select {
-				case merged <- evt:
 				case <-runCtx.Done():
+					// Source completion is represented by channel closure. Keep
+					// draining after cancellation so Stop joins the source itself,
+					// not only this forwarder.
+					for range c {
+					}
 					return
+				case evt, ok := <-c:
+					if !ok {
+						return
+					}
+					select {
+					case merged <- evt:
+					case <-runCtx.Done():
+						for range c {
+						}
+						return
+					}
 				}
 			}
 		}(ch)
 	}
 
+	workerWG.Add(1)
 	go func() {
-		wg.Wait()
+		defer workerWG.Done()
+		sourceWG.Wait()
 		close(merged)
 	}()
 
+	workerWG.Add(1)
 	go func() {
-		defer close(h.stopped)
+		defer workerWG.Done()
 		for {
 			select {
 			case evt, ok := <-merged:
 				if !ok {
+					return
+				}
+				if runCtx.Err() != nil {
 					return
 				}
 				if h.lifecycle != nil {
@@ -94,6 +122,12 @@ func (h *SignalHub) Start(ctx context.Context) error {
 		}
 	}()
 
+	stopped := h.stopped
+	go func() {
+		workerWG.Wait()
+		close(stopped)
+	}()
+
 	return nil
 }
 
@@ -102,12 +136,28 @@ func (h *SignalHub) Stop() {
 	h.mu.Lock()
 	cancel := h.cancel
 	stopped := h.stopped
-	h.cancel = nil
 	h.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
+	if stopped != nil {
+		<-stopped
+	}
+
+	h.mu.Lock()
+	if h.stopped == stopped {
+		h.cancel = nil
+		h.stopped = nil
+	}
+	h.mu.Unlock()
+}
+
+// Wait blocks until all source-forwarding and processing workers have exited.
+func (h *SignalHub) Wait() {
+	h.mu.Lock()
+	stopped := h.stopped
+	h.mu.Unlock()
 	if stopped != nil {
 		<-stopped
 	}

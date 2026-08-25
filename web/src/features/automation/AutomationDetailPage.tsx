@@ -34,6 +34,62 @@ function JobStatePill({ job }: { job: AutomationJobStatus }) {
   return <StatusBadge status="success" label="healthy" />
 }
 
+type ReviewMetric = {
+  key: string
+  label: string
+  tone?: 'warning' | 'unknown'
+}
+
+const reviewMetrics: ReviewMetric[] = [
+  { key: 'runs', label: 'Total runs' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'failed', label: 'Failed findings', tone: 'warning' },
+  { key: 'running', label: 'Running findings', tone: 'warning' },
+  { key: 'cancelled', label: 'Cancelled findings', tone: 'warning' },
+  { key: 'completed_without_signal', label: 'Coverage issues', tone: 'warning' },
+  { key: 'query_errors', label: 'Query issues', tone: 'warning' },
+]
+
+function numericSummaryValue(summary: Record<string, unknown>, key: string): number | undefined {
+  const value = summary[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function DailyReviewFindings({ job }: { job: AutomationJobStatus }) {
+  if (!job.last_summary) return null
+  const metrics = reviewMetrics.flatMap((metric) => {
+    const value = numericSummaryValue(job.last_summary!, metric.key)
+    return value === undefined ? [] : [{ ...metric, value }]
+  })
+  if (metrics.length === 0) return null
+
+  const reviewSucceeded = normalizeStatus(job.last_result) === 'success'
+  return (
+    <section className="panel nested-panel" aria-labelledby="review-findings-heading">
+      <div className="panel-header">
+        <div>
+          <p className="eyebrow">Daily review</p>
+          <h2 id="review-findings-heading">Review findings</h2>
+        </div>
+        <StatusBadge
+          status={reviewSucceeded ? 'success' : normalizeStatus(job.last_result)}
+          label={reviewSucceeded ? 'Operationally successful' : job.last_result}
+        />
+      </div>
+      <div className="metrics-grid">
+        {metrics.map(({ key, label, tone, value }) => (
+          <div className="panel nested-panel" key={key}>
+            <span>{label}</span>
+            <strong className={tone && value > 0 ? `status-pill ${tone}` : undefined}>{value}</strong>
+          </div>
+        ))}
+      </div>
+      <p>Failed and cancelled counts are findings in the reviewed pipelines. They do not mean the daily review job failed.</p>
+      <p className="muted">Source: daily review run {formatDate(job.last_run)}. Current operational history starts at cutover {formatDate(automationCutover.occurredAt)} ({automationCutover.deployment}).</p>
+    </section>
+  )
+}
+
 export function AutomationDetailPage() {
   const params = useParams()
   const name = params.name ?? ''
@@ -79,7 +135,9 @@ export function AutomationDetailPage() {
               <div><dt>Last result</dt><dd>{automationOperationalState(job) === 'unverified' ? 'Unverified after deployment cutover' : job.last_result || '--'}</dd></div>
               <div><dt>Last error</dt><dd>{automationOperationalState(job) === 'unverified' ? `Pre-deploy history excluded after ${automationCutover.deployment}` : job.last_error || '--'}</dd></div>
             </dl>
-            {job.last_summary && automationOperationalState(job) !== 'unverified' ? (
+            {job.last_summary && automationOperationalState(job) !== 'unverified' ? name === 'daily_review' && reviewMetrics.some(({ key }) => numericSummaryValue(job.last_summary!, key) !== undefined) ? (
+              <DailyReviewFindings job={job} />
+            ) : (
               <div className="json-viewer"><pre>{JSON.stringify(job.last_summary, null, 2)}</pre></div>
             ) : automationOperationalState(job) === 'unverified' ? <p className="muted">The pre-deployment result summary is excluded from this operational view.</p> : null}
             <div className="header-cluster">

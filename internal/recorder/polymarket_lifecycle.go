@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,19 +15,23 @@ const defaultPolymarketLifecycleBatchSize = 5000
 
 const defaultPolymarketLifecycleFlushInterval = 500 * time.Millisecond
 
+const defaultPolymarketLifecycleFlushTimeout = 5 * time.Second
+
 type polymarketLifecycle struct {
 	ticks *polymarketBatcher[domain.PolymarketTick]
 	books *polymarketBatcher[domain.PolymarketBookSnapshot]
 }
 
-func newPolymarketLifecycle(repo repository.PolymarketMarketDataRepository, cfg RecorderConfig, metrics RecorderMetrics) *polymarketLifecycle {
+func newPolymarketLifecycle(repo repository.PolymarketMarketDataRepository, cfg RecorderConfig, logger *slog.Logger, metrics RecorderMetrics) *polymarketLifecycle {
 	return &polymarketLifecycle{
 		ticks: newPolymarketBatcher(
 			"tick",
 			repo.InsertTicks,
 			cfg.BatchSize,
 			cfg.FlushInterval,
+			cfg.FlushTimeout,
 			func(t domain.PolymarketTick) time.Time { return t.ReceivedAt },
+			logger,
 			metrics,
 		),
 		books: newPolymarketBatcher(
@@ -34,7 +39,9 @@ func newPolymarketLifecycle(repo repository.PolymarketMarketDataRepository, cfg 
 			repo.InsertBookSnapshots,
 			cfg.BatchSize,
 			cfg.FlushInterval,
+			cfg.FlushTimeout,
 			func(b domain.PolymarketBookSnapshot) time.Time { return b.ReceivedAt },
+			logger,
 			metrics,
 		),
 	}
@@ -65,6 +72,8 @@ type polymarketBatcher[T any] struct {
 	metrics       RecorderMetrics
 	batchSize     int
 	flushInterval time.Duration
+	flushTimeout  time.Duration
+	logger        *slog.Logger
 	in            chan T
 	done          chan struct{}
 	once          sync.Once
@@ -74,12 +83,15 @@ type polymarketBatcher[T any] struct {
 	buf           []T
 }
 
-func newPolymarketBatcher[T any](kind string, insert func(context.Context, []T) error, batchSize int, flushInterval time.Duration, receivedAt func(T) time.Time, metrics RecorderMetrics) *polymarketBatcher[T] {
+func newPolymarketBatcher[T any](kind string, insert func(context.Context, []T) error, batchSize int, flushInterval, flushTimeout time.Duration, receivedAt func(T) time.Time, logger *slog.Logger, metrics RecorderMetrics) *polymarketBatcher[T] {
 	if batchSize <= 0 {
 		batchSize = defaultPolymarketLifecycleBatchSize
 	}
 	if flushInterval <= 0 {
 		flushInterval = defaultPolymarketLifecycleFlushInterval
+	}
+	if flushTimeout <= 0 {
+		flushTimeout = defaultPolymarketLifecycleFlushTimeout
 	}
 	if metrics == nil {
 		metrics = noopRecorderMetrics{}
@@ -91,6 +103,8 @@ func newPolymarketBatcher[T any](kind string, insert func(context.Context, []T) 
 		metrics:       metrics,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
+		flushTimeout:  flushTimeout,
+		logger:        logger,
 		in:            make(chan T, batchSize),
 		done:          make(chan struct{}),
 	}
@@ -178,7 +192,15 @@ func (b *polymarketBatcher[T]) flush() {
 	if len(batch) == 0 {
 		return
 	}
-	_ = b.insert(context.Background(), batch)
+	ctx, cancel := context.WithTimeout(context.Background(), b.flushTimeout)
+	err := b.insert(ctx, batch)
+	cancel()
+	if err != nil {
+		if b.logger != nil {
+			b.logger.Error("polymarket recorder flush failed", "kind", b.kind, "count", len(batch), "error", err)
+		}
+		return
+	}
 	b.metrics.IncInserted(b.kind, len(batch))
 	b.metrics.ObserveLagSeconds(b.kind, batchLagSeconds(batch, b.receivedAt))
 }

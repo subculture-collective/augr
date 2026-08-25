@@ -3,6 +3,7 @@ package signal
 import (
 	"context"
 	"log/slog"
+	"sync"
 )
 
 // OrchestratorConfig holds all configuration for the signal intelligence stack.
@@ -38,6 +39,8 @@ type Orchestrator struct {
 	hub        *SignalHub
 	handler    *TriggerHandler
 	cancel     context.CancelFunc
+	mu         sync.Mutex
+	wg         sync.WaitGroup
 	logger     *slog.Logger
 }
 
@@ -84,17 +87,26 @@ func (o *Orchestrator) Start(ctx context.Context) error {
 		return err
 	}
 	handlerCtx, cancel := context.WithCancel(ctx)
+	o.mu.Lock()
 	o.cancel = cancel
-	go o.handler.Run(handlerCtx)
+	o.wg.Add(1)
+	o.mu.Unlock()
+	go func() {
+		defer o.wg.Done()
+		o.handler.Run(handlerCtx)
+	}()
 	return nil
 }
 
 // Stop gracefully shuts down the hub and trigger handler.
 func (o *Orchestrator) Stop() {
 	o.hub.Stop()
+	o.mu.Lock()
 	if o.cancel != nil {
 		o.cancel()
 	}
+	o.mu.Unlock()
+	o.wg.Wait()
 }
 
 // Store returns the event store for API reads.

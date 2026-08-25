@@ -14,6 +14,7 @@ import (
 type RecorderConfig struct {
 	BatchSize     int
 	FlushInterval time.Duration
+	FlushTimeout  time.Duration
 	Slugs         []string
 }
 
@@ -56,7 +57,7 @@ func New(feed polymarketFeed, repo repository.PolymarketMarketDataRepository, cf
 	if metrics == nil {
 		metrics = noopRecorderMetrics{}
 	}
-	return &Recorder{feed: feed, repo: repo, cfg: cfg, log: log, metrics: metrics, lifecycle: newPolymarketLifecycle(repo, cfg, metrics)}
+	return &Recorder{feed: feed, repo: repo, cfg: cfg, log: log, metrics: metrics, lifecycle: newPolymarketLifecycle(repo, cfg, log, metrics)}
 }
 
 func (r *Recorder) Start(ctx context.Context) {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,6 +82,111 @@ func TestPolygonMempool_DedupesByHash(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestPolygonMempool_CancelInterruptsBlockedRead(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	readBlocked := make(chan struct{})
+	serverWorkerDone := make(chan struct{})
+	ws := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(serverWorkerDone)
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var sub map[string]any
+		if err := conn.ReadJSON(&sub); err != nil {
+			return
+		}
+		if err := conn.WriteJSON(map[string]any{"jsonrpc": "2.0", "id": 1, "result": "sub-1"}); err != nil {
+			return
+		}
+		close(readBlocked)
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer ws.Close()
+	rpc := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer rpc.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	src := NewPolygonMempoolSource(PolygonMempoolSourceConfig{
+		WSURL:  strings.Replace(ws.URL, "http://", "ws://", 1),
+		RPCURL: rpc.URL,
+	}, nil)
+	out, err := src.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-readBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("source did not reach blocked websocket read")
+	}
+	cancel()
+	select {
+	case _, ok := <-out:
+		if ok {
+			t.Fatal("source emitted an event during shutdown")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("source worker remained blocked after cancellation")
+	}
+	select {
+	case <-serverWorkerDone:
+	case <-time.After(time.Second):
+		t.Fatal("websocket server worker remained after source shutdown")
+	}
+}
+
+func TestPolygonMempool_CancelInterruptsBlockedWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	conn := &blockedWritePolygonConn{writeStarted: make(chan struct{}), closed: make(chan struct{})}
+	source := NewPolygonMempoolSource(PolygonMempoolSourceConfig{}, nil)
+	done := make(chan struct{})
+	go func() {
+		_ = source.runConnection(ctx, make(chan RawSignalEvent), conn)
+		close(done)
+	}()
+	select {
+	case <-conn.writeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("subscription write did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("blocked websocket write prevented shutdown")
+	}
+	if conn.closeCalls.Load() != 1 {
+		t.Fatalf("Close() calls=%d, want 1", conn.closeCalls.Load())
+	}
+}
+
+type blockedWritePolygonConn struct {
+	writeStarted chan struct{}
+	closed       chan struct{}
+	closeOnce    sync.Once
+	closeCalls   atomic.Int32
+}
+
+func (*blockedWritePolygonConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *blockedWritePolygonConn) WriteJSON(any) error {
+	close(c.writeStarted)
+	<-c.closed
+	return context.Canceled
+}
+
+func (*blockedWritePolygonConn) ReadJSON(any) error { return context.Canceled }
+
+func (c *blockedWritePolygonConn) Close() error {
+	c.closeOnce.Do(func() {
+		c.closeCalls.Add(1)
+		close(c.closed)
+	})
+	return nil
 }
 
 func runMempoolScenario(t *testing.T, watchedTo, txTo, hash string) *RawSignalEvent {

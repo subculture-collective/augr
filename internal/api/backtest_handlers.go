@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/PatrickFanella/get-rich-quick/internal/service"
 )
 
@@ -146,7 +148,22 @@ func (s *Server) handleRunBacktestConfig(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	run, err := s.backtestSvc.RunBacktest(r.Context(), id, actorOf(r))
+	runCtx := r.Context()
+	if s.runGroup != nil {
+		admittedCtx, lease, admitErr := s.runGroup.Admit(runCtx)
+		if admitErr != nil {
+			if errors.Is(admitErr, runcontrol.ErrDraining) {
+				respondError(w, http.StatusServiceUnavailable, "backtest runtime is shutting down", ErrCodeInternal)
+				return
+			}
+			respondError(w, http.StatusInternalServerError, "failed to admit backtest run", ErrCodeInternal)
+			return
+		}
+		runCtx = admittedCtx
+		defer lease.Done()
+	}
+
+	run, err := s.backtestSvc.RunBacktest(runCtx, id, actorOf(r))
 	if err != nil {
 		if svcErr, ok := err.(*service.ServiceError); ok {
 			code := ErrCodeInternal

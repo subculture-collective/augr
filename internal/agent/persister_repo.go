@@ -54,26 +54,15 @@ func (p *RepoPersister) RecordRunStart(ctx context.Context, run *domain.Pipeline
 	return nil
 }
 
-func (p *RepoPersister) RecordRunComplete(_ context.Context, runID uuid.UUID, tradeDate time.Time, status domain.PipelineStatus, completedAt time.Time, errMsg string, phaseTimings json.RawMessage) error {
+func (p *RepoPersister) FinalizeRun(ctx context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	if p.pipelineRunRepo == nil {
-		return nil
+		return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: runID, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt, ErrorMessage: finalization.ErrorMessage}}, nil
 	}
-	dbCtx, dbCancel := context.WithTimeout(context.Background(), statusUpdateTimeout)
-	defer dbCancel()
-
-	update := repository.PipelineRunStatusUpdate{
-		Status:       status,
-		CompletedAt:  &completedAt,
-		PhaseTimings: phaseTimings,
+	receipt, err := p.pipelineRunRepo.Finalize(ctx, runID, tradeDate, finalization)
+	if err != nil {
+		return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("agent/pipeline: finalize run: %w", err)
 	}
-	if errMsg != "" {
-		update.ErrorMessage = errMsg
-	}
-
-	if err := p.pipelineRunRepo.UpdateStatus(dbCtx, runID, tradeDate, update); err != nil {
-		return fmt.Errorf("agent/pipeline: update run status: %w", err)
-	}
-	return nil
+	return receipt, nil
 }
 
 func (p *RepoPersister) SupportsSnapshots() bool {

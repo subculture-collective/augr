@@ -27,6 +27,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
@@ -230,6 +231,7 @@ type JobOrchestrator struct {
 	reportWorker        *ReportWorker
 	kalshiGateUnhealthy bool
 	now                 func() time.Time
+	runs                *runcontrol.Group
 }
 
 // NewJobOrchestrator constructs a new orchestrator.
@@ -244,6 +246,7 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 		deps:   deps,
 		logger: logger,
 		now:    time.Now,
+		runs:   runcontrol.NewGroup(),
 	}
 }
 
@@ -255,11 +258,15 @@ func (o *JobOrchestrator) currentTime() time.Time {
 }
 
 func (o *JobOrchestrator) jobContext() (context.Context, context.CancelFunc) {
+	return o.jobContextFrom(context.Background())
+}
+
+func (o *JobOrchestrator) jobContextFrom(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := o.deps.JobTimeout
 	if timeout <= 0 {
 		timeout = defaultAutomationJobTimeout
 	}
-	return context.WithTimeout(context.Background(), timeout)
+	return context.WithTimeout(parent, timeout)
 }
 
 // invokeAutomationJob contains a job-local panic so one defective automation
@@ -383,8 +390,10 @@ func (o *JobOrchestrator) Start() error {
 
 // Stop stops all jobs and the cron engine.
 func (o *JobOrchestrator) Stop() {
+	o.runs.Stop(runcontrol.Shutdown)
 	ctx := o.cron.Stop()
 	<-ctx.Done()
+	o.runs.Wait()
 	o.logger.Info("automation: orchestrator stopped")
 }
 
@@ -448,22 +457,35 @@ func (o *JobOrchestrator) RunJob(ctx context.Context, name string) error {
 		return fmt.Errorf("automation: job %q is outside configured session (%s)", name, schedule.Describe())
 	}
 	startedAt := now
+	runCtx, lease, err := o.runs.Admit(context.WithoutCancel(ctx))
+	if err != nil {
+		return err
+	}
 	if err := claimManualJob(job, startedAt); err != nil {
+		lease.Done()
 		return err
 	}
 	o.logger.Info("automation: manual trigger", slog.String("job", name))
-	go o.runClaimedDirect(job, startedAt)
+	go func() {
+		defer lease.Done()
+		o.runClaimedDirect(runCtx, job, startedAt)
+	}()
 	return nil
 }
 
 // runDirect runs a job immediately without checking ShouldFire (for manual triggers).
 func (o *JobOrchestrator) runDirect(job *RegisteredJob) {
+	ctx, lease, err := o.runs.Admit(context.Background())
+	if err != nil {
+		return
+	}
+	defer lease.Done()
 	startedAt := o.currentTime()
 	if err := claimManualJob(job, startedAt); err != nil {
 		o.logger.Info("automation: manual run not admitted", slog.String("job", job.Name), slog.Any("error", err))
 		return
 	}
-	o.runClaimedDirect(job, startedAt)
+	o.runClaimedDirect(ctx, job, startedAt)
 }
 
 func claimManualJob(job *RegisteredJob, startedAt time.Time) error {
@@ -480,7 +502,7 @@ func claimManualJob(job *RegisteredJob, startedAt time.Time) error {
 	return nil
 }
 
-func (o *JobOrchestrator) runClaimedDirect(job *RegisteredJob, startedAt time.Time) {
+func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *RegisteredJob, startedAt time.Time) {
 	// Require every dependency to have completed successfully in today's
 	// Eastern automation cycle, not merely to be idle at this instant.
 	if dep, reason := o.dependencyBlocker(job, startedAt); dep != "" {
@@ -504,7 +526,7 @@ func (o *JobOrchestrator) runClaimedDirect(job *RegisteredJob, startedAt time.Ti
 
 	o.logger.Info("automation: job starting", slog.String("job", job.Name))
 	start := time.Now()
-	ctx, cancel := o.jobContext()
+	ctx, cancel := o.jobContextFrom(parent)
 	defer cancel()
 	err := invokeAutomationJob(ctx, job.Fn)
 	elapsed := time.Since(start)
@@ -621,6 +643,11 @@ func settlementGateStatusFromState(state *domain.KalshiSettlementGateState) *Set
 
 // wrapAndRun is the common wrapper that checks preconditions and runs the job.
 func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
+	parent, lease, err := o.runs.Admit(context.Background())
+	if err != nil {
+		return
+	}
+	defer lease.Done()
 	now := o.currentTime()
 
 	job.mu.Lock()
@@ -663,9 +690,9 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 	o.logger.Info("automation: job starting", slog.String("job", job.Name))
 	start := time.Now()
 
-	ctx, cancel := o.jobContext()
+	ctx, cancel := o.jobContextFrom(parent)
 	defer cancel()
-	err := invokeAutomationJob(ctx, job.Fn)
+	err = invokeAutomationJob(ctx, job.Fn)
 
 	elapsed := time.Since(start)
 	completedAt := o.currentTime()

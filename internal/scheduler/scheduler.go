@@ -17,6 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
 const (
@@ -76,6 +77,15 @@ func WithJobTimeout(d time.Duration) Option {
 func WithMetrics(m SchedulerMetrics) Option {
 	return func(s *Scheduler) {
 		s.metrics = m
+	}
+}
+
+// WithRunGroup shares process-local strategy admission with manual and native runs.
+func WithRunGroup(group *runcontrol.Group) Option {
+	return func(s *Scheduler) {
+		if group != nil {
+			s.runGroup = group
+		}
 	}
 }
 
@@ -144,6 +154,7 @@ type Scheduler struct {
 	riskMonitor           *riskMonitor
 	strategySem           chan struct{} // limits concurrent strategy executions
 	disabledMarketTypes   map[domain.MarketType]struct{}
+	runGroup              *runcontrol.Group
 }
 
 type strategyScheduleKey struct {
@@ -179,6 +190,7 @@ func NewScheduler(
 			pollInterval: defaultPollInterval,
 			logger:       logger,
 		},
+		runGroup: runcontrol.NewGroup(),
 	}
 
 	for _, opt := range opts {
@@ -334,7 +346,9 @@ func (s *Scheduler) Start() error {
 // subject to the same concurrency semaphore and dedup guards as cron-triggered
 // runs. Execution is asynchronous; this method returns immediately.
 func (s *Scheduler) TriggerStrategy(strategy domain.Strategy) {
-	go s.runTriggeredStrategy(strategy)
+	_ = s.runGroup.Go(s.schedulerContext(), func(ctx context.Context) {
+		s.runTriggeredStrategyContext(ctx, strategy)
+	})
 }
 
 // TriggerSignalStrategy makes the event-driven admission decision
@@ -368,17 +382,26 @@ func (s *Scheduler) TriggerSignalStrategy(
 		return s.persistSignalTriggerOutcome(strategy, domain.StrategyTriggerCapacityDropped, recordOutcome)
 	}
 
+	admittedCtx, lease, err := s.runGroup.Admit(runCtx)
+	if err != nil {
+		<-s.strategySem
+		s.dedup.Release(strategy.ID)
+		return s.persistSignalTriggerOutcome(strategy, domain.StrategyTriggerSchedulerStopped, recordOutcome)
+	}
+
 	if outcome := s.persistSignalTriggerOutcome(strategy, domain.StrategyTriggerAdmitted, recordOutcome); outcome != domain.StrategyTriggerAdmitted {
+		lease.Done()
 		<-s.strategySem
 		s.dedup.Release(strategy.ID)
 		return outcome
 	}
 
 	go func() {
+		defer lease.Done()
 		defer s.containStrategyPanic(strategy)
 		defer s.dedup.Release(strategy.ID)
 		defer func() { <-s.strategySem }()
-		s.executeAdmittedStrategy(strategy)
+		s.executeAdmittedStrategy(admittedCtx, strategy)
 	}()
 	return domain.StrategyTriggerAdmitted
 }
@@ -417,6 +440,14 @@ func invokeSignalOutcomeRecorder(
 
 // Stop gracefully stops the cron engine and waits for running jobs to finish.
 func (s *Scheduler) Stop() {
+	s.runGroup.Stop(runcontrol.Shutdown)
+	s.StopDispatch()
+	s.runGroup.Wait()
+	s.logger.Info("scheduler: stopped")
+}
+
+// StopDispatch stops cron and joins its callbacks without waiting on the shared run group.
+func (s *Scheduler) StopDispatch() {
 	s.mu.Lock()
 	engine, cancel := s.clearStateLocked()
 	s.mu.Unlock()
@@ -429,12 +460,11 @@ func (s *Scheduler) Stop() {
 	}
 
 	<-engine.Stop().Done()
-	s.logger.Info("scheduler: stopped")
 }
 
 // InFlightCount returns the number of in-flight scheduled pipeline runs.
 func (s *Scheduler) InFlightCount() int {
-	return s.dedup.Count()
+	return s.runGroup.InFlight()
 }
 
 func (s *Scheduler) loadActiveStrategies(ctx context.Context) ([]domain.Strategy, error) {
@@ -493,7 +523,12 @@ func (s *Scheduler) loadScheduledBacktests(ctx context.Context) ([]domain.Backte
 }
 
 func (s *Scheduler) runStrategy(strategy domain.Strategy) {
-	s.runStrategyWithAdmission(strategy, true)
+	ctx, lease, err := s.runGroup.Admit(s.schedulerContext())
+	if err != nil {
+		return
+	}
+	defer lease.Done()
+	s.runStrategyWithAdmission(ctx, strategy, true)
 }
 
 // runTriggeredStrategy admits event-driven work only when execution capacity is
@@ -501,7 +536,11 @@ func (s *Scheduler) runStrategy(strategy domain.Strategy) {
 // meaning when it waits behind unrelated pipelines and must not become a stale
 // deferred queue.
 func (s *Scheduler) runTriggeredStrategy(strategy domain.Strategy) {
-	s.runStrategyWithAdmission(strategy, false)
+	s.runTriggeredStrategyContext(s.schedulerContext(), strategy)
+}
+
+func (s *Scheduler) runTriggeredStrategyContext(ctx context.Context, strategy domain.Strategy) {
+	s.runStrategyWithAdmission(ctx, strategy, false)
 }
 
 func (s *Scheduler) containStrategyPanic(strategy domain.Strategy) {
@@ -514,7 +553,7 @@ func (s *Scheduler) containStrategyPanic(strategy domain.Strategy) {
 	}
 }
 
-func (s *Scheduler) runStrategyWithAdmission(strategy domain.Strategy, waitForCapacity bool) {
+func (s *Scheduler) runStrategyWithAdmission(runCtx context.Context, strategy domain.Strategy, waitForCapacity bool) {
 	defer s.containStrategyPanic(strategy)
 	if s.marketTypeDisabled(strategy.MarketType) {
 		s.logger.Info("scheduler: retired market strategy ignored",
@@ -541,7 +580,6 @@ func (s *Scheduler) runStrategyWithAdmission(strategy domain.Strategy, waitForCa
 
 	// Concurrency gate: limit how many strategies run in parallel to avoid
 	// overwhelming the LLM backend (Ollama is single-threaded by default).
-	runCtx := s.ctx
 	if runCtx == nil {
 		runCtx = context.Background()
 	}
@@ -569,7 +607,7 @@ func (s *Scheduler) runStrategyWithAdmission(strategy domain.Strategy, waitForCa
 		}
 	}
 
-	s.executeAdmittedStrategy(strategy)
+	s.executeAdmittedStrategy(runCtx, strategy)
 }
 
 func (s *Scheduler) marketTypeDisabled(marketType domain.MarketType) bool {
@@ -580,9 +618,9 @@ func (s *Scheduler) marketTypeDisabled(marketType domain.MarketType) bool {
 	return disabled
 }
 
-func (s *Scheduler) executeAdmittedStrategy(strategy domain.Strategy) {
+func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy domain.Strategy) {
 	// Re-read strategy to get latest status and skip_next_run.
-	fetchCtx, fetchCancel := context.WithTimeout(s.schedulerContext(), 5*time.Second)
+	fetchCtx, fetchCancel := context.WithTimeout(parent, 5*time.Second)
 	defer fetchCancel()
 	current, err := s.strategyRepo.Get(fetchCtx, strategy.ID)
 	if err != nil {
@@ -627,7 +665,7 @@ func (s *Scheduler) executeAdmittedStrategy(strategy domain.Strategy) {
 	}
 
 	now := s.nowFunc()
-	ctx, cancel := s.jobContext()
+	ctx, cancel := s.jobContextFrom(parent)
 	defer cancel()
 
 	s.logger.Info("scheduler: triggered strategy schedule",
@@ -710,6 +748,15 @@ func (s *Scheduler) schedulerContext() context.Context {
 }
 
 func (s *Scheduler) runBacktest(config domain.BacktestConfig) {
+	parent, running := s.runningContext()
+	if !running {
+		return
+	}
+	admittedCtx, lease, err := s.runGroup.Admit(parent)
+	if err != nil {
+		return
+	}
+	defer lease.Done()
 	defer s.containBacktestPanic(config)
 
 	if s.metrics != nil {
@@ -727,7 +774,7 @@ func (s *Scheduler) runBacktest(config domain.BacktestConfig) {
 
 	triggeredAt := s.nowFunc().UTC()
 	started := time.Now()
-	ctx, cancel := s.jobContext()
+	ctx, cancel := s.jobContextFrom(admittedCtx)
 	defer cancel()
 
 	s.logger.Info("scheduler: triggered backtest schedule",
@@ -787,6 +834,12 @@ func (s *Scheduler) runBacktest(config domain.BacktestConfig) {
 	)
 }
 
+func (s *Scheduler) runningContext() (context.Context, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ctx, s.ctx != nil
+}
+
 func (s *Scheduler) containBacktestPanic(config domain.BacktestConfig) {
 	if recovered := recover(); recovered != nil && s.logger != nil {
 		s.logger.Error("scheduler: backtest panic contained",
@@ -807,18 +860,15 @@ func (s *Scheduler) clearStateLocked() (cronEngine, context.CancelFunc) {
 	return engine, cancel
 }
 
-func (s *Scheduler) jobContext() (context.Context, context.CancelFunc) {
+func (s *Scheduler) jobContextFrom(baseCtx context.Context) (context.Context, context.CancelFunc) {
 	s.mu.Lock()
-	baseCtx := s.ctx
 	timeout := s.jobTimeout
 	s.mu.Unlock()
-
 	if baseCtx == nil {
 		baseCtx = context.Background()
 	}
 	if timeout <= 0 {
 		return context.WithCancel(baseCtx)
 	}
-
 	return context.WithTimeout(baseCtx, timeout)
 }

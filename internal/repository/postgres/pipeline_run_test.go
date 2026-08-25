@@ -6,14 +6,18 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/agent"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
+	"github.com/PatrickFanella/get-rich-quick/internal/service"
 )
 
 func TestBuildPipelineRunListQuery_NoFilters(t *testing.T) {
@@ -141,6 +145,279 @@ func TestMarshalConfigSnapshot_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestValidatePipelineRunFinalization(t *testing.T) {
+	runID := uuid.New()
+	otherRunID := uuid.New()
+	now := time.Now()
+	invalidSignal := domain.PipelineSignal("wait")
+
+	tests := []struct {
+		name         string
+		finalization repository.PipelineRunFinalization
+	}{
+		{name: "running outcome", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusRunning, CompletedAt: now}},
+		{name: "completed error", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: now, ErrorMessage: "boom"}},
+		{name: "failed without error", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusFailed, CompletedAt: now}},
+		{name: "cancelled whitespace error", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCancelled, CompletedAt: now, ErrorMessage: "  "}},
+		{name: "zero completion", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted}},
+		{name: "invalid signal", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: now, Signal: &invalidSignal}},
+		{name: "invalid timings", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: now, PhaseTimings: json.RawMessage(`{`)}},
+		{name: "event wrong run", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: now, Event: &domain.AgentEvent{PipelineRunID: &otherRunID, EventKind: "pipeline_completed"}}},
+		{name: "event wrong outcome", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: now, Event: &domain.AgentEvent{PipelineRunID: &runID, EventKind: "pipeline_failed"}}},
+		{name: "event invalid metadata", finalization: repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: now, Event: &domain.AgentEvent{PipelineRunID: &runID, EventKind: "pipeline_completed", Metadata: json.RawMessage(`{`)}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validatePipelineRunFinalization(runID, tt.finalization); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
+func TestValidatePipelineRunFinalization_CancelledEvent(t *testing.T) {
+	runID := uuid.New()
+	value := repository.PipelineRunFinalization{Status: domain.PipelineStatusCancelled, CompletedAt: time.Now(), ErrorMessage: "operator", Event: &domain.AgentEvent{PipelineRunID: &runID, EventKind: "pipeline_cancelled"}}
+	if err := validatePipelineRunFinalization(runID, value); err != nil {
+		t.Fatal(err)
+	}
+	value.Event.EventKind = "pipeline_failed"
+	if err := validatePipelineRunFinalization(runID, value); err == nil {
+		t.Fatal("pipeline_failed accepted for cancelled status")
+	}
+}
+
+func TestPipelineRunRepoIntegration_FinalizationReceiptsAndSignalPreservation(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPipelineRunRepo(pool)
+	run := createRunningPipelineRun(t, ctx, repo, domain.PipelineSignalBuy)
+	completedAt := run.StartedAt.Add(time.Minute)
+	runID := run.ID
+	event := &domain.AgentEvent{PipelineRunID: &runID, EventKind: "pipeline_completed", Title: "done", Metadata: json.RawMessage(`{"ok":true}`)}
+
+	receipt, err := repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+		Status: domain.PipelineStatusCompleted, CompletedAt: completedAt,
+		PhaseTimings: json.RawMessage(`{"analysis_ms":12}`), Event: event,
+	})
+	if err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+	if !receipt.Applied || receipt.Run.Status != domain.PipelineStatusCompleted || receipt.Run.Signal != domain.PipelineSignalBuy {
+		t.Fatalf("unexpected applied receipt: %+v", receipt)
+	}
+	if receipt.Run.CompletedAt == nil || !receipt.Run.CompletedAt.Equal(completedAt) || !jsonBytesEqual(receipt.Run.PhaseTimings, json.RawMessage(`{"analysis_ms":12}`)) {
+		t.Fatalf("receipt omitted terminal fields: %+v", receipt.Run)
+	}
+	var eventCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM agent_events WHERE pipeline_run_id = $1`, run.ID).Scan(&eventCount); err != nil || eventCount != 1 {
+		t.Fatalf("terminal event count = %d, err = %v", eventCount, err)
+	}
+
+	loser, err := repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+		Status: domain.PipelineStatusFailed, CompletedAt: completedAt.Add(time.Second), ErrorMessage: "late failure",
+	})
+	if err != nil {
+		t.Fatalf("losing Finalize() error = %v", err)
+	}
+	if loser.Applied || loser.Run.Status != receipt.Run.Status || loser.Run.ErrorMessage != receipt.Run.ErrorMessage || loser.Run.Signal != receipt.Run.Signal {
+		t.Fatalf("loser did not receive canonical winner: %+v", loser)
+	}
+}
+
+func TestPipelineRunRepoIntegration_CreatePreservesIDAndGeneratesMissingID(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPipelineRunRepo(pool)
+	tradeDate := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
+
+	providedID := uuid.New()
+	provided := &domain.PipelineRun{ID: providedID, StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: tradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	if err := repo.Create(ctx, provided); err != nil {
+		t.Fatal(err)
+	}
+	if provided.ID != providedID {
+		t.Fatalf("Create() ID = %s, want caller ID %s", provided.ID, providedID)
+	}
+	stored, err := repo.GetByID(ctx, providedID)
+	if err != nil || stored.ID != providedID {
+		t.Fatalf("GetByID() = (%+v, %v), want durable caller ID", stored, err)
+	}
+
+	generated := &domain.PipelineRun{StrategyID: uuid.New(), Ticker: "MSFT", TradeDate: tradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	if err := repo.Create(ctx, generated); err != nil {
+		t.Fatal(err)
+	}
+	if generated.ID == uuid.Nil {
+		t.Fatal("Create() left missing ID at zero")
+	}
+	if _, err := repo.GetByID(ctx, generated.ID); err != nil {
+		t.Fatalf("generated ID %s was not durable: %v", generated.ID, err)
+	}
+}
+
+func TestPipelineRunRepoIntegration_RegisteredIDSurvivesCreateAndCancel(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPipelineRunRepo(pool)
+	run := &domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC), Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	registry := agent.NewRunContextRegistry()
+	runCtx, cancelRun := context.WithCancelCause(context.Background())
+	if err := registry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Create(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.NewRunService(repo, registry).Cancel(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(context.Cause(runCtx), runcontrol.Operator) {
+		t.Fatalf("registry cancellation cause = %v, want operator", context.Cause(runCtx))
+	}
+	stored, err := repo.GetByID(ctx, run.ID)
+	if err != nil || stored.Status != domain.PipelineStatusCancelled {
+		t.Fatalf("durable run = (%+v, %v), want cancelled registered ID", stored, err)
+	}
+}
+
+func TestPipelineRunRepoIntegration_FinalizationMissingAndEventRollback(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPipelineRunRepo(pool)
+	tradeDate := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
+	_, err := repo.Finalize(ctx, uuid.New(), tradeDate, repository.PipelineRunFinalization{
+		Status: domain.PipelineStatusCompleted, CompletedAt: time.Now(),
+	})
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("Finalize() missing error = %v, want ErrNotFound", err)
+	}
+
+	run := createRunningPipelineRun(t, ctx, repo, domain.PipelineSignalHold)
+	if _, err := pool.Exec(ctx, `CREATE FUNCTION reject_terminal_event() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'event rejected'; END $$`); err != nil {
+		t.Fatalf("create rejecting trigger function: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `CREATE TRIGGER reject_terminal_event BEFORE INSERT ON agent_events FOR EACH ROW EXECUTE FUNCTION reject_terminal_event()`); err != nil {
+		t.Fatalf("create rejecting trigger: %v", err)
+	}
+	runID := run.ID
+	_, err = repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+		Status: domain.PipelineStatusCompleted, CompletedAt: time.Now(),
+		Event: &domain.AgentEvent{PipelineRunID: &runID, EventKind: "pipeline_completed", Title: "done"},
+	})
+	if err == nil {
+		t.Fatal("Finalize() succeeded despite event insert failure")
+	}
+	durable, getErr := repo.Get(ctx, run.ID, run.TradeDate)
+	if getErr != nil || durable.Status != domain.PipelineStatusRunning || durable.CompletedAt != nil {
+		t.Fatalf("event failure did not roll back run: run=%+v err=%v", durable, getErr)
+	}
+}
+
+func TestPipelineRunRepoIntegration_ConcurrentFinalizersHaveOneWinner(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPipelineRunRepo(pool)
+	run := createRunningPipelineRun(t, ctx, repo, domain.PipelineSignalHold)
+	inputs := []repository.PipelineRunFinalization{
+		{Status: domain.PipelineStatusCompleted, CompletedAt: time.Now()},
+		{Status: domain.PipelineStatusFailed, CompletedAt: time.Now().Add(time.Second), ErrorMessage: "failed"},
+	}
+	type result struct {
+		receipt repository.PipelineRunFinalizationReceipt
+		err     error
+	}
+	results := make(chan result, len(inputs))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for _, input := range inputs {
+		wg.Add(1)
+		go func(input repository.PipelineRunFinalization) {
+			defer wg.Done()
+			<-start
+			receipt, err := repo.Finalize(ctx, run.ID, run.TradeDate, input)
+			results <- result{receipt: receipt, err: err}
+		}(input)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	applied := 0
+	var winner domain.PipelineStatus
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent Finalize() error = %v", result.err)
+		}
+		if winner == "" {
+			winner = result.receipt.Run.Status
+		}
+		if result.receipt.Run.Status != winner {
+			t.Fatalf("receipts disagree on winner: %q and %q", winner, result.receipt.Run.Status)
+		}
+		if result.receipt.Applied {
+			applied++
+		}
+	}
+	if applied != 1 {
+		t.Fatalf("applied finalizers = %d, want 1", applied)
+	}
+}
+
+func TestPipelineRunRepoIntegration_RefineCompletedSignal(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPipelineRunRepo(pool)
+	run := createRunningPipelineRun(t, ctx, repo, domain.PipelineSignalBuy)
+	running, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalBuy, domain.PipelineSignalSell)
+	if err != nil || running.Applied || running.Run.Status != domain.PipelineStatusRunning || running.Run.Signal != domain.PipelineSignalBuy {
+		t.Fatalf("running signal refinement = %+v, %v", running, err)
+	}
+	completedAt := time.Now()
+	finalized, err := repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: completedAt})
+	if err != nil {
+		t.Fatalf("Finalize() error = %v", err)
+	}
+
+	refined, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalBuy, domain.PipelineSignalSell)
+	if err != nil || !refined.Applied || refined.Run.Signal != domain.PipelineSignalSell {
+		t.Fatalf("RefineCompletedSignal() = %+v, %v", refined, err)
+	}
+	if refined.Run.Status != finalized.Run.Status || refined.Run.ErrorMessage != finalized.Run.ErrorMessage || refined.Run.CompletedAt == nil || !refined.Run.CompletedAt.Equal(*finalized.Run.CompletedAt) {
+		t.Fatalf("signal refinement altered terminal fields: before=%+v after=%+v", finalized.Run, refined.Run)
+	}
+	retry, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalBuy, domain.PipelineSignalSell)
+	if err != nil || !retry.Applied {
+		t.Fatalf("same-value retry = %+v, %v", retry, err)
+	}
+	loser, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalHold, domain.PipelineSignalBuy)
+	if err != nil || loser.Applied || loser.Run.Signal != domain.PipelineSignalSell {
+		t.Fatalf("refinement CAS loser = %+v, %v", loser, err)
+	}
+	_, err = repo.RefineCompletedSignal(ctx, uuid.New(), run.TradeDate, "", domain.PipelineSignalBuy)
+	if !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("missing refinement error = %v, want ErrNotFound", err)
+	}
+}
+
+func createRunningPipelineRun(t *testing.T, ctx context.Context, repo *PipelineRunRepo, signal domain.PipelineSignal) *domain.PipelineRun {
+	t.Helper()
+	run := &domain.PipelineRun{
+		StrategyID: uuid.New(), Ticker: "AAPL",
+		TradeDate: time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC),
+		Status:    domain.PipelineStatusRunning, Signal: signal, StartedAt: time.Now(),
+	}
+	if err := repo.Create(ctx, run); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	return run
+}
+
 func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	t.Helper()
 
@@ -231,12 +508,12 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	}
 
 	completedAt := startedAt1.Add(30 * time.Minute)
-	if err := repo.UpdateStatus(ctx, run1.ID, run1.TradeDate, repository.PipelineRunStatusUpdate{
+	if _, err := repo.Finalize(ctx, run1.ID, run1.TradeDate, repository.PipelineRunFinalization{
 		Status:       domain.PipelineStatusCompleted,
-		CompletedAt:  &completedAt,
+		CompletedAt:  completedAt,
 		ErrorMessage: "",
 	}); err != nil {
-		t.Fatalf("UpdateStatus() error = %v", err)
+		t.Fatalf("Finalize() error = %v", err)
 	}
 
 	updated, err := repo.Get(ctx, run1.ID, run1.TradeDate)
@@ -370,11 +647,11 @@ func TestPipelineRunRepoIntegration_NotFound(t *testing.T) {
 		t.Fatalf("expected Get() ErrNotFound, got %v", err)
 	}
 
-	err = repo.UpdateStatus(ctx, missingID, missingTradeDate, repository.PipelineRunStatusUpdate{
-		Status: domain.PipelineStatusFailed,
+	_, err = repo.Finalize(ctx, missingID, missingTradeDate, repository.PipelineRunFinalization{
+		Status: domain.PipelineStatusFailed, CompletedAt: time.Now().UTC(), ErrorMessage: "failed",
 	})
 	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected UpdateStatus() ErrNotFound, got %v", err)
+		t.Fatalf("expected Finalize() ErrNotFound, got %v", err)
 	}
 }
 
@@ -429,12 +706,12 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 	}
 
 	completedAt := startedAt1.Add(time.Hour)
-	if err := repo.UpdateStatus(ctx, sharedID, tradeDate1, repository.PipelineRunStatusUpdate{
+	if _, err := repo.Finalize(ctx, sharedID, tradeDate1, repository.PipelineRunFinalization{
 		Status:       domain.PipelineStatusCompleted,
-		CompletedAt:  &completedAt,
+		CompletedAt:  completedAt,
 		ErrorMessage: "",
 	}); err != nil {
-		t.Fatalf("UpdateStatus() error = %v", err)
+		t.Fatalf("Finalize() error = %v", err)
 	}
 
 	firstRun, err := repo.Get(ctx, sharedID, tradeDate1)
@@ -523,6 +800,13 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		`CREATE INDEX idx_pipeline_runs_ticker ON pipeline_runs (ticker)`,
 		`CREATE INDEX idx_pipeline_runs_status ON pipeline_runs (status)`,
 		`CREATE INDEX idx_pipeline_runs_trade_date ON pipeline_runs (trade_date)`,
+		`CREATE TABLE agent_events (
+			id UUID NOT NULL DEFAULT gen_random_uuid(), pipeline_run_id UUID, strategy_id UUID,
+			agent_role TEXT, event_kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT,
+			tags TEXT[], metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (id, created_at)
+		) PARTITION BY RANGE (created_at)`,
+		`CREATE TABLE agent_events_default PARTITION OF agent_events DEFAULT`,
 	}
 
 	for _, stmt := range ddl {

@@ -22,6 +22,7 @@ type PolymarketSource struct {
 	gammaURL              string
 	client                *http.Client
 	interval              time.Duration
+	refreshInterval       time.Duration
 	priceMoveThreshold    float64 // emit if |ΔpYES| >= this (e.g. 0.05 = 5pp)
 	volumeSpikeMultiplier float64 // emit if vol > multiplier * rolling avg
 	logger                *slog.Logger
@@ -82,6 +83,7 @@ func NewPolymarketSource(cfg PolymarketSourceConfig, logger *slog.Logger) *Polym
 		gammaURL:              strings.TrimRight(cfg.GammaURL, "/"),
 		client:                &http.Client{Timeout: 10 * time.Second},
 		interval:              cfg.Interval,
+		refreshInterval:       60 * time.Second,
 		priceMoveThreshold:    cfg.PriceMoveThreshold,
 		volumeSpikeMultiplier: cfg.VolumeSpikeMultiplier,
 		logger:                logger,
@@ -107,12 +109,16 @@ func (p *PolymarketSource) Start(ctx context.Context) (<-chan RawSignalEvent, er
 	ch := make(chan RawSignalEvent, 64)
 	go func() {
 		defer close(ch)
+		var refreshWG sync.WaitGroup
+		defer refreshWG.Wait()
 		if p.loader != nil {
 			if slugs, err := p.loader.ListEnabledSlugs(ctx); err == nil {
 				p.SetWatchedMarkets(slugs)
 			}
+			refreshWG.Add(1)
 			go func() {
-				ticker := time.NewTicker(60 * time.Second)
+				defer refreshWG.Done()
+				ticker := time.NewTicker(p.refreshInterval)
 				defer ticker.Stop()
 				for {
 					select {

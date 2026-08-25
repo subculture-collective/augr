@@ -70,8 +70,11 @@ func (s *portfolioDiagnosticsRunRepo) CountByStatus(context.Context, repository.
 	return counts, nil
 }
 
-func (s *portfolioDiagnosticsRunRepo) UpdateStatus(context.Context, uuid.UUID, time.Time, repository.PipelineRunStatusUpdate) error {
-	return nil
+func (s *portfolioDiagnosticsRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
+}
+func (s *portfolioDiagnosticsRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
 type portfolioDiagnosticsTradeDecisionRepo struct {
