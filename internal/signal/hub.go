@@ -75,8 +75,7 @@ func (h *SignalHub) Start(ctx context.Context) error {
 					// Source completion is represented by channel closure. Keep
 					// draining after cancellation so Stop joins the source itself,
 					// not only this forwarder.
-					for range c {
-					}
+					drainRawSignalEvents(c)
 					return
 				case evt, ok := <-c:
 					if !ok {
@@ -85,8 +84,7 @@ func (h *SignalHub) Start(ctx context.Context) error {
 					select {
 					case merged <- evt:
 					case <-runCtx.Done():
-						for range c {
-						}
+						drainRawSignalEvents(c)
 						return
 					}
 				}
@@ -129,6 +127,12 @@ func (h *SignalHub) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func drainRawSignalEvents(events <-chan RawSignalEvent) {
+	for range events {
+		continue
+	}
 }
 
 // Stop shuts down the hub and waits for the fan-in loop to finish.

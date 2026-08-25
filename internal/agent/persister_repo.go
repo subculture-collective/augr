@@ -13,8 +13,6 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-const statusUpdateTimeout = 10 * time.Second
-
 // RepoPersister implements DecisionPersister using repository interfaces.
 type RepoPersister struct {
 	pipelineRunRepo   repository.PipelineRunRepository

@@ -502,7 +502,7 @@ func TestRunStrategy_KalshiPostTerminalErrorsReturnCanonicalResult(t *testing.T)
 	}
 }
 
-func TestRecordAgentTerminalMetricsSkipsCASLoser(t *testing.T) {
+func TestRecordAgentTerminalMetricsSkipsCASLoser(_ *testing.T) {
 	runner := &realStrategyRunner{metrics: metrics.New()}
 	runner.recordAgentTerminalMetrics(&agent.RunResult{
 		Run:             domain.PipelineRun{Ticker: "AAPL", Status: domain.PipelineStatusCancelled},

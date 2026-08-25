@@ -22,8 +22,10 @@ type CopyOriginRepo struct {
 	createPlannedIntent func(context.Context, pgx.Tx, domain.CopyTradeIntent) (domain.CopyTradeIntent, error)
 }
 
-var _ copyorigin.Store = (*CopyOriginRepo)(nil)
-var _ copyorigin.PlannedStore = (*CopyOriginRepo)(nil)
+var (
+	_ copyorigin.Store        = (*CopyOriginRepo)(nil)
+	_ copyorigin.PlannedStore = (*CopyOriginRepo)(nil)
+)
 
 func NewCopyOriginRepo(pool *pgxpool.Pool) *CopyOriginRepo { return &CopyOriginRepo{pool: pool} }
 

@@ -31,10 +31,12 @@ func (r *runRepoStub) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, 
 	value := r.run
 	return &value, nil
 }
+
 func (r *runRepoStub) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
 	value := r.run
 	return &value, nil
 }
+
 func (*runRepoStub) List(context.Context, repository.PipelineRunFilter, int, int) ([]domain.PipelineRun, error) {
 	return nil, nil
 }
@@ -69,6 +71,7 @@ func TestRunServiceCancelFinalizesAfterRequestCancellation(t *testing.T) {
 		t.Fatalf("cancel = %+v", canceller)
 	}
 }
+
 func (*runRepoStub) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }

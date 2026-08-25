@@ -268,7 +268,7 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 		applied := false
 		if run.ID != uuid.Nil {
 			event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, AgentEventKindPipelineFailed, "", "Pipeline failed", panicErr.Error(), map[string]any{"phase": "panic", "error_message": panicErr.Error()}, []string{"pipeline", "failed"})
-			receipt, persistErr := finalizeRunBounded(r.persister, context.Background(), run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusFailed, CompletedAt: completedAt, ErrorMessage: panicErr.Error(), PhaseTimings: phaseTimingsJSON, Event: event})
+			receipt, persistErr := finalizeRunBounded(context.Background(), r.persister, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusFailed, CompletedAt: completedAt, ErrorMessage: panicErr.Error(), PhaseTimings: phaseTimingsJSON, Event: event})
 			if persistErr != nil {
 				panicErr = errors.Join(panicErr, fmt.Errorf("agent/runner: persist panic terminal status: %w", persistErr))
 			} else {
@@ -414,7 +414,7 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 			phaseTimingsJSON, _ := json.Marshal(phaseTimings)
 			status, eventKind, eventType, terminalErr := classifyRunFailure(ctx, err)
 			event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, eventKind, "", terminalTitle(status), terminalErr, map[string]any{"phase": phase.name, "error_message": terminalErr}, []string{"pipeline", string(status)})
-			receipt, persistErr := finalizeRunBounded(r.persister, ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, CompletedAt: completedAt, ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON, Event: event})
+			receipt, persistErr := finalizeRunBounded(ctx, r.persister, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, CompletedAt: completedAt, ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON, Event: event})
 			if persistErr != nil {
 				return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, executionError(ctx, errors.Join(err, fmt.Errorf("agent/runner: persist terminal status: %w", persistErr)))
 			}
@@ -457,7 +457,7 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 		phaseTimingsJSON, _ := json.Marshal(phaseTimings)
 		status, eventKind, eventType, terminalErr := classifyRunFailure(ctx, err)
 		event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, eventKind, "", terminalTitle(status), terminalErr, map[string]any{"phase": "completion", "error_message": terminalErr}, []string{"pipeline", string(status)})
-		receipt, persistErr := finalizeRunBounded(r.persister, ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, CompletedAt: completedAt, ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON, Event: event})
+		receipt, persistErr := finalizeRunBounded(ctx, r.persister, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, CompletedAt: completedAt, ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON, Event: event})
 		if persistErr != nil {
 			return &RunResult{Run: run, Signal: r.canonicalSignal(state), State: snapshotState(state), Warnings: warnings}, executionError(ctx, errors.Join(err, fmt.Errorf("agent/runner: persist terminal status: %w", persistErr)))
 		}
@@ -477,7 +477,7 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 	signal := r.canonicalSignal(state)
 	event := r.helper.newStructuredEvent(run.ID, prepared.Strategy.ID, AgentEventKindPipelineCompleted, "", "Pipeline completed", "", nil, []string{"pipeline", "completed"})
 	completedFinalization := repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: completedAt, Signal: &signal, PhaseTimings: phaseTimingsJSON, Event: event}
-	receipt, persistErr := finalizeCompletedRun(r.persister, ctx, run.ID, run.TradeDate, completedFinalization, func() repository.PipelineRunFinalization {
+	receipt, persistErr := finalizeCompletedRun(ctx, r.persister, run.ID, run.TradeDate, completedFinalization, func() repository.PipelineRunFinalization {
 		status, eventKind, _, terminalErr := classifyRunFailure(ctx, ctx.Err())
 		return repository.PipelineRunFinalization{
 			Status: status, CompletedAt: r.currentTime().UTC(), ErrorMessage: terminalErr, PhaseTimings: phaseTimingsJSON,
@@ -521,15 +521,15 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 
 const terminalFinalizeTimeout = 10 * time.Second
 
-func finalizeRunBounded(persister DecisionPersister, ctx context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func finalizeRunBounded(ctx context.Context, persister DecisionPersister, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), terminalFinalizeTimeout)
 	defer cancel()
 	return persister.FinalizeRun(persistCtx, runID, tradeDate, finalization)
 }
 
 func finalizeCompletedRun(
-	persister DecisionPersister,
 	ctx context.Context,
+	persister DecisionPersister,
 	runID uuid.UUID,
 	tradeDate time.Time,
 	completed repository.PipelineRunFinalization,
@@ -541,7 +541,7 @@ func finalizeCompletedRun(
 	if err == nil || ctx.Err() == nil {
 		return receipt, err
 	}
-	fallbackReceipt, fallbackErr := finalizeRunBounded(persister, ctx, runID, tradeDate, cancelled())
+	fallbackReceipt, fallbackErr := finalizeRunBounded(ctx, persister, runID, tradeDate, cancelled())
 	if fallbackErr != nil {
 		return fallbackReceipt, errors.Join(err, fallbackErr)
 	}

@@ -1093,11 +1093,12 @@ func nativeTerminalEvent(
 	eventKind := agent.AgentEventKindPipelineFailed.String()
 	title := "Pipeline failed"
 	tags := []string{"pipeline", "failed", "native", source}
-	if status == domain.PipelineStatusCompleted {
+	switch status {
+	case domain.PipelineStatusCompleted:
 		eventKind = agent.AgentEventKindPipelineCompleted.String()
 		title = "Pipeline completed"
 		tags = []string{"pipeline", "completed", "native", source}
-	} else if status == domain.PipelineStatusCancelled {
+	case domain.PipelineStatusCancelled:
 		eventKind = agent.AgentEventKindPipelineCancelled.String()
 		title = "Pipeline cancelled"
 		tags = []string{"pipeline", "cancelled", "native", source}

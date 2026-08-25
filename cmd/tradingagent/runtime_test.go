@@ -1255,7 +1255,7 @@ func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeD
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
 }
 
-func (r *stubPipelineRunRepo) RefineCompletedSignal(_ context.Context, id uuid.UUID, tradeDate time.Time, _ domain.PipelineSignal, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *stubPipelineRunRepo) RefineCompletedSignal(_ context.Context, id uuid.UUID, tradeDate time.Time, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	r.refineCalled = true
 	r.updateCalled = true
 	if r.updateErr != nil {

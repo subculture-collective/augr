@@ -510,9 +510,10 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	}
 
 	eventKind, title, tag := "pipeline_completed", "Copy plan authorized", "completed"
-	if status == domain.PipelineStatusFailed {
+	switch status {
+	case domain.PipelineStatusFailed:
 		eventKind, title, tag = "pipeline_failed", "Pipeline failed", "failed"
-	} else if status == domain.PipelineStatusCancelled {
+	case domain.PipelineStatusCancelled:
 		eventKind, title, tag = "pipeline_cancelled", "Pipeline cancelled", "cancelled"
 	}
 	completionMetadata, _ := json.Marshal(map[string]any{

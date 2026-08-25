@@ -257,10 +257,6 @@ func (o *JobOrchestrator) currentTime() time.Time {
 	return time.Now()
 }
 
-func (o *JobOrchestrator) jobContext() (context.Context, context.CancelFunc) {
-	return o.jobContextFrom(context.Background())
-}
-
 func (o *JobOrchestrator) jobContextFrom(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := o.deps.JobTimeout
 	if timeout <= 0 {

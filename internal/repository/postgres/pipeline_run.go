@@ -367,9 +367,10 @@ func validatePipelineRunFinalization(id uuid.UUID, finalization repository.Pipel
 		return fmt.Errorf("postgres: terminal agent event does not match pipeline run")
 	}
 	expectedKind := "pipeline_failed"
-	if finalization.Status == domain.PipelineStatusCompleted {
+	switch finalization.Status {
+	case domain.PipelineStatusCompleted:
 		expectedKind = "pipeline_completed"
-	} else if finalization.Status == domain.PipelineStatusCancelled {
+	case domain.PipelineStatusCancelled:
 		expectedKind = "pipeline_cancelled"
 	}
 	if finalization.Event.EventKind != expectedKind {

@@ -94,7 +94,11 @@ func TestPolygonMempool_CancelInterruptsBlockedRead(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() {
+			if err := conn.Close(); err != nil {
+				t.Errorf("close websocket connection: %v", err)
+			}
+		}()
 		var sub map[string]any
 		if err := conn.ReadJSON(&sub); err != nil {
 			return

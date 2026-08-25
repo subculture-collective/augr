@@ -64,18 +64,6 @@ func (h *PhaseHelper) persistStructuredEvent(ctx context.Context, event *domain.
 	}
 }
 
-func (h *PhaseHelper) persistStructuredTerminalEvent(event *domain.AgentEvent) error {
-	if event == nil {
-		return nil
-	}
-	dbCtx, cancel := context.WithTimeout(context.Background(), statusUpdateTimeout)
-	defer cancel()
-	if err := h.persister.PersistEvent(dbCtx, event); err != nil {
-		return fmt.Errorf("agent: persist terminal event %s: %w", event.EventKind, err)
-	}
-	return nil
-}
-
 func (h *PhaseHelper) newStructuredEvent(runID, strategyID uuid.UUID, kind AgentEventKind, agentRole AgentRole, title, summary string, metadata map[string]any, tags []string) *domain.AgentEvent {
 	event := &domain.AgentEvent{
 		PipelineRunID: &runID,
