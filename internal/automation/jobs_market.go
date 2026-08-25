@@ -19,10 +19,11 @@ import (
 // Schedule specs for market-hours jobs.
 var (
 	currentDataRefreshSpec = scheduler.ScheduleSpec{
-		Type:         scheduler.ScheduleTypeMarketHours,
-		Cron:         "30 * * * 1-5", // opening refresh at 9:30 AM ET, then hourly
-		SkipWeekends: true,
-		SkipHolidays: true,
+		Type:                  scheduler.ScheduleTypeMarketHours,
+		Cron:                  "30 * * * 1-5", // 09:30–15:30 hourly plus 16:30 ET closing refresh
+		SkipWeekends:          true,
+		SkipHolidays:          true,
+		PostCloseGraceMinutes: 30,
 	}
 	hotScanSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,

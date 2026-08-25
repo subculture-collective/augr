@@ -75,6 +75,54 @@ func TestShouldFire(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "market_hours post-close grace includes close",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: 30},
+			now:  time.Date(2024, time.January, 8, 16, 0, 0, 0, et),
+			want: true,
+		},
+		{
+			name: "market_hours post-close grace includes subsecond cron delay",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: 30},
+			now:  time.Date(2024, time.January, 8, 16, 30, 0, int(3*time.Millisecond), et),
+			want: true,
+		},
+		{
+			name: "market_hours post-close grace includes full endpoint minute",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: 30},
+			now:  time.Date(2024, time.January, 8, 16, 30, 59, 999999999, et),
+			want: true,
+		},
+		{
+			name: "market_hours post-close grace excludes next minute",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: 30},
+			now:  time.Date(2024, time.January, 8, 16, 31, 0, 0, et),
+			want: false,
+		},
+		{
+			name: "market_hours post-close grace converts UTC",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: 30},
+			now:  time.Date(2024, time.January, 8, 21, 30, 0, 0, time.UTC),
+			want: true,
+		},
+		{
+			name: "market_hours post-close grace rejects weekend without skip flag",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: 30},
+			now:  time.Date(2024, time.January, 6, 16, 30, 0, 0, et),
+			want: false,
+		},
+		{
+			name: "market_hours post-close grace rejects NYSE holiday without skip flag",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: 30},
+			now:  time.Date(2024, time.December, 25, 16, 30, 0, 0, et),
+			want: false,
+		},
+		{
+			name: "market_hours negative post-close grace is zero",
+			spec: ScheduleSpec{Type: ScheduleTypeMarketHours, MarketType: "stock", PostCloseGraceMinutes: -30},
+			now:  time.Date(2024, time.January, 8, 16, 0, 0, 0, et),
+			want: false,
+		},
+		{
 			name: "market_hours Saturday",
 			spec: ScheduleSpec{
 				Type:         ScheduleTypeMarketHours,
@@ -261,6 +309,7 @@ func TestParseScheduleSpec(t *testing.T) {
 		wantCron   string
 		wantSkipWE bool
 		wantSkipH  bool
+		wantGrace  int
 	}{
 		{
 			name:       "raw cron for stock",
@@ -291,12 +340,13 @@ func TestParseScheduleSpec(t *testing.T) {
 		},
 		{
 			name:       "JSON input",
-			raw:        `{"type":"pre_market","cron":"0 9 * * 1-5","market_type":"stock","skip_weekends":true,"skip_holidays":true}`,
+			raw:        `{"type":"pre_market","cron":"0 9 * * 1-5","market_type":"stock","skip_weekends":true,"skip_holidays":true,"post_close_grace_minutes":30}`,
 			marketType: domain.MarketTypeStock,
 			wantType:   ScheduleTypePreMarket,
 			wantCron:   "0 9 * * 1-5",
 			wantSkipWE: true,
 			wantSkipH:  true,
+			wantGrace:  30,
 		},
 		{
 			name:       "empty string",
@@ -323,6 +373,9 @@ func TestParseScheduleSpec(t *testing.T) {
 			}
 			if got.SkipHolidays != tc.wantSkipH {
 				t.Errorf("SkipHolidays = %v, want %v", got.SkipHolidays, tc.wantSkipH)
+			}
+			if got.PostCloseGraceMinutes != tc.wantGrace {
+				t.Errorf("PostCloseGraceMinutes = %d, want %d", got.PostCloseGraceMinutes, tc.wantGrace)
 			}
 		})
 	}
@@ -351,6 +404,15 @@ func TestDescribe(t *testing.T) {
 				SkipHolidays: true,
 			},
 			want: "Daily at 9:00 AM ET, Mon\u2013Fri (pre-market), skip holidays",
+		},
+		{
+			name: "market hours with post-close grace",
+			spec: ScheduleSpec{
+				Type:                  ScheduleTypeMarketHours,
+				Cron:                  "30 * * * 1-5",
+				PostCloseGraceMinutes: 30,
+			},
+			want: "30 * * * 1-5 (market hours plus 30-minute post-close grace)",
 		},
 		{
 			name: "at market close",

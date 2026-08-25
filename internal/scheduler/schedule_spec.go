@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -21,11 +22,12 @@ const (
 
 // ScheduleSpec describes when and under what market conditions a job should run.
 type ScheduleSpec struct {
-	Type         ScheduleType `json:"type"`
-	Cron         string       `json:"cron,omitempty"`
-	MarketType   string       `json:"market_type,omitempty"`
-	SkipWeekends bool         `json:"skip_weekends,omitempty"`
-	SkipHolidays bool         `json:"skip_holidays,omitempty"`
+	Type                  ScheduleType `json:"type"`
+	Cron                  string       `json:"cron,omitempty"`
+	MarketType            string       `json:"market_type,omitempty"`
+	SkipWeekends          bool         `json:"skip_weekends,omitempty"`
+	SkipHolidays          bool         `json:"skip_holidays,omitempty"`
+	PostCloseGraceMinutes int          `json:"post_close_grace_minutes,omitempty"`
 }
 
 // Predefined schedule templates for common use cases.
@@ -118,7 +120,19 @@ func (s ScheduleSpec) ShouldFire(now time.Time) bool {
 		if isAlwaysOpen {
 			return true
 		}
-		return IsRegularMarketOpen(now, mt)
+		if IsRegularMarketOpen(now, mt) {
+			return true
+		}
+		if s.PostCloseGraceMinutes <= 0 || (mt != "" && mt != domain.MarketTypeStock) {
+			return false
+		}
+		et := now.In(newYorkLocation)
+		if !IsNYSETradingDay(et) {
+			return false
+		}
+		closeTime := time.Date(et.Year(), et.Month(), et.Day(), 16, 0, 0, 0, newYorkLocation)
+		graceEnd := closeTime.Add(time.Duration(s.PostCloseGraceMinutes) * time.Minute).Add(time.Minute)
+		return !et.Before(closeTime) && et.Before(graceEnd)
 
 	case ScheduleTypePreMarket:
 		if isAlwaysOpen {
@@ -146,10 +160,15 @@ func (s ScheduleSpec) ShouldFire(now time.Time) bool {
 // Describe returns a human-readable description including market constraints.
 func (s ScheduleSpec) Describe() string {
 	desc := DescribeCron(s.Cron)
+	mt := domain.MarketType(s.MarketType).Normalize()
 
 	switch s.Type {
 	case ScheduleTypeMarketHours:
-		desc += " (market hours only)"
+		if s.PostCloseGraceMinutes > 0 && (mt == "" || mt == domain.MarketTypeStock) {
+			desc += fmt.Sprintf(" (market hours plus %d-minute post-close grace)", s.PostCloseGraceMinutes)
+		} else {
+			desc += " (market hours only)"
+		}
 	case ScheduleTypePreMarket:
 		desc += " (pre-market)"
 	case ScheduleTypeMarketClose:

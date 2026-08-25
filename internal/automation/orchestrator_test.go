@@ -590,6 +590,46 @@ func TestJobOrchestratorRunJobAllowsRerunInsideConfiguredSession(t *testing.T) {
 	}
 }
 
+func TestCurrentDataRefreshManualRunUsesPostCloseGrace(t *testing.T) {
+	tests := []struct {
+		name    string
+		now     time.Time
+		wantRun bool
+	}{
+		{name: "closing refresh", now: time.Date(2026, time.August, 6, 16, 30, 0, 0, easternTime), wantRun: true},
+		{name: "after grace", now: time.Date(2026, time.August, 6, 16, 31, 0, 0, easternTime)},
+		{name: "holiday", now: time.Date(2026, time.December, 25, 16, 30, 0, 0, easternTime)},
+		{name: "weekend", now: time.Date(2026, time.August, 8, 16, 30, 0, 0, easternTime)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			done := make(chan struct{})
+			orch := NewJobOrchestrator(OrchestratorDeps{})
+			orch.now = func() time.Time { return test.now }
+			orch.Register("current_data_refresh", "test", currentDataRefreshSpec, func(context.Context) error {
+				close(done)
+				return nil
+			})
+
+			err := orch.RunJob(context.Background(), "current_data_refresh")
+			if test.wantRun {
+				if err != nil {
+					t.Fatalf("RunJob() error = %v", err)
+				}
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Fatal("current_data_refresh did not run")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "outside configured session") {
+				t.Fatalf("RunJob() error = %v, want session rejection", err)
+			}
+		})
+	}
+}
+
 func TestJobOrchestratorRunJobRejectsOverlapSynchronously(t *testing.T) {
 	t.Parallel()
 

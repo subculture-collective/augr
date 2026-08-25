@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
 func TestCurrentDataRefreshSkipsPredictionMarketPositions(t *testing.T) {
@@ -34,6 +35,22 @@ func TestMarketJobCadenceRunsDependenciesBeforeConsumers(t *testing.T) {
 
 	if currentDataRefreshSpec.Cron != "30 * * * 1-5" {
 		t.Fatalf("current refresh cron = %q", currentDataRefreshSpec.Cron)
+	}
+	if currentDataRefreshSpec.Type != scheduler.ScheduleTypeMarketHours || currentDataRefreshSpec.PostCloseGraceMinutes != 30 {
+		t.Fatalf("current refresh schedule = %+v", currentDataRefreshSpec)
+	}
+	for _, test := range []struct {
+		now  time.Time
+		want bool
+	}{
+		{now: time.Date(2026, time.August, 6, 15, 30, 0, 0, easternTime), want: true},
+		{now: time.Date(2026, time.August, 6, 16, 30, 0, int(3*time.Millisecond), easternTime), want: true},
+		{now: time.Date(2026, time.August, 6, 16, 31, 0, 0, easternTime), want: false},
+		{now: time.Date(2026, time.August, 6, 17, 30, 0, 0, easternTime), want: false},
+	} {
+		if got := currentDataRefreshSpec.ShouldFire(test.now); got != test.want {
+			t.Fatalf("current refresh ShouldFire(%s) = %t, want %t", test.now, got, test.want)
+		}
 	}
 	if hotScanSpec.Cron != "0 * * * 1-5" {
 		t.Fatalf("hot scan cron = %q, want minute 0", hotScanSpec.Cron)
