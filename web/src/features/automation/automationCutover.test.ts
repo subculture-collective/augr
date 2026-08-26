@@ -6,8 +6,8 @@ const job = (overrides: Record<string, unknown> = {}) => ({
   name: 'current_data_refresh',
   description: 'Refreshes current data.',
   schedule: '*/15 * * * 1-5',
-  last_run: '2026-08-24T11:26:32Z',
-  last_error_at: '2026-08-24T11:26:32Z',
+  last_run: '2026-08-26T03:05:08.819Z',
+  last_error_at: '2026-08-26T03:05:08.819Z',
   last_result: 'error',
   run_count: 12,
   error_count: 6,
@@ -19,8 +19,8 @@ const job = (overrides: Record<string, unknown> = {}) => ({
 
 describe('automation cutover', () => {
   it('excludes runs before the deployment', () => {
-    expect(isPostAutomationCutover('2026-08-24T11:26:32Z')).toBe(false)
-    expect(isPostAutomationCutover('2026-08-24T11:26:33Z')).toBe(true)
+    expect(isPostAutomationCutover('2026-08-26T03:05:08.819Z')).toBe(false)
+    expect(isPostAutomationCutover('2026-08-26T03:05:08.820431707Z')).toBe(true)
     expect(isPostAutomationCutover()).toBe(false)
   })
 
@@ -32,7 +32,7 @@ describe('automation cutover', () => {
   })
 
   it('retains post-deployment failures as operational failures', () => {
-    const currentFailure = job({ last_run: '2026-08-24T11:26:34Z', last_error_at: '2026-08-24T11:26:34Z' })
+    const currentFailure = job({ last_run: '2026-08-26T03:05:09Z', last_error_at: '2026-08-26T03:05:09Z' })
 
     expect(automationOperationalState(currentFailure)).toBe('failing')
     expect(currentAutomationErrorCount(currentFailure)).toBe(6)
@@ -42,7 +42,7 @@ describe('automation cutover', () => {
     'classifies a post-deployment %s result before error counts',
     (lastResult) => {
       const degradedJob = job({
-        last_run: '2026-08-24T11:26:34Z',
+        last_run: '2026-08-26T03:05:09Z',
         last_error_at: undefined,
         last_result: lastResult,
         error_count: 6,

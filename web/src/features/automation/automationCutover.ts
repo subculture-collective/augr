@@ -1,8 +1,8 @@
 import type { AutomationJobStatus } from '@/shared/types/domain'
 
 export const automationCutover = {
-  deployment: 'c7a4c45cded9',
-  occurredAt: '2026-08-24T11:26:33Z',
+  deployment: '37da1b975217',
+  occurredAt: '2026-08-26T03:05:08.820431707Z',
 } as const
 
 export type AutomationOperationalState = 'disabled' | 'running' | 'unverified' | 'failing' | 'degraded' | 'healthy'

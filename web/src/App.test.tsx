@@ -114,7 +114,7 @@ describe('first vertical slice app', () => {
     const failedFinding = within(findings).getByText('Failed findings').closest('.nested-panel') as HTMLElement
     expect(within(failedFinding).getByText('4')).toBeTruthy()
     expect(within(findings).getByText(/do not mean the daily review job failed/i)).toBeTruthy()
-    expect(within(findings).getByText(/current operational history starts at cutover/i)).toHaveTextContent('c7a4c45cded9')
+    expect(within(findings).getByText(/current operational history starts at cutover/i)).toHaveTextContent('37da1b975217')
     expect(within(findings).queryByText(/"failed": 4/i)).toBeNull()
     expect(screen.queryByText(/^failing$/i)).toBeNull()
   })
