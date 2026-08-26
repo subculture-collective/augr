@@ -122,6 +122,10 @@ func partialResultOrchestrator(tickers []string, service *data.DataService) *Job
 func TestCurrentDataRefreshConsumesLivePartialStatsWithoutSystemicError(t *testing.T) {
 	provider := &partialResultProvider{}
 	orch := partialResultOrchestrator([]string{"AAPL", "FAIL"}, partialResultDataService(provider, &partialResultHistoryRepo{}))
+	orch.deps.StrategyRepo = &kalshiStrategyRepoStub{strategies: []domain.Strategy{
+		{Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive},
+		{Ticker: "FAIL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive},
+	}}
 	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
 
 	_ = orch.currentDataRefresh(context.Background())
@@ -133,6 +137,7 @@ func TestCurrentDataRefreshConsumesLivePartialStatsWithoutSystemicError(t *testi
 
 func TestCurrentDataRefreshNilStatsAreSystemic(t *testing.T) {
 	orch := partialResultOrchestrator([]string{"AAPL"}, data.NewDataService(config.Config{}, nil, nil, nil, nil))
+	orch.deps.PositionRepo = newRecordingPositionRepo(&domain.Position{Ticker: "AAPL", AssetClass: domain.AssetClassEquity})
 	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
 
 	err := orch.currentDataRefresh(context.Background())

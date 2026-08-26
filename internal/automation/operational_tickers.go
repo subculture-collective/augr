@@ -8,6 +8,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
 
 const defaultHistoryRefreshWatchlistLimit = 250
@@ -20,8 +21,8 @@ type operationalTickerSelection struct {
 }
 
 func (o *JobOrchestrator) selectOperationalStockTickers(ctx context.Context, watchlistLimit int) (operationalTickerSelection, error) {
-	if watchlistLimit <= 0 {
-		return operationalTickerSelection{}, fmt.Errorf("watchlist limit must be greater than 0")
+	if watchlistLimit < 0 {
+		return operationalTickerSelection{}, fmt.Errorf("watchlist limit must not be negative")
 	}
 	if o.deps.PositionRepo == nil {
 		return operationalTickerSelection{}, fmt.Errorf("position repository unavailable")
@@ -40,12 +41,15 @@ func (o *JobOrchestrator) selectOperationalStockTickers(ctx context.Context, wat
 	if err != nil {
 		return operationalTickerSelection{}, fmt.Errorf("list active stock strategies: %w", err)
 	}
-	if o.deps.Universe == nil {
-		return operationalTickerSelection{}, fmt.Errorf("universe unavailable")
-	}
-	watchlist, err := o.deps.Universe.GetWatchlist(ctx, watchlistLimit)
-	if err != nil {
-		return operationalTickerSelection{}, fmt.Errorf("get watchlist: %w", err)
+	var watchlist []universe.TrackedTicker
+	if watchlistLimit > 0 {
+		if o.deps.Universe == nil {
+			return operationalTickerSelection{}, fmt.Errorf("universe unavailable")
+		}
+		watchlist, err = o.deps.Universe.GetWatchlist(ctx, watchlistLimit)
+		if err != nil {
+			return operationalTickerSelection{}, fmt.Errorf("get watchlist: %w", err)
+		}
 	}
 
 	selection := operationalTickerSelection{}

@@ -22,6 +22,7 @@ type TrackedTicker struct {
 type UniverseRepository interface {
 	Upsert(ctx context.Context, ticker *TrackedTicker) error
 	UpsertBatch(ctx context.Context, tickers []TrackedTicker) error
+	ReplaceConstituents(ctx context.Context, tickers []TrackedTicker) error
 	List(ctx context.Context, filter ListFilter, limit, offset int) ([]TrackedTicker, error)
 	Watchlist(ctx context.Context, topN int) ([]TrackedTicker, error)
 	UpdateScore(ctx context.Context, ticker string, score float64) error

@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -28,7 +27,7 @@ type timedCurrentScopeProvider struct {
 	calls       int
 }
 
-func (p *timedCurrentScopeProvider) GetOHLCV(_ context.Context, _ string, timeframe data.Timeframe, _, to time.Time) ([]domain.OHLCV, error) {
+func (p *timedCurrentScopeProvider) GetOHLCV(_ context.Context, ticker string, timeframe data.Timeframe, _, to time.Time) ([]domain.OHLCV, error) {
 	p.mu.Lock()
 	p.calls++
 	p.virtualTime += p.callTime
@@ -38,6 +37,14 @@ func (p *timedCurrentScopeProvider) GetOHLCV(_ context.Context, _ string, timefr
 	if timeframe == data.Timeframe1d {
 		latest = expectedCompletedNYSESession(to)
 		previous = latest.AddDate(0, 0, -1)
+	} else {
+		switch ticker {
+		case "POS00", "POS01":
+			return nil, nil
+		case "POS02":
+			latest = to.Add(-25 * time.Minute)
+			previous = latest.Add(-5 * time.Minute)
+		}
 	}
 	return []domain.OHLCV{
 		{Timestamp: previous, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1},
@@ -57,17 +64,31 @@ func (*timedCurrentScopeProvider) GetSocialSentiment(context.Context, string, ti
 	return nil, data.ErrNotImplemented
 }
 
-func TestCurrentDataRefreshUsesTop50AndHandsOffExactPayloadBeforeHotCadence(t *testing.T) {
-	watchlist := make([]universe.TrackedTicker, 55)
-	expected := []string{"POSITION", "SHARED", "STRATEGY"}
-	for i := range watchlist {
-		ticker := fmt.Sprintf("WATCH%02d", i)
-		watchlist[i] = universe.TrackedTicker{Ticker: ticker}
-		if i < currentDataWatchlistLimit {
+func TestCurrentDataRefreshUsesOperationalScopeAndHandsOffExactDegradedPayload(t *testing.T) {
+	positions := make([]*domain.Position, 0, 41)
+	strategies := make([]domain.Strategy, 0, 41)
+	expected := make([]string, 0, 75)
+	for i := 0; i < 39; i++ {
+		ticker := fmt.Sprintf("POS%02d", i)
+		positions = append(positions, &domain.Position{ID: uuid.New(), Ticker: ticker, MarketType: domain.MarketTypeStock})
+		if i > 2 {
 			expected = append(expected, ticker)
 		}
 	}
-	sort.Strings(expected)
+	for i := 0; i < 39; i++ {
+		ticker := fmt.Sprintf("STRAT%02d", i)
+		strategies = append(strategies, domain.Strategy{ID: uuid.New(), Ticker: ticker, Status: domain.StrategyStatusActive, MarketType: domain.MarketTypeStock})
+		expected = append(expected, ticker)
+	}
+	positions = append(positions,
+		&domain.Position{ID: uuid.New(), Ticker: "KALSHI", MarketType: domain.MarketTypeKalshi},
+		&domain.Position{ID: uuid.New(), Ticker: "OPTION", MarketType: domain.MarketTypeStock, AssetClass: domain.AssetClassOption},
+	)
+	strategies = append(strategies,
+		domain.Strategy{ID: uuid.New(), Ticker: "PAUSED", Status: domain.StrategyStatusPaused, MarketType: domain.MarketTypeStock},
+		domain.Strategy{ID: uuid.New(), Ticker: "POLYMARKET", Status: domain.StrategyStatusActive, MarketType: domain.MarketTypePolymarket},
+	)
+	watchlist := []universe.TrackedTicker{{Ticker: "WATCHLIST_ONLY"}}
 	universeRepo := &operationalUniverseRepo{watchlist: watchlist}
 	provider := &timedCurrentScopeProvider{callTime: 5 * time.Second}
 	registry := data.NewProviderRegistry()
@@ -80,54 +101,54 @@ func TestCurrentDataRefreshUsesTop50AndHandsOffExactPayloadBeforeHotCadence(t *t
 		nil,
 	)
 	orch := NewJobOrchestrator(OrchestratorDeps{
-		PositionRepo: newRecordingPositionRepo(
-			&domain.Position{ID: uuid.New(), Ticker: "POSITION", MarketType: domain.MarketTypeStock},
-			&domain.Position{ID: uuid.New(), Ticker: "SHARED", MarketType: domain.MarketTypeStock},
-		),
-		StrategyRepo: &kalshiStrategyRepoStub{strategies: []domain.Strategy{
-			{ID: uuid.New(), Ticker: "STRATEGY", Status: domain.StrategyStatusActive, MarketType: domain.MarketTypeStock},
-			{ID: uuid.New(), Ticker: "SHARED", Status: domain.StrategyStatusActive, MarketType: domain.MarketTypeStock},
-		}},
-		Universe:    universe.NewUniverse(universeRepo, nil, nil),
-		DataService: service,
+		PositionRepo: newRecordingPositionRepo(positions...),
+		StrategyRepo: &kalshiStrategyRepoStub{strategies: strategies},
+		Universe:     universe.NewUniverse(universeRepo, nil, nil),
+		DataService:  service,
 	})
 	orch.now = func() time.Time { return time.Date(2026, time.August, 6, 10, 30, 0, 0, easternTime) }
 	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
 
-	if err := orch.currentDataRefresh(context.Background()); err != nil {
-		t.Fatalf("currentDataRefresh() error = %v", err)
+	if err := orch.currentDataRefresh(context.Background()); !IsDegraded(err) {
+		t.Fatalf("currentDataRefresh() error = %v, want degraded", err)
 	}
 	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
-	if summary["positions"] != 2 || summary["strategies"] != 2 || summary["watchlist"] != 50 || summary["selected"] != 53 {
+	if summary["positions"] != 39 || summary["strategies"] != 39 || summary["watchlist"] != 0 || summary["selected"] != 78 {
 		t.Fatalf("current scope summary = %#v", summary)
 	}
-	if universeRepo.limit != currentDataWatchlistLimit {
-		t.Fatalf("current refresh watchlist limit = %d, want %d", universeRepo.limit, currentDataWatchlistLimit)
+	if summary["updated"] != 75 || summary["empty"] != 2 || summary["stale"] != 1 {
+		t.Fatalf("current refresh coverage summary = %#v", summary)
 	}
-	if summary["batches"] != 6 {
-		t.Fatalf("current refresh batches = %d, want 6", summary["batches"])
+	if universeRepo.limit != 0 || len(universeRepo.limits) != 0 {
+		t.Fatalf("current refresh queried watchlist with limits %v", universeRepo.limits)
+	}
+	if summary["batches"] != 8 {
+		t.Fatalf("current refresh batches = %d, want 8", summary["batches"])
 	}
 	provider.mu.Lock()
 	providerCalls, providerTime := provider.calls, provider.virtualTime
 	provider.mu.Unlock()
 	modeledDuration := providerTime + time.Duration(summary["batches"]-1)*150*time.Millisecond
-	if providerCalls != 2*len(expected) || modeledDuration >= 30*time.Minute {
-		t.Fatalf("current refresh provider calls = %d, modeled duration = %s; want %d calls before 30m hot cadence", providerCalls, modeledDuration, 2*len(expected))
+	if providerCalls != 2*summary["selected"] || modeledDuration >= 30*time.Minute {
+		t.Fatalf("current refresh provider calls = %d, modeled duration = %s; want %d calls before 30m hot cadence", providerCalls, modeledDuration, 2*summary["selected"])
 	}
 	if got := orch.getRefreshedTickers(); !reflect.DeepEqual(got, expected) {
 		t.Fatalf("hot payload = %v, want exact fresh selection %v", got, expected)
 	}
 }
 
-func TestCurrentDataRefreshSkipsPredictionMarketPositions(t *testing.T) {
-	universeRepo := &operationalUniverseRepo{}
+func TestCurrentDataRefreshExcludesWatchlistNonStockAndPausedSources(t *testing.T) {
+	universeRepo := &operationalUniverseRepo{watchlist: []universe.TrackedTicker{{Ticker: "WATCHLIST_ONLY"}}}
 	orch := NewJobOrchestrator(OrchestratorDeps{
 		PositionRepo: newRecordingPositionRepo(
 			&domain.Position{ID: uuid.New(), Ticker: "AAPL", MarketType: domain.MarketTypeStock},
 			&domain.Position{ID: uuid.New(), Ticker: "KXTEST:YES", MarketType: domain.MarketTypeKalshi},
 		),
-		StrategyRepo: &kalshiStrategyRepoStub{},
-		Universe:     universe.NewUniverse(universeRepo, nil, nil),
+		StrategyRepo: &kalshiStrategyRepoStub{strategies: []domain.Strategy{
+			{ID: uuid.New(), Ticker: "PAUSED", Status: domain.StrategyStatusPaused, MarketType: domain.MarketTypeStock},
+			{ID: uuid.New(), Ticker: "POLYMARKET", Status: domain.StrategyStatusActive, MarketType: domain.MarketTypePolymarket},
+		}},
+		Universe: universe.NewUniverse(universeRepo, nil, nil),
 	})
 	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
 
@@ -137,6 +158,9 @@ func TestCurrentDataRefreshSkipsPredictionMarketPositions(t *testing.T) {
 	status := singleJobStatus(t, orch, "current_data_refresh")
 	if got := status.LastSummary["tickers"]; got != 1 {
 		t.Fatalf("refreshed ticker count = %d, want only the stock position", got)
+	}
+	if got := status.LastSummary["watchlist"]; got != 0 || len(universeRepo.limits) != 0 {
+		t.Fatalf("watchlist count = %d, calls = %v; want omitted", got, universeRepo.limits)
 	}
 }
 
@@ -384,7 +408,7 @@ func TestCurrentDataRefreshHandsOffExactDegradedSelection(t *testing.T) {
 	if err == nil || IsDegraded(err) {
 		t.Fatalf("completeCurrentDataRefresh() = %v, want true error", err)
 	}
-	if got := orch.getRefreshedTickers(); len(got) != 1 || got[0] != "KEEP" {
-		t.Fatalf("refreshed tickers after true error = %v, want prior selection unchanged", got)
+	if got := orch.getRefreshedTickers(); len(got) != 0 {
+		t.Fatalf("refreshed tickers after true error = %v, want cleared payload", got)
 	}
 }

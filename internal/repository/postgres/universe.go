@@ -84,6 +84,96 @@ func (r *UniverseRepo) UpsertBatch(ctx context.Context, tickers []universe.Track
 	return nil
 }
 
+// ReplaceConstituents atomically replaces active constituent membership while
+// retaining score data for existing tickers.
+func (r *UniverseRepo) ReplaceConstituents(ctx context.Context, tickers []universe.TrackedTicker) error {
+	rows := make([][]any, 0, len(tickers))
+	seen := make(map[string]struct{}, len(tickers))
+	for _, ticker := range tickers {
+		symbol := canonicalUniverseTicker(ticker.Ticker)
+		if symbol == "" {
+			continue
+		}
+		if _, exists := seen[symbol]; exists {
+			continue
+		}
+		seen[symbol] = struct{}{}
+		rows = append(rows, []any{symbol, ticker.Name, ticker.Exchange, ticker.IndexGroup})
+	}
+	if len(rows) == 0 {
+		return errors.New("postgres: replace universe constituents: empty constituent set")
+	}
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: replace universe constituents begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	for _, step := range replaceConstituentsPreparation {
+		if _, err := tx.Exec(ctx, step.query); err != nil {
+			return fmt.Errorf("postgres: replace universe constituents %s: %w", step.name, err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE refreshed_universe_constituents (
+		ticker text PRIMARY KEY, name text, exchange text, index_group text
+	) ON COMMIT DROP`); err != nil {
+		return fmt.Errorf("postgres: replace universe constituents staging table: %w", err)
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"refreshed_universe_constituents"},
+		[]string{"ticker", "name", "exchange", "index_group"}, pgx.CopyFromRows(rows)); err != nil {
+		return fmt.Errorf("postgres: replace universe constituents copy: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO universe_tickers
+		(ticker, name, exchange, index_group, watch_score, last_scanned, active)
+		SELECT refreshed.ticker, refreshed.name, refreshed.exchange, refreshed.index_group,
+		       COALESCE(prior.watch_score, 0), prior.last_scanned, true
+		FROM refreshed_universe_constituents refreshed
+		LEFT JOIN prior_universe_provenance prior USING (ticker)
+		ON CONFLICT (ticker) DO UPDATE SET
+			name = EXCLUDED.name,
+			exchange = EXCLUDED.exchange,
+			index_group = EXCLUDED.index_group,
+			watch_score = EXCLUDED.watch_score,
+			last_scanned = EXCLUDED.last_scanned,
+			active = true,
+			updated_at = NOW()`); err != nil {
+		return fmt.Errorf("postgres: replace universe constituents upsert: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: replace universe constituents commit: %w", err)
+	}
+	return nil
+}
+
+var replaceConstituentsPreparation = []struct {
+	name  string
+	query string
+}{
+	{
+		name: "lock",
+		// A transaction-scoped, namespaced lock serializes authoritative replacements
+		// without locking the table. PostgreSQL releases it on commit or rollback, and
+		// pgx's context-aware Exec interrupts the wait when ctx is canceled.
+		query: `SELECT pg_advisory_xact_lock(hashtextextended('augr:universe:replace-constituents', 0))`,
+	},
+	{
+		name: "snapshot provenance",
+		// Score and scan provenance are independent: preserve the highest historical
+		// score and latest historical scan across every canonical-symbol variant.
+		query: `CREATE TEMP TABLE prior_universe_provenance ON COMMIT DROP AS
+			SELECT upper(trim(ticker)) AS ticker,
+			       MAX(watch_score) AS watch_score,
+			       MAX(last_scanned) AS last_scanned
+			FROM universe_tickers
+			GROUP BY upper(trim(ticker))`,
+	},
+	{
+		name:  "deactivate",
+		query: `UPDATE universe_tickers SET active = false, updated_at = NOW() WHERE active = true`,
+	},
+}
+
 // List returns tracked tickers matching the provided filter with pagination.
 func (r *UniverseRepo) List(ctx context.Context, filter universe.ListFilter, limit, offset int) ([]universe.TrackedTicker, error) {
 	query, args := buildUniverseListQuery(filter, limit, offset)

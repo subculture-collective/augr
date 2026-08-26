@@ -17,7 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
 
-const currentDataWatchlistLimit = 50
+const currentDataWatchlistLimit = 0
 
 // Schedule specs for market-hours jobs.
 var (
@@ -43,12 +43,12 @@ var (
 )
 
 func (o *JobOrchestrator) registerMarketJobs() {
-	o.Register("current_data_refresh", "Refresh intraday OHLCV for holdings, active strategies, and top watchlist", currentDataRefreshSpec, o.currentDataRefresh)
+	o.Register("current_data_refresh", "Refresh intraday OHLCV for open stock positions and active stock strategies", currentDataRefreshSpec, o.currentDataRefresh)
 	o.Register("hot_scan", "Quick scan tickers refreshed by the current market-data run", hotScanSpec, o.hotScan, "current_data_refresh")
 	o.Register("deep_scan", "Operational holdings, strategies, and watchlist score update", deepScanSpec, o.deepScan, "hot_scan")
 }
 
-// currentDataRefresh refreshes recent intraday OHLCV for the most relevant stock tickers.
+// currentDataRefresh refreshes recent intraday OHLCV for open stock positions and active stock strategies.
 func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 	summary := map[string]int{
 		"tickers":                 0,
@@ -201,6 +201,8 @@ func (o *JobOrchestrator) completeCurrentDataRefresh(summary map[string]int, fre
 	err := currentDataRefreshCompletionError(summary)
 	if err == nil || IsDegraded(err) {
 		o.setRefreshedTickers(freshTickers)
+	} else {
+		o.setRefreshedTickers(nil)
 	}
 	return err
 }

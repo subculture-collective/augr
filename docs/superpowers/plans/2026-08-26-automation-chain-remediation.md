@@ -25,6 +25,7 @@
 - [ ] **Step 1:** Add a failing test proving the shared selector accepts a caller limit; current refresh selects open stock positions, active stock strategies, and at most 50 watchlist names while history/deep may pass 250.
 - [ ] **Step 2:** Run `go test ./internal/automation -run 'TestCurrentData|TestOperational'` and require the new test to fail.
 - [ ] **Step 3:** Add `const currentDataWatchlistLimit = 50` and pass it to operational selection only from `currentDataRefresh`; keep `HistoryRefreshWatchlistLimit` in history/deep.
+- [ ] **Step 3a:** Production canary override: while ticker scoring is unavailable, set current refresh watchlist limit to zero. Zero omits watchlist; negative remains invalid. History/deep retain 250.
 - [ ] **Step 4:** Update `historyRefresh` to pass `HistoryRefreshWatchlistLimit` explicitly and test a non-default configured limit.
 - [ ] **Step 5:** Add deterministic fake-provider timing proving the current scope's batch count completes before the next hot cadence and hot receives the exact persisted fresh selection.
 - [ ] **Step 6:** Run `go test -race ./internal/automation`.
@@ -116,3 +117,17 @@
 - [ ] **Step 3:** In a valid market window trigger current refresh, wait for its durable success/degraded row, then trigger hot and wait for same-cycle completion.
 - [ ] **Step 4:** Require same-day history refresh success/degraded before triggering overnight sweep; wait for the sweep terminal row.
 - [ ] **Step 5:** Compare postdeployment schema/count/fingerprint evidence to baseline; verify exact images/revisions, schema 107 clean, health, safety controls, temp keys zero, source clean, and retained backup.
+
+### Task 7: Repair constituent replacement semantics
+
+**Files:**
+- Modify: `internal/universe/repository.go`
+- Modify: `internal/universe/universe.go`
+- Modify: `internal/repository/postgres/universe.go`
+- Test: `internal/universe/universe_test.go`
+- Test: `internal/repository/postgres/universe_test.go`
+
+- [ ] **Step 1:** Add tests proving a refresh deactivates constituents absent from the authoritative Polygon result.
+- [ ] **Step 2:** Add tests proving retained constituents preserve `watch_score` and `last_scanned` while metadata/name/exchange and active state update.
+- [ ] **Step 3:** Replace batch upsert refresh with one transaction: mark current constituents inactive, upsert returned names active, preserve scoring fields on conflict, rollback atomically on failure.
+- [ ] **Step 4:** Run focused repository/universe tests against real PostgreSQL, full race, lint, and release gate.

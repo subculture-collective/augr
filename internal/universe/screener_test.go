@@ -69,6 +69,13 @@ func (m *mockUniverseRepo) UpsertBatch(_ context.Context, tickers []TrackedTicke
 	return nil
 }
 
+func (m *mockUniverseRepo) ReplaceConstituents(ctx context.Context, tickers []TrackedTicker) error {
+	for i := range m.tickers {
+		m.tickers[i].Active = false
+	}
+	return m.UpsertBatch(ctx, tickers)
+}
+
 func (m *mockUniverseRepo) List(_ context.Context, filter ListFilter, limit, offset int) ([]TrackedTicker, error) {
 	var result []TrackedTicker
 	for _, t := range m.tickers {

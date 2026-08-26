@@ -29,8 +29,8 @@ func NewUniverse(repo UniverseRepository, polygonClient *polygon.Client, logger 
 }
 
 // RefreshConstituents loads all active US common stocks from Polygon,
-// assigns index groups by exchange, and upserts into DB. Returns the count
-// of tickers upserted.
+// assigns index groups by exchange, and atomically replaces constituent
+// membership in the DB. Returns the authoritative constituent count.
 func (u *Universe) RefreshConstituents(ctx context.Context) (int, error) {
 	u.logger.Info("universe: refreshing constituents from Polygon")
 
@@ -49,8 +49,12 @@ func (u *Universe) RefreshConstituents(ctx context.Context) (int, error) {
 		)
 	}
 
-	if err := u.repo.UpsertBatch(ctx, tracked); err != nil {
-		return 0, fmt.Errorf("universe: upsert batch: %w", err)
+	if len(tracked) == 0 {
+		return 0, fmt.Errorf("universe: Polygon returned no active stock constituents")
+	}
+
+	if err := u.repo.ReplaceConstituents(ctx, tracked); err != nil {
+		return 0, fmt.Errorf("universe: replace constituents: %w", err)
 	}
 
 	u.logger.Info("universe: refresh complete", slog.Int("upserted", len(tracked)))
