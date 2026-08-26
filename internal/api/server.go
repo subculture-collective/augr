@@ -67,8 +67,10 @@ type Server struct {
 	dataService      *data.DataService
 
 	// Discovery
-	discoveryDeps    *discovery.DiscoveryDeps
-	discoveryRunRepo discovery.RunRepository
+	discoveryDeps      *discovery.DiscoveryDeps
+	discoveryRunRepo   discovery.RunRepository
+	discoveryReadiness *automation.DiscoveryReadiness
+	discoveryRunner    func(context.Context, discovery.DiscoveryConfig, discovery.DiscoveryDeps) (*discovery.DiscoveryResult, error)
 
 	// Universe
 	universe     *universe.Universe
@@ -261,6 +263,7 @@ type Deps struct {
 	EventsProvider         data.EventsProvider
 	DiscoveryDeps          *discovery.DiscoveryDeps
 	DiscoveryRunRepo       discovery.RunRepository
+	DiscoveryReadiness     *automation.DiscoveryReadiness
 	Universe               *universe.Universe
 	UniverseRepo           universe.UniverseRepository
 	Automation             *automation.JobOrchestrator
@@ -406,6 +409,8 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		eventsProvider:        deps.EventsProvider,
 		discoveryDeps:         deps.DiscoveryDeps,
 		discoveryRunRepo:      deps.DiscoveryRunRepo,
+		discoveryReadiness:    deps.DiscoveryReadiness,
+		discoveryRunner:       discovery.RunDiscovery,
 		universe:              deps.Universe,
 		universeRepo:          deps.UniverseRepo,
 		automation:            deps.Automation,

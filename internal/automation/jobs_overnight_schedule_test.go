@@ -1,9 +1,13 @@
 package automation
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
 func TestOvernightScheduleRefreshesHistoryBeforeConsumers(t *testing.T) {
@@ -32,17 +36,78 @@ func TestOvernightScheduleRefreshesHistoryBeforeConsumers(t *testing.T) {
 func TestOvernightCompletionErrorsExposePartialCoverage(t *testing.T) {
 	t.Parallel()
 
-	if err := overnightSweepCompletionError(2); err == nil || !strings.Contains(err.Error(), "2 strategies failed") {
-		t.Fatalf("overnightSweepCompletionError() = %v, want sweep coverage error", err)
+	err := overnightSweepCompletionError(map[string]int{"supported": 107, "swept": 105, "failed": 2, "stale": 2})
+	if err == nil || !IsDegraded(err) || !strings.Contains(err.Error(), "coverage_bps=9813") || !strings.Contains(err.Error(), "stale=2") {
+		t.Fatalf("overnightSweepCompletionError(live) = %v, want detailed degraded result", err)
+	}
+	if err := overnightSweepCompletionError(map[string]int{"supported": 100, "swept": 79}); err == nil || IsDegraded(err) {
+		t.Fatalf("overnightSweepCompletionError(79%%) = %v, want true error", err)
+	}
+	if err := overnightSweepCompletionError(map[string]int{"supported": 5, "swept": 0, "config_failed": 5}); err == nil || IsDegraded(err) || !strings.Contains(err.Error(), "zero supported strategies swept") {
+		t.Fatalf("overnightSweepCompletionError(zero output) = %v, want true error", err)
+	}
+	if err := overnightSweepCompletionError(map[string]int{"supported": 100, "swept": 80, "failed": 20, "fetch_failed": 20}); err == nil || !IsDegraded(err) {
+		t.Fatalf("overnightSweepCompletionError(80%%) = %v, want degraded", err)
+	}
+	if err := overnightSweepCompletionError(map[string]int{"supported": 100, "swept": 100, "invalid_scores": 1}); err == nil || !IsDegraded(err) {
+		t.Fatalf("overnightSweepCompletionError(finding) = %v, want degraded", err)
 	}
 	if err := overnightGenerateCompletionError(1); err == nil || !strings.Contains(err.Error(), "1 index groups failed") {
 		t.Fatalf("overnightGenerateCompletionError() = %v, want generation coverage error", err)
 	}
-	if err := overnightSweepCompletionError(0); err != nil {
-		t.Fatalf("overnightSweepCompletionError(0) = %v, want nil", err)
+	if err := overnightSweepCompletionError(map[string]int{}); err != nil {
+		t.Fatalf("overnightSweepCompletionError(unsupported) = %v, want nil", err)
+	}
+	if err := overnightSweepCompletionError(map[string]int{"supported": 100, "swept": 100}); err != nil {
+		t.Fatalf("overnightSweepCompletionError(complete) = %v, want nil", err)
 	}
 	if err := overnightGenerateCompletionError(0); err != nil {
 		t.Fatalf("overnightGenerateCompletionError(0) = %v, want nil", err)
+	}
+}
+
+func TestOvernightSweepSkipsUnsupportedStrategiesWithoutDataService(t *testing.T) {
+	orch := NewJobOrchestrator(OrchestratorDeps{StrategyRepo: &kalshiStrategyRepoStub{strategies: []domain.Strategy{
+		{Name: "event", Ticker: "KX:YES", Status: domain.StrategyStatusActive, MarketType: domain.MarketTypeKalshi},
+	}}})
+	orch.Register("overnight_sweep", "sweep", overnightSweepSpec, orch.overnightSweep)
+
+	if err := orch.overnightSweep(t.Context()); err != nil {
+		t.Fatalf("overnightSweep() error = %v", err)
+	}
+	summary := singleJobStatus(t, orch, "overnight_sweep").LastSummary
+	if summary["strategies"] != 1 || summary["supported"] != 0 || summary["skipped"] != 1 || summary["coverage_bps"] != 0 {
+		t.Fatalf("overnightSweep() summary = %#v, want explicit unsupported success", summary)
+	}
+}
+
+func TestOvernightDependenciesAcceptDegradedSweepAndResetFailureStreak(t *testing.T) {
+	now := time.Date(2026, time.August, 26, 2, 0, 0, 0, easternTime)
+	orch := NewJobOrchestrator(OrchestratorDeps{})
+	orch.now = func() time.Time { return now }
+	orch.Register("overnight_sweep", "sweep", overnightSweepSpec, func(context.Context) error {
+		summary := map[string]int{"supported": 107, "swept": 105, "failed": 2, "stale": 2}
+		orch.SetLastSummary("overnight_sweep", summary)
+		return overnightSweepCompletionError(summary)
+	})
+	orch.Register("overnight_backtest", "backtest", overnightBacktestSpec, func(context.Context) error { return nil }, "overnight_sweep")
+	orch.Register("overnight_generate", "generate", overnightGenerateSpec, func(context.Context) error { return nil }, "overnight_sweep", "overnight_backtest")
+	orch.SetConsecutiveFailures("overnight_sweep", 4)
+
+	orch.runDirect(orch.jobs["overnight_sweep"])
+	sweep := singleJobStatus(t, orch, "overnight_sweep")
+	if sweep.LastResult != "degraded" || sweep.ConsecutiveFailures != 0 || sweep.LastSummary["stale"] != 2 {
+		t.Fatalf("overnight sweep status = %+v, want degraded with reset streak", sweep)
+	}
+	if dep, reason := orch.dependencyBlocker(orch.jobs["overnight_backtest"], now); dep != "" || reason != "" {
+		t.Fatalf("overnight_backtest blocked by degraded sweep: dep=%q reason=%q", dep, reason)
+	}
+
+	backtest := orch.jobs["overnight_backtest"]
+	backtest.LastRun = &now
+	backtest.LastResult = "success"
+	if dep, reason := orch.dependencyBlocker(orch.jobs["overnight_generate"], now); dep != "" || reason != "" {
+		t.Fatalf("overnight_generate blocked by degraded sweep: dep=%q reason=%q", dep, reason)
 	}
 }
 

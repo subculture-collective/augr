@@ -2,15 +2,36 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/automation"
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+)
+
+const (
+	errCodeDiscoveryImmutableBindingLocked = "ERR_DISCOVERY_IMMUTABLE_BINDING_LOCKED"
+	errCodeDiscoveryReadinessUnavailable   = "ERR_DISCOVERY_READINESS_UNAVAILABLE"
 )
 
 // handleRunDiscovery triggers an on-demand strategy discovery run.
 func (s *Server) handleRunDiscovery(w http.ResponseWriter, r *http.Request) {
+	if s.discoveryReadiness == nil || s.discoveryReadiness.Err != nil {
+		var lock repository.ImmutableBindingLock
+		if s.discoveryReadiness != nil && !s.discoveryReadiness.Ready && errors.As(s.discoveryReadiness.Err, &lock) && lock.Reason() != "" {
+			respondError(w, http.StatusLocked, lock.Reason(), errCodeDiscoveryImmutableBindingLocked)
+			return
+		}
+		respondError(w, http.StatusServiceUnavailable, automation.DiscoveryReadinessEvaluationErrorReason, errCodeDiscoveryReadinessUnavailable)
+		return
+	}
+	if !s.discoveryReadiness.Ready {
+		respondError(w, http.StatusServiceUnavailable, automation.DiscoveryReadinessEvaluationErrorReason, errCodeDiscoveryReadinessUnavailable)
+		return
+	}
 	if s.discoveryDeps == nil {
 		respondError(w, http.StatusServiceUnavailable, "discovery not configured", ErrCodeInternal)
 		return
@@ -63,7 +84,12 @@ func (s *Server) handleRunDiscovery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startedAt := time.Now()
-	result, err := discovery.RunDiscovery(r.Context(), cfg, *s.discoveryDeps)
+	runner := s.discoveryRunner
+	if runner == nil {
+		respondError(w, http.StatusServiceUnavailable, automation.DiscoveryReadinessEvaluationErrorReason, errCodeDiscoveryReadinessUnavailable)
+		return
+	}
+	result, err := runner(r.Context(), cfg, *s.discoveryDeps)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "discovery failed: "+err.Error(), ErrCodeInternal)
 		return

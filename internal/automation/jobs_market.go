@@ -17,6 +17,8 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
 
+const currentDataWatchlistLimit = 50
+
 // Schedule specs for market-hours jobs.
 var (
 	currentDataRefreshSpec = scheduler.ScheduleSpec{
@@ -74,7 +76,7 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 	defer func() {
 		o.SetLastSummary("current_data_refresh", summary)
 	}()
-	selection, err := o.selectOperationalStockTickers(ctx)
+	selection, err := o.selectOperationalStockTickers(ctx, currentDataWatchlistLimit)
 	if err != nil {
 		summary["errors"]++
 		return fmt.Errorf("current_data_refresh: select operational tickers: %w", err)
@@ -93,7 +95,7 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 	}
 
 	const batchSize = 10
-	now := time.Now().UTC()
+	now := o.now().UTC()
 	intradayFrom := now.Add(-48 * time.Hour)
 	dailyFrom := now.AddDate(0, 0, -10)
 	freshTickers := make([]string, 0, len(tickers))
@@ -222,7 +224,7 @@ func (o *JobOrchestrator) hotScan(ctx context.Context) error {
 	}
 	var topMovers []mover
 
-	now := time.Now()
+	now := o.now()
 	from := now.Add(-2 * time.Hour)
 
 	for _, ticker := range tickers {
@@ -354,7 +356,7 @@ func (o *JobOrchestrator) deepScan(ctx context.Context) error {
 	if o.deps.Universe == nil || o.deps.DataService == nil {
 		return fmt.Errorf("deep_scan: universe and data service are required")
 	}
-	selection, err := o.selectOperationalStockTickers(ctx)
+	selection, err := o.selectOperationalStockTickers(ctx, o.deps.HistoryRefreshWatchlistLimit)
 	if err != nil {
 		return fmt.Errorf("deep_scan: select operational tickers: %w", err)
 	}
@@ -376,7 +378,7 @@ func (o *JobOrchestrator) deepScan(ctx context.Context) error {
 	}
 	var allScored []scored
 
-	now := time.Now()
+	now := o.now()
 	from := now.AddDate(0, -1, 0) // 1 month of recent bars for scoring
 
 	for i, ticker := range allSymbols {

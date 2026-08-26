@@ -19,7 +19,10 @@ type operationalTickerSelection struct {
 	Watchlist  int
 }
 
-func (o *JobOrchestrator) selectOperationalStockTickers(ctx context.Context) (operationalTickerSelection, error) {
+func (o *JobOrchestrator) selectOperationalStockTickers(ctx context.Context, watchlistLimit int) (operationalTickerSelection, error) {
+	if watchlistLimit <= 0 {
+		return operationalTickerSelection{}, fmt.Errorf("watchlist limit must be greater than 0")
+	}
 	if o.deps.PositionRepo == nil {
 		return operationalTickerSelection{}, fmt.Errorf("position repository unavailable")
 	}
@@ -40,7 +43,7 @@ func (o *JobOrchestrator) selectOperationalStockTickers(ctx context.Context) (op
 	if o.deps.Universe == nil {
 		return operationalTickerSelection{}, fmt.Errorf("universe unavailable")
 	}
-	watchlist, err := o.deps.Universe.GetWatchlist(ctx, o.deps.HistoryRefreshWatchlistLimit)
+	watchlist, err := o.deps.Universe.GetWatchlist(ctx, watchlistLimit)
 	if err != nil {
 		return operationalTickerSelection{}, fmt.Errorf("get watchlist: %w", err)
 	}

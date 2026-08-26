@@ -403,9 +403,12 @@ export function buildAutomationHealth(overrides: Partial<AutomationHealthRespons
         run_count: 3,
       },
     ],
+    unavailable_jobs: [],
+    unavailable_job_count: 0,
     healthy: true,
     total_jobs: 1,
     failing_jobs: 0,
+    blocked_jobs: 0,
     degraded_jobs: 0,
     ...overrides,
   }

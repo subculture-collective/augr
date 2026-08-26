@@ -562,11 +562,19 @@ export type AutomationJobHealth = {
   run_count: number
 }
 
+export type UnavailableAutomationJob = {
+  name: string
+  reason: string
+}
+
 export type AutomationHealthResponse = {
   jobs: AutomationJobHealth[]
+  unavailable_jobs: UnavailableAutomationJob[]
+  unavailable_job_count: number
   healthy: boolean
   total_jobs: number
   failing_jobs: number
+  blocked_jobs: number
   degraded_jobs: number
 }
 

@@ -28,6 +28,10 @@ var (
 	// entity does not exist. Callers should check with errors.Is.
 	ErrNotFound = errors.New("not found")
 
+	// ErrOvernightBacktestRunClosed is returned when a stale worker attempts
+	// to mutate an overnight run that is already terminal.
+	ErrOvernightBacktestRunClosed = errors.New("overnight backtest run closed")
+
 	// ErrIdempotencyConflict is returned when a previously accepted key is
 	// reused for a different payload.
 	ErrIdempotencyConflict = errors.New("idempotency conflict")
@@ -498,13 +502,25 @@ type BacktestRunRepository interface {
 	Count(ctx context.Context, filter BacktestRunFilter) (int, error)
 }
 
+// OvernightBacktestRunCommitter atomically deploys prepared strategies and
+// closes a running overnight backtest.
+type OvernightBacktestRunCommitter interface {
+	CommitIfRunning(ctx context.Context, runID uuid.UUID, completedAt time.Time, summary domain.OvernightBacktestSummary, prepared []domain.Strategy) (domain.OvernightBacktestSummary, time.Time, error)
+}
+
 // OvernightBacktestRunRepository persists resumable overnight backtest progress.
 type OvernightBacktestRunRepository interface {
+	OvernightBacktestRunCommitter
 	Create(ctx context.Context, run *domain.OvernightBacktestRun) error
 	Get(ctx context.Context, id uuid.UUID) (*domain.OvernightBacktestRun, error)
 	GetActive(ctx context.Context) (*domain.OvernightBacktestRun, error)
-	Update(ctx context.Context, run *domain.OvernightBacktestRun) error
+	SaveIfRunning(ctx context.Context, run *domain.OvernightBacktestRun) error
 	ListLatest(ctx context.Context, limit int) ([]domain.OvernightBacktestRun, error)
+}
+
+// OvernightBacktestRunReconciler terminally closes active resumable runs.
+type OvernightBacktestRunReconciler interface {
+	ReconcileActive(context.Context, time.Time, string) (int, error)
 }
 
 // PolymarketDiscoveryRunRepository persists resumable Polymarket discovery progress.

@@ -10,6 +10,10 @@ describe('normalizeStatus automation results', () => {
     ['error after 2h3m4.5s', 'danger'],
     ['degraded after 12.345ms', 'warning'],
     ['degraded after 2h3m4.5s', 'warning'],
+    ['skipped', 'warning'],
+    ['skipped after 12.345ms', 'warning'],
+    ['blocked', 'warning'],
+    ['blocked after 2h3m4.5s', 'warning'],
   ] as const)('normalizes %s as %s', (value, expected) => {
     expect(normalizeStatus(value)).toBe(expected)
   })
@@ -19,6 +23,9 @@ describe('normalizeStatus automation results', () => {
     'ok in 12 seconds',
     'error after retry',
     'degraded after partial response',
+    'skipped: market closed',
+    'skipped because a dependency failed',
+    'blocked by arbitrary text',
     'not ok in 2s',
   ])('leaves arbitrary text unknown: %s', (value) => {
     expect(normalizeStatus(value)).toBe('unknown')

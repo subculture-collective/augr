@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,67 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestMain(m *testing.M) {
+	original := runtimeDiscoveryDeploymentReadiness
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
+		return true, "", nil
+	}
+	code := m.Run()
+	runtimeDiscoveryDeploymentReadiness = original
+	os.Exit(code)
+}
+
+func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *testing.T) {
+	originalReadiness := runtimeDiscoveryDeploymentReadiness
+	originalReconcile := runtimeReconcileOvernightBacktests
+	t.Cleanup(func() {
+		runtimeDiscoveryDeploymentReadiness = originalReadiness
+		runtimeReconcileOvernightBacktests = originalReconcile
+	})
+	readinessCalls := 0
+	reconcileCalls := 0
+	completedAt := time.Date(2026, 8, 26, 4, 5, 6, 0, time.FixedZone("offset", 3600))
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
+		readinessCalls++
+		return false, pgrepo.DiscoveryDeploymentUnavailableReason, pgrepo.ErrDiscoveryDeploymentImmutableBinding
+	}
+	runtimeReconcileOvernightBacktests = func(_ context.Context, _ *pgrepo.OvernightBacktestRunRepo, at time.Time, reason string) (int, error) {
+		reconcileCalls++
+		if !at.Equal(completedAt.UTC()) || reason != pgrepo.DiscoveryDeploymentUnavailableReason {
+			t.Fatalf("reconciliation = %v, %q", at, reason)
+		}
+		return 1, nil
+	}
+
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, completedAt, slogDiscardLogger())
+	if err != nil || readiness.Ready || !errors.Is(readiness.Err, pgrepo.ErrDiscoveryDeploymentImmutableBinding) || readinessCalls != 1 || reconcileCalls != 1 {
+		t.Fatalf("evaluation = %+v, %v; calls readiness=%d reconcile=%d", readiness, err, readinessCalls, reconcileCalls)
+	}
+}
+
+func TestEvaluateRuntimeDiscoveryReadinessErrorRemainsDistinct(t *testing.T) {
+	originalReadiness := runtimeDiscoveryDeploymentReadiness
+	originalReconcile := runtimeReconcileOvernightBacktests
+	t.Cleanup(func() {
+		runtimeDiscoveryDeploymentReadiness = originalReadiness
+		runtimeReconcileOvernightBacktests = originalReconcile
+	})
+	wantErr := errors.New("readiness store unavailable")
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
+		return false, "", wantErr
+	}
+	runtimeReconcileOvernightBacktests = func(_ context.Context, _ *pgrepo.OvernightBacktestRunRepo, _ time.Time, reason string) (int, error) {
+		if reason != automation.DiscoveryReadinessEvaluationErrorReason {
+			t.Fatalf("reconciliation reason = %q", reason)
+		}
+		return 0, nil
+	}
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, time.Now(), slogDiscardLogger())
+	if err != nil || !errors.Is(readiness.Err, wantErr) || readiness.Ready {
+		t.Fatalf("evaluation = %+v, %v", readiness, err)
+	}
+}
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 

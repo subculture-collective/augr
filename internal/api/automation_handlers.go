@@ -27,11 +27,14 @@ type AutomationJobHealth struct {
 
 // AutomationHealthResponse is the response body for GET /api/v1/automation/health.
 type AutomationHealthResponse struct {
-	Jobs         []AutomationJobHealth `json:"jobs"`
-	Healthy      bool                  `json:"healthy"`
-	TotalJobs    int                   `json:"total_jobs"`
-	FailingJobs  int                   `json:"failing_jobs"`
-	DegradedJobs int                   `json:"degraded_jobs"`
+	Jobs                []AutomationJobHealth       `json:"jobs"`
+	Healthy             bool                        `json:"healthy"`
+	TotalJobs           int                         `json:"total_jobs"`
+	FailingJobs         int                         `json:"failing_jobs"`
+	DegradedJobs        int                         `json:"degraded_jobs"`
+	BlockedJobs         int                         `json:"blocked_jobs"`
+	UnavailableJobs     []automation.UnavailableJob `json:"unavailable_jobs"`
+	UnavailableJobCount int                         `json:"unavailable_job_count"`
 }
 
 // handleGetAutomationStatus returns status for all registered jobs.
@@ -53,23 +56,24 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, _ *http.Reques
 	}
 
 	statuses := s.automation.Status()
+	unavailableJobs := s.automation.UnavailableJobs()
 	jobs := make([]AutomationJobHealth, 0, len(statuses))
-	healthy := true
+	healthy := len(unavailableJobs) == 0
 	failingJobs := 0
 	degradedJobs := 0
+	blockedJobs := 0
 
 	for _, st := range statuses {
-		lastResult := strings.ToLower(strings.TrimSpace(st.LastResult))
-		degraded := lastResult == "degraded" || strings.HasPrefix(lastResult, "degraded after ")
+		jobHealthy, failing, degraded, blocked := classifyAutomationHealth(st)
+		if !jobHealthy {
+			healthy = false
+		}
 		switch {
-		case degraded:
-			healthy = false
-			degradedJobs++
-		case st.ConsecutiveFailures >= 3:
-			healthy = false
+		case blocked:
+			blockedJobs++
+		case failing:
 			failingJobs++
-		case st.ConsecutiveFailures >= 1:
-			healthy = false
+		case degraded:
 			degradedJobs++
 		}
 		jobs = append(jobs, AutomationJobHealth{
@@ -87,12 +91,38 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, _ *http.Reques
 	}
 
 	respondJSON(w, http.StatusOK, AutomationHealthResponse{
-		Jobs:         jobs,
-		Healthy:      healthy,
-		TotalJobs:    len(jobs),
-		FailingJobs:  failingJobs,
-		DegradedJobs: degradedJobs,
+		Jobs:                jobs,
+		Healthy:             healthy,
+		TotalJobs:           len(jobs),
+		FailingJobs:         failingJobs,
+		DegradedJobs:        degradedJobs,
+		BlockedJobs:         blockedJobs,
+		UnavailableJobs:     unavailableJobs,
+		UnavailableJobCount: len(unavailableJobs),
 	})
+}
+
+func classifyAutomationHealth(st automation.JobStatus) (healthy, failing, degraded, blocked bool) {
+	lastResult := strings.ToLower(strings.TrimSpace(st.LastResult))
+	skipped := lastResult == "skipped" || strings.HasPrefix(lastResult, "skipped:")
+	if skipped && strings.HasPrefix(strings.ToLower(strings.TrimSpace(st.LastDetail)), "dependency ") {
+		return false, false, false, true
+	}
+	if skipped {
+		// Skips without a persisted dependency reason are unverified. They are
+		// unhealthy, but are not reported as blocked, degraded, or failing.
+		return false, false, false, false
+	}
+	if lastResult == "degraded" || strings.HasPrefix(lastResult, "degraded after ") {
+		return false, false, true, false
+	}
+	if st.ConsecutiveFailures >= 3 {
+		return false, true, false, false
+	}
+	if st.ConsecutiveFailures >= 1 {
+		return false, false, true, false
+	}
+	return true, false, false, false
 }
 
 // handleListAutomationRuns returns persisted automation job execution history.

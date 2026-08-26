@@ -8,12 +8,36 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
+	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/google/uuid"
 )
+
+type overnightReconcilerStub struct {
+	at     time.Time
+	reason string
+	count  int
+	err    error
+}
+
+func (s *overnightReconcilerStub) ReconcileActive(_ context.Context, at time.Time, reason string) (int, error) {
+	s.at = at
+	s.reason = reason
+	return s.count, s.err
+}
+
+func TestReconcileUnavailableOvernightBacktestsDelegatesStableReason(t *testing.T) {
+	now := time.Now().UTC()
+	repo := &overnightReconcilerStub{count: 2}
+	count, err := ReconcileUnavailableOvernightBacktests(context.Background(), repo, now, pgrepo.DiscoveryDeploymentUnavailableReason)
+	if err != nil || count != 2 || !repo.at.Equal(now) || repo.reason != pgrepo.DiscoveryDeploymentUnavailableReason {
+		t.Fatalf("reconciliation = %d, %v; repo = %+v", count, err, repo)
+	}
+}
 
 type fakeOvernightBacktestRunRepo struct {
 	run                      *domain.OvernightBacktestRun
@@ -21,6 +45,10 @@ type fakeOvernightBacktestRunRepo struct {
 	created                  bool
 	updated                  bool
 	updateSeen               *domain.OvernightBacktestRun
+	updateErr                error
+	commitErr                error
+	committed                bool
+	committedStrategies      []domain.Strategy
 	failOnCancelledUpdateCtx bool
 	latest                   []domain.OvernightBacktestRun
 }
@@ -42,7 +70,7 @@ func (f *fakeOvernightBacktestRunRepo) GetActive(_ context.Context) (*domain.Ove
 	return f.run, nil
 }
 
-func (f *fakeOvernightBacktestRunRepo) Update(ctx context.Context, run *domain.OvernightBacktestRun) error {
+func (f *fakeOvernightBacktestRunRepo) SaveIfRunning(ctx context.Context, run *domain.OvernightBacktestRun) error {
 	if f.failOnCancelledUpdateCtx {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -51,7 +79,18 @@ func (f *fakeOvernightBacktestRunRepo) Update(ctx context.Context, run *domain.O
 	f.run = run
 	f.updated = true
 	f.updateSeen = run
-	return nil
+	return f.updateErr
+}
+
+func (f *fakeOvernightBacktestRunRepo) CommitIfRunning(_ context.Context, _ uuid.UUID, completedAt time.Time, summary domain.OvernightBacktestSummary, prepared []domain.Strategy) (domain.OvernightBacktestSummary, time.Time, error) {
+	if f.commitErr != nil {
+		return summary, time.Time{}, f.commitErr
+	}
+	f.committed = true
+	f.committedStrategies = append([]domain.Strategy(nil), prepared...)
+	summary.Created = len(prepared)
+	summary.Deployed = len(prepared)
+	return summary, completedAt, nil
 }
 
 type blockingOvernightBacktestLLMProvider struct{}
@@ -350,6 +389,27 @@ func TestOvernightBacktestChunkerMissingUniverseFailsRun(t *testing.T) {
 	}
 	if repo.run.Status != domain.OvernightBacktestStatusFailed || repo.run.Phase != domain.OvernightBacktestPhaseDone || repo.run.CompletedAt == nil {
 		t.Fatalf("unexpected run state: %+v", repo.run)
+	}
+}
+
+func TestOvernightBacktestChunkerClosedRunStopsWithoutDirectEffect(t *testing.T) {
+	repo := &fakeOvernightBacktestRunRepo{commitErr: repository.ErrOvernightBacktestRunClosed}
+	run := &domain.OvernightBacktestRun{ID: uuid.New(), Status: domain.OvernightBacktestStatusRunning, Phase: domain.OvernightBacktestPhaseSweepValidateDeploy}
+	c := overnightBacktestChunker{progress: repo, deps: OrchestratorDeps{DataService: &data.DataService{}}}
+	if err := c.runSweepValidateDeploy(context.Background(), run); err != nil {
+		t.Fatalf("runSweepValidateDeploy() error = %v", err)
+	}
+	if repo.committed || len(repo.committedStrategies) != 0 || repo.updated {
+		t.Fatalf("closed run produced effects: %+v", repo)
+	}
+}
+
+func TestOvernightBacktestChunkerClosedProgressSaveReturnsImmediately(t *testing.T) {
+	repo := &fakeOvernightBacktestRunRepo{updateErr: repository.ErrOvernightBacktestRunClosed}
+	run := &domain.OvernightBacktestRun{ID: uuid.New(), Status: domain.OvernightBacktestStatusRunning}
+	c := overnightBacktestChunker{progress: repo}
+	if err := ignoreClosedOvernightRun(c.updateProgress(run)); err != nil {
+		t.Fatalf("closed progress error = %v", err)
 	}
 }
 

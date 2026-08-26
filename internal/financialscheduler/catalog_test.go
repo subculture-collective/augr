@@ -11,7 +11,10 @@ func TestCatalogCoversEveryRegisteredAutomationJob(t *testing.T) {
 	orchestrator := automation.NewJobOrchestrator(automation.OrchestratorDeps{})
 	orchestrator.RegisterAll()
 	keys := orchestrator.RegisteredJobKeys()
-	if len(keys) < 20 {
+	// Discovery deployment jobs require an affirmative immutable-data readiness
+	// result and their execution dependencies. This fixture intentionally has
+	// neither; those conditional registrations are covered in automation tests.
+	if len(keys) < 15 {
 		t.Fatalf("registered only %d jobs; coverage fixture is incomplete", len(keys))
 	}
 	if err := financialscheduler.ValidateCatalogCoverage(keys); err != nil {

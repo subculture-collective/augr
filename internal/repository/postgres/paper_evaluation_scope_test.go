@@ -2,14 +2,33 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/google/uuid"
 )
+
+func TestDiscoveryDeploymentReadinessRejectsValidScopeWithoutLoaderBinding(t *testing.T) {
+	scope, err := NewPaperEvaluationScope(PaperEvaluationScope{
+		AccountID: uuid.New(), CapitalBindingID: uuid.New(), ManifestSHA256: strings.Repeat("1", 64),
+		QualitySHA256: strings.Repeat("2", 64), SimulationPolicySHA256: strings.Repeat("3", 64), CapitalPolicySHA256: strings.Repeat("4", 64),
+		EvaluationStart: time.Now().Add(-time.Hour), EvaluationEnd: time.Now(),
+	})
+	if err != nil || scope.CanonicalSHA256 == "" {
+		t.Fatalf("valid scope = %+v, err = %v", scope, err)
+	}
+	ready, reason, err := (&ReportArtifactRepo{}).DiscoveryDeploymentReadiness(context.Background())
+	var lock repository.ImmutableBindingLock
+	if !errors.Is(err, ErrDiscoveryDeploymentImmutableBinding) || !errors.As(err, &lock) || ready || reason != DiscoveryDeploymentUnavailableReason || lock.Reason() != reason {
+		t.Fatalf("readiness = %t, %q, %v", ready, reason, err)
+	}
+}
 
 func TestNewPaperEvaluationScopeCanonicalIdentityCoversEveryField(t *testing.T) {
 	input := PaperEvaluationScope{

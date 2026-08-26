@@ -3,13 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { ApiContractError, parseContract } from '@/shared/api/contract'
 import {
   apiErrorSchema,
+  automationHealthResponseSchema,
   authResponseSchema,
   listResponseSchema,
   riskEngineStatusSchema,
   settingsResponseSchema,
   websocketEventEnvelopeSchema,
 } from '@/shared/api/schemas'
-import { buildAuthResponse, buildRiskStatus, buildRun, buildSettings, buildWebSocketEvent } from '@/test/fixtures'
+import { buildAuthResponse, buildAutomationHealth, buildRiskStatus, buildRun, buildSettings, buildWebSocketEvent } from '@/test/fixtures'
 
 describe('runtime schemas', () => {
   it('validates auth responses and preserves unknown fields', () => {
@@ -58,5 +59,36 @@ describe('runtime schemas', () => {
   it('keeps raw payloads explicit for undocumented fields', () => {
     const run = buildRun({ config_snapshot: { nested: { raw: true } } })
     expect(run.config_snapshot).toEqual({ nested: { raw: true } })
+  })
+
+  it('defaults fields absent from older automation health responses', () => {
+    const legacyHealth = buildAutomationHealth()
+    Reflect.deleteProperty(legacyHealth, 'blocked_jobs')
+    Reflect.deleteProperty(legacyHealth, 'unavailable_jobs')
+    Reflect.deleteProperty(legacyHealth, 'unavailable_job_count')
+
+    expect(parseContract('automation health', automationHealthResponseSchema, legacyHealth)).toMatchObject({
+      blocked_jobs: 0,
+      unavailable_jobs: [],
+      unavailable_job_count: 0,
+    })
+  })
+
+  it.each([
+    { unavailable_jobs: null },
+    { unavailable_jobs: [{ name: 'stock_discovery' }] },
+    { unavailable_jobs: [{ name: '', reason: 'dataset binding inactive' }] },
+    { unavailable_jobs: [{ name: 'stock_discovery', reason: 7 }] },
+    { unavailable_job_count: '0' },
+    { unavailable_job_count: -1 },
+    { unavailable_job_count: 1.5 },
+  ])('rejects malformed unavailable automation diagnostics: $unavailable_jobs', (malformed) => {
+    expect(() => parseContract('automation health', automationHealthResponseSchema, { ...buildAutomationHealth(), ...malformed })).toThrow(ApiContractError)
+  })
+
+  it('rejects a malformed blocked job count', () => {
+    const legacyHealth = buildAutomationHealth()
+    Reflect.deleteProperty(legacyHealth, 'blocked_jobs')
+    expect(() => parseContract('automation health', automationHealthResponseSchema, { ...legacyHealth, blocked_jobs: '0' })).toThrow(ApiContractError)
   })
 })

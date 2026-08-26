@@ -12,9 +12,35 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/automation"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/go-chi/chi/v5"
 )
+
+func TestAutomationHealthExposesUnavailableJobsOutsideRunnableStatus(t *testing.T) {
+	o := automation.NewJobOrchestrator(automation.OrchestratorDeps{DiscoveryReadiness: &automation.DiscoveryReadiness{Reason: pgrepo.DiscoveryDeploymentUnavailableReason, Err: pgrepo.ErrDiscoveryDeploymentImmutableBinding}})
+	o.RegisterAll()
+	s := &Server{automation: o}
+	rr := httptest.NewRecorder()
+	s.handleGetAutomationHealth(rr, httptest.NewRequest(http.MethodGet, "/api/v1/automation/health", nil))
+	var resp AutomationHealthResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Healthy || resp.UnavailableJobCount != 5 || len(resp.UnavailableJobs) != 5 {
+		t.Fatalf("unavailable health = %+v", resp)
+	}
+	for _, unavailable := range resp.UnavailableJobs {
+		if unavailable.Reason != pgrepo.DiscoveryDeploymentUnavailableReason {
+			t.Fatalf("unavailable diagnostic = %+v", unavailable)
+		}
+		for _, job := range resp.Jobs {
+			if job.Name == unavailable.Name {
+				t.Fatalf("unavailable job %q included in runnable jobs", unavailable.Name)
+			}
+		}
+	}
+}
 
 type failingAutomationJobControlRepo struct{}
 
@@ -196,6 +222,52 @@ func TestAutomationHealthClassifiesExplicitDegradedOutcome(t *testing.T) {
 	}
 	if len(resp.Jobs) != 1 || resp.Jobs[0].LastResult != "degraded" || resp.Jobs[0].LastDetail != "partial provider response" || resp.Jobs[0].LastError != "" || resp.Jobs[0].ErrorCount != 0 || resp.Jobs[0].ConsecutiveFailures != 0 {
 		t.Fatalf("degraded job health = %+v", resp.Jobs)
+	}
+}
+
+func TestAutomationHealthClassifiesDependencySkipBeforeRetainedFailures(t *testing.T) {
+	o := newTestOrchestrator()
+	registerJob(o, "upstream")
+	o.Register("consumer", "test job", scheduler.ScheduleSpec{Cron: "0 * * * *"}, func(context.Context) error { return nil }, "upstream")
+	o.SetConsecutiveFailures("consumer", 5)
+	if err := o.RunJob(context.Background(), "consumer"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		for _, status := range o.Status() {
+			if status.Name == "consumer" && status.RunCount == 1 && !status.Running {
+				goto completed
+			}
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("consumer did not complete")
+
+completed:
+
+	s := &Server{automation: o}
+	rr := httptest.NewRecorder()
+	s.handleGetAutomationHealth(rr, httptest.NewRequest(http.MethodGet, "/api/v1/automation/health", nil))
+	var resp AutomationHealthResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Healthy || resp.BlockedJobs != 1 || resp.FailingJobs != 0 || resp.DegradedJobs != 0 {
+		t.Fatalf("blocked health = %+v", resp)
+	}
+	for _, job := range resp.Jobs {
+		if job.Name == "consumer" && (job.LastDetail != "dependency upstream has not completed" || job.LastError != "" || job.ConsecutiveFailures != 5) {
+			t.Fatalf("blocked job = %+v", job)
+		}
+	}
+}
+
+func TestAutomationHealthTreatsUnverifiedSkipAsUnclassifiedUnhealthy(t *testing.T) {
+	status := automation.JobStatus{Name: "legacy", LastResult: "skipped", ConsecutiveFailures: 5}
+	healthy, failing, degraded, blocked := classifyAutomationHealth(status)
+	if healthy || failing || degraded || blocked {
+		t.Fatalf("legacy skipped classification = healthy:%t failing:%t degraded:%t blocked:%t", healthy, failing, degraded, blocked)
 	}
 }
 

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import App from '@/App'
 import { setTokenSnapshot } from '@/shared/auth/tokenStore'
-import { buildAutomationJobRun, buildAutomationJobStatus, buildAuthResponse, buildOrder, buildPortfolioSummary, buildPosition, buildRiskStatus, buildRun, buildStrategy, fixtureDate } from '@/test/fixtures'
+import { buildAutomationHealth, buildAutomationJobRun, buildAutomationJobStatus, buildAuthResponse, buildOrder, buildPortfolioSummary, buildPosition, buildRiskStatus, buildRun, buildStrategy, fixtureDate } from '@/test/fixtures'
 import { apiBaseUrl, FakeWebSocket, installAppTestHarness, resetApp, server, state, strategyId } from '@/test/app-harness'
 
 describe('first vertical slice app', () => {
@@ -87,8 +87,214 @@ describe('first vertical slice app', () => {
     expect(within(state).getByText(/^degraded$/i)).toHaveClass('warning')
     expect(screen.getByText('degraded after 12ms')).toBeTruthy()
     expect(screen.getByText('partial provider response')).toBeTruthy()
-    expect(screen.getByText('Diagnostic: partial provider response')).toBeTruthy()
+    expect(await screen.findByText('Diagnostic: partial provider response')).toBeTruthy()
     expect(screen.getByText('Current errors').closest('.nested-panel')).toHaveTextContent('0')
+    expect(screen.queryByText(/^healthy$/i)).toBeNull()
+  })
+
+  it('shows a blocked dependency in the warning summary without counting an error', async () => {
+    resetApp('/automation')
+    setTokenSnapshot(buildAuthResponse())
+    const blockedJob = buildAutomationJobStatus({
+      name: 'hot_scan',
+      description: 'Hot strategy scan',
+      last_result: 'skipped',
+      last_detail: 'dependency current_data_refresh still running',
+      last_error: 'retained historical failure',
+      last_error_at: '2026-08-26T03:05:09Z',
+      error_count: 5,
+      consecutive_failures: 5,
+    })
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([blockedJob])),
+      http.get(`${apiBaseUrl}/automation/health`, () => HttpResponse.json(buildAutomationHealth({
+        jobs: [blockedJob],
+        healthy: false,
+        total_jobs: 1,
+        failing_jobs: 0,
+        blocked_jobs: 1,
+        degraded_jobs: 0,
+      }))),
+    )
+    render(<App />)
+
+    const row = (await screen.findByRole('link', { name: 'hot_scan' })).closest('tr') as HTMLElement
+    expect(within(row).getByText(/^blocked$/i)).toHaveClass('warning')
+    expect(within(row).getByText('dependency current_data_refresh still running')).toBeTruthy()
+    expect(within(row).getByText('0')).toBeTruthy()
+    expect(within(row).queryByText(/^failing$/i)).toBeNull()
+    expect(within(row).queryByText(/^healthy$/i)).toBeNull()
+
+    const summary = await screen.findByLabelText('Automation summary')
+    expect(summary.children).toHaveLength(6)
+    expect(within(screen.getByText('Blocked').closest('div') as HTMLElement).getByText('1')).toBeTruthy()
+    expect(within(screen.getByText('Overall').closest('div') as HTMLElement).getByText('Degraded')).toBeTruthy()
+  })
+
+  it('keeps five unavailable capabilities separate from runnable jobs', async () => {
+    resetApp('/automation')
+    setTokenSnapshot(buildAuthResponse())
+    const immutableReason = "historical data loader is not bound to the scope's immutable dataset manifest"
+    const evaluationReason = 'paper evaluation scope lookup failed: evaluation store unavailable'
+    const unavailableJobs = [
+      'discovery_run',
+      'ticker_discovery',
+      'overnight_backtest',
+      'overnight_generate',
+      'options_discovery',
+    ].map((name, index) => ({ name, reason: index === 0 ? evaluationReason : immutableReason }))
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([buildAutomationJobStatus()])),
+      http.get(`${apiBaseUrl}/automation/health`, () => HttpResponse.json(buildAutomationHealth({
+        unavailable_jobs: unavailableJobs,
+        unavailable_job_count: 5,
+      }))),
+    )
+    render(<App />)
+
+    const panel = (await screen.findByRole('heading', { name: 'Unavailable capabilities' })).closest('section') as HTMLElement
+    expect(panel).toHaveAccessibleName('Unavailable capabilities')
+    expect(within(panel).getByText(/these automation capabilities are unavailable/i)).toBeTruthy()
+    expect(within(panel).queryByText(/immutable dataset binding is not active/i)).toBeNull()
+    expect(within(panel).getByLabelText('5 unavailable capabilities')).toHaveTextContent('5 unavailable')
+
+    const unavailableList = within(panel).getByRole('list', { name: 'Unavailable automation capabilities' })
+    expect(within(unavailableList).getAllByRole('listitem')).toHaveLength(5)
+    expect(within(unavailableList).getByText(evaluationReason)).toBeTruthy()
+    expect(within(unavailableList).getAllByText(immutableReason)).toHaveLength(4)
+    for (const { name } of unavailableJobs) {
+      const item = within(unavailableList).getByRole('heading', { name }).closest('li') as HTMLElement
+      expect(within(item).queryByRole('button')).toBeNull()
+      expect(within(item).queryByRole('link')).toBeNull()
+      expect(screen.queryByRole('link', { name })).toBeNull()
+    }
+
+    expect(within(screen.getByRole('table', { name: 'Automation jobs' })).getAllByRole('row')).toHaveLength(2)
+    const summary = await screen.findByLabelText('Automation summary')
+    expect(summary.children).toHaveLength(6)
+    expect(within(screen.getByText('Overall').closest('div') as HTMLElement).getByText('Limited')).toBeTruthy()
+    expect(within(panel).queryByText(/^(?:disabled|failing|unverified|degraded)$/i)).toBeNull()
+  })
+
+  it('keeps overall automation health unknown while capability diagnostics load', async () => {
+    resetApp('/automation')
+    setTokenSnapshot(buildAuthResponse())
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([buildAutomationJobStatus()])),
+      http.get(`${apiBaseUrl}/automation/health`, async () => {
+        await delay(1_000)
+        return HttpResponse.json(buildAutomationHealth())
+      }),
+    )
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Automation health is unknown' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Checking capability availability' })).toBeTruthy()
+    expect(screen.getByText('Loading capability diagnostics…')).toBeTruthy()
+    const summary = screen.getByLabelText('Automation summary')
+    expect(within(screen.getByText('Overall').closest('div') as HTMLElement).getByText('Unknown')).toBeTruthy()
+    expect(within(summary).queryByText('Healthy')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Automation is operating normally' })).toBeNull()
+  })
+
+  it('marks overall automation health unavailable when capability diagnostics fail', async () => {
+    resetApp('/automation')
+    setTokenSnapshot(buildAuthResponse())
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([buildAutomationJobStatus()])),
+      http.get(`${apiBaseUrl}/automation/health`, () => HttpResponse.json({ error: 'automation health probe failed', code: 'ERR_NOT_IMPLEMENTED' }, { status: 501 })),
+    )
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Automation health is unavailable' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Capability diagnostics unavailable' })).toBeTruthy()
+    expect(screen.getByText('Feature unavailable on this server.')).toBeTruthy()
+    expect(within(screen.getByText('Overall').closest('div') as HTMLElement).getByText('Unavailable')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Automation is operating normally' })).toBeNull()
+  })
+
+  it('renders an omitted unavailable job as a capability boundary without stale history', async () => {
+    resetApp('/automation/discovery_run')
+    setTokenSnapshot(buildAuthResponse())
+    const reason = 'paper evaluation scope lookup failed: evaluation store unavailable'
+    let runHistoryRequests = 0
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([])),
+      http.get(`${apiBaseUrl}/automation/health`, () => HttpResponse.json(buildAutomationHealth({
+        jobs: [],
+        total_jobs: 0,
+        unavailable_jobs: [{ name: 'discovery_run', reason }],
+        unavailable_job_count: 1,
+      }))),
+      http.get(`${apiBaseUrl}/automation/runs`, () => {
+        runHistoryRequests += 1
+        return HttpResponse.json({ data: [buildAutomationJobRun({ job_name: 'discovery_run' })], total: 1, limit: 100, offset: 0 })
+      }),
+    )
+    render(<App />)
+
+    const panel = (await screen.findByRole('heading', { name: 'Unavailable capability' })).closest('section') as HTMLElement
+    expect(within(panel).getByRole('heading', { name: 'discovery_run' })).toBeTruthy()
+    expect(within(panel).getByText(reason)).toBeTruthy()
+    expect(screen.queryByText('Automation not found')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Recent runs' })).toBeNull()
+    expect(screen.queryByRole('table', { name: 'Automation run history' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Run now' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Enable' })).toBeNull()
+    expect(runHistoryRequests).toBe(0)
+  })
+
+  it('keeps a truly unknown automation route not found', async () => {
+    resetApp('/automation/unknown_job')
+    setTokenSnapshot(buildAuthResponse())
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([])),
+      http.get(`${apiBaseUrl}/automation/health`, () => HttpResponse.json(buildAutomationHealth({ jobs: [], total_jobs: 0 }))),
+    )
+    render(<App />)
+
+    expect(await screen.findByRole('heading', { name: 'Automation not found' })).toBeTruthy()
+    expect(screen.getByText('No registered or unavailable automation capability matches this name.')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Unavailable capability' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Recent runs' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Run now' })).toBeNull()
+  })
+
+  it('labels a blocked job dependency reason without presenting it as an error', async () => {
+    resetApp('/automation/hot_scan')
+    setTokenSnapshot(buildAuthResponse())
+    const dependencyReason = 'dependency current_data_refresh still running'
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([
+        buildAutomationJobStatus({
+          name: 'hot_scan',
+          last_result: 'skipped',
+          last_detail: dependencyReason,
+          last_error: dependencyReason,
+          last_error_at: '2026-08-26T03:05:09Z',
+          error_count: 5,
+          consecutive_failures: 5,
+        }),
+      ])),
+      http.get(`${apiBaseUrl}/automation/runs`, () => HttpResponse.json({
+        data: [buildAutomationJobRun({ job_name: 'hot_scan', status: 'skipped', detail: dependencyReason, consecutive_failures: 5 })],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      })),
+    )
+    render(<App />)
+
+    const state = (await screen.findByText('State')).closest('.nested-panel') as HTMLElement
+    expect(within(state).getByText(/^blocked$/i)).toHaveClass('warning')
+    expect(screen.getByText('Current errors').closest('.nested-panel')).toHaveTextContent('0')
+    const dependencyLabel = screen.getByText('Dependency reason').closest('div') as HTMLElement
+    expect(within(dependencyLabel).getByText(dependencyReason)).toBeTruthy()
+    expect(await screen.findByText(`Dependency: ${dependencyReason}`)).toBeTruthy()
+    const lastError = screen.getByText('Last error').closest('div') as HTMLElement
+    expect(lastError).toHaveTextContent('Last error--')
+    expect(lastError).not.toHaveTextContent(dependencyReason)
+    expect(screen.queryByText(/^failing$/i)).toBeNull()
     expect(screen.queryByText(/^healthy$/i)).toBeNull()
   })
 

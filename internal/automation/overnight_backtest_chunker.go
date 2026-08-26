@@ -43,6 +43,15 @@ type overnightBacktestChunker struct {
 	progressTimeout  time.Duration
 }
 
+// ReconcileUnavailableOvernightBacktests terminally closes resumable runs
+// before discovery-deployment jobs are omitted from the runtime.
+func ReconcileUnavailableOvernightBacktests(ctx context.Context, repo repository.OvernightBacktestRunReconciler, now time.Time, reason string) (int, error) {
+	if repo == nil {
+		return 0, fmt.Errorf("overnight_backtest: reconciliation repository not configured")
+	}
+	return repo.ReconcileActive(ctx, now, reason)
+}
+
 func newOvernightBacktestChunker(deps OrchestratorDeps, logger *slog.Logger) overnightBacktestChunker {
 	if logger == nil {
 		logger = slog.Default()
@@ -179,7 +188,7 @@ func (c overnightBacktestChunker) runScreen(ctx context.Context, run *domain.Ove
 	run.CandidateIndex = 0
 	run.Phase = domain.OvernightBacktestPhaseGenerate
 	run.UpdatedAt = time.Now()
-	return c.updateProgress(run)
+	return ignoreClosedOvernightRun(c.updateProgress(run))
 }
 
 func validateOvernightScreenResults(screened []discovery.ScreenResult, requested []string, now time.Time) error {
@@ -287,6 +296,9 @@ func (c overnightBacktestChunker) runGenerateChunk(ctx context.Context, run *dom
 		c.advanceAfterGenerate(run)
 		run.UpdatedAt = time.Now()
 		if updateErr := c.updateProgress(run); updateErr != nil {
+			if errors.Is(updateErr, repository.ErrOvernightBacktestRunClosed) {
+				return nil
+			}
 			return updateErr
 		}
 	}
@@ -299,9 +311,6 @@ func (c overnightBacktestChunker) runGenerateChunk(ctx context.Context, run *dom
 func (c overnightBacktestChunker) runSweepValidateDeploy(ctx context.Context, run *domain.OvernightBacktestRun) error {
 	if c.deps.DataService == nil {
 		return c.failRun(run, fmt.Errorf("overnight_backtest: data service not configured"))
-	}
-	if c.deps.StrategyRepo == nil {
-		return c.failRun(run, fmt.Errorf("overnight_backtest: strategy repository not configured"))
 	}
 	logger := c.logger
 	if logger == nil {
@@ -362,8 +371,6 @@ func (c overnightBacktestChunker) runSweepValidateDeploy(ctx context.Context, ru
 	maxWinners := 3
 	topScorers := discovery.FilterAndRank(allBests, discovery.DefaultScoringConfig(), maxWinners*2)
 	validated := 0
-	created := 0
-	reused := 0
 	passed := make([]discovery.SweepResult, 0, len(topScorers))
 	for _, scorer := range topScorers {
 		if err := ctx.Err(); err != nil {
@@ -391,38 +398,38 @@ func (c overnightBacktestChunker) runSweepValidateDeploy(ctx context.Context, ru
 	if failures := len(run.Errors) - initialErrors; failures > 0 {
 		return c.failRun(run, fmt.Errorf("overnight_backtest: %d sweep or validation inputs failed", failures))
 	}
+	prepared := make([]domain.Strategy, 0, len(passed))
 	for _, scorer := range passed {
 		ticker := configNameToTicker[scorer.Config.Name]
 		configJSON, err := json.Marshal(map[string]any{"rules_engine": scorer.Config})
 		if err != nil {
-			run.Errors = append(run.Errors, fmt.Sprintf("marshal config %s: %v", ticker, err))
-			continue
+			return c.failRun(run, fmt.Errorf("marshal config %s: %w", ticker, err))
 		}
 		strategy := domain.Strategy{ID: uuid.New(), Name: fmt.Sprintf("discovery: %s %s", ticker, scorer.Config.Name), Ticker: ticker, MarketType: domain.MarketTypeStock, IsPaper: true, Status: "active", ScheduleCron: "0 */2 * * *", Config: json.RawMessage(configJSON)}
-		_, wasCreated, err := discovery.CreateOrReusePaperStrategy(ctx, c.deps.StrategyRepo, strategy)
+		strategy, err = discovery.PrepareResearchIdea(strategy)
 		if err != nil {
-			run.Errors = append(run.Errors, fmt.Sprintf("deploy %s: %v", ticker, err))
-			continue
+			return c.failRun(run, fmt.Errorf("prepare strategy %s: %w", ticker, err))
 		}
-		if wasCreated {
-			created++
-		} else {
-			reused++
+		if err := strategy.Validate(); err != nil {
+			return c.failRun(run, fmt.Errorf("validate strategy %s: %w", ticker, err))
 		}
+		prepared = append(prepared, strategy)
 	}
 	run.Summary.Validated = validated
-	run.Summary.Deployed = created
-	run.Summary.Created = created
-	run.Summary.Reused = reused
-	if failures := len(run.Errors) - initialErrors; failures > 0 {
-		return c.failRun(run, fmt.Errorf("overnight_backtest: %d deployment steps failed", failures))
+	now := time.Now()
+	summary, persistedAt, err := c.progress.CommitIfRunning(ctx, run.ID, now, run.Summary, prepared)
+	if errors.Is(err, repository.ErrOvernightBacktestRunClosed) {
+		return nil
 	}
+	if err != nil {
+		return c.failRun(run, fmt.Errorf("overnight_backtest: commit deployment: %w", err))
+	}
+	run.Summary = summary
 	run.Phase = domain.OvernightBacktestPhaseDone
 	run.Status = domain.OvernightBacktestStatusCompleted
-	now := time.Now()
-	run.CompletedAt = &now
-	run.UpdatedAt = now
-	return c.updateProgress(run)
+	run.CompletedAt = &persistedAt
+	run.UpdatedAt = persistedAt
+	return nil
 }
 
 func (c overnightBacktestChunker) failRun(run *domain.OvernightBacktestRun, cause error) error {
@@ -436,6 +443,9 @@ func (c overnightBacktestChunker) failRun(run *domain.OvernightBacktestRun, caus
 	run.CompletedAt = &now
 	run.UpdatedAt = now
 	if err := c.updateProgress(run); err != nil {
+		if errors.Is(err, repository.ErrOvernightBacktestRunClosed) {
+			return nil
+		}
 		return fmt.Errorf("%v; persist failed run: %w", cause, err)
 	}
 	return cause
@@ -444,7 +454,14 @@ func (c overnightBacktestChunker) failRun(run *domain.OvernightBacktestRun, caus
 func (c overnightBacktestChunker) updateProgress(run *domain.OvernightBacktestRun) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.progressTimeoutOrDefault())
 	defer cancel()
-	return c.progress.Update(ctx, run)
+	return c.progress.SaveIfRunning(ctx, run)
+}
+
+func ignoreClosedOvernightRun(err error) error {
+	if errors.Is(err, repository.ErrOvernightBacktestRunClosed) {
+		return nil
+	}
+	return err
 }
 
 func (c overnightBacktestChunker) generationContext(parent context.Context) (context.Context, context.CancelFunc) {

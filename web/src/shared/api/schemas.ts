@@ -593,9 +593,15 @@ export const automationHealthResponseSchema = z
         })
         .passthrough(),
     ),
+    unavailable_jobs: z.array(z.object({
+      name: z.string().min(1),
+      reason: z.string().min(1),
+    }).passthrough()).default([]),
+    unavailable_job_count: z.number().int().nonnegative().default(0),
     healthy: z.boolean(),
     total_jobs: z.number().int(),
     failing_jobs: z.number().int(),
+    blocked_jobs: z.number().int().default(0),
     degraded_jobs: z.number().int(),
   })
   .passthrough()

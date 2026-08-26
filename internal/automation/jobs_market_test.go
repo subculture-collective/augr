@@ -2,7 +2,13 @@ package automation
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +20,104 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
+
+type timedCurrentScopeProvider struct {
+	mu          sync.Mutex
+	callTime    time.Duration
+	virtualTime time.Duration
+	calls       int
+}
+
+func (p *timedCurrentScopeProvider) GetOHLCV(_ context.Context, _ string, timeframe data.Timeframe, _, to time.Time) ([]domain.OHLCV, error) {
+	p.mu.Lock()
+	p.calls++
+	p.virtualTime += p.callTime
+	p.mu.Unlock()
+	latest := to
+	previous := to.Add(-5 * time.Minute)
+	if timeframe == data.Timeframe1d {
+		latest = expectedCompletedNYSESession(to)
+		previous = latest.AddDate(0, 0, -1)
+	}
+	return []domain.OHLCV{
+		{Timestamp: previous, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1},
+		{Timestamp: latest, Open: 1, High: 1, Low: 1, Close: 2, Volume: 2},
+	}, nil
+}
+
+func (*timedCurrentScopeProvider) GetFundamentals(context.Context, string) (data.Fundamentals, error) {
+	return data.Fundamentals{}, data.ErrNotImplemented
+}
+
+func (*timedCurrentScopeProvider) GetNews(context.Context, string, time.Time, time.Time) ([]data.NewsArticle, error) {
+	return nil, data.ErrNotImplemented
+}
+
+func (*timedCurrentScopeProvider) GetSocialSentiment(context.Context, string, time.Time, time.Time) ([]data.SocialSentiment, error) {
+	return nil, data.ErrNotImplemented
+}
+
+func TestCurrentDataRefreshUsesTop50AndHandsOffExactPayloadBeforeHotCadence(t *testing.T) {
+	watchlist := make([]universe.TrackedTicker, 55)
+	expected := []string{"POSITION", "SHARED", "STRATEGY"}
+	for i := range watchlist {
+		ticker := fmt.Sprintf("WATCH%02d", i)
+		watchlist[i] = universe.TrackedTicker{Ticker: ticker}
+		if i < currentDataWatchlistLimit {
+			expected = append(expected, ticker)
+		}
+	}
+	sort.Strings(expected)
+	universeRepo := &operationalUniverseRepo{watchlist: watchlist}
+	provider := &timedCurrentScopeProvider{callTime: 5 * time.Second}
+	registry := data.NewProviderRegistry()
+	registry.Yahoo = func(data.ProviderConfig) data.DataProvider { return provider }
+	service := data.NewDataService(
+		config.Config{},
+		registry,
+		&partialResultHistoryRepo{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+	)
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		PositionRepo: newRecordingPositionRepo(
+			&domain.Position{ID: uuid.New(), Ticker: "POSITION", MarketType: domain.MarketTypeStock},
+			&domain.Position{ID: uuid.New(), Ticker: "SHARED", MarketType: domain.MarketTypeStock},
+		),
+		StrategyRepo: &kalshiStrategyRepoStub{strategies: []domain.Strategy{
+			{ID: uuid.New(), Ticker: "STRATEGY", Status: domain.StrategyStatusActive, MarketType: domain.MarketTypeStock},
+			{ID: uuid.New(), Ticker: "SHARED", Status: domain.StrategyStatusActive, MarketType: domain.MarketTypeStock},
+		}},
+		Universe:    universe.NewUniverse(universeRepo, nil, nil),
+		DataService: service,
+	})
+	orch.now = func() time.Time { return time.Date(2026, time.August, 6, 10, 30, 0, 0, easternTime) }
+	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
+
+	if err := orch.currentDataRefresh(context.Background()); err != nil {
+		t.Fatalf("currentDataRefresh() error = %v", err)
+	}
+	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
+	if summary["positions"] != 2 || summary["strategies"] != 2 || summary["watchlist"] != 50 || summary["selected"] != 53 {
+		t.Fatalf("current scope summary = %#v", summary)
+	}
+	if universeRepo.limit != currentDataWatchlistLimit {
+		t.Fatalf("current refresh watchlist limit = %d, want %d", universeRepo.limit, currentDataWatchlistLimit)
+	}
+	if summary["batches"] != 6 {
+		t.Fatalf("current refresh batches = %d, want 6", summary["batches"])
+	}
+	provider.mu.Lock()
+	providerCalls, providerTime := provider.calls, provider.virtualTime
+	provider.mu.Unlock()
+	modeledDuration := providerTime + time.Duration(summary["batches"]-1)*150*time.Millisecond
+	if providerCalls != 2*len(expected) || modeledDuration >= 30*time.Minute {
+		t.Fatalf("current refresh provider calls = %d, modeled duration = %s; want %d calls before 30m hot cadence", providerCalls, modeledDuration, 2*len(expected))
+	}
+	if got := orch.getRefreshedTickers(); !reflect.DeepEqual(got, expected) {
+		t.Fatalf("hot payload = %v, want exact fresh selection %v", got, expected)
+	}
+}
 
 func TestCurrentDataRefreshSkipsPredictionMarketPositions(t *testing.T) {
 	universeRepo := &operationalUniverseRepo{}

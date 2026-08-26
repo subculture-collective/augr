@@ -21,6 +21,7 @@ type operationalUniverseRepo struct {
 	watchlist []universe.TrackedTicker
 	err       error
 	limit     int
+	limits    []int
 	listCalls int
 }
 
@@ -37,7 +38,12 @@ func (r *operationalUniverseRepo) List(context.Context, universe.ListFilter, int
 
 func (r *operationalUniverseRepo) Watchlist(_ context.Context, limit int) ([]universe.TrackedTicker, error) {
 	r.limit = limit
-	return append([]universe.TrackedTicker(nil), r.watchlist...), r.err
+	r.limits = append(r.limits, limit)
+	watchlist := r.watchlist
+	if len(watchlist) > limit {
+		watchlist = watchlist[:limit]
+	}
+	return append([]universe.TrackedTicker(nil), watchlist...), r.err
 }
 
 func (r *operationalUniverseRepo) UpdateScore(context.Context, string, float64) error { return nil }
@@ -82,7 +88,7 @@ func TestSelectOperationalStockTickersNormalizesDeduplicatesAndFiltersMarkets(t 
 		HistoryRefreshWatchlistLimit: 17,
 	})
 
-	got, err := orch.selectOperationalStockTickers(context.Background())
+	got, err := orch.selectOperationalStockTickers(context.Background(), 17)
 	if err != nil {
 		t.Fatalf("selectOperationalStockTickers() error = %v", err)
 	}
@@ -94,6 +100,15 @@ func TestSelectOperationalStockTickersNormalizesDeduplicatesAndFiltersMarkets(t 
 	}
 	if repo.limit != 17 {
 		t.Fatalf("watchlist limit = %d, want 17", repo.limit)
+	}
+}
+
+func TestSelectOperationalStockTickersRequiresPositiveWatchlistLimit(t *testing.T) {
+	orch := NewJobOrchestrator(OrchestratorDeps{})
+	for _, limit := range []int{0, -1} {
+		if _, err := orch.selectOperationalStockTickers(context.Background(), limit); err == nil || !strings.Contains(err.Error(), "must be greater than 0") {
+			t.Fatalf("selectOperationalStockTickers(limit=%d) error = %v", limit, err)
+		}
 	}
 }
 
@@ -127,7 +142,7 @@ func TestSelectOperationalStockTickersSourceFailureIsTerminal(t *testing.T) {
 				test.deps.Universe = universe.NewUniverse(&operationalUniverseRepo{}, nil, nil)
 			}
 			orch := NewJobOrchestrator(test.deps)
-			if _, err := orch.selectOperationalStockTickers(context.Background()); err == nil || !strings.Contains(err.Error(), test.want) {
+			if _, err := orch.selectOperationalStockTickers(context.Background(), 1); err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("selectOperationalStockTickers() error = %v, want %q", err, test.want)
 			}
 		})
@@ -157,7 +172,7 @@ func TestRefreshedTickerStateIsPerOrchestratorAndRaceSafe(t *testing.T) {
 	wg.Wait()
 }
 
-func TestHistoryAndDeepScansUseOperationalScope(t *testing.T) {
+func TestHistoryAndDeepScansUseConfiguredOperationalScope(t *testing.T) {
 	repo := &operationalUniverseRepo{watchlist: []universe.TrackedTicker{{Ticker: "MSFT"}}}
 	orch := NewJobOrchestrator(OrchestratorDeps{
 		PositionRepo:                 newRecordingPositionRepo(&domain.Position{ID: uuid.New(), Ticker: "AAPL", MarketType: domain.MarketTypeStock}),
@@ -184,7 +199,22 @@ func TestHistoryAndDeepScansUseOperationalScope(t *testing.T) {
 	if repo.listCalls != 0 {
 		t.Fatalf("history/deep scans queried full active universe %d times", repo.listCalls)
 	}
-	if repo.limit != 7 {
-		t.Fatalf("operational watchlist limit = %d, want 7", repo.limit)
+	if want := []int{7, 7}; !reflect.DeepEqual(repo.limits, want) {
+		t.Fatalf("operational watchlist limits = %v, want %v", repo.limits, want)
+	}
+}
+
+func TestDeepScanUsesDefault250WatchlistLimit(t *testing.T) {
+	repo := &operationalUniverseRepo{watchlist: []universe.TrackedTicker{{Ticker: "AAPL"}}}
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		PositionRepo: newRecordingPositionRepo(),
+		StrategyRepo: &kalshiStrategyRepoStub{},
+		Universe:     universe.NewUniverse(repo, nil, nil),
+		DataService:  data.NewDataService(config.Config{}, nil, nil, nil, nil),
+	})
+
+	_ = orch.deepScan(context.Background())
+	if repo.limit != defaultHistoryRefreshWatchlistLimit {
+		t.Fatalf("deep scan watchlist limit = %d, want %d", repo.limit, defaultHistoryRefreshWatchlistLimit)
 	}
 }

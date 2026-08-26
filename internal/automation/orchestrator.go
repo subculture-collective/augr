@@ -56,6 +56,21 @@ const (
 // ErrJobControlPersistence identifies a failed durable enable/disable write.
 var ErrJobControlPersistence = errors.New("automation: job control persistence failed")
 
+const DiscoveryReadinessEvaluationErrorReason = "discovery deployment readiness evaluation failed"
+
+// DiscoveryReadiness is the single startup evaluation shared by automation and API.
+type DiscoveryReadiness struct {
+	Ready  bool
+	Reason string
+	Err    error
+}
+
+// UnavailableJob describes an intentionally omitted job.
+type UnavailableJob struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
 // DegradedError reports a completed automation run that needs operator
 // attention but is not a failed execution.
 type DegradedError struct {
@@ -102,6 +117,7 @@ type TickerDiscoveryJobConfig struct {
 
 // OrchestratorDeps bundles external dependencies required by the orchestrator.
 type OrchestratorDeps struct {
+	DiscoveryReadiness           *DiscoveryReadiness
 	Universe                     *universe.Universe
 	Polygon                      *polygon.Client
 	PolygonBulkSnapshotsEnabled  bool
@@ -260,6 +276,7 @@ type JobOrchestrator struct {
 	runs                *runcontrol.Group
 	refreshedTickersMu  sync.RWMutex
 	refreshedTickers    []string
+	unavailableJobs     []UnavailableJob
 }
 
 // NewJobOrchestrator constructs a new orchestrator.
@@ -271,7 +288,7 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 	if deps.HistoryRefreshWatchlistLimit <= 0 {
 		deps.HistoryRefreshWatchlistLimit = defaultHistoryRefreshWatchlistLimit
 	}
-	return &JobOrchestrator{
+	o := &JobOrchestrator{
 		jobs:   make(map[string]*RegisteredJob),
 		cron:   cron.New(cron.WithLocation(easternTime)),
 		deps:   deps,
@@ -279,6 +296,40 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 		now:    time.Now,
 		runs:   runcontrol.NewGroup(),
 	}
+	if deps.DiscoveryReadiness != nil && (!deps.DiscoveryReadiness.Ready || deps.DiscoveryReadiness.Err != nil) {
+		reason := discoveryReadinessUnavailableReason(deps.DiscoveryReadiness)
+		for _, name := range discoveryDeploymentJobNames {
+			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: reason})
+		}
+	}
+	return o
+}
+
+func discoveryReadinessUnavailableReason(readiness *DiscoveryReadiness) string {
+	if readiness == nil || readiness.Ready || readiness.Err == nil {
+		return DiscoveryReadinessEvaluationErrorReason
+	}
+	var lock repository.ImmutableBindingLock
+	if errors.As(readiness.Err, &lock) && strings.TrimSpace(lock.Reason()) != "" {
+		return lock.Reason()
+	}
+	return DiscoveryReadinessEvaluationErrorReason
+}
+
+var discoveryDeploymentJobNames = [...]string{
+	"discovery_run", "options_discovery", "overnight_backtest", "overnight_generate", "ticker_discovery",
+}
+
+func (o *JobOrchestrator) discoveryDeploymentReady() bool {
+	return o.deps.DiscoveryReadiness != nil && o.deps.DiscoveryReadiness.Ready && o.deps.DiscoveryReadiness.Err == nil
+}
+
+// UnavailableJobs returns sorted diagnostics for jobs omitted at startup.
+func (o *JobOrchestrator) UnavailableJobs() []UnavailableJob {
+	jobs := make([]UnavailableJob, len(o.unavailableJobs))
+	copy(jobs, o.unavailableJobs)
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].Name < jobs[j].Name })
+	return jobs
 }
 
 func (o *JobOrchestrator) setRefreshedTickers(tickers []string) {
@@ -380,6 +431,11 @@ func (o *JobOrchestrator) RegisteredJobKeys() []string {
 
 // RegisterAll registers all automated jobs from every job group.
 func (o *JobOrchestrator) RegisterAll() {
+	if !o.discoveryDeploymentReady() && len(o.unavailableJobs) == 0 {
+		for _, name := range discoveryDeploymentJobNames {
+			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: DiscoveryReadinessEvaluationErrorReason})
+		}
+	}
 	o.registerBrokerReconciliationJobs()
 	o.registerMarketJobs()
 	o.registerPreMarketJobs()
@@ -887,7 +943,8 @@ func (o *JobOrchestrator) recordDependencySkip(job *RegisteredJob, at time.Time,
 	job.StartedAt = nil
 	job.LastRun = &at
 	job.LastResult = "skipped: " + message
-	job.LastDetail = ""
+	job.LastError = ""
+	job.LastDetail = message
 	job.RunCount++
 	lastErrorAt := job.LastErrorAt
 	consecutiveFailures := job.ConsecutiveFailures
@@ -903,6 +960,7 @@ func (o *JobOrchestrator) recordDependencySkip(job *RegisteredJob, at time.Time,
 		StartedAt:           at.UTC(),
 		CompletedAt:         &completed,
 		Result:              map[string]int{"dependency_blocked": 1},
+		Detail:              message,
 		LastErrorAt:         lastErrorAt,
 		ConsecutiveFailures: consecutiveFailures,
 	}
@@ -1062,11 +1120,16 @@ func (o *JobOrchestrator) hydrateFromDB() {
 			if !ok {
 				continue
 			}
+			dependencySkipped := isDependencySkippedOutcome(s.LastResult, s.LastDetail)
 			job.mu.Lock()
 			job.LastRun = s.LastRun
 			job.LastResult = s.LastResult
 			job.LastError = s.LastError
 			job.LastDetail = s.LastDetail
+			if dependencySkipped && strings.EqualFold(strings.TrimSpace(s.LastResult), "skipped") && s.LastDetail != "" {
+				job.LastResult = "skipped: " + s.LastDetail
+				job.LastError = ""
+			}
 			job.LastErrorAt = s.LastErrorAt
 			job.RunCount = s.RunCount
 			job.ErrorCount = s.ErrorCount
@@ -1076,7 +1139,7 @@ func (o *JobOrchestrator) hydrateFromDB() {
 				job.LastErrorAt = nil
 				job.ConsecutiveFailures = 0
 			}
-			if shouldDisableAfterHydration(job.ConsecutiveFailures) {
+			if shouldDisableAfterHydration(job.ConsecutiveFailures) && !dependencySkipped {
 				job.Enabled = false
 			}
 			job.mu.Unlock()
@@ -1127,6 +1190,14 @@ func (o *JobOrchestrator) disableAllJobs() {
 
 func shouldDisableAfterHydration(consecutiveFailures int) bool {
 	return consecutiveFailures >= autoDisableThreshold
+}
+
+func isDependencySkippedOutcome(result, detail string) bool {
+	normalizedResult := strings.ToLower(strings.TrimSpace(result))
+	if strings.HasPrefix(normalizedResult, "skipped: dependency ") {
+		return true
+	}
+	return normalizedResult == "skipped" && strings.HasPrefix(strings.ToLower(strings.TrimSpace(detail)), "dependency ")
 }
 
 func cloneSummary(summary map[string]int) map[string]int {

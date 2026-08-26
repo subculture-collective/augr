@@ -191,7 +191,13 @@ var (
 	runtimeNewPaperAccountRepo  func(*pgrepo.DB) repository.PaperAccountRepository = func(db *pgrepo.DB) repository.PaperAccountRepository {
 		return pgrepo.NewPaperAccountRepo(db)
 	}
-	runtimeNewServer       = api.NewServer
+	runtimeNewServer                    = api.NewServer
+	runtimeDiscoveryDeploymentReadiness = func(ctx context.Context, repo *pgrepo.ReportArtifactRepo) (bool, string, error) {
+		return repo.DiscoveryDeploymentReadiness(ctx)
+	}
+	runtimeReconcileOvernightBacktests = func(ctx context.Context, repo *pgrepo.OvernightBacktestRunRepo, at time.Time, reason string) (int, error) {
+		return automation.ReconcileUnavailableOvernightBacktests(ctx, repo, at, reason)
+	}
 	runtimeAfterSchemaGate = func() {}
 	runtimeCloseDB         = func(db *pgrepo.DB) {
 		if db != nil {
@@ -397,6 +403,31 @@ func ensureRuntimeSchemaCompatible(ctx context.Context, db *pgrepo.DB) (int, int
 	}
 }
 
+func evaluateRuntimeDiscoveryReadiness(ctx context.Context, reportRepo *pgrepo.ReportArtifactRepo, runRepo *pgrepo.OvernightBacktestRunRepo, now time.Time, logger *slog.Logger) (*automation.DiscoveryReadiness, error) {
+	ready, reason, readinessErr := runtimeDiscoveryDeploymentReadiness(ctx, reportRepo)
+	readiness := &automation.DiscoveryReadiness{Ready: ready, Reason: reason, Err: readinessErr}
+	if ready && readinessErr == nil {
+		return readiness, nil
+	}
+	reconciliationReason := reason
+	var bindingLock repository.ImmutableBindingLock
+	knownLock := !ready && errors.As(readinessErr, &bindingLock) && strings.TrimSpace(bindingLock.Reason()) != ""
+	if !knownLock {
+		reconciliationReason = automation.DiscoveryReadinessEvaluationErrorReason
+	}
+	if readinessErr != nil && !knownLock {
+		logger.Error("discovery deployment readiness evaluation failed", slog.Any("error", readinessErr))
+	}
+	reconciled, err := runtimeReconcileOvernightBacktests(ctx, runRepo, now.UTC(), reconciliationReason)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile unavailable overnight backtests: %w", err)
+	}
+	if reconciled > 0 {
+		logger.Warn("reconciled active overnight backtest runs", slog.Int("runs", reconciled), slog.String("reason", reconciliationReason))
+	}
+	return readiness, nil
+}
+
 func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*api.Server, cli.SchedulerLifecycle, func(), error) {
 	if cfg.Server.ProjectionAccountID != "" {
 		accountID, err := uuid.Parse(cfg.Server.ProjectionAccountID)
@@ -472,6 +503,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	riskBreakerRepo := pgrepo.NewRiskBreakerRepo(db.Pool)
 	riskBreaker := risk.NewDrawdownBreaker(risk.DrawdownBreakerConfig{}, riskBreakerRepo)
 	reportArtifactRepo := pgrepo.NewReportArtifactRepo(db.Pool)
+	discoveryReadiness, err := evaluateRuntimeDiscoveryReadiness(ctx, reportArtifactRepo, pgrepo.NewOvernightBacktestRunRepo(db.Pool), time.Now(), logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	milestoneEvidenceRepo := pgrepo.NewMilestoneEvidenceRepo(db.Pool)
 	runRegistry := agent.NewRunContextRegistry()
 
@@ -541,6 +576,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		NewsFeedRepo:           newsFeedRepo,
 		MarketDataHistory:      marketDataCacheRepo,
 		DiscoveryRunRepo:       discoveryRunRepo,
+		DiscoveryReadiness:     discoveryReadiness,
 		JobRunRepo:             jobRunRepo,
 		ReportArtifacts:        reportArtifactRepo,
 		PaperEvaluationScopes:  reportArtifactRepo,
@@ -928,6 +964,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					PaperBroker:            strategyRunner.localPaperBroker,
 				})
 				orch := automation.NewJobOrchestrator(automation.OrchestratorDeps{
+					DiscoveryReadiness:          discoveryReadiness,
 					Universe:                    deps.Universe,
 					Polygon:                     polygonClientForAuto,
 					PolygonBulkSnapshotsEnabled: cfg.DataProviders.PolygonBulkSnapshotsEnabled,

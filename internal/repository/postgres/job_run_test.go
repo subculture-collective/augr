@@ -189,6 +189,28 @@ func TestJobRunJSONExposesDegradedDetailNotError(t *testing.T) {
 	}
 }
 
+func TestJobRunJSONExposesDependencySkipDetailNotError(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(JobRun{
+		Status: "skipped",
+		Result: map[string]int{"dependency_blocked": 1},
+		Detail: "dependency current_data_refresh still running",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["detail"] != "dependency current_data_refresh still running" {
+		t.Fatalf("detail = %#v", decoded["detail"])
+	}
+	if _, exists := decoded["error"]; exists {
+		t.Fatalf("dependency skip API payload exposes error: %s", payload)
+	}
+}
+
 func TestJobRunLifecycleIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newJobRunIntegrationPool(t, ctx)
@@ -274,8 +296,43 @@ func TestJobRunLifecycleIntegration(t *testing.T) {
 		t.Fatalf("degraded summary = %+v", summaries)
 	}
 
+	skippedAt := degradedAt.Add(time.Second)
+	skipped := &JobRun{
+		JobName:             run.JobName,
+		Status:              "skipped",
+		StartedAt:           skippedAt,
+		CompletedAt:         &skippedAt,
+		Result:              map[string]int{"dependency_blocked": 1},
+		Detail:              "dependency current_data_refresh still running",
+		ConsecutiveFailures: 5,
+	}
+	if err := repo.Create(ctx, skipped); err != nil {
+		t.Fatal(err)
+	}
+	var skippedStatus string
+	if err := pool.QueryRow(ctx, `SELECT status, result, error, consecutive_failures FROM automation_job_runs WHERE id=$1`, skipped.ID).Scan(&skippedStatus, &rawResult, &rawError, &rawStreak); err != nil {
+		t.Fatal(err)
+	}
+	if skippedStatus != "skipped" || !strings.Contains(string(rawResult), `"dependency_blocked": 1`) || !strings.Contains(string(rawResult), `"_detail": "dependency current_data_refresh still running"`) || rawError != nil || rawStreak != 5 {
+		t.Fatalf("raw dependency skip status=%q result=%s error=%v streak=%d", skippedStatus, rawResult, rawError, rawStreak)
+	}
+	skippedRuns, err := repo.ListByJob(ctx, run.JobName, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skippedRuns) != 1 || skippedRuns[0].Status != "skipped" || skippedRuns[0].Error != "" || skippedRuns[0].Detail != skipped.Detail || skippedRuns[0].Result["dependency_blocked"] != 1 {
+		t.Fatalf("dependency skip API model = %+v", skippedRuns)
+	}
+	summaries, err = repo.Summaries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].LastResult != "skipped" || summaries[0].LastError != "" || summaries[0].LastDetail != skipped.Detail || summaries[0].ConsecutiveFailures != 5 {
+		t.Fatalf("dependency skip summary = %+v", summaries)
+	}
+
 	legacyID := uuid.New()
-	legacyAt := degradedAt.Add(time.Second)
+	legacyAt := skippedAt.Add(time.Second)
 	if _, err := pool.Exec(ctx, `INSERT INTO automation_job_runs (id, job_name, status, started_at, completed_at, result, error, consecutive_failures) VALUES ($1, $2, 'degraded', $3, $3, '{"items":1}', $4, 0)`, legacyID, "legacy_degraded_job", legacyAt, "legacy partial result"); err != nil {
 		t.Fatal(err)
 	}

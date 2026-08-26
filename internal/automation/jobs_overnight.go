@@ -16,11 +16,20 @@ import (
 )
 
 func (o *JobOrchestrator) registerOvernightJobs() {
-	o.Register("overnight_backtest", "Heavy 5-year backtests on promising candidates", overnightBacktestSpec, o.overnightBacktest, "history_refresh", "overnight_sweep")
 	o.Register("overnight_sweep", "Parameter optimization on deployed strategies", overnightSweepSpec, o.overnightSweep, "history_refresh")
-	o.Register("overnight_generate", "LLM generates new strategy ideas per index group", overnightGenerateSpec, o.overnightGenerate, "overnight_sweep", "overnight_backtest")
 	o.Register("history_refresh", "Refresh 5-year OHLCV for holdings, active strategies, and top watchlist", historyRefreshSpec, o.historyRefresh)
-	o.Register("options_discovery", "Full options strategy discovery pipeline", optionsDiscoverySpec, o.optionsDiscovery, "overnight_generate")
+	if !o.discoveryDeploymentReady() {
+		return
+	}
+	if o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.OvernightBacktestRuns != nil {
+		o.Register("overnight_backtest", "Heavy 5-year backtests on promising candidates", overnightBacktestSpec, o.overnightBacktest, "history_refresh", "overnight_sweep")
+	}
+	if o.jobs["overnight_backtest"] != nil && o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil {
+		o.Register("overnight_generate", "LLM generates new strategy ideas per index group", overnightGenerateSpec, o.overnightGenerate, "overnight_sweep", "overnight_backtest")
+	}
+	if o.jobs["overnight_generate"] != nil && o.deps.OptionsProvider != nil && o.deps.Universe != nil && o.deps.LLMProvider != nil && o.deps.DataService != nil && o.deps.StrategyRepo != nil && o.deps.DiscoveryRunRepo != nil && o.deps.BacktestConfigRepo != nil {
+		o.Register("options_discovery", "Full options strategy discovery pipeline", optionsDiscoverySpec, o.optionsDiscovery, "overnight_generate")
+	}
 }
 
 var optionsDiscoverySpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "30 6 * * 2-6", SkipWeekends: false, SkipHolidays: false}
@@ -78,8 +87,10 @@ func optionsDiscoveryCompletionError(errors []string) error {
 // improvement is found.
 func (o *JobOrchestrator) overnightSweep(ctx context.Context) error {
 	o.logger.Info("overnight_sweep: starting")
-	if o.deps.StrategyRepo == nil || o.deps.DataService == nil {
-		return fmt.Errorf("overnight_sweep: strategy repository and data service are required")
+	summary := map[string]int{"strategies": 0, "supported": 0, "coverage_bps": 0, "swept": 0, "improved": 0, "skipped": 0, "failed": 0, "config_failed": 0, "fetch_failed": 0, "sweep_failed": 0, "insufficient": 0, "stale": 0, "empty_results": 0, "invalid_scores": 0, "missing_base": 0, "base_unqualified": 0, "all_unqualified": 0}
+	defer func() { o.SetLastSummary("overnight_sweep", summary) }()
+	if o.deps.StrategyRepo == nil {
+		return fmt.Errorf("overnight_sweep: strategy repository is required")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Hour)
@@ -89,24 +100,41 @@ func (o *JobOrchestrator) overnightSweep(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("overnight_sweep: list strategies: %w", err)
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	summary["strategies"] = len(strategies)
+	for _, strat := range strategies {
+		if strat.Status == domain.StrategyStatusActive && strat.MarketType.Normalize() == domain.MarketTypeStock {
+			summary["supported"]++
+		} else {
+			summary["skipped"]++
+		}
+	}
+	if summary["supported"] == 0 {
+		o.logger.Info("overnight_sweep: completed", slog.Int("strategies", summary["strategies"]), slog.Int("supported", 0))
+		return overnightSweepCompletionError(summary)
+	}
+	if o.deps.DataService == nil {
+		return fmt.Errorf("overnight_sweep: data service is required for supported strategies")
+	}
 
 	scoring := discovery.DefaultScoringConfig()
 	now := time.Now()
 	histFrom := now.AddDate(-1, 0, 0)
 
-	var improved, total, swept, skipped, failed, insufficient, stale int
-	defer func() {
-		o.SetLastSummary("overnight_sweep", map[string]int{"strategies": total, "swept": swept, "improved": improved, "skipped": skipped, "failed": failed, "insufficient": insufficient, "stale": stale})
-	}()
 	for _, strat := range strategies {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		total++
+		if strat.Status != domain.StrategyStatusActive || strat.MarketType.Normalize() != domain.MarketTypeStock {
+			continue
+		}
 
 		rulesConfig, err := extractRulesConfig(strat.Config)
 		if err != nil {
-			failed++
+			summary["failed"]++
+			summary["config_failed"]++
 			o.logger.Warn("overnight_sweep: bad config",
 				slog.String("strategy", strat.Name),
 				slog.Any("error", err),
@@ -120,7 +148,11 @@ func (o *JobOrchestrator) overnightSweep(ctx context.Context) error {
 			data.Timeframe1d, histFrom, now, true,
 		)
 		if err != nil {
-			failed++
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			summary["failed"]++
+			summary["fetch_failed"]++
 			o.logger.Warn("overnight_sweep: download failed",
 				slog.String("ticker", strat.Ticker),
 				slog.Any("error", err),
@@ -130,13 +162,13 @@ func (o *JobOrchestrator) overnightSweep(ctx context.Context) error {
 
 		bars := barsMap[strat.Ticker]
 		if len(bars) < 50 {
-			failed++
-			insufficient++
+			summary["failed"]++
+			summary["insufficient"]++
 			continue
 		}
-		if !dailyBarFresh(now, bars[len(bars)-1].Timestamp) {
-			failed++
-			stale++
+		if !completedDailyBarFresh(strat.MarketType, now, bars[len(bars)-1].Timestamp) {
+			summary["failed"]++
+			summary["stale"]++
 			continue
 		}
 
@@ -152,7 +184,11 @@ func (o *JobOrchestrator) overnightSweep(ctx context.Context) error {
 
 		results, err := discovery.RunSweep(ctx, *rulesConfig, sweepCfg, scoring, o.logger)
 		if err != nil {
-			failed++
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			summary["failed"]++
+			summary["sweep_failed"]++
 			o.logger.Warn("overnight_sweep: sweep failed",
 				slog.String("ticker", strat.Ticker),
 				slog.Any("error", err),
@@ -161,22 +197,26 @@ func (o *JobOrchestrator) overnightSweep(ctx context.Context) error {
 		}
 
 		if len(results) == 0 {
-			failed++
+			summary["failed"]++
+			summary["empty_results"]++
 			continue
 		}
-		swept++
+		summary["swept"]++
 
-		var currentScore float64
-		for _, r := range results {
-			if r.Label == "base" {
-				currentScore = r.Score
-				break
-			}
+		currentScore, best, scoreState, err := classifyResweepScores(results)
+		if err != nil {
+			summary["failed"]++
+			summary[scoreState]++
+			continue
+		}
+		switch scoreState {
+		case "base_unqualified", "all_unqualified":
+			summary[scoreState]++
+			continue
 		}
 
-		best := results[0]
 		if currentScore > 0 && best.Score > currentScore*1.30 {
-			improved++
+			summary["improved"]++
 			o.logger.Info("overnight_sweep: recommendation",
 				slog.String("ticker", strat.Ticker),
 				slog.String("strategy", strat.Name),
@@ -188,18 +228,49 @@ func (o *JobOrchestrator) overnightSweep(ctx context.Context) error {
 		}
 	}
 
+	summary["coverage_bps"] = coverageBasisPoints(summary["swept"], summary["supported"])
 	o.logger.Info("overnight_sweep: completed",
-		slog.Int("strategies", total),
-		slog.Int("improved", improved),
+		slog.Int("strategies", summary["strategies"]),
+		slog.Int("supported", summary["supported"]),
+		slog.Int("swept", summary["swept"]),
+		slog.Int("improved", summary["improved"]),
 	)
-	return overnightSweepCompletionError(failed)
+	return overnightSweepCompletionError(summary)
 }
 
-func overnightSweepCompletionError(failed int) error {
-	if failed <= 0 {
+func overnightSweepCompletionError(summary map[string]int) error {
+	supported, swept := summary["supported"], summary["swept"]
+	coverage := coverageBasisPoints(swept, supported)
+	summary["coverage_bps"] = coverage
+	if supported == 0 {
 		return nil
 	}
-	return fmt.Errorf("overnight_sweep: %d strategies failed", failed)
+	detail := fmt.Sprintf("supported=%d swept=%d coverage_bps=%d failed=%d config_failed=%d fetch_failed=%d sweep_failed=%d insufficient=%d stale=%d empty_results=%d invalid_scores=%d missing_base=%d base_unqualified=%d all_unqualified=%d",
+		supported, swept, coverage, summary["failed"], summary["config_failed"], summary["fetch_failed"], summary["sweep_failed"], summary["insufficient"], summary["stale"], summary["empty_results"], summary["invalid_scores"], summary["missing_base"], summary["base_unqualified"], summary["all_unqualified"])
+	if swept == 0 {
+		return fmt.Errorf("overnight_sweep: zero supported strategies swept: %s", detail)
+	}
+	if coverage < 8000 {
+		return fmt.Errorf("overnight_sweep: coverage below 80%%: %s", detail)
+	}
+	findings := summary["failed"] +
+		summary["config_failed"] +
+		summary["fetch_failed"] +
+		summary["sweep_failed"] +
+		summary["insufficient"] +
+		summary["stale"] +
+		summary["empty_results"] +
+		summary["invalid_scores"] +
+		summary["missing_base"] +
+		summary["base_unqualified"] +
+		summary["all_unqualified"]
+	if coverage < 10_000 {
+		findings++
+	}
+	if findings == 0 {
+		return nil
+	}
+	return Degradedf("overnight_sweep: completed with findings: %s", detail)
 }
 
 // overnightGenerate uses the LLM to generate new strategy ideas for each
@@ -306,7 +377,7 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 		return fmt.Errorf("history_refresh: data service not configured")
 	}
 
-	selection, err := o.selectOperationalStockTickers(ctx)
+	selection, err := o.selectOperationalStockTickers(ctx, o.deps.HistoryRefreshWatchlistLimit)
 	if err != nil {
 		return fmt.Errorf("history_refresh: select operational tickers: %w", err)
 	}

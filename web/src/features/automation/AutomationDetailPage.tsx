@@ -3,13 +3,14 @@ import { useParams } from 'react-router-dom'
 
 import { PageHeader } from '@/components/ui/page-header'
 import { StatusBadge } from '@/components/ui/status-badge'
-import { getAutomationRuns, getAutomationStatus, runAutomationJob, setAutomationJobEnabled } from '@/shared/api/endpoints'
+import { getAutomationHealth, getAutomationRuns, getAutomationStatus, runAutomationJob, setAutomationJobEnabled } from '@/shared/api/endpoints'
 import { EmptyState, ErrorState, LastUpdated, LoadingState } from '@/shared/components/QueryStates'
 import { queryKeys } from '@/shared/query/keys'
 import type { AutomationJobStatus } from '@/shared/types/domain'
 import { normalizeStatus } from '@/lib/status'
 
-import { automationCutover, automationOperationalState, currentAutomationErrorCount, isPostAutomationCutover } from './automationCutover'
+import { automationCutover, automationDependencyReason, automationOperationalState, currentAutomationErrorCount, isPostAutomationCutover } from './automationCutover'
+import { UnavailableCapabilitiesPanel } from './UnavailableCapabilitiesPanel'
 
 function formatDuration(ns?: number): string {
   if (!ns) return '--'
@@ -29,6 +30,7 @@ function JobStatePill({ job }: { job: AutomationJobStatus }) {
   if (state === 'disabled') return <StatusBadge status="unknown" label="disabled" />
   if (state === 'running') return <StatusBadge status="running" />
   if (state === 'unverified') return <StatusBadge status="unknown" label="unverified" />
+  if (state === 'blocked') return <StatusBadge status="warning" label="blocked" />
   if (state === 'failing') return <StatusBadge status="danger" label="failing" />
   if (state === 'degraded') return <StatusBadge status="warning" label="degraded" />
   return <StatusBadge status="success" label="healthy" />
@@ -95,8 +97,11 @@ export function AutomationDetailPage() {
   const name = params.name ?? ''
   const queryClient = useQueryClient()
   const statusQuery = useQuery({ queryKey: queryKeys.automationStatus, queryFn: ({ signal }) => getAutomationStatus(signal), refetchInterval: 30_000 })
-  const runsQuery = useQuery({ queryKey: queryKeys.automationRuns({ limit: 100, offset: 0 }), queryFn: ({ signal }) => getAutomationRuns({ limit: 100, offset: 0 }, signal), refetchInterval: 30_000 })
+  const healthQuery = useQuery({ queryKey: queryKeys.automationHealth, queryFn: ({ signal }) => getAutomationHealth(signal), refetchInterval: 30_000 })
   const job = statusQuery.data?.find((item) => item.name === name)
+  const unavailableJob = healthQuery.data?.unavailable_jobs.find((item) => item.name === name)
+  const runsQuery = useQuery({ queryKey: queryKeys.automationRuns({ limit: 100, offset: 0 }), queryFn: ({ signal }) => getAutomationRuns({ limit: 100, offset: 0 }, signal), refetchInterval: 30_000, enabled: Boolean(job) })
+  const jobState = job ? automationOperationalState(job) : undefined
   const runs = (runsQuery.data?.data ?? []).filter((run) => run.job_name === name && isPostAutomationCutover(run.started_at))
 
   const invalidate = async () => {
@@ -114,11 +119,9 @@ export function AutomationDetailPage() {
     <div className="detail-stack">
       <PageHeader eyebrow="Automation" title={name} description="Job status, controls, and recent execution history." actions={<LastUpdated date={statusQuery.dataUpdatedAt || undefined} />} />
 
-      <section className="panel">
-
+      {job || statusQuery.isLoading || statusQuery.error ? <section className="panel">
         {statusQuery.isLoading ? <LoadingState label="Loading automation job…" /> : null}
         {statusQuery.error ? <ErrorState error={statusQuery.error} onRetry={() => void statusQuery.refetch()} /> : null}
-        {!statusQuery.isLoading && !statusQuery.error && !job ? <EmptyState title="Automation not found" message="No registered job matches this name." /> : null}
 
         {job ? (
           <>
@@ -132,9 +135,9 @@ export function AutomationDetailPage() {
               <div><dt>Description</dt><dd>{job.description}</dd></div>
               <div><dt>Schedule</dt><dd>{job.schedule || 'Manual only'}</dd></div>
               <div><dt>Last run</dt><dd>{formatDate(job.last_run)}</dd></div>
-              <div><dt>Last result</dt><dd>{automationOperationalState(job) === 'unverified' ? 'Unverified after deployment cutover' : job.last_result || '--'}</dd></div>
-              <div><dt>Last detail</dt><dd>{automationOperationalState(job) === 'degraded' ? job.last_detail || '--' : '--'}</dd></div>
-              <div><dt>Last error</dt><dd>{automationOperationalState(job) === 'unverified' ? `Pre-deploy history excluded after ${automationCutover.deployment}` : job.last_error || '--'}</dd></div>
+              <div><dt>Last result</dt><dd>{jobState === 'unverified' ? 'Unverified after deployment cutover' : job.last_result || '--'}</dd></div>
+              <div><dt>{jobState === 'blocked' ? 'Dependency reason' : jobState === 'degraded' ? 'Diagnostic' : 'Last detail'}</dt><dd>{jobState === 'blocked' ? automationDependencyReason(job) || '--' : jobState === 'degraded' ? job.last_detail || '--' : '--'}</dd></div>
+              <div><dt>Last error</dt><dd>{jobState === 'unverified' ? `Pre-deploy history excluded after ${automationCutover.deployment}` : jobState === 'blocked' ? '--' : job.last_error || '--'}</dd></div>
             </dl>
             {job.last_summary && automationOperationalState(job) !== 'unverified' ? name === 'daily_review' && reviewMetrics.some(({ key }) => numericSummaryValue(job.last_summary!, key) !== undefined) ? (
               <DailyReviewFindings job={job} />
@@ -147,9 +150,21 @@ export function AutomationDetailPage() {
             </div>
           </>
         ) : null}
-      </section>
+      </section> : healthQuery.error ? (
+        <section className="panel unavailable-capabilities" aria-labelledby="capability-diagnostics-title">
+          <div className="panel-header unavailable-capabilities-header"><div><p className="eyebrow">Capability boundary</p><h2 id="capability-diagnostics-title">Capability diagnostics unavailable</h2><p className="muted">This route is not a registered job. Capability diagnostics must load before its availability can be determined.</p></div></div>
+          <ErrorState error={healthQuery.error} onRetry={() => void healthQuery.refetch()} />
+        </section>
+      ) : !healthQuery.data ? (
+        <section className="panel unavailable-capabilities" aria-labelledby="capability-diagnostics-title">
+          <div className="panel-header unavailable-capabilities-header"><div><p className="eyebrow">Capability boundary</p><h2 id="capability-diagnostics-title">Checking capability availability</h2><p className="muted">This route is not a registered job. Waiting for backend capability diagnostics.</p></div></div>
+          <LoadingState label="Loading capability diagnostics…" />
+        </section>
+      ) : unavailableJob ? <UnavailableCapabilitiesPanel jobs={[unavailableJob]} singular /> : (
+        <section className="panel"><EmptyState title="Automation not found" message="No registered or unavailable automation capability matches this name." /></section>
+      )}
 
-      <section className="panel">
+      {job ? <section className="panel">
         <div className="panel-header">
           <div>
             <p className="eyebrow">History</p>
@@ -172,14 +187,14 @@ export function AutomationDetailPage() {
                     <td>{formatDate(run.started_at)}</td>
                     <td>{formatDate(run.completed_at)}</td>
                     <td>{formatDuration(run.duration_ns)}</td>
-                    <td>{run.detail ? <>Diagnostic: {run.detail}</> : run.error || '--'}</td>
+                    <td>{run.detail ? <>{/^dependency\s+/i.test(run.detail.trim()) ? 'Dependency' : 'Diagnostic'}: {run.detail}</> : run.error || '--'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         ) : null}
-      </section>
+      </section> : null}
     </div>
   )
 }

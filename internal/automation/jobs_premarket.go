@@ -46,6 +46,10 @@ func (o *JobOrchestrator) registerPreMarketJobs() {
 	if o.deps.Universe != nil {
 		if o.deps.PolygonBulkSnapshotsEnabled && o.deps.Polygon != nil {
 			o.Register("gap_scanner", "Detect overnight gaps and unusual volume", gapScannerSpec, o.gapScanner)
+		}
+	}
+	if o.discoveryDeploymentReady() && o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil && o.deps.DiscoveryRunRepo != nil {
+		if o.deps.PolygonBulkSnapshotsEnabled && o.deps.Polygon != nil {
 			o.Register("discovery_run", "Full strategy discovery on top watchlist tickers", discoveryRunSpec, o.discoveryRun, "gap_scanner")
 		} else {
 			o.Register("discovery_run", "Full strategy discovery on top watchlist tickers", discoveryRunSpec, o.discoveryRun)
@@ -56,7 +60,7 @@ func (o *JobOrchestrator) registerPreMarketJobs() {
 
 func (o *JobOrchestrator) registerTickerDiscoveryJob() {
 	cfg := o.deps.TickerDiscovery
-	if !cfg.Enabled || !o.deps.PolygonBulkSnapshotsEnabled || o.deps.Polygon == nil || o.deps.Universe == nil {
+	if !o.discoveryDeploymentReady() || !cfg.Enabled || !o.deps.PolygonBulkSnapshotsEnabled || o.deps.Polygon == nil || o.deps.Universe == nil || o.deps.DataService == nil || o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil || o.deps.BacktestConfigRepo == nil || o.deps.DiscoveryRunRepo == nil {
 		return
 	}
 	cron := cfg.Cron

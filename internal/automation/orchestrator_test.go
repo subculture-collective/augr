@@ -25,6 +25,59 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
+func TestDiscoveryReadinessLockOmitsFiveJobsAndRecordsSortedDiagnostics(t *testing.T) {
+	readiness := &DiscoveryReadiness{Reason: pgrepo.DiscoveryDeploymentUnavailableReason, Err: pgrepo.ErrDiscoveryDeploymentImmutableBinding}
+	orch := NewJobOrchestrator(OrchestratorDeps{DiscoveryReadiness: readiness})
+	orch.RegisterAll()
+
+	for _, name := range discoveryDeploymentJobNames {
+		if _, ok := orch.jobs[name]; ok {
+			t.Fatalf("readiness-locked job %q registered", name)
+		}
+	}
+	for _, name := range []string{"history_refresh", "overnight_sweep", "earnings_scanner", "filing_monitor", "position_review"} {
+		if _, ok := orch.jobs[name]; !ok {
+			t.Fatalf("unrelated job %q omitted", name)
+		}
+	}
+	diagnostics := orch.UnavailableJobs()
+	if len(diagnostics) != len(discoveryDeploymentJobNames) {
+		t.Fatalf("unavailable diagnostics = %#v", diagnostics)
+	}
+	for i, diagnostic := range diagnostics {
+		if i > 0 && diagnostics[i-1].Name >= diagnostic.Name {
+			t.Fatalf("unavailable diagnostics not sorted: %#v", diagnostics)
+		}
+		if diagnostic.Reason != pgrepo.DiscoveryDeploymentUnavailableReason {
+			t.Fatalf("unavailable reason = %q", diagnostic.Reason)
+		}
+	}
+	statuses := orch.Status()
+	for _, status := range statuses {
+		for _, diagnostic := range diagnostics {
+			if status.Name == diagnostic.Name {
+				t.Fatalf("unavailable job %q exposed as runnable status", status.Name)
+			}
+		}
+	}
+}
+
+func TestDiscoveryReadinessEvaluationFailureUsesGenericDiagnostics(t *testing.T) {
+	readiness := &DiscoveryReadiness{Reason: pgrepo.DiscoveryDeploymentUnavailableReason, Err: errors.New("readiness database unavailable")}
+	orch := NewJobOrchestrator(OrchestratorDeps{DiscoveryReadiness: readiness})
+	orch.RegisterAll()
+
+	diagnostics := orch.UnavailableJobs()
+	if len(diagnostics) != len(discoveryDeploymentJobNames) {
+		t.Fatalf("unavailable diagnostics = %#v", diagnostics)
+	}
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Reason != DiscoveryReadinessEvaluationErrorReason {
+			t.Fatalf("evaluation failure reason = %q", diagnostic.Reason)
+		}
+	}
+}
+
 func TestJobOrchestratorRunJob_TracksFailureFieldsAndReset(t *testing.T) {
 	t.Parallel()
 
@@ -629,16 +682,29 @@ func TestJobOrchestratorHydratesDurableDisabledControl(t *testing.T) {
 func TestJobOrchestratorDurableEnableOverridesHistoricalAutoDisable(t *testing.T) {
 	t.Parallel()
 
+	completedAt := time.Date(2026, time.August, 6, 10, 0, 0, 0, time.UTC)
 	runs := newRecordingAutomationJobRunRepo()
-	runs.summaries = []pgrepo.JobRunSummary{{JobName: "job", ConsecutiveFailures: autoDisableThreshold}}
+	runs.summaries = []pgrepo.JobRunSummary{{
+		JobName:             "job",
+		LastResult:          "skipped",
+		LastError:           "market calendar unavailable",
+		LastDetail:          "market closed",
+		LastErrorAt:         &completedAt,
+		RunCount:            8,
+		ErrorCount:          5,
+		ConsecutiveFailures: autoDisableThreshold,
+	}}
 	controls := &automationJobControlRepoStub{controls: []domain.AutomationJobControl{{JobName: "job", Enabled: true, UpdatedBy: "operator"}}}
 	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: runs, JobControlRepo: controls})
 	orch.Register("job", "controlled job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
 	orch.hydrateFromDB()
 
 	status := singleJobStatus(t, orch, "job")
-	if !status.Enabled || status.ConsecutiveFailures != autoDisableThreshold {
+	if !status.Enabled || status.LastResult != "skipped" || status.LastError != "market calendar unavailable" || status.LastDetail != "market closed" || status.LastErrorAt == nil || !status.LastErrorAt.Equal(completedAt) {
 		t.Fatalf("durably re-enabled job = %+v", status)
+	}
+	if status.RunCount != 8 || status.ErrorCount != 5 || status.ConsecutiveFailures != autoDisableThreshold {
+		t.Fatalf("durably re-enabled job counters = %+v", status)
 	}
 }
 
@@ -928,6 +994,82 @@ func TestCurrentDataRefreshPayloadSurvivesRestartAndBlocksLegacyHandoff(t *testi
 	persisted := legacy.deps.JobRunRepo.(*recordingAutomationJobRunRepo).singleRun(t)
 	if persisted.Status != "skipped" {
 		t.Fatalf("legacy hot scan persisted status = %q", persisted.Status)
+	}
+	wantReason := "dependency current_data_refresh fresh ticker payload unavailable"
+	if persisted.Error != "" || persisted.Detail != wantReason || persisted.Result["dependency_blocked"] != 1 {
+		t.Fatalf("persisted dependency skip = %+v", persisted)
+	}
+	if status.LastError != "" || status.LastDetail != wantReason {
+		t.Fatalf("in-memory dependency skip = %+v", status)
+	}
+}
+
+func TestJobOrchestratorHydratesLatestOutcomeWithRetainedFailureStreak(t *testing.T) {
+	completedAt := time.Date(2026, time.August, 6, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name           string
+		lastResult     string
+		lastError      string
+		lastDetail     string
+		wantLastResult string
+		wantLastError  string
+		enabled        bool
+	}{
+		{name: "dependency skip", lastResult: "skipped", lastError: "stale failure", lastDetail: "dependency upstream still running", wantLastResult: "skipped: dependency upstream still running", enabled: true},
+		{name: "legacy explicit dependency skip", lastResult: "skipped: dependency upstream still running", wantLastResult: "skipped: dependency upstream still running", enabled: true},
+		{name: "ordinary skip", lastResult: "skipped", lastError: "market calendar unavailable", lastDetail: "market closed", wantLastResult: "skipped", wantLastError: "market calendar unavailable", enabled: false},
+		{name: "error", lastResult: "error", wantLastResult: "error", enabled: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			repo := newRecordingAutomationJobRunRepo()
+			repo.summaries = []pgrepo.JobRunSummary{{
+				JobName:             "consumer",
+				LastRun:             &completedAt,
+				LastResult:          tc.lastResult,
+				LastError:           tc.lastError,
+				LastDetail:          tc.lastDetail,
+				LastErrorAt:         &completedAt,
+				RunCount:            8,
+				ErrorCount:          5,
+				ConsecutiveFailures: autoDisableThreshold,
+			}}
+			orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+			orch.Register("consumer", "consumer", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
+			orch.hydrateFromDB()
+
+			status := singleJobStatus(t, orch, "consumer")
+			if status.Enabled != tc.enabled {
+				t.Fatalf("Enabled = %t, want %t; status = %+v", status.Enabled, tc.enabled, status)
+			}
+			if status.LastResult != tc.wantLastResult || status.LastError != tc.wantLastError || status.LastDetail != tc.lastDetail || status.LastErrorAt == nil || !status.LastErrorAt.Equal(completedAt) {
+				t.Fatalf("hydrated outcome = %+v", status)
+			}
+			if status.RunCount != 8 || status.ConsecutiveFailures != autoDisableThreshold || status.ErrorCount != 5 {
+				t.Fatalf("hydrated historical failures = %+v", status)
+			}
+		})
+	}
+}
+
+func TestJobOrchestratorDurableDisableOverridesDependencySkip(t *testing.T) {
+	t.Parallel()
+
+	runs := newRecordingAutomationJobRunRepo()
+	runs.summaries = []pgrepo.JobRunSummary{{
+		JobName:             "job",
+		LastResult:          "skipped",
+		LastDetail:          "dependency upstream disabled",
+		ConsecutiveFailures: autoDisableThreshold,
+	}}
+	controls := &automationJobControlRepoStub{controls: []domain.AutomationJobControl{{JobName: "job", Enabled: false, UpdatedBy: "operator"}}}
+	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: runs, JobControlRepo: controls})
+	orch.Register("job", "controlled job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
+	orch.hydrateFromDB()
+
+	status := singleJobStatus(t, orch, "job")
+	if status.Enabled || status.ConsecutiveFailures != autoDisableThreshold {
+		t.Fatalf("durably disabled dependency-skipped job = %+v", status)
 	}
 }
 

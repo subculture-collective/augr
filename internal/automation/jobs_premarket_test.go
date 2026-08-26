@@ -8,12 +8,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/polygon"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 	"github.com/google/uuid"
 )
+
+func readyStockDiscoveryDeps(deps OrchestratorDeps) OrchestratorDeps {
+	deps.DiscoveryReadiness = &DiscoveryReadiness{Ready: true}
+	deps.DataService = &data.DataService{}
+	deps.LLMProvider = llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		return &llm.CompletionResponse{}, nil
+	})
+	deps.StrategyRepo = &stubReportStrategyRepo{}
+	deps.BacktestConfigRepo = pgrepo.NewBacktestConfigRepo(nil)
+	deps.DiscoveryRunRepo = pgrepo.NewDiscoveryRunRepo(nil)
+	return deps
+}
 
 type positionReviewStrategyRepo struct{ *kalshiStrategyRepoStub }
 
@@ -104,8 +119,8 @@ func TestGapScannerRegistrationRequiresEnabledPolygonBulkSnapshots(t *testing.T)
 		{name: "disabled with client", deps: OrchestratorDeps{Polygon: client}},
 		{name: "enabled without client", deps: OrchestratorDeps{PolygonBulkSnapshotsEnabled: true}},
 		{name: "enabled without universe", deps: OrchestratorDeps{Polygon: client, PolygonBulkSnapshotsEnabled: true}},
-		{name: "universe without bulk snapshots", deps: OrchestratorDeps{Universe: univ, Polygon: client}, wantDiscovery: true},
-		{name: "enabled with all dependencies", deps: OrchestratorDeps{Universe: univ, Polygon: client, PolygonBulkSnapshotsEnabled: true}, wantGap: true, wantDiscovery: true, wantDeps: []string{"gap_scanner"}},
+		{name: "universe without bulk snapshots", deps: readyStockDiscoveryDeps(OrchestratorDeps{Universe: univ, Polygon: client}), wantDiscovery: true},
+		{name: "enabled with all dependencies", deps: readyStockDiscoveryDeps(OrchestratorDeps{Universe: univ, Polygon: client, PolygonBulkSnapshotsEnabled: true}), wantGap: true, wantDiscovery: true, wantDeps: []string{"gap_scanner"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -130,10 +145,10 @@ func TestTickerDiscoveryRegistersInAutomationLedger(t *testing.T) {
 	t.Parallel()
 
 	client := polygon.NewClient("test-key", nil)
-	orch := NewJobOrchestrator(OrchestratorDeps{
+	orch := NewJobOrchestrator(readyStockDiscoveryDeps(OrchestratorDeps{
 		Universe: clientUniverse(client), Polygon: client, PolygonBulkSnapshotsEnabled: true,
 		TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true, Cron: "30 10 * * 1-5", MinADV: 100000, MaxTickers: 30},
-	})
+	}))
 	orch.registerTickerDiscoveryJob()
 	job := orch.jobs["ticker_discovery"]
 	if job == nil {
@@ -148,10 +163,10 @@ func TestTickerDiscoveryPreservesExplicitCronTimezone(t *testing.T) {
 	t.Parallel()
 
 	client := polygon.NewClient("test-key", nil)
-	orch := NewJobOrchestrator(OrchestratorDeps{
+	orch := NewJobOrchestrator(readyStockDiscoveryDeps(OrchestratorDeps{
 		Universe: clientUniverse(client), Polygon: client, PolygonBulkSnapshotsEnabled: true,
 		TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true, Cron: "CRON_TZ=America/Chicago 30 5 * * 1-5"},
-	})
+	}))
 	orch.registerTickerDiscoveryJob()
 	if got := orch.jobs["ticker_discovery"].Schedule.Cron; got != "CRON_TZ=America/Chicago 30 5 * * 1-5" {
 		t.Fatalf("ticker_discovery cron = %q, want explicit timezone unchanged", got)
@@ -172,7 +187,7 @@ func TestTickerDiscoveryRegistrationRequiresBulkSnapshotCapability(t *testing.T)
 		{name: "missing bulk capability", deps: OrchestratorDeps{Universe: univ, Polygon: client, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}},
 		{name: "missing polygon client", deps: OrchestratorDeps{Universe: univ, PolygonBulkSnapshotsEnabled: true, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}},
 		{name: "missing universe", deps: OrchestratorDeps{Polygon: client, PolygonBulkSnapshotsEnabled: true, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}},
-		{name: "enabled with all prerequisites", deps: OrchestratorDeps{Universe: univ, Polygon: client, PolygonBulkSnapshotsEnabled: true, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}, want: true},
+		{name: "enabled with all prerequisites", deps: readyStockDiscoveryDeps(OrchestratorDeps{Universe: univ, Polygon: client, PolygonBulkSnapshotsEnabled: true, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}), want: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -78,8 +78,8 @@ func TestOvernightBacktestRunRepoIntegration_CRUD(t *testing.T) {
 	run.Phase = domain.OvernightBacktestPhaseGenerate
 	run.CandidateIndex = 1
 	run.Summary = domain.OvernightBacktestSummary{Candidates: 2, Generated: 2, Swept: 2, Validated: 2, Deployed: 1, Created: 1, Reused: 1}
-	if err := repo.Update(ctx, &run); err != nil {
-		t.Fatalf("Update() error = %v", err)
+	if err := repo.SaveIfRunning(ctx, &run); err != nil {
+		t.Fatalf("SaveIfRunning() error = %v", err)
 	}
 	updated, err := repo.Get(ctx, run.ID)
 	if err != nil {
@@ -95,8 +95,11 @@ func TestOvernightBacktestRunRepoIntegration_CRUD(t *testing.T) {
 	run.Status = domain.OvernightBacktestStatusCompleted
 	run.Phase = domain.OvernightBacktestPhaseDone
 	run.CompletedAt = &now
-	if err := repo.Update(ctx, &run); err != nil {
-		t.Fatalf("complete Update() error = %v", err)
+	if err := repo.SaveIfRunning(ctx, &run); err != nil {
+		t.Fatalf("complete SaveIfRunning() error = %v", err)
+	}
+	if err := repo.SaveIfRunning(ctx, &run); !errors.Is(err, repository.ErrOvernightBacktestRunClosed) {
+		t.Fatalf("second terminal SaveIfRunning() error = %v, want closed", err)
 	}
 	_, err = repo.GetActive(ctx)
 	if !errors.Is(err, repository.ErrNotFound) {
@@ -109,6 +112,131 @@ func TestOvernightBacktestRunRepoIntegration_CRUD(t *testing.T) {
 	if len(latest) != 1 || latest[0].ID != run.ID {
 		t.Fatalf("latest = %#v, want completed run", latest)
 	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_ReconcileActiveIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOvernightBacktestRunRepo(pool)
+	active := domain.NewOvernightBacktestRun()
+	active.Errors = []string{"existing"}
+	if err := repo.Create(ctx, &active); err != nil {
+		t.Fatal(err)
+	}
+	completed := domain.NewOvernightBacktestRun()
+	completed.Status = domain.OvernightBacktestStatusCompleted
+	completed.Phase = domain.OvernightBacktestPhaseDone
+	completedAt := time.Now().Add(-time.Hour).UTC().Truncate(time.Microsecond)
+	completed.CompletedAt = &completedAt
+	if err := repo.Create(ctx, &completed); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	count, err := repo.ReconcileActive(ctx, now, DiscoveryDeploymentUnavailableReason)
+	if err != nil || count != 1 {
+		t.Fatalf("ReconcileActive() = %d, %v", count, err)
+	}
+	got, err := repo.Get(ctx, active.ID)
+	if err != nil || got.Status != domain.OvernightBacktestStatusFailed || got.Phase != domain.OvernightBacktestPhaseDone || got.CompletedAt == nil || !got.CompletedAt.Equal(now) || !got.UpdatedAt.Equal(now) {
+		t.Fatalf("reconciled run = %+v, err = %v", got, err)
+	}
+	if len(got.Errors) != 2 || got.Errors[0] != "existing" || got.Errors[1] != DiscoveryDeploymentUnavailableReason {
+		t.Fatalf("reconciled errors = %#v", got.Errors)
+	}
+	untouched, err := repo.Get(ctx, completed.ID)
+	if err != nil || untouched.Status != domain.OvernightBacktestStatusCompleted || untouched.CompletedAt == nil || !untouched.CompletedAt.Equal(completedAt) {
+		t.Fatalf("terminal run mutated = %+v, err = %v", untouched, err)
+	}
+	count, err = repo.ReconcileActive(ctx, now.Add(time.Minute), DiscoveryDeploymentUnavailableReason)
+	if err != nil || count != 0 {
+		t.Fatalf("idempotent ReconcileActive() = %d, %v", count, err)
+	}
+	active.Phase = domain.OvernightBacktestPhaseGenerate
+	if err := repo.SaveIfRunning(ctx, &active); !errors.Is(err, repository.ErrOvernightBacktestRunClosed) {
+		t.Fatalf("stale SaveIfRunning() error = %v, want closed", err)
+	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_CommitAndReconcileTerminalRaceOrders(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOvernightBacktestRunRepo(pool)
+	completedAt := time.Now().UTC().Truncate(time.Microsecond)
+
+	reconcileWins := domain.NewOvernightBacktestRun()
+	reconcileWins.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := repo.Create(ctx, &reconcileWins); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := repo.ReconcileActive(ctx, completedAt, "unavailable"); err != nil || count != 1 {
+		t.Fatalf("reconcile first = %d, %v", count, err)
+	}
+	if _, _, err := repo.CommitIfRunning(ctx, reconcileWins.ID, completedAt.Add(time.Second), domain.OvernightBacktestSummary{}, []domain.Strategy{preparedOvernightStrategy("AAPL", "one")}); !errors.Is(err, repository.ErrOvernightBacktestRunClosed) {
+		t.Fatalf("commit after reconcile error = %v, want closed", err)
+	}
+
+	commitWins := domain.NewOvernightBacktestRun()
+	commitWins.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := repo.Create(ctx, &commitWins); err != nil {
+		t.Fatal(err)
+	}
+	summary, persistedAt, err := repo.CommitIfRunning(ctx, commitWins.ID, completedAt, domain.OvernightBacktestSummary{Validated: 1}, []domain.Strategy{preparedOvernightStrategy("MSFT", "two")})
+	if err != nil || summary.Created != 1 || summary.Reused != 0 || summary.Deployed != 1 || !persistedAt.Equal(completedAt) {
+		t.Fatalf("commit first = %+v, %v, %v", summary, persistedAt, err)
+	}
+	if count, err := repo.ReconcileActive(ctx, completedAt.Add(time.Minute), "unavailable"); err != nil || count != 0 {
+		t.Fatalf("reconcile after commit = %d, %v", count, err)
+	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_CommitRollsBackAndReuses(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOvernightBacktestRunRepo(pool)
+
+	failed := domain.NewOvernightBacktestRun()
+	failed.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := repo.Create(ctx, &failed); err != nil {
+		t.Fatal(err)
+	}
+	bad := preparedOvernightStrategy("BBB", "bad")
+	bad.Config = json.RawMessage(`{`)
+	if _, _, err := repo.CommitIfRunning(ctx, failed.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{preparedOvernightStrategy("AAA", "good"), bad}); err == nil {
+		t.Fatal("CommitIfRunning() error = nil, want second insert failure")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM strategies`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("strategies after rollback = %d, %v", count, err)
+	}
+
+	first := domain.NewOvernightBacktestRun()
+	first.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := repo.Create(ctx, &first); err != nil {
+		t.Fatal(err)
+	}
+	strategy := preparedOvernightStrategy("AAPL", "reuse")
+	if _, _, err := repo.CommitIfRunning(ctx, first.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy}); err != nil {
+		t.Fatal(err)
+	}
+	second := domain.NewOvernightBacktestRun()
+	second.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := repo.Create(ctx, &second); err != nil {
+		t.Fatal(err)
+	}
+	summary, _, err := repo.CommitIfRunning(ctx, second.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy})
+	if err != nil || summary.Created != 0 || summary.Reused != 1 || summary.Deployed != 1 {
+		t.Fatalf("reuse summary = %+v, err = %v", summary, err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM strategies`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("strategies after reuse = %d, %v", count, err)
+	}
+}
+
+func preparedOvernightStrategy(ticker, suffix string) domain.Strategy {
+	return domain.Strategy{ID: uuid.New(), Name: "discovery: " + ticker + " " + suffix, Ticker: ticker, MarketType: domain.MarketTypeStock, IsPaper: true, Status: domain.StrategyStatusInactive, Config: json.RawMessage(`{"research_lifecycle":{"stage":"idea"}}`)}
 }
 
 func newOvernightBacktestIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
@@ -161,7 +289,16 @@ func newOvernightBacktestIntegrationPool(t *testing.T, ctx context.Context) (*pg
 		started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		completed_at TIMESTAMPTZ
-	)`
+	);
+	CREATE TABLE strategies (
+		id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, description TEXT,
+		ticker TEXT NOT NULL, market_type TEXT NOT NULL, schedule_cron TEXT, config JSONB NOT NULL DEFAULT '{}',
+		status TEXT NOT NULL DEFAULT 'inactive', skip_next_run BOOLEAN NOT NULL DEFAULT false,
+		is_paper BOOLEAN NOT NULL DEFAULT true, is_active BOOLEAN NOT NULL DEFAULT false,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	CREATE UNIQUE INDEX idx_strategies_discovery_unique ON strategies (ticker, market_type, is_paper, name)
+		WHERE is_paper = true AND (name LIKE 'discovery:%' OR name LIKE 'options:%')`
 	if _, err := pool.Exec(ctx, ddl); err != nil {
 		pool.Close()
 		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)

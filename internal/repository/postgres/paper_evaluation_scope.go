@@ -72,11 +72,21 @@ func (r *ReportArtifactRepo) ValidateBacktestConfigScope(ctx context.Context, co
 	return nil
 }
 
-// ScopedExecutionBinding reports the current runtime's fail-closed boundary.
-// HistoricalOHLCV is provider/cache backed and cannot prove reads came from the
-// scope's immutable manifest.
+const DiscoveryDeploymentUnavailableReason = "historical data loader is not bound to the scope's immutable dataset manifest"
+
+// ErrDiscoveryDeploymentImmutableBinding is the authoritative deployment lock
+// while the historical loader cannot prove immutable manifest binding.
+var ErrDiscoveryDeploymentImmutableBinding = repository.NewImmutableBindingLock(DiscoveryDeploymentUnavailableReason)
+
+// DiscoveryDeploymentReadiness reports whether discovery can deploy from an
+// immutable dataset manifest. Scope rows alone do not establish that binding.
+func (r *ReportArtifactRepo) DiscoveryDeploymentReadiness(context.Context) (bool, string, error) {
+	return false, DiscoveryDeploymentUnavailableReason, ErrDiscoveryDeploymentImmutableBinding
+}
+
+// ScopedExecutionBinding retains per-scope validation for backtest callers.
 func (r *ReportArtifactRepo) ScopedExecutionBinding(context.Context, uuid.UUID) (bool, string, error) {
-	return false, "historical data loader is not bound to the scope's immutable dataset manifest", nil
+	return false, DiscoveryDeploymentUnavailableReason, ErrDiscoveryDeploymentImmutableBinding
 }
 
 type paperEvaluationScopeCanonical struct {
