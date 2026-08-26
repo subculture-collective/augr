@@ -58,15 +58,21 @@ func TestOptionsDiscoveryCompletionErrorRejectsReportedErrors(t *testing.T) {
 	}
 }
 
-func TestHistoryRefreshCompletionErrorRejectsEmptyAndStaleCoverage(t *testing.T) {
+func TestHistoryRefreshCompletionErrorCoveragePolicy(t *testing.T) {
 	t.Parallel()
 
-	if err := historyRefreshCompletionError(map[string]int{}); err != nil {
-		t.Fatalf("historyRefreshCompletionError(empty) = %v, want nil", err)
+	if err := historyRefreshCompletionError(map[string]int{}); err == nil {
+		t.Fatal("historyRefreshCompletionError(empty) = nil, want error")
 	}
-	err := historyRefreshCompletionError(map[string]int{"tickers": 10, "empty": 2, "stale": 1})
-	if err == nil || !strings.Contains(err.Error(), "empty=2 stale=1") {
-		t.Fatalf("historyRefreshCompletionError(partial) = %v", err)
+	if err := historyRefreshCompletionError(map[string]int{"selected": 10, "updated": 4, "empty": 6}); err == nil || IsDegraded(err) {
+		t.Fatalf("historyRefreshCompletionError(below floor) = %v, want true error", err)
+	}
+	err := historyRefreshCompletionError(map[string]int{"selected": 10, "updated": 5, "empty": 3, "stale": 2})
+	if !IsDegraded(err) || !strings.Contains(err.Error(), "coverage=50%") {
+		t.Fatalf("historyRefreshCompletionError(at floor) = %v, want degraded", err)
+	}
+	if err := historyRefreshCompletionError(map[string]int{"selected": 10, "updated": 10}); err != nil {
+		t.Fatalf("historyRefreshCompletionError(full) = %v, want nil", err)
 	}
 }
 

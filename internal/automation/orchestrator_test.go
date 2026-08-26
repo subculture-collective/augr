@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -204,6 +205,116 @@ func TestJobOrchestratorPersistsRunningRowBeforeExecuting(t *testing.T) {
 	}
 }
 
+func TestJobOrchestratorPersistsDegradedOutcomeWithoutFailureAccounting(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		run        func(*JobOrchestrator, *RegisteredJob)
+		wantResult func(string) bool
+	}{
+		{name: "manual", run: func(o *JobOrchestrator, job *RegisteredJob) { o.runDirect(job) }, wantResult: func(result string) bool { return result == "degraded" }},
+		{name: "scheduled", run: func(o *JobOrchestrator, job *RegisteredJob) { o.wrapAndRun(job) }, wantResult: func(result string) bool { return strings.HasPrefix(result, "degraded after ") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newRecordingAutomationJobRunRepo()
+			metrics := &stubAutomationMetrics{}
+			var logs bytes.Buffer
+			orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
+			orch.WithJobMetrics(metrics)
+			orch.Register("job", "degraded job", schedulerSpecEveryMinute(), func(context.Context) error {
+				orch.SetLastSummary("job", map[string]int{"processed": 7})
+				return Degradedf("provider returned partial data")
+			})
+			job := orch.jobs["job"]
+			priorErrorAt := time.Now()
+			job.ErrorCount = 4
+			job.ConsecutiveFailures = 2
+			job.LastError = "prior failure"
+			job.LastErrorAt = &priorErrorAt
+
+			tc.run(orch, job)
+
+			status := singleJobStatus(t, orch, "job")
+			if !tc.wantResult(status.LastResult) {
+				t.Fatalf("LastResult = %q, want degraded result", status.LastResult)
+			}
+			if status.RunCount != 1 || status.ErrorCount != 4 || status.ConsecutiveFailures != 0 {
+				t.Fatalf("counters = runs:%d errors:%d consecutive:%d, want 1/4/0", status.RunCount, status.ErrorCount, status.ConsecutiveFailures)
+			}
+			if status.LastError != "" || status.LastDetail != "provider returned partial data" || status.LastErrorAt != nil || !status.Enabled {
+				t.Fatalf("degraded fields = error:%q detail:%q at:%v enabled:%t", status.LastError, status.LastDetail, status.LastErrorAt, status.Enabled)
+			}
+			persisted := repo.singleRun(t)
+			if persisted.Status != "degraded" || persisted.Error != "" || persisted.Detail != "provider returned partial data" || persisted.ConsecutiveFailures != 0 || persisted.LastErrorAt != nil {
+				t.Fatalf("persisted degraded run = %+v", persisted)
+			}
+			if persisted.Result["processed"] != 7 {
+				t.Fatalf("persisted summary = %#v, want processed=7", persisted.Result)
+			}
+			if metrics.jobErrors != 0 {
+				t.Fatalf("automation error metrics = %d, want 0", metrics.jobErrors)
+			}
+			if output := logs.String(); !strings.Contains(output, "level=WARN") || !strings.Contains(output, "job degraded") || strings.Contains(output, "job failed") {
+				t.Fatalf("degraded logs = %q, want warning only", output)
+			}
+		})
+	}
+}
+
+func TestJobOrchestratorHydratesLatestDegradedOutcome(t *testing.T) {
+	repo := newRecordingAutomationJobRunRepo()
+	lastRun := time.Now().UTC()
+	priorErrorAt := lastRun.Add(-time.Hour)
+	repo.summaries = []pgrepo.JobRunSummary{
+		{JobName: "job", LastRun: &lastRun, LastResult: "degraded", LastError: "stale failure", LastDetail: "partial provider response", LastErrorAt: &priorErrorAt, RunCount: 9, ErrorCount: 4, ConsecutiveFailures: 3},
+	}
+	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+	orch.Register("job", "degraded job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
+
+	orch.hydrateFromDB()
+
+	status := singleJobStatus(t, orch, "job")
+	if status.LastResult != "degraded" || status.ConsecutiveFailures != 0 || status.LastError != "" || status.LastErrorAt != nil {
+		t.Fatalf("hydrated degraded status = %+v", status)
+	}
+	if status.LastDetail != "partial provider response" {
+		t.Fatalf("LastDetail = %q", status.LastDetail)
+	}
+	if status.ErrorCount != 4 || status.RunCount != 9 || !status.Enabled {
+		t.Fatalf("hydrated lifetime counters = %+v", status)
+	}
+}
+
+func TestJobOrchestratorTreatsDegradedRunPersistenceFailureAsError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*JobOrchestrator, *RegisteredJob)
+	}{
+		{name: "manual", run: func(o *JobOrchestrator, job *RegisteredJob) { o.runDirect(job) }},
+		{name: "scheduled", run: func(o *JobOrchestrator, job *RegisteredJob) { o.wrapAndRun(job) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := newRecordingAutomationJobRunRepo()
+			repo.completeErr = errors.New("database unavailable")
+			metrics := &stubAutomationMetrics{}
+			orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+			orch.WithJobMetrics(metrics)
+			orch.Register("job", "degraded job", schedulerSpecEveryMinute(), func(context.Context) error {
+				return Degradedf("partial data")
+			})
+
+			tc.run(orch, orch.jobs["job"])
+
+			status := singleJobStatus(t, orch, "job")
+			if status.LastResult != "failed: run persistence" || status.ErrorCount != 1 || status.ConsecutiveFailures != 1 || status.LastErrorAt == nil {
+				t.Fatalf("status after degraded persistence failure = %+v", status)
+			}
+			if metrics.jobErrors != 1 {
+				t.Fatalf("automation error metrics = %d, want 1", metrics.jobErrors)
+			}
+		})
+	}
+}
+
 func TestJobOrchestratorDirectRunUsesOneTerminalTimestampAcrossHourlyBoundary(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -216,6 +327,9 @@ func TestJobOrchestratorDirectRunUsesOneTerminalTimestampAcrossHourlyBoundary(t 
 			repo := newRecordingAutomationJobRunRepo()
 			orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
 			orch.Register("current_data_refresh", "upstream", currentDataRefreshSpec, func(context.Context) error {
+				if test.jobErr == nil {
+					orch.setRefreshedTickers([]string{"AAPL"})
+				}
 				return test.jobErr
 			})
 			orch.Register("deep_scan", "consumer", deepScanSpec, func(context.Context) error { return nil }, "current_data_refresh")
@@ -245,14 +359,20 @@ func TestJobOrchestratorDirectRunUsesOneTerminalTimestampAcrossHourlyBoundary(t 
 			if !status.LastRun.Equal(terminalAt) {
 				t.Fatalf("terminal timestamp = %v, want %v", status.LastRun, terminalAt)
 			}
+			if test.jobErr == nil && strings.Join(persisted.Tickers, ",") != "AAPL" {
+				t.Fatalf("persisted tickers = %v, want exact refresh payload", persisted.Tickers)
+			}
 			if test.jobErr != nil && (status.LastErrorAt == nil || !status.LastErrorAt.Equal(terminalAt)) {
 				t.Fatalf("LastErrorAt = %v, want %v", status.LastErrorAt, terminalAt)
+			}
+			if test.jobErr != nil && (persisted.Error != "boom" || persisted.Detail != "") {
+				t.Fatalf("persisted failure = %+v, want error only", persisted)
 			}
 
 			if test.jobErr == nil {
 				liveDep, liveReason := orch.dependencyBlocker(orch.jobs["deep_scan"], boundary)
 				hydratedRepo := newRecordingAutomationJobRunRepo()
-				hydratedRepo.summaries = []pgrepo.JobRunSummary{{JobName: "current_data_refresh", LastRun: persisted.CompletedAt, LastResult: "ok", RunCount: 1}}
+				hydratedRepo.summaries = []pgrepo.JobRunSummary{{JobName: "current_data_refresh", LastRun: persisted.CompletedAt, LastResult: "ok", LastTickers: []string{"AAPL"}, RunCount: 1}}
 				hydrated := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: hydratedRepo})
 				hydrated.Register("current_data_refresh", "upstream", currentDataRefreshSpec, func(context.Context) error { return nil })
 				hydrated.Register("deep_scan", "consumer", deepScanSpec, func(context.Context) error { return nil }, "current_data_refresh")
@@ -319,6 +439,7 @@ type recordingAutomationJobRunRepo struct {
 	mu                sync.Mutex
 	runs              []pgrepo.JobRun
 	createErr         error
+	completeErr       error
 	failIncompleteErr error
 	summariesErr      error
 	summaries         []pgrepo.JobRunSummary
@@ -344,6 +465,9 @@ func (r *recordingAutomationJobRunRepo) Create(_ context.Context, run *pgrepo.Jo
 func (r *recordingAutomationJobRunRepo) Complete(_ context.Context, run *pgrepo.JobRun) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.completeErr != nil {
+		return r.completeErr
+	}
 	for i := range r.runs {
 		if r.runs[i].ID == run.ID {
 			r.runs[i] = *run
@@ -732,6 +856,10 @@ func TestDependencyBlockerRequiresSuccessfulSameDayRun(t *testing.T) {
 	if dep, reason := orch.dependencyBlocker(consumer, now); dep != "" || reason != "" {
 		t.Fatalf("successful blocker = (%q, %q), want none", dep, reason)
 	}
+	upstream.LastResult = "degraded after 2s"
+	if dep, reason := orch.dependencyBlocker(consumer, now); dep != "" || reason != "" {
+		t.Fatalf("degraded blocker = (%q, %q), want none", dep, reason)
+	}
 }
 
 func TestMarketDependencyCycleCheckMatchesHydratedState(t *testing.T) {
@@ -752,10 +880,11 @@ func TestMarketDependencyCycleCheckMatchesHydratedState(t *testing.T) {
 	upstream.LastRun = &completedAt
 	upstream.LastResult = "ok"
 	upstream.mu.Unlock()
+	inMemory.setRefreshedTickers([]string{"AAPL", "MSFT"})
 	inMemoryDep, inMemoryReason := inMemory.dependencyBlocker(inMemory.jobs["hot_scan"], now)
 
 	repo := newRecordingAutomationJobRunRepo()
-	repo.summaries = []pgrepo.JobRunSummary{{JobName: "current_data_refresh", LastRun: &completedAt, LastResult: "ok", RunCount: 1}}
+	repo.summaries = []pgrepo.JobRunSummary{{JobName: "current_data_refresh", LastRun: &completedAt, LastResult: "ok", LastTickers: []string{"AAPL", "MSFT"}, RunCount: 1}}
 	hydrated := newOrchestrator(repo)
 	hydrated.hydrateFromDB()
 	hydratedDep, hydratedReason := hydrated.dependencyBlocker(hydrated.jobs["hot_scan"], now)
@@ -765,14 +894,52 @@ func TestMarketDependencyCycleCheckMatchesHydratedState(t *testing.T) {
 	}
 }
 
+func TestCurrentDataRefreshPayloadSurvivesRestartAndBlocksLegacyHandoff(t *testing.T) {
+	completedAt := time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime)
+	now := completedAt.Add(5 * time.Minute)
+	newOrchestrator := func(summary pgrepo.JobRunSummary) *JobOrchestrator {
+		repo := newRecordingAutomationJobRunRepo()
+		repo.summaries = []pgrepo.JobRunSummary{summary}
+		orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+		orch.Register("current_data_refresh", "upstream", currentDataRefreshSpec, func(context.Context) error { return nil })
+		orch.Register("hot_scan", "consumer", hotScanSpec, func(context.Context) error { return nil }, "current_data_refresh")
+		orch.hydrateFromDB()
+		return orch
+	}
+
+	hydrated := newOrchestrator(pgrepo.JobRunSummary{JobName: "current_data_refresh", LastRun: &completedAt, LastResult: "degraded", LastDetail: "partial refresh", LastTickers: []string{"AAPL", "MSFT"}})
+	if got := strings.Join(hydrated.getRefreshedTickers(), ","); got != "AAPL,MSFT" {
+		t.Fatalf("hydrated tickers = %q", got)
+	}
+	if dep, reason := hydrated.dependencyBlocker(hydrated.jobs["hot_scan"], now); dep != "" || reason != "" {
+		t.Fatalf("hydrated payload blocker = (%q, %q)", dep, reason)
+	}
+
+	legacy := newOrchestrator(pgrepo.JobRunSummary{JobName: "current_data_refresh", LastRun: &completedAt, LastResult: "ok"})
+	if dep, reason := legacy.dependencyBlocker(legacy.jobs["hot_scan"], now); dep != "current_data_refresh" || reason != "fresh ticker payload unavailable" {
+		t.Fatalf("legacy blocker = (%q, %q)", dep, reason)
+	}
+	legacy.now = func() time.Time { return now }
+	legacy.runDirect(legacy.jobs["hot_scan"])
+	status := singleJobStatus(t, legacy, "hot_scan")
+	if status.LastResult != "skipped: dependency current_data_refresh fresh ticker payload unavailable" {
+		t.Fatalf("legacy hot scan result = %q", status.LastResult)
+	}
+	persisted := legacy.deps.JobRunRepo.(*recordingAutomationJobRunRepo).singleRun(t)
+	if persisted.Status != "skipped" {
+		t.Fatalf("legacy hot scan persisted status = %q", persisted.Status)
+	}
+}
+
 type stubAutomationMetrics struct {
 	alpacaRuns     map[string]int
 	kalshiDryRuns  map[string]int
 	kalshiOutcomes map[string]int
 	transitions    []string
+	jobErrors      int
 }
 
-func (m *stubAutomationMetrics) RecordAutomationJobError(string) {}
+func (m *stubAutomationMetrics) RecordAutomationJobError(string) { m.jobErrors++ }
 
 func (m *stubAutomationMetrics) RecordAlpacaReconcileRun(result string) {
 	if m.alpacaRuns == nil {
@@ -1053,9 +1220,68 @@ func TestStrategyResweepSkipsKalshiBeforeOHLCVDownload(t *testing.T) {
 			},
 		}},
 	})
+	orch.Register("strategy_resweep", "test", schedulerSpecEveryMinute(), orch.strategyResweep)
 
 	if err := orch.strategyResweep(context.Background()); err != nil {
 		t.Fatalf("strategyResweep() error = %v", err)
+	}
+	summary := singleJobStatus(t, orch, "strategy_resweep").LastSummary
+	if summary["strategies"] != 1 || summary["supported"] != 0 || summary["skipped"] != 1 {
+		t.Fatalf("strategyResweep() summary = %#v, want one skipped unsupported strategy", summary)
+	}
+}
+
+func TestStrategyTournamentSkipsKalshiBeforeOHLCVDownload(t *testing.T) {
+	t.Parallel()
+
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		StrategyRepo: &kalshiStrategyRepoStub{strategies: []domain.Strategy{
+			{
+				ID:         uuid.New(),
+				Name:       "auto: kalshi KXMENWORLDCUP-26-US",
+				Ticker:     "KXMENWORLDCUP-26-US",
+				MarketType: domain.MarketTypeKalshi,
+				Status:     domain.StrategyStatusActive,
+				IsPaper:    true,
+			},
+		}},
+	})
+	orch.Register("strategy_tournament", "test", schedulerSpecEveryMinute(), orch.strategyTournament)
+
+	if err := orch.strategyTournament(context.Background()); err != nil {
+		t.Fatalf("strategyTournament() error = %v", err)
+	}
+	summary := singleJobStatus(t, orch, "strategy_tournament").LastSummary
+	if summary["scanned"] != 1 || summary["supported"] != 0 || summary["skipped"] != 1 {
+		t.Fatalf("strategyTournament() summary = %#v, want one skipped unsupported strategy", summary)
+	}
+}
+
+func TestStrategyCoverageJobsRequireDataServiceForSupportedStrategies(t *testing.T) {
+	t.Parallel()
+
+	strategies := []domain.Strategy{{
+		ID:         uuid.New(),
+		Name:       "invalid config must not be parsed",
+		Ticker:     "AAPL",
+		MarketType: domain.MarketTypeStock,
+		Status:     domain.StrategyStatusActive,
+		Config:     json.RawMessage(`not JSON`),
+	}}
+	for _, tc := range []struct {
+		name string
+		run  func(*JobOrchestrator) error
+	}{
+		{name: "resweep", run: func(o *JobOrchestrator) error { return o.strategyResweep(context.Background()) }},
+		{name: "tournament", run: func(o *JobOrchestrator) error { return o.strategyTournament(context.Background()) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orch := NewJobOrchestrator(OrchestratorDeps{StrategyRepo: &kalshiStrategyRepoStub{strategies: strategies}})
+			err := tc.run(orch)
+			if err == nil || IsDegraded(err) || !strings.Contains(err.Error(), "data service is required for supported strategies") {
+				t.Fatalf("job error = %v, want true data service preflight error", err)
+			}
+		})
 	}
 }
 
@@ -1152,7 +1378,7 @@ func (s *kalshiStrategyRepoStub) List(context.Context, repository.StrategyFilter
 }
 
 func (s *kalshiStrategyRepoStub) Count(context.Context, repository.StrategyFilter) (int, error) {
-	return 0, nil
+	return len(s.strategies), nil
 }
 func (s *kalshiStrategyRepoStub) Update(context.Context, *domain.Strategy) error { return nil }
 func (s *kalshiStrategyRepoStub) Delete(context.Context, uuid.UUID) error        { return nil }

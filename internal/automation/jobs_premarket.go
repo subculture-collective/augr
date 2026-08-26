@@ -56,7 +56,7 @@ func (o *JobOrchestrator) registerPreMarketJobs() {
 
 func (o *JobOrchestrator) registerTickerDiscoveryJob() {
 	cfg := o.deps.TickerDiscovery
-	if !cfg.Enabled {
+	if !cfg.Enabled || !o.deps.PolygonBulkSnapshotsEnabled || o.deps.Polygon == nil || o.deps.Universe == nil {
 		return
 	}
 	cron := cfg.Cron

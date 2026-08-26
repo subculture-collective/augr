@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/automation"
@@ -16,7 +17,9 @@ type AutomationJobHealth struct {
 	Enabled             bool       `json:"enabled"`
 	Running             bool       `json:"running"`
 	LastRun             *time.Time `json:"last_run,omitempty"`
+	LastResult          string     `json:"last_result"`
 	LastError           string     `json:"last_error,omitempty"`
+	LastDetail          string     `json:"last_detail,omitempty"`
 	ErrorCount          int        `json:"error_count"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
 	RunCount            int        `json:"run_count"`
@@ -56,10 +59,17 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, _ *http.Reques
 	degradedJobs := 0
 
 	for _, st := range statuses {
-		if st.ConsecutiveFailures >= 3 {
+		lastResult := strings.ToLower(strings.TrimSpace(st.LastResult))
+		degraded := lastResult == "degraded" || strings.HasPrefix(lastResult, "degraded after ")
+		switch {
+		case degraded:
+			healthy = false
+			degradedJobs++
+		case st.ConsecutiveFailures >= 3:
 			healthy = false
 			failingJobs++
-		} else if st.ConsecutiveFailures >= 1 {
+		case st.ConsecutiveFailures >= 1:
+			healthy = false
 			degradedJobs++
 		}
 		jobs = append(jobs, AutomationJobHealth{
@@ -67,7 +77,9 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, _ *http.Reques
 			Enabled:             st.Enabled,
 			Running:             st.Running,
 			LastRun:             st.LastRun,
+			LastResult:          st.LastResult,
 			LastError:           st.LastError,
+			LastDetail:          st.LastDetail,
 			ErrorCount:          st.ErrorCount,
 			ConsecutiveFailures: st.ConsecutiveFailures,
 			RunCount:            st.RunCount,

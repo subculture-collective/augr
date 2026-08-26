@@ -397,6 +397,7 @@ export function buildAutomationHealth(overrides: Partial<AutomationHealthRespons
         enabled: true,
         running: false,
         last_run: automationFixtureDate,
+        last_result: 'ok',
         error_count: 0,
         consecutive_failures: 0,
         run_count: 3,

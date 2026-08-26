@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/automation"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -150,16 +151,79 @@ func TestAutomationHealthFailingJobsCount(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 
-	// No job has >= 3 consecutive failures, so failing_jobs=0 and healthy=true.
+	// No job has >= 3 consecutive failures, so failing_jobs=0.
 	if resp.FailingJobs != 0 {
 		t.Errorf("expected failing_jobs=0 (none have >=3 consecutive failures), got %d", resp.FailingJobs)
 	}
 	if resp.DegradedJobs != 2 {
 		t.Errorf("expected degraded_jobs=2 (job-1 and job-3 have 1-2 consecutive failures), got %d", resp.DegradedJobs)
 	}
-	// Neither has >=3 consecutive failures, so healthy=true.
-	if !resp.Healthy {
-		t.Errorf("expected healthy=true (no job has >=3 consecutive failures)")
+	if resp.Healthy {
+		t.Errorf("expected healthy=false when jobs are degraded")
+	}
+}
+
+func TestAutomationHealthClassifiesExplicitDegradedOutcome(t *testing.T) {
+	o := newTestOrchestrator()
+	o.Register("partial-job", "test job", scheduler.ScheduleSpec{Cron: "* * * * *", Type: scheduler.ScheduleTypeCron},
+		func(context.Context) error { return automation.Degradedf("partial provider response") },
+	)
+	if err := o.RunJob(context.Background(), "partial-job"); err != nil {
+		t.Fatalf("RunJob() error = %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if statuses := o.Status(); len(statuses) == 1 && statuses[0].RunCount == 1 && !statuses[0].Running {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if status := o.Status()[0]; status.RunCount != 1 || status.Running {
+		t.Fatalf("degraded job did not complete: %+v", status)
+	}
+
+	s := &Server{automation: o}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/automation/health", nil)
+	rr := httptest.NewRecorder()
+	s.handleGetAutomationHealth(rr, req)
+
+	var resp AutomationHealthResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Healthy || resp.DegradedJobs != 1 || resp.FailingJobs != 0 {
+		t.Fatalf("degraded health = %+v", resp)
+	}
+	if len(resp.Jobs) != 1 || resp.Jobs[0].LastResult != "degraded" || resp.Jobs[0].LastDetail != "partial provider response" || resp.Jobs[0].LastError != "" || resp.Jobs[0].ErrorCount != 0 || resp.Jobs[0].ConsecutiveFailures != 0 {
+		t.Fatalf("degraded job health = %+v", resp.Jobs)
+	}
+}
+
+func TestAutomationStatusExposesDegradedDetailNotError(t *testing.T) {
+	o := newTestOrchestrator()
+	o.Register("partial-job", "test job", scheduler.ScheduleSpec{Cron: "* * * * *", Type: scheduler.ScheduleTypeCron},
+		func(context.Context) error { return automation.Degradedf("partial provider response") },
+	)
+	if err := o.RunJob(context.Background(), "partial-job"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if status := o.Status()[0]; status.RunCount == 1 && !status.Running {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	s := &Server{automation: o}
+	rr := httptest.NewRecorder()
+	s.handleGetAutomationStatus(rr, httptest.NewRequest(http.MethodGet, "/api/v1/automation/status", nil))
+	var statuses []automation.JobStatus
+	if err := json.NewDecoder(rr.Body).Decode(&statuses); err != nil {
+		t.Fatal(err)
+	}
+	if len(statuses) != 1 || statuses[0].LastDetail != "partial provider response" || statuses[0].LastError != "" {
+		t.Fatalf("statuses = %+v", statuses)
 	}
 }
 

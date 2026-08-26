@@ -133,6 +133,7 @@ export function AutomationDetailPage() {
               <div><dt>Schedule</dt><dd>{job.schedule || 'Manual only'}</dd></div>
               <div><dt>Last run</dt><dd>{formatDate(job.last_run)}</dd></div>
               <div><dt>Last result</dt><dd>{automationOperationalState(job) === 'unverified' ? 'Unverified after deployment cutover' : job.last_result || '--'}</dd></div>
+              <div><dt>Last detail</dt><dd>{automationOperationalState(job) === 'degraded' ? job.last_detail || '--' : '--'}</dd></div>
               <div><dt>Last error</dt><dd>{automationOperationalState(job) === 'unverified' ? `Pre-deploy history excluded after ${automationCutover.deployment}` : job.last_error || '--'}</dd></div>
             </dl>
             {job.last_summary && automationOperationalState(job) !== 'unverified' ? name === 'daily_review' && reviewMetrics.some(({ key }) => numericSummaryValue(job.last_summary!, key) !== undefined) ? (
@@ -163,7 +164,7 @@ export function AutomationDetailPage() {
         {runs.length > 0 ? (
           <div className="table-wrap" role="region" aria-label="Automation run history" tabIndex={0}>
             <table aria-label="Automation run history">
-              <thead><tr><th>Status</th><th>Started</th><th>Completed</th><th>Duration</th><th>Error</th></tr></thead>
+              <thead><tr><th>Status</th><th>Started</th><th>Completed</th><th>Duration</th><th>Detail</th></tr></thead>
               <tbody>
                 {runs.map((run) => (
                   <tr key={run.id}>
@@ -171,7 +172,7 @@ export function AutomationDetailPage() {
                     <td>{formatDate(run.started_at)}</td>
                     <td>{formatDate(run.completed_at)}</td>
                     <td>{formatDuration(run.duration_ns)}</td>
-                    <td>{run.error || '--'}</td>
+                    <td>{run.detail ? <>Diagnostic: {run.detail}</> : run.error || '--'}</td>
                   </tr>
                 ))}
               </tbody>

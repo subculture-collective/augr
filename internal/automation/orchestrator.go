@@ -56,6 +56,29 @@ const (
 // ErrJobControlPersistence identifies a failed durable enable/disable write.
 var ErrJobControlPersistence = errors.New("automation: job control persistence failed")
 
+// DegradedError reports a completed automation run that needs operator
+// attention but is not a failed execution.
+type DegradedError struct {
+	Reason string
+}
+
+var _ error = (*DegradedError)(nil)
+
+func (e *DegradedError) Error() string {
+	return e.Reason
+}
+
+// Degradedf creates a degraded automation outcome with a human-readable reason.
+func Degradedf(format string, args ...any) error {
+	return &DegradedError{Reason: fmt.Sprintf(format, args...)}
+}
+
+// IsDegraded reports whether err contains a degraded automation outcome.
+func IsDegraded(err error) bool {
+	var degraded *DegradedError
+	return errors.As(err, &degraded)
+}
+
 type AutomationJobRunRepository interface {
 	Create(context.Context, *pgrepo.JobRun) error
 	Complete(context.Context, *pgrepo.JobRun) error
@@ -79,34 +102,35 @@ type TickerDiscoveryJobConfig struct {
 
 // OrchestratorDeps bundles external dependencies required by the orchestrator.
 type OrchestratorDeps struct {
-	Universe                    *universe.Universe
-	Polygon                     *polygon.Client
-	PolygonBulkSnapshotsEnabled bool
-	DataService                 *data.DataService
-	AlpacaReconciler            *AlpacaReconciler
-	OptionsProvider             data.OptionsDataProvider
-	LLMProvider                 llm.Provider
-	LLMQuickModel               string
-	GeneratorMetrics            discovery.GeneratorMetrics
-	TickerDiscovery             TickerDiscoveryJobConfig
-	EmbeddingProvider           embedding.Provider // optional; nil = skip embedding during triage
-	EventsProvider              data.EventsProvider
-	StrategyRepo                repository.StrategyRepository
-	PositionRepo                repository.PositionRepository
-	OrderRepo                   repository.OrderRepository
-	TradeRepo                   repository.TradeRepository
-	OptionSettlementRepo        repository.OptionSettlementRepository
-	OpportunityRepo             repository.OpportunityRepository
-	AllocationDecisionRepo      repository.AllocationDecisionRepository
-	RunRepo                     repository.PipelineRunRepository
-	JobRunRepo                  AutomationJobRunRepository
-	JobControlRepo              repository.AutomationJobControlRepository
-	OptionsScanRepo             *pgrepo.OptionsScanRepo
-	NewsFeedRepo                *pgrepo.NewsFeedRepo
-	StrategyTrigger             StrategyTrigger                        // optional; nil = no event-driven triggers
-	PolymarketAccountRepo       repository.PolymarketAccountRepository // optional; nil = skip profiling job
-	PolymarketReconciler        *polymarketexecution.Reconciler        // optional; nil = skip reconciliation job
-	PredictionSettler           interface {
+	Universe                     *universe.Universe
+	Polygon                      *polygon.Client
+	PolygonBulkSnapshotsEnabled  bool
+	DataService                  *data.DataService
+	AlpacaReconciler             *AlpacaReconciler
+	OptionsProvider              data.OptionsDataProvider
+	LLMProvider                  llm.Provider
+	LLMQuickModel                string
+	GeneratorMetrics             discovery.GeneratorMetrics
+	TickerDiscovery              TickerDiscoveryJobConfig
+	HistoryRefreshWatchlistLimit int
+	EmbeddingProvider            embedding.Provider // optional; nil = skip embedding during triage
+	EventsProvider               data.EventsProvider
+	StrategyRepo                 repository.StrategyRepository
+	PositionRepo                 repository.PositionRepository
+	OrderRepo                    repository.OrderRepository
+	TradeRepo                    repository.TradeRepository
+	OptionSettlementRepo         repository.OptionSettlementRepository
+	OpportunityRepo              repository.OpportunityRepository
+	AllocationDecisionRepo       repository.AllocationDecisionRepository
+	RunRepo                      repository.PipelineRunRepository
+	JobRunRepo                   AutomationJobRunRepository
+	JobControlRepo               repository.AutomationJobControlRepository
+	OptionsScanRepo              *pgrepo.OptionsScanRepo
+	NewsFeedRepo                 *pgrepo.NewsFeedRepo
+	StrategyTrigger              StrategyTrigger                        // optional; nil = no event-driven triggers
+	PolymarketAccountRepo        repository.PolymarketAccountRepository // optional; nil = skip profiling job
+	PolymarketReconciler         *polymarketexecution.Reconciler        // optional; nil = skip reconciliation job
+	PredictionSettler            interface {
 		PendingMarkets(context.Context, domain.MarketType) ([]string, error)
 		SettlePreview(context.Context, domain.MarketType, string) (*prediction.SettlementPreview, error)
 		PreviewMarket(context.Context, domain.MarketType, string) (int, error)
@@ -160,6 +184,7 @@ type RegisteredJob struct {
 	LastResult          string
 	LastSummary         map[string]int
 	LastError           string
+	LastDetail          string
 	LastErrorAt         *time.Time
 	RunCount            int
 	ErrorCount          int
@@ -178,6 +203,7 @@ type JobStatus struct {
 	LastResult          string                `json:"last_result"`
 	LastSummary         map[string]int        `json:"last_summary,omitempty"`
 	LastError           string                `json:"last_error,omitempty"`
+	LastDetail          string                `json:"last_detail,omitempty"`
 	LastErrorAt         *time.Time            `json:"last_error_at,omitempty"`
 	RunCount            int                   `json:"run_count"`
 	ErrorCount          int                   `json:"error_count"`
@@ -232,6 +258,8 @@ type JobOrchestrator struct {
 	kalshiGateUnhealthy bool
 	now                 func() time.Time
 	runs                *runcontrol.Group
+	refreshedTickersMu  sync.RWMutex
+	refreshedTickers    []string
 }
 
 // NewJobOrchestrator constructs a new orchestrator.
@@ -239,6 +267,9 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if deps.HistoryRefreshWatchlistLimit <= 0 {
+		deps.HistoryRefreshWatchlistLimit = defaultHistoryRefreshWatchlistLimit
 	}
 	return &JobOrchestrator{
 		jobs:   make(map[string]*RegisteredJob),
@@ -248,6 +279,19 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 		now:    time.Now,
 		runs:   runcontrol.NewGroup(),
 	}
+}
+
+func (o *JobOrchestrator) setRefreshedTickers(tickers []string) {
+	o.refreshedTickersMu.Lock()
+	o.refreshedTickers = append([]string(nil), tickers...)
+	o.refreshedTickersMu.Unlock()
+}
+
+func (o *JobOrchestrator) getRefreshedTickers() []string {
+	o.refreshedTickersMu.RLock()
+	tickers := append([]string(nil), o.refreshedTickers...)
+	o.refreshedTickersMu.RUnlock()
+	return tickers
 }
 
 func (o *JobOrchestrator) currentTime() time.Time {
@@ -411,6 +455,7 @@ func (o *JobOrchestrator) Status() []JobStatus {
 			LastResult:          job.LastResult,
 			LastSummary:         cloneSummary(job.LastSummary),
 			LastError:           job.LastError,
+			LastDetail:          job.LastDetail,
 			LastErrorAt:         job.LastErrorAt,
 			RunCount:            job.RunCount,
 			ErrorCount:          job.ErrorCount,
@@ -524,17 +569,30 @@ func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *Register
 	start := time.Now()
 	ctx, cancel := o.jobContextFrom(parent)
 	defer cancel()
+	if job.Name == "current_data_refresh" {
+		o.setRefreshedTickers(nil)
+	}
 	err := invokeAutomationJob(ctx, job.Fn)
 	elapsed := time.Since(start)
+	degraded := IsDegraded(err)
 
 	job.mu.Lock()
 	completedAt := o.currentTime()
 	job.LastRun = &completedAt
 	job.RunCount++
-	if err != nil {
+	switch {
+	case degraded:
+		job.LastResult = "degraded"
+		job.LastError = ""
+		job.LastDetail = err.Error()
+		job.LastErrorAt = nil
+		job.ConsecutiveFailures = 0
+		o.logger.Warn("automation: job degraded", slog.String("job", job.Name), slog.Duration("elapsed", elapsed), slog.String("reason", err.Error()))
+	case err != nil:
 		job.ErrorCount++
 		job.LastResult = "failed"
 		job.LastError = err.Error()
+		job.LastDetail = ""
 		job.LastErrorAt = &completedAt
 		job.ConsecutiveFailures++
 		o.logger.Error("automation: job failed", slog.String("job", job.Name), slog.Duration("elapsed", elapsed), slog.Any("error", err))
@@ -548,9 +606,10 @@ func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *Register
 				slog.Int("consecutive_failures", job.ConsecutiveFailures),
 			)
 		}
-	} else {
+	default:
 		job.LastResult = "success"
 		job.LastError = ""
+		job.LastDetail = ""
 		job.ConsecutiveFailures = 0
 		o.logger.Info("automation: job completed", slog.String("job", job.Name), slog.Duration("elapsed", elapsed))
 	}
@@ -558,7 +617,7 @@ func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *Register
 
 	if persistErr := o.completeRun(run, job, completedAt, elapsed, err); persistErr != nil {
 		o.logger.Error("automation: failed to persist job run", slog.String("job", job.Name), slog.Any("error", persistErr))
-		if err == nil {
+		if err == nil || degraded {
 			_ = o.applyRunPersistenceFailure(job, completedAt, persistErr)
 		}
 	}
@@ -688,17 +747,29 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 
 	ctx, cancel := o.jobContextFrom(parent)
 	defer cancel()
+	if job.Name == "current_data_refresh" {
+		o.setRefreshedTickers(nil)
+	}
 	err = invokeAutomationJob(ctx, job.Fn)
 
 	elapsed := time.Since(start)
 	completedAt := o.currentTime()
+	degraded := IsDegraded(err)
 
 	job.mu.Lock()
 	job.LastRun = &completedAt
 	job.RunCount++
-	if err != nil {
+	switch {
+	case degraded:
+		job.LastError = ""
+		job.LastDetail = err.Error()
+		job.LastErrorAt = nil
+		job.ConsecutiveFailures = 0
+		job.LastResult = fmt.Sprintf("degraded after %s", elapsed.Truncate(time.Millisecond))
+	case err != nil:
 		job.ErrorCount++
 		job.LastError = err.Error()
+		job.LastDetail = ""
 		job.LastErrorAt = &completedAt
 		job.ConsecutiveFailures++
 		job.LastResult = fmt.Sprintf("error after %s", elapsed.Truncate(time.Millisecond))
@@ -712,8 +783,9 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 				slog.Int("consecutive_failures", job.ConsecutiveFailures),
 			)
 		}
-	} else {
+	default:
 		job.LastError = ""
+		job.LastDetail = ""
 		job.ConsecutiveFailures = 0
 		job.LastResult = fmt.Sprintf("ok in %s", elapsed.Truncate(time.Millisecond))
 	}
@@ -721,18 +793,26 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 
 	if persistErr := o.completeRun(run, job, completedAt, elapsed, err); persistErr != nil {
 		o.logger.Error("automation: failed to persist job run", slog.String("job", job.Name), slog.Any("error", persistErr))
-		if err == nil {
+		if err == nil || degraded {
 			err = o.applyRunPersistenceFailure(job, completedAt, persistErr)
+			degraded = false
 		}
 	}
 
-	if err != nil {
+	switch {
+	case degraded:
+		o.logger.Warn("automation: job degraded",
+			slog.String("job", job.Name),
+			slog.Duration("elapsed", elapsed),
+			slog.String("reason", err.Error()),
+		)
+	case err != nil:
 		o.logger.Error("automation: job failed",
 			slog.String("job", job.Name),
 			slog.Duration("elapsed", elapsed),
 			slog.Any("error", err),
 		)
-	} else {
+	default:
 		o.logger.Info("automation: job completed",
 			slog.String("job", job.Name),
 			slog.Duration("elapsed", elapsed),
@@ -764,6 +844,8 @@ func (o *JobOrchestrator) dependencyBlocker(job *RegisteredJob, now time.Time) (
 			return dep, "latest run is from a prior automation day"
 		case !successfulJobResult(lastResult):
 			return dep, "latest run was not successful"
+		case dep == "current_data_refresh" && len(o.getRefreshedTickers()) == 0:
+			return dep, "fresh ticker payload unavailable"
 		case marketPipelineCycleStart(job.Name, now).After(*lastRun):
 			return dep, "latest successful run is from a prior hourly cycle"
 		}
@@ -789,7 +871,7 @@ func marketPipelineCycleStart(jobName string, now time.Time) time.Time {
 
 func successfulJobResult(result string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(result))
-	return normalized == "ok" || normalized == "success" || strings.HasPrefix(normalized, "ok in ")
+	return normalized == "ok" || normalized == "success" || normalized == "degraded" || strings.HasPrefix(normalized, "ok in ") || strings.HasPrefix(normalized, "degraded after ")
 }
 
 func (o *JobOrchestrator) recordDependencySkip(job *RegisteredJob, at time.Time, dep, reason string) {
@@ -805,6 +887,7 @@ func (o *JobOrchestrator) recordDependencySkip(job *RegisteredJob, at time.Time,
 	job.StartedAt = nil
 	job.LastRun = &at
 	job.LastResult = "skipped: " + message
+	job.LastDetail = ""
 	job.RunCount++
 	lastErrorAt := job.LastErrorAt
 	consecutiveFailures := job.ConsecutiveFailures
@@ -862,6 +945,7 @@ func (o *JobOrchestrator) applyRunPersistenceFailure(job *RegisteredJob, at time
 	job.mu.Lock()
 	job.ErrorCount++
 	job.LastError = err.Error()
+	job.LastDetail = ""
 	job.LastErrorAt = &at
 	job.ConsecutiveFailures++
 	job.LastResult = "failed: run persistence"
@@ -889,7 +973,11 @@ func (o *JobOrchestrator) completeRun(run *pgrepo.JobRun, job *RegisteredJob, co
 
 	status := "ok"
 	var errMsg string
-	if jobErr != nil {
+	var detail string
+	if IsDegraded(jobErr) {
+		status = "degraded"
+		detail = jobErr.Error()
+	} else if jobErr != nil {
 		status = "error"
 		errMsg = jobErr.Error()
 	}
@@ -910,9 +998,18 @@ func (o *JobOrchestrator) completeRun(run *pgrepo.JobRun, job *RegisteredJob, co
 	run.CompletedAt = &completedAt
 	run.DurationNs = elapsed.Nanoseconds()
 	run.Result = result
+	if job != nil && job.Name == "current_data_refresh" && (status == "ok" || status == "degraded") {
+		run.Tickers = append([]string{}, o.getRefreshedTickers()...)
+	}
 	run.Error = errMsg
-	run.LastErrorAt = lastErrorAt
-	run.ConsecutiveFailures = consecutiveFailures
+	run.Detail = detail
+	if status == "degraded" {
+		run.LastErrorAt = nil
+		run.ConsecutiveFailures = 0
+	} else {
+		run.LastErrorAt = lastErrorAt
+		run.ConsecutiveFailures = consecutiveFailures
+	}
 
 	persistCtx, cancel := context.WithTimeout(context.Background(), jobRunPersistenceTimeout)
 	defer cancel()
@@ -969,14 +1066,23 @@ func (o *JobOrchestrator) hydrateFromDB() {
 			job.LastRun = s.LastRun
 			job.LastResult = s.LastResult
 			job.LastError = s.LastError
+			job.LastDetail = s.LastDetail
 			job.LastErrorAt = s.LastErrorAt
 			job.RunCount = s.RunCount
 			job.ErrorCount = s.ErrorCount
 			job.ConsecutiveFailures = s.ConsecutiveFailures
-			if shouldDisableAfterHydration(s.ConsecutiveFailures) {
+			if strings.EqualFold(strings.TrimSpace(s.LastResult), "degraded") {
+				job.LastError = ""
+				job.LastErrorAt = nil
+				job.ConsecutiveFailures = 0
+			}
+			if shouldDisableAfterHydration(job.ConsecutiveFailures) {
 				job.Enabled = false
 			}
 			job.mu.Unlock()
+			if s.JobName == "current_data_refresh" {
+				o.setRefreshedTickers(s.LastTickers)
+			}
 		}
 
 		o.logger.Info("automation: hydrated job stats from DB", slog.Int("jobs", len(summaries)))

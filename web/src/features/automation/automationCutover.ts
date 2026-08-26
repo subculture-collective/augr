@@ -17,6 +17,7 @@ export function automationOperationalState(job: AutomationJobStatus): Automation
   if (!job.enabled) return 'disabled'
   if (job.running) return 'running'
   if (!isPostAutomationCutover(job.last_run)) return 'unverified'
+  if (/^degraded(?: after .+)?$/i.test(job.last_result.trim())) return 'degraded'
   if (currentAutomationErrorCount(job) >= 3) return 'failing'
   if (currentAutomationErrorCount(job) > 0) return 'degraded'
   return 'healthy'

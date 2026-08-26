@@ -37,6 +37,7 @@ type Config struct {
 	LiveTradingAllowedStrategies []string
 	LiveTradingAllowedBrokers    []string
 	TickerDiscovery              TickerDiscoveryConfig
+	HistoryRefreshWatchlistLimit int
 }
 
 // TickerDiscoveryConfig holds settings for the automated ticker discovery pipeline.
@@ -641,6 +642,11 @@ func loadFromEnvironment() (Config, error) {
 		return Config{}, err
 	}
 
+	historyRefreshWatchlistLimit, err := getEnvInt("HISTORY_REFRESH_WATCHLIST_LIMIT", 250)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Environment: getEnvString("APP_ENV", "development"),
 		Server: ServerConfig{
@@ -872,6 +878,7 @@ func loadFromEnvironment() (Config, error) {
 			MinADV:     tickerDiscoveryMinADV,
 			MaxTickers: tickerDiscoveryMaxTickers,
 		},
+		HistoryRefreshWatchlistLimit: historyRefreshWatchlistLimit,
 	}
 
 	return cfg, nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -35,17 +36,35 @@ type IVHistoryRecord struct {
 
 // OptionsScanRepo persists options scan results and IV history.
 type OptionsScanRepo struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	begin func(context.Context) (optionsScanTx, error)
+}
+
+type optionsScanTx interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Commit(context.Context) error
+	Rollback(context.Context) error
 }
 
 // NewOptionsScanRepo returns a new OptionsScanRepo.
 func NewOptionsScanRepo(pool *pgxpool.Pool) *OptionsScanRepo {
-	return &OptionsScanRepo{pool: pool}
+	return &OptionsScanRepo{pool: pool, begin: func(ctx context.Context) (optionsScanTx, error) { return pool.Begin(ctx) }}
 }
 
 // UpsertScanResult inserts or updates a scan result for a ticker+date.
 func (r *OptionsScanRepo) UpsertScanResult(ctx context.Context, res *OptionsScanResult) error {
-	_, err := r.pool.Exec(ctx,
+	if err := upsertScanResult(ctx, r.pool, res); err != nil {
+		return fmt.Errorf("postgres: upsert options scan result: %w", err)
+	}
+	return nil
+}
+
+type optionsScanExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func upsertScanResult(ctx context.Context, executor optionsScanExecutor, res *OptionsScanResult) error {
+	_, err := executor.Exec(ctx,
 		`INSERT INTO options_scan_results
 			(ticker, scan_date, close_price, adv, iv_rank, iv_percentile, atm_iv, put_call_ratio, volume_ratio, chain_depth, atm_oi, score)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -59,10 +78,7 @@ func (r *OptionsScanRepo) UpsertScanResult(ctx context.Context, res *OptionsScan
 		res.IVRank, res.IVPercentile, res.ATMIV, res.PutCallRatio,
 		res.VolumeRatio, res.ChainDepth, res.ATMOI, res.Score,
 	)
-	if err != nil {
-		return fmt.Errorf("postgres: upsert options scan result: %w", err)
-	}
-	return nil
+	return err
 }
 
 // ListLatestScan returns the most recent scan results for a given date.
@@ -98,15 +114,38 @@ func (r *OptionsScanRepo) ListLatestScan(ctx context.Context, date time.Time, li
 
 // UpsertIVHistory records daily ATM IV for a ticker.
 func (r *OptionsScanRepo) UpsertIVHistory(ctx context.Context, rec *IVHistoryRecord) error {
-	_, err := r.pool.Exec(ctx,
+	if err := upsertIVHistory(ctx, r.pool, rec); err != nil {
+		return fmt.Errorf("postgres: upsert iv history: %w", err)
+	}
+	return nil
+}
+
+func upsertIVHistory(ctx context.Context, executor optionsScanExecutor, rec *IVHistoryRecord) error {
+	_, err := executor.Exec(ctx,
 		`INSERT INTO iv_history (ticker, date, atm_iv, iv_rank, iv_percentile)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (ticker, date) DO UPDATE SET
 			atm_iv = EXCLUDED.atm_iv, iv_rank = EXCLUDED.iv_rank, iv_percentile = EXCLUDED.iv_percentile`,
 		rec.Ticker, rec.Date, rec.ATMIV, rec.IVRank, rec.IVPercentile,
 	)
+	return err
+}
+
+// UpsertScanAndHistory atomically records a scan result and its IV history.
+func (r *OptionsScanRepo) UpsertScanAndHistory(ctx context.Context, res *OptionsScanResult, rec *IVHistoryRecord) error {
+	tx, err := r.begin(ctx)
 	if err != nil {
+		return fmt.Errorf("postgres: begin options evidence transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := upsertScanResult(ctx, tx, res); err != nil {
+		return fmt.Errorf("postgres: upsert options scan result: %w", err)
+	}
+	if err := upsertIVHistory(ctx, tx, rec); err != nil {
 		return fmt.Errorf("postgres: upsert iv history: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit options evidence transaction: %w", err)
 	}
 	return nil
 }

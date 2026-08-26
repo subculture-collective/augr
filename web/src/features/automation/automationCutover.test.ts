@@ -37,4 +37,20 @@ describe('automation cutover', () => {
     expect(automationOperationalState(currentFailure)).toBe('failing')
     expect(currentAutomationErrorCount(currentFailure)).toBe(6)
   })
+
+  it.each(['degraded', 'degraded after 12.345ms'])(
+    'classifies a post-deployment %s result before error counts',
+    (lastResult) => {
+      const degradedJob = job({
+        last_run: '2026-08-24T11:26:34Z',
+        last_error_at: undefined,
+        last_result: lastResult,
+        error_count: 6,
+        consecutive_failures: 0,
+      })
+
+      expect(automationOperationalState(degradedJob)).toBe('degraded')
+      expect(currentAutomationErrorCount(degradedJob)).toBe(0)
+    },
+  )
 })

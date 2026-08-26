@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -18,7 +19,7 @@ func (o *JobOrchestrator) registerOvernightJobs() {
 	o.Register("overnight_backtest", "Heavy 5-year backtests on promising candidates", overnightBacktestSpec, o.overnightBacktest, "history_refresh", "overnight_sweep")
 	o.Register("overnight_sweep", "Parameter optimization on deployed strategies", overnightSweepSpec, o.overnightSweep, "history_refresh")
 	o.Register("overnight_generate", "LLM generates new strategy ideas per index group", overnightGenerateSpec, o.overnightGenerate, "overnight_sweep", "overnight_backtest")
-	o.Register("history_refresh", "Download latest OHLCV for all universe tickers", historyRefreshSpec, o.historyRefresh)
+	o.Register("history_refresh", "Refresh 5-year OHLCV for holdings, active strategies, and top watchlist", historyRefreshSpec, o.historyRefresh)
 	o.Register("options_discovery", "Full options strategy discovery pipeline", optionsDiscoverySpec, o.optionsDiscovery, "overnight_generate")
 }
 
@@ -294,30 +295,31 @@ func overnightGenerateCompletionError(errors int) error {
 	return fmt.Errorf("overnight_generate: %d index groups failed", errors)
 }
 
-// historyRefresh downloads latest OHLCV for all active tickers in
-// the universe, batching 10 at a time with a 1-second pause for rate
-// limiting.
+// historyRefresh downloads five years of daily OHLCV for operational stock
+// tickers, batching 10 at a time with a one-second rate-limit pause.
 func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
-	summary := map[string]int{"tickers": 0, "updated": 0, "cache_revalidated": 0, "provider_requests": 0, "fresh_bars": 0, "empty": 0, "stale": 0, "failed": 0, "batches": 0}
+	summary := map[string]int{"tickers": 0, "selected": 0, "positions": 0, "strategies": 0, "watchlist": 0, "updated": 0, "cache_revalidated": 0, "provider_requests": 0, "provider_failures": 0, "fresh_bars": 0, "empty": 0, "stale": 0, "failed": 0, "batches": 0}
 	defer func() { o.SetLastSummary("history_refresh", summary) }()
 	o.logger.Info("history_refresh: starting")
 
-	if o.deps.Universe == nil {
-		return fmt.Errorf("history_refresh: universe not configured")
-	}
 	if o.deps.DataService == nil {
 		return fmt.Errorf("history_refresh: data service not configured")
 	}
 
-	allTickers, err := o.deps.Universe.GetActiveTickers(ctx, "", 0)
+	selection, err := o.selectOperationalStockTickers(ctx)
 	if err != nil {
-		return fmt.Errorf("history_refresh: get active tickers: %w", err)
+		return fmt.Errorf("history_refresh: select operational tickers: %w", err)
 	}
+	allTickers := selection.Tickers
 
 	now := time.Now()
 	summary["tickers"] = len(allTickers)
+	summary["selected"] = len(allTickers)
+	summary["positions"] = selection.Positions
+	summary["strategies"] = selection.Strategies
+	summary["watchlist"] = selection.Watchlist
 	if len(allTickers) == 0 {
-		return fmt.Errorf("history_refresh: active universe empty")
+		return fmt.Errorf("history_refresh: no operational stock tickers selected")
 	}
 	histFrom := now.AddDate(-5, 0, 0)
 	batchSize := 10
@@ -341,75 +343,89 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 			histFrom, now, true,
 		)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			if download == nil {
+				summary["failed"] += len(batch)
+				return fmt.Errorf("history_refresh: batch download at %d: %w", i, err)
+			}
+			o.logger.Warn("history_refresh: partial batch download", slog.Int("offset", i), slog.Any("error", err))
+		} else if download == nil {
 			summary["failed"] += len(batch)
-			o.logger.Warn("history_refresh: batch download failed",
-				slog.Int("batch_start", i),
-				slog.Any("error", err),
+			return fmt.Errorf("history_refresh: batch download at %d returned no result", i)
+		}
+		cacheOnly := make([]string, 0, len(batch))
+		for _, ticker := range batch {
+			if download.ProviderRequests[ticker] == 0 {
+				cacheOnly = append(cacheOnly, ticker)
+			}
+		}
+		if len(cacheOnly) > 0 {
+			trailingFrom := now.AddDate(0, 0, -10)
+			revalidated, refreshErr := o.deps.DataService.DownloadHistoricalOHLCVWithStats(
+				ctx, domain.MarketTypeStock,
+				cacheOnly, data.Timeframe1d,
+				trailingFrom, now, false,
 			)
-		} else {
-			cacheOnly := make([]string, 0, len(batch))
-			for _, ticker := range batch {
-				if download.ProviderRequests[ticker] == 0 {
-					cacheOnly = append(cacheOnly, ticker)
+			if refreshErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
-			}
-			revalidationFailed := make(map[string]struct{}, len(cacheOnly))
-			if len(cacheOnly) > 0 {
-				trailingFrom := now.AddDate(0, 0, -10)
-				revalidated, refreshErr := o.deps.DataService.DownloadHistoricalOHLCVWithStats(
-					ctx, domain.MarketTypeStock,
-					cacheOnly, data.Timeframe1d,
-					trailingFrom, now, false,
-				)
-				if refreshErr != nil {
+				if errors.Is(refreshErr, context.Canceled) || errors.Is(refreshErr, context.DeadlineExceeded) {
+					return refreshErr
+				}
+				if revalidated == nil {
 					summary["failed"] += len(cacheOnly)
-					for _, ticker := range cacheOnly {
-						revalidationFailed[ticker] = struct{}{}
-					}
-					o.logger.Warn("history_refresh: cache revalidation failed",
-						slog.Int("batch_start", i),
-						slog.Int("tickers", len(cacheOnly)),
-						slog.Any("error", refreshErr),
-					)
-				} else {
-					for _, ticker := range cacheOnly {
-						download.ProviderRequests[ticker] += revalidated.ProviderRequests[ticker]
-						download.FreshBars[ticker] += revalidated.FreshBars[ticker]
-						if len(revalidated.Bars[ticker]) > 0 {
-							download.Bars[ticker] = revalidated.Bars[ticker]
-						}
-						if revalidated.FreshBars[ticker] > 0 {
-							summary["cache_revalidated"]++
-						}
-					}
+					return fmt.Errorf("history_refresh: cache revalidation at %d: %w", i, refreshErr)
+				}
+				o.logger.Warn("history_refresh: partial cache revalidation", slog.Int("offset", i), slog.Any("error", refreshErr))
+			} else if revalidated == nil {
+				summary["failed"] += len(cacheOnly)
+				return fmt.Errorf("history_refresh: cache revalidation at %d returned no result", i)
+			}
+			for _, ticker := range cacheOnly {
+				download.ProviderRequests[ticker] += revalidated.ProviderRequests[ticker]
+				download.ProviderFailures[ticker] += revalidated.ProviderFailures[ticker]
+				download.FreshBars[ticker] += revalidated.FreshBars[ticker]
+				if len(revalidated.Bars[ticker]) > 0 {
+					download.Bars[ticker] = revalidated.Bars[ticker]
+				}
+				if revalidated.FreshBars[ticker] > 0 {
+					summary["cache_revalidated"]++
 				}
 			}
+		}
 
-			for _, ticker := range batch {
-				if _, failed := revalidationFailed[ticker]; failed {
-					continue
-				}
-				summary["provider_requests"] += download.ProviderRequests[ticker]
-				summary["fresh_bars"] += download.FreshBars[ticker]
-				if download.ProviderRequests[ticker] == 0 {
-					summary["failed"]++
-					continue
-				}
-				if download.FreshBars[ticker] == 0 {
-					summary["empty"]++
-					continue
-				}
-				bars := download.Bars[ticker]
-				if len(bars) == 0 {
-					summary["empty"]++
-					continue
-				}
-				if !dailyBarFresh(now, bars[len(bars)-1].Timestamp) {
-					summary["stale"]++
-					continue
-				}
-				summary["updated"]++
+		for _, ticker := range batch {
+			summary["provider_requests"] += download.ProviderRequests[ticker]
+			summary["provider_failures"] += download.ProviderFailures[ticker]
+			summary["fresh_bars"] += download.FreshBars[ticker]
+			if download.ProviderFailures[ticker] > 0 {
+				summary["failed"]++
+				continue
 			}
+			if download.ProviderRequests[ticker] == 0 {
+				summary["failed"]++
+				continue
+			}
+			if download.FreshBars[ticker] == 0 {
+				summary["empty"]++
+				continue
+			}
+			bars := download.Bars[ticker]
+			if len(bars) == 0 {
+				summary["empty"]++
+				continue
+			}
+			if !dailyBarFresh(now, bars[len(bars)-1].Timestamp) {
+				summary["stale"]++
+				continue
+			}
+			summary["updated"]++
 		}
 
 		processed += len(batch)
@@ -436,11 +452,23 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 }
 
 func historyRefreshCompletionError(summary map[string]int) error {
-	if summary["failed"] == 0 && summary["empty"] == 0 && summary["stale"] == 0 {
+	selected := summary["selected"]
+	if selected == 0 {
+		selected = summary["tickers"]
+	}
+	updated := summary["updated"]
+	coverage := 0
+	if selected > 0 {
+		coverage = updated * 100 / selected
+	}
+	if selected == 0 || updated == 0 || updated*2 < selected {
+		return fmt.Errorf("history_refresh: unusable coverage: updated=%d selected=%d coverage=%d%% minimum=50%%", updated, selected, coverage)
+	}
+	if updated == selected && summary["failed"] == 0 && summary["empty"] == 0 && summary["stale"] == 0 {
 		return nil
 	}
-	return fmt.Errorf("history_refresh: incomplete coverage: failed=%d empty=%d stale=%d tickers=%d",
-		summary["failed"], summary["empty"], summary["stale"], summary["tickers"])
+	return Degradedf("history_refresh: partial coverage: updated=%d selected=%d coverage=%d%% failed=%d empty=%d stale=%d",
+		updated, selected, coverage, summary["failed"], summary["empty"], summary["stale"])
 }
 
 // optionsDiscovery runs the full options strategy discovery pipeline.

@@ -1,12 +1,147 @@
 package backtest
 
 import (
+	"encoding/json"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
+
+func TestMetricsJSONRoundTripEveryNumericField(t *testing.T) {
+	t.Parallel()
+
+	type metricField struct {
+		name string
+		set  func(*Metrics, float64)
+		get  func(Metrics) float64
+	}
+	fields := []metricField{
+		{"fill_rate", func(m *Metrics, v float64) { m.FillRate = v }, func(m Metrics) float64 { return m.FillRate }},
+		{"total_return", func(m *Metrics, v float64) { m.TotalReturn = v }, func(m Metrics) float64 { return m.TotalReturn }},
+		{"buy_and_hold_return", func(m *Metrics, v float64) { m.BuyAndHoldReturn = v }, func(m Metrics) float64 { return m.BuyAndHoldReturn }},
+		{"max_drawdown", func(m *Metrics, v float64) { m.MaxDrawdown = v }, func(m Metrics) float64 { return m.MaxDrawdown }},
+		{"calmar_ratio", func(m *Metrics, v float64) { m.CalmarRatio = v }, func(m Metrics) float64 { return m.CalmarRatio }},
+		{"sharpe_ratio", func(m *Metrics, v float64) { m.SharpeRatio = v }, func(m Metrics) float64 { return m.SharpeRatio }},
+		{"sortino_ratio", func(m *Metrics, v float64) { m.SortinoRatio = v }, func(m Metrics) float64 { return m.SortinoRatio }},
+		{"alpha", func(m *Metrics, v float64) { m.Alpha = v }, func(m Metrics) float64 { return m.Alpha }},
+		{"beta", func(m *Metrics, v float64) { m.Beta = v }, func(m Metrics) float64 { return m.Beta }},
+		{"information_ratio", func(m *Metrics, v float64) { m.InformationRatio = v }, func(m Metrics) float64 { return m.InformationRatio }},
+		{"win_rate", func(m *Metrics, v float64) { m.WinRate = v }, func(m Metrics) float64 { return m.WinRate }},
+		{"profit_factor", func(m *Metrics, v float64) { m.ProfitFactor = v }, func(m Metrics) float64 { return m.ProfitFactor }},
+		{"avg_win_loss_ratio", func(m *Metrics, v float64) { m.AvgWinLossRatio = v }, func(m Metrics) float64 { return m.AvgWinLossRatio }},
+		{"volatility", func(m *Metrics, v float64) { m.Volatility = v }, func(m Metrics) float64 { return m.Volatility }},
+		{"start_equity", func(m *Metrics, v float64) { m.StartEquity = v }, func(m Metrics) float64 { return m.StartEquity }},
+		{"end_equity", func(m *Metrics, v float64) { m.EndEquity = v }, func(m Metrics) float64 { return m.EndEquity }},
+		{"realized_pnl", func(m *Metrics, v float64) { m.RealizedPnL = v }, func(m Metrics) float64 { return m.RealizedPnL }},
+		{"unrealized_pnl", func(m *Metrics, v float64) { m.UnrealizedPnL = v }, func(m Metrics) float64 { return m.UnrealizedPnL }},
+	}
+	values := []struct {
+		name  string
+		value float64
+	}{
+		{"finite", -123.456},
+		{"NaN", math.NaN()},
+		{"positive_infinity", math.Inf(1)},
+		{"negative_infinity", math.Inf(-1)},
+	}
+	start := time.Date(2025, 2, 3, 4, 5, 6, 7, time.FixedZone("test", -5*60*60))
+	end := start.Add(37*time.Hour + 11*time.Nanosecond)
+
+	for _, field := range fields {
+		field := field
+		for _, testValue := range values {
+			testValue := testValue
+			t.Run(field.name+"/"+testValue.name, func(t *testing.T) {
+				t.Parallel()
+				input := Metrics{OrderAttempts: 17, OrderFills: 13, TotalBars: 991, StartTime: start, EndTime: end}
+				for i, otherField := range fields {
+					otherField.set(&input, float64(i)+0.125)
+				}
+				field.set(&input, testValue.value)
+
+				encoded, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var output Metrics
+				if err := json.Unmarshal(encoded, &output); err != nil {
+					t.Fatalf("json.Unmarshal(%s): %v", encoded, err)
+				}
+				if output.OrderAttempts != input.OrderAttempts || output.OrderFills != input.OrderFills || output.TotalBars != input.TotalBars {
+					t.Fatalf("integer fields changed: got %#v, want %#v", output, input)
+				}
+				if !output.StartTime.Equal(input.StartTime) || !output.EndTime.Equal(input.EndTime) {
+					t.Fatalf("timestamps changed: got %v..%v, want %v..%v", output.StartTime, output.EndTime, input.StartTime, input.EndTime)
+				}
+				for _, otherField := range fields {
+					assertSameFloat(t, otherField.name, otherField.get(output), otherField.get(input))
+				}
+			})
+		}
+	}
+}
+
+func TestMetricsUnmarshalJSONRejectsMalformedValues(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{
+		`{"sharpe_ratio":"nan"}`,
+		`{"sharpe_ratio":"+Infinity"}`,
+		`{"sharpe_ratio":"infinity"}`,
+		`{"sharpe_ratio":null}`,
+		`{"sharpe_ratio":true}`,
+		`{"sharpe_ratio":[]}`,
+		`{"sharpe_ratio":1e400}`,
+		`{"total_bars":92233720368547758070}`,
+		`{"sharpe_ratio":1} trailing`,
+		`{"sharpe_ratio":1,"sharpe_ratio":"NaN"}`,
+		`{"sharpe_ratio":01}`,
+		`[1]`,
+	} {
+		input := input
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			var metrics Metrics
+			if err := json.Unmarshal([]byte(input), &metrics); err == nil {
+				t.Fatalf("json.Unmarshal(%s) error = nil", input)
+			}
+		})
+	}
+}
+
+func TestMetricsUnmarshalJSONAcceptsBackwardFiniteJSON(t *testing.T) {
+	t.Parallel()
+
+	var metrics Metrics
+	if err := json.Unmarshal([]byte(`{"order_attempts":9,"fill_rate":0.75,"sharpe_ratio":1.5,"start_equity":1000,"total_bars":42}`), &metrics); err != nil {
+		t.Fatal(err)
+	}
+	if metrics.OrderAttempts != 9 || metrics.FillRate != 0.75 || metrics.SharpeRatio != 1.5 || metrics.StartEquity != 1000 || metrics.TotalBars != 42 {
+		t.Fatalf("decoded metrics = %#v", metrics)
+	}
+}
+
+func assertSameFloat(t *testing.T, field string, got, want float64) {
+	t.Helper()
+	switch {
+	case math.IsNaN(want):
+		if !math.IsNaN(got) {
+			t.Errorf("%s = %v, want NaN", field, got)
+		}
+	case math.IsInf(want, 1):
+		if !math.IsInf(got, 1) {
+			t.Errorf("%s = %v, want +Inf", field, got)
+		}
+	case math.IsInf(want, -1):
+		if !math.IsInf(got, -1) {
+			t.Errorf("%s = %v, want -Inf", field, got)
+		}
+	case got != want:
+		t.Errorf("%s = %v, want %v", field, got, want)
+	}
+}
 
 func TestComputeMetricsEmpty(t *testing.T) {
 	t.Parallel()

@@ -1,9 +1,11 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,7 +21,9 @@ type JobRun struct {
 	CompletedAt         *time.Time     `json:"completed_at,omitempty"`
 	DurationNs          int64          `json:"duration_ns,omitempty"`
 	Result              map[string]int `json:"result,omitempty"`
+	Tickers             []string       `json:"tickers,omitempty"`
 	Error               string         `json:"error,omitempty"`
+	Detail              string         `json:"detail,omitempty"`
 	LastErrorAt         *time.Time     `json:"last_error_at,omitempty"`
 	ConsecutiveFailures int            `json:"consecutive_failures"`
 	CreatedAt           time.Time      `json:"created_at"`
@@ -31,10 +35,108 @@ type JobRunSummary struct {
 	LastRun             *time.Time `json:"last_run,omitempty"`
 	LastResult          string     `json:"last_result"`
 	LastError           string     `json:"last_error,omitempty"`
+	LastDetail          string     `json:"last_detail,omitempty"`
+	LastTickers         []string   `json:"last_tickers,omitempty"`
 	LastErrorAt         *time.Time `json:"last_error_at,omitempty"`
 	RunCount            int        `json:"run_count"`
 	ErrorCount          int        `json:"error_count"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
+}
+
+const (
+	jobRunTickersKey = "_tickers"
+	jobRunDetailKey  = "_detail"
+)
+
+func encodeJobRunResult(result map[string]int, tickers []string, detail string) ([]byte, error) {
+	if result == nil && tickers == nil && detail == "" {
+		return nil, nil
+	}
+	payload := make(map[string]any, len(result)+2)
+	for key, value := range result {
+		if key == jobRunTickersKey || key == jobRunDetailKey {
+			return nil, fmt.Errorf("reserved result key %q", key)
+		}
+		payload[key] = value
+	}
+	if tickers != nil {
+		payload[jobRunTickersKey] = tickers
+	}
+	if detail != "" {
+		payload[jobRunDetailKey] = detail
+	}
+	return json.Marshal(payload)
+}
+
+func decodeJobRunResult(raw []byte) (map[string]int, []string, string, error) {
+	if len(raw) == 0 {
+		return nil, nil, "", nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if opening != json.Delim('{') {
+		return nil, nil, "", fmt.Errorf("result must be a JSON object")
+	}
+	counts := make(map[string]int)
+	seen := make(map[string]struct{})
+	var tickers []string
+	var detail string
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return nil, nil, "", err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return nil, nil, "", fmt.Errorf("result key must be a string")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return nil, nil, "", fmt.Errorf("duplicate result key %q", key)
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, nil, "", err
+		}
+		switch key {
+		case jobRunTickersKey:
+			if err := json.Unmarshal(value, &tickers); err != nil || tickers == nil {
+				return nil, nil, "", fmt.Errorf("%s must be a string array", jobRunTickersKey)
+			}
+		case jobRunDetailKey:
+			var decoded any
+			if err := json.Unmarshal(value, &decoded); err != nil {
+				return nil, nil, "", fmt.Errorf("%s must be a string", jobRunDetailKey)
+			}
+			var ok bool
+			detail, ok = decoded.(string)
+			if !ok {
+				return nil, nil, "", fmt.Errorf("%s must be a string", jobRunDetailKey)
+			}
+		default:
+			var count int
+			if err := json.Unmarshal(value, &count); err != nil {
+				return nil, nil, "", fmt.Errorf("result count %q must be an integer: %w", key, err)
+			}
+			counts[key] = count
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, nil, "", err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("unexpected trailing JSON value")
+		}
+		return nil, nil, "", err
+	}
+	if len(counts) == 0 {
+		counts = nil
+	}
+	return counts, tickers, detail, nil
 }
 
 // JobRunRepo persists automation job runs to PostgreSQL.
@@ -50,13 +152,9 @@ func NewJobRunRepo(pool *pgxpool.Pool) *JobRunRepo {
 // Create inserts a new job run record.
 func (r *JobRunRepo) Create(ctx context.Context, run *JobRun) error {
 	run.ID = uuid.New()
-	var resultJSON []byte
-	if run.Result != nil {
-		var err error
-		resultJSON, err = json.Marshal(run.Result)
-		if err != nil {
-			return fmt.Errorf("postgres: marshal job run result: %w", err)
-		}
+	resultJSON, err := encodeJobRunResult(run.Result, run.Tickers, run.Detail)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal job run result: %w", err)
 	}
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO automation_job_runs (id, job_name, status, started_at, completed_at, duration_ns, result, error, last_error_at, consecutive_failures)
@@ -69,13 +167,9 @@ func (r *JobRunRepo) Create(ctx context.Context, run *JobRun) error {
 
 // Complete updates an admitted running row with its terminal outcome.
 func (r *JobRunRepo) Complete(ctx context.Context, run *JobRun) error {
-	var resultJSON []byte
-	if run.Result != nil {
-		var err error
-		resultJSON, err = json.Marshal(run.Result)
-		if err != nil {
-			return fmt.Errorf("postgres: marshal completed job run result: %w", err)
-		}
+	resultJSON, err := encodeJobRunResult(run.Result, run.Tickers, run.Detail)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal completed job run result: %w", err)
 	}
 	commandTag, err := r.pool.Exec(ctx,
 		`UPDATE automation_job_runs
@@ -188,7 +282,9 @@ func scanJobRuns(rows jobRunRows) ([]JobRun, error) {
 			run.CompletedAt = completed
 		}
 		if len(resultRaw) > 0 {
-			if err := json.Unmarshal(resultRaw, &run.Result); err != nil {
+			var err error
+			run.Result, run.Tickers, run.Detail, err = decodeJobRunResult(resultRaw)
+			if err != nil {
 				return nil, fmt.Errorf("postgres: unmarshal job run result: %w", err)
 			}
 		}
@@ -238,21 +334,36 @@ func (r *JobRunRepo) Summaries(ctx context.Context) ([]JobRunSummary, error) {
 		var errStr *string
 		var lastErrAt *time.Time
 		var consecutiveFailures int
+		var resultRaw []byte
 		err := r.pool.QueryRow(ctx,
-			`SELECT status, error, last_error_at, consecutive_failures
+			`SELECT status, error, last_error_at, consecutive_failures, result
 			 FROM automation_job_runs
 			 WHERE job_name = $1
 			 ORDER BY COALESCE(completed_at, started_at) DESC, started_at DESC
 			 LIMIT 1`,
 			s.JobName,
-		).Scan(&status, &errStr, &lastErrAt, &consecutiveFailures)
-		if err == nil {
-			summaries[i].LastResult = status
-			if errStr != nil {
+		).Scan(&status, &errStr, &lastErrAt, &consecutiveFailures, &resultRaw)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: latest job run summary for %q: %w", s.JobName, err)
+		}
+		summaries[i].LastResult = status
+		if errStr != nil {
+			if status == "degraded" {
+				summaries[i].LastDetail = *errStr
+			} else {
 				summaries[i].LastError = *errStr
 			}
-			summaries[i].LastErrorAt = lastErrAt
-			summaries[i].ConsecutiveFailures = consecutiveFailures
+		}
+		summaries[i].LastErrorAt = lastErrAt
+		summaries[i].ConsecutiveFailures = consecutiveFailures
+		_, tickers, detail, decodeErr := decodeJobRunResult(resultRaw)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("postgres: decode latest job run result for %q: %w", s.JobName, decodeErr)
+		}
+		summaries[i].LastTickers = tickers
+		summaries[i].LastDetail = detail
+		if status == "degraded" && detail == "" && errStr != nil {
+			summaries[i].LastDetail = *errStr
 		}
 	}
 

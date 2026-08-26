@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/agent"
@@ -55,10 +56,30 @@ func universeRefreshCompletionError(count int) error {
 // 1-year period and ranks them by Sharpe ratio.
 func (o *JobOrchestrator) strategyTournament(ctx context.Context) error {
 	o.logger.Info("strategy_tournament: starting")
+	summary := map[string]int{"scanned": 0, "supported": 0, "ranked": 0, "coverage_bps": 0, "skipped": 0, "failed": 0, "provider_contacted": 0, "cache_only": 0, "stale": 0, "config_failed": 0, "fetch_failed": 0, "insufficient": 0, "backtest_failed": 0, "nonfinite": 0}
+	defer func() { o.SetLastSummary("strategy_tournament", summary) }()
+	if o.deps.StrategyRepo == nil {
+		return fmt.Errorf("strategy_tournament: strategy repository is required")
+	}
 
 	strategies, err := listAllStrategies(ctx, o.deps.StrategyRepo, repository.StrategyFilter{Status: "active"})
 	if err != nil {
 		return fmt.Errorf("strategy_tournament: list strategies: %w", err)
+	}
+	summary["scanned"] = len(strategies)
+	for _, strat := range strategies {
+		if eventmarkets.SupportsOHLCVResweep(strat.MarketType) {
+			summary["supported"]++
+		} else {
+			summary["skipped"]++
+		}
+	}
+	if summary["supported"] == 0 {
+		o.logger.Info("strategy_tournament: completed", slog.Int("strategies_ranked", 0), slog.Int("failed", 0), slog.Int("skipped", summary["skipped"]))
+		return strategyTournamentCompletionError(summary)
+	}
+	if o.deps.DataService == nil {
+		return fmt.Errorf("strategy_tournament: data service is required for supported strategies")
 	}
 
 	now := time.Now()
@@ -70,21 +91,19 @@ func (o *JobOrchestrator) strategyTournament(ctx context.Context) error {
 		sharpe float64
 	}
 	var rankings []ranked
-	var eligible, skipped, failed, providerContacted, cacheOnly, stale int
 
 	for _, strat := range strategies {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if !eventmarkets.SupportsOHLCVResweep(strat.MarketType) {
-			skipped++
 			continue
 		}
-		eligible++
 
 		rulesConfig, err := extractRulesConfig(strat.Config)
 		if err != nil {
-			failed++
+			summary["failed"]++
+			summary["config_failed"]++
 			o.logger.Warn("strategy_tournament: bad config",
 				slog.String("strategy", strat.Name),
 				slog.Any("error", err),
@@ -98,7 +117,11 @@ func (o *JobOrchestrator) strategyTournament(ctx context.Context) error {
 			data.Timeframe1d, histFrom, now, true,
 		)
 		if err != nil {
-			failed++
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			summary["failed"]++
+			summary["fetch_failed"]++
 			o.logger.Warn("strategy_tournament: download failed",
 				slog.String("ticker", strat.Ticker),
 				slog.Any("error", err),
@@ -107,26 +130,27 @@ func (o *JobOrchestrator) strategyTournament(ctx context.Context) error {
 		}
 
 		if download.ProviderRequests[strat.Ticker] == 0 {
-			failed++
-			cacheOnly++
+			summary["failed"]++
+			summary["cache_only"]++
 			o.logger.Warn("strategy_tournament: provider freshness unavailable",
 				slog.String("ticker", strat.Ticker),
 			)
 			continue
 		}
-		providerContacted++
+		summary["provider_contacted"]++
 		bars := download.Bars[strat.Ticker]
 		if len(bars) < 50 {
-			failed++
+			summary["failed"]++
+			summary["insufficient"]++
 			o.logger.Warn("strategy_tournament: insufficient bars",
 				slog.String("ticker", strat.Ticker),
 				slog.Int("bars", len(bars)),
 			)
 			continue
 		}
-		if !dailyBarFresh(now, bars[len(bars)-1].Timestamp) {
-			failed++
-			stale++
+		if !completedDailyBarFresh(strat.MarketType, now, bars[len(bars)-1].Timestamp) {
+			summary["failed"]++
+			summary["stale"]++
 			o.logger.Warn("strategy_tournament: stale latest bar",
 				slog.String("ticker", strat.Ticker),
 				slog.Time("latest", bars[len(bars)-1].Timestamp),
@@ -136,11 +160,21 @@ func (o *JobOrchestrator) strategyTournament(ctx context.Context) error {
 
 		metrics, err := backtestStrategy(ctx, *rulesConfig, strat.Ticker, bars, o.logger)
 		if err != nil {
-			failed++
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			summary["failed"]++
+			summary["backtest_failed"]++
 			o.logger.Warn("strategy_tournament: backtest failed",
 				slog.String("ticker", strat.Ticker),
 				slog.Any("error", err),
 			)
+			continue
+		}
+		if !validTournamentSharpe(metrics.SharpeRatio) {
+			summary["failed"]++
+			summary["nonfinite"]++
+			o.logger.Warn("strategy_tournament: non-finite Sharpe ratio", slog.String("ticker", strat.Ticker))
 			continue
 		}
 
@@ -174,10 +208,33 @@ func (o *JobOrchestrator) strategyTournament(ctx context.Context) error {
 		}
 	}
 
-	o.SetLastSummary("strategy_tournament", map[string]int{"scanned": len(strategies), "eligible": eligible, "skipped": skipped, "ranked": len(rankings), "failed": failed, "provider_contacted": providerContacted, "cache_only": cacheOnly, "stale": stale})
-	o.logger.Info("strategy_tournament: completed", slog.Int("strategies_ranked", len(rankings)), slog.Int("failed", failed), slog.Int("skipped", skipped))
-	if failed > 0 {
-		return fmt.Errorf("strategy_tournament: %d of %d eligible strategies failed", failed, eligible)
+	summary["ranked"] = len(rankings)
+	summary["coverage_bps"] = coverageBasisPoints(summary["ranked"], summary["supported"])
+	o.logger.Info("strategy_tournament: completed", slog.Int("strategies_ranked", len(rankings)), slog.Int("failed", summary["failed"]), slog.Int("skipped", summary["skipped"]))
+	return strategyTournamentCompletionError(summary)
+}
+
+func validTournamentSharpe(sharpe float64) bool {
+	return !math.IsNaN(sharpe) && !math.IsInf(sharpe, 0)
+}
+
+func strategyTournamentCompletionError(summary map[string]int) error {
+	supported, ranked := summary["supported"], summary["ranked"]
+	coverage := coverageBasisPoints(ranked, supported)
+	summary["coverage_bps"] = coverage
+	if supported == 0 {
+		return nil
+	}
+	detail := fmt.Sprintf("supported=%d ranked=%d coverage_bps=%d provider_contacted=%d failed=%d config_failed=%d fetch_failed=%d cache_only=%d insufficient=%d stale=%d backtest_failed=%d nonfinite=%d",
+		supported, ranked, coverage, summary["provider_contacted"], summary["failed"], summary["config_failed"], summary["fetch_failed"], summary["cache_only"], summary["insufficient"], summary["stale"], summary["backtest_failed"], summary["nonfinite"])
+	if supported > 0 && (ranked == 0 || summary["provider_contacted"] == 0) {
+		return fmt.Errorf("strategy_tournament: zero ranking or provider coverage: %s", detail)
+	}
+	if supported > 0 && coverage < 7000 {
+		return fmt.Errorf("strategy_tournament: coverage below 70%%: %s", detail)
+	}
+	if summary["failed"] > 0 || coverage < 10_000 {
+		return Degradedf("strategy_tournament: completed with findings: %s", detail)
 	}
 	return nil
 }

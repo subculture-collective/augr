@@ -67,6 +67,7 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	t.Setenv("ENABLE_REDIS_CACHE", "false")
 	t.Setenv("LIVE_TRADING_ALLOWED_STRATEGIES", "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222")
 	t.Setenv("LIVE_TRADING_ALLOWED_BROKERS", "Alpaca,Binance")
+	t.Setenv("HISTORY_REFRESH_WATCHLIST_LIMIT", "321")
 
 	cfg, err := Load()
 	if err != nil {
@@ -75,6 +76,9 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 
 	if cfg.Server.Host != "127.0.0.1" {
 		t.Fatalf("cfg.Server.Host = %q, want %q", cfg.Server.Host, "127.0.0.1")
+	}
+	if cfg.HistoryRefreshWatchlistLimit != 321 {
+		t.Fatalf("cfg.HistoryRefreshWatchlistLimit = %d, want 321", cfg.HistoryRefreshWatchlistLimit)
 	}
 
 	if cfg.Server.Port != 9090 {
@@ -308,6 +312,17 @@ func TestLoadAppliesResilienceDefaults(t *testing.T) {
 	}
 	if cfg.DataProviders.PolygonBulkSnapshotsEnabled {
 		t.Fatal("cfg.DataProviders.PolygonBulkSnapshotsEnabled = true, want default false")
+	}
+	if cfg.HistoryRefreshWatchlistLimit != 250 {
+		t.Fatalf("cfg.HistoryRefreshWatchlistLimit = %d, want default 250", cfg.HistoryRefreshWatchlistLimit)
+	}
+}
+
+func TestValidateRequiresPositiveHistoryRefreshWatchlistLimit(t *testing.T) {
+	cfg := validConfig()
+	cfg.HistoryRefreshWatchlistLimit = 0
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "HISTORY_REFRESH_WATCHLIST_LIMIT must be greater than 0") {
+		t.Fatalf("Validate() error = %v, want history refresh limit error", err)
 	}
 }
 
@@ -565,7 +580,8 @@ func TestValidateRejectsInvalidPaperEvaluationProfile(t *testing.T) {
 
 func validConfig() Config {
 	return Config{
-		Environment: "test",
+		HistoryRefreshWatchlistLimit: 250,
+		Environment:                  "test",
 		Server: ServerConfig{
 			Host: "127.0.0.1",
 			Port: 8080,
@@ -991,6 +1007,7 @@ func clearConfigEnv(t *testing.T) {
 		"LLM_BUDGET_REQUESTS_DAY",
 		"LLM_BUDGET_TOKENS_DAY",
 		"LLM_THROTTLE_CONCURRENCY",
+		"HISTORY_REFRESH_WATCHLIST_LIMIT",
 	} {
 		t.Setenv(key, "")
 	}

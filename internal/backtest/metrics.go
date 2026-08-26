@@ -1,7 +1,10 @@
 package backtest
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"math"
 	"sort"
 	"time"
@@ -97,6 +100,141 @@ func (m Metrics) MarshalJSON() ([]byte, error) {
 		RealizedPnL:      jsonFloatValue(m.RealizedPnL),
 		UnrealizedPnL:    jsonFloatValue(m.UnrealizedPnL),
 	})
+}
+
+type metricJSONFloat float64
+
+func (f *metricJSONFloat) UnmarshalJSON(data []byte) error {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return fmt.Errorf("metric must not be null")
+	}
+	var value float64
+	if err := json.Unmarshal(data, &value); err == nil {
+		*f = metricJSONFloat(value)
+		return nil
+	}
+
+	var sentinel string
+	if err := json.Unmarshal(data, &sentinel); err != nil {
+		return fmt.Errorf("metric must be a JSON number or non-finite sentinel: %w", err)
+	}
+	switch sentinel {
+	case "NaN":
+		*f = metricJSONFloat(math.NaN())
+	case "Infinity":
+		*f = metricJSONFloat(math.Inf(1))
+	case "-Infinity":
+		*f = metricJSONFloat(math.Inf(-1))
+	default:
+		return fmt.Errorf("unknown non-finite metric sentinel %q", sentinel)
+	}
+	return nil
+}
+
+// UnmarshalJSON accepts the finite numbers used by older reports and the exact
+// non-finite sentinels emitted by MarshalJSON.
+func (m *Metrics) UnmarshalJSON(data []byte) error {
+	type metricsJSON struct {
+		OrderAttempts    int             `json:"order_attempts"`
+		OrderFills       int             `json:"order_fills"`
+		FillRate         metricJSONFloat `json:"fill_rate"`
+		TotalReturn      metricJSONFloat `json:"total_return"`
+		BuyAndHoldReturn metricJSONFloat `json:"buy_and_hold_return"`
+		MaxDrawdown      metricJSONFloat `json:"max_drawdown"`
+		CalmarRatio      metricJSONFloat `json:"calmar_ratio"`
+		SharpeRatio      metricJSONFloat `json:"sharpe_ratio"`
+		SortinoRatio     metricJSONFloat `json:"sortino_ratio"`
+		Alpha            metricJSONFloat `json:"alpha"`
+		Beta             metricJSONFloat `json:"beta"`
+		InformationRatio metricJSONFloat `json:"information_ratio"`
+		WinRate          metricJSONFloat `json:"win_rate"`
+		ProfitFactor     metricJSONFloat `json:"profit_factor"`
+		AvgWinLossRatio  metricJSONFloat `json:"avg_win_loss_ratio"`
+		Volatility       metricJSONFloat `json:"volatility"`
+		StartEquity      metricJSONFloat `json:"start_equity"`
+		EndEquity        metricJSONFloat `json:"end_equity"`
+		StartTime        time.Time       `json:"start_time"`
+		EndTime          time.Time       `json:"end_time"`
+		TotalBars        int             `json:"total_bars"`
+		RealizedPnL      metricJSONFloat `json:"realized_pnl"`
+		UnrealizedPnL    metricJSONFloat `json:"unrealized_pnl"`
+	}
+
+	if err := rejectDuplicateMetricFields(data); err != nil {
+		return err
+	}
+	var decoded metricsJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = Metrics{
+		OrderAttempts:    decoded.OrderAttempts,
+		OrderFills:       decoded.OrderFills,
+		FillRate:         float64(decoded.FillRate),
+		TotalReturn:      float64(decoded.TotalReturn),
+		BuyAndHoldReturn: float64(decoded.BuyAndHoldReturn),
+		MaxDrawdown:      float64(decoded.MaxDrawdown),
+		CalmarRatio:      float64(decoded.CalmarRatio),
+		SharpeRatio:      float64(decoded.SharpeRatio),
+		SortinoRatio:     float64(decoded.SortinoRatio),
+		Alpha:            float64(decoded.Alpha),
+		Beta:             float64(decoded.Beta),
+		InformationRatio: float64(decoded.InformationRatio),
+		WinRate:          float64(decoded.WinRate),
+		ProfitFactor:     float64(decoded.ProfitFactor),
+		AvgWinLossRatio:  float64(decoded.AvgWinLossRatio),
+		Volatility:       float64(decoded.Volatility),
+		StartEquity:      float64(decoded.StartEquity),
+		EndEquity:        float64(decoded.EndEquity),
+		StartTime:        decoded.StartTime,
+		EndTime:          decoded.EndTime,
+		TotalBars:        decoded.TotalBars,
+		RealizedPnL:      float64(decoded.RealizedPnL),
+		UnrealizedPnL:    float64(decoded.UnrealizedPnL),
+	}
+	return nil
+}
+
+func rejectDuplicateMetricFields(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return fmt.Errorf("metrics must be a JSON object")
+	}
+
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		fieldToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		field, ok := fieldToken.(string)
+		if !ok {
+			return fmt.Errorf("invalid metrics field name")
+		}
+		if _, duplicate := seen[field]; duplicate {
+			return fmt.Errorf("duplicate metrics field %q", field)
+		}
+		seen[field] = struct{}{}
+
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("unexpected data after metrics object")
+		}
+		return err
+	}
+	return nil
 }
 
 // ComputeMetrics calculates performance metrics from an equity curve.

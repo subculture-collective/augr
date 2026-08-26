@@ -8,16 +8,22 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/config"
+	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
+	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
 
 func TestCurrentDataRefreshSkipsPredictionMarketPositions(t *testing.T) {
+	universeRepo := &operationalUniverseRepo{}
 	orch := NewJobOrchestrator(OrchestratorDeps{
 		PositionRepo: newRecordingPositionRepo(
 			&domain.Position{ID: uuid.New(), Ticker: "AAPL", MarketType: domain.MarketTypeStock},
 			&domain.Position{ID: uuid.New(), Ticker: "KXTEST:YES", MarketType: domain.MarketTypeKalshi},
 		),
+		StrategyRepo: &kalshiStrategyRepoStub{},
+		Universe:     universe.NewUniverse(universeRepo, nil, nil),
 	})
 	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
 
@@ -27,6 +33,30 @@ func TestCurrentDataRefreshSkipsPredictionMarketPositions(t *testing.T) {
 	status := singleJobStatus(t, orch, "current_data_refresh")
 	if got := status.LastSummary["tickers"]; got != 1 {
 		t.Fatalf("refreshed ticker count = %d, want only the stock position", got)
+	}
+}
+
+func TestHotScanRequiresAndConsumesCurrentRefreshState(t *testing.T) {
+	repo := &operationalUniverseRepo{watchlist: []universe.TrackedTicker{{Ticker: "WRONG"}}}
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		Universe:    universe.NewUniverse(repo, nil, nil),
+		DataService: data.NewDataService(config.Config{}, nil, nil, nil, nil),
+	})
+	orch.Register("hot_scan", "test", hotScanSpec, orch.hotScan)
+	if err := orch.hotScan(context.Background()); err == nil || !strings.Contains(err.Error(), "no fresh ticker selection") {
+		t.Fatalf("hotScan() without refresh error = %v", err)
+	}
+
+	orch.setRefreshedTickers([]string{"AAPL", "MSFT"})
+	if err := orch.hotScan(context.Background()); err == nil {
+		t.Fatal("hotScan() with unavailable market data error = nil")
+	}
+	status := singleJobStatus(t, orch, "hot_scan")
+	if got := status.LastSummary["selected"]; got != 2 {
+		t.Fatalf("hot scan selected = %d, want exact refreshed set size 2", got)
+	}
+	if repo.limit != 0 {
+		t.Fatalf("hot scan queried watchlist with limit %d", repo.limit)
 	}
 }
 
@@ -102,6 +132,9 @@ func TestMarketPipelineDependenciesRequireCurrentHourlyCycle(t *testing.T) {
 			dependency.LastRun = &test.completedAt
 			dependency.LastResult = "success"
 			dependency.mu.Unlock()
+			if test.dependency == "current_data_refresh" {
+				orch.setRefreshedTickers([]string{"AAPL"})
+			}
 
 			blockedBy, _ := orch.dependencyBlocker(orch.jobs[test.consumer], test.now)
 			if got := blockedBy != ""; got != test.wantBlocked {
@@ -132,12 +165,21 @@ func TestCanonicalTriggeredStrategiesDeduplicatesSchedulerKeys(t *testing.T) {
 func TestMarketScanCompletionErrorFailsVisibleOnPartialCoverage(t *testing.T) {
 	t.Parallel()
 
-	if err := marketScanCompletionError("deep_scan", map[string]int{}); err != nil {
-		t.Fatalf("marketScanCompletionError(empty) = %v, want nil", err)
+	if err := marketScanCompletionError("deep_scan", map[string]int{}, 50); err == nil {
+		t.Fatal("marketScanCompletionError(empty) = nil, want coverage error")
 	}
-	err := marketScanCompletionError("deep_scan", map[string]int{"fetch_errors": 1, "insufficient": 2, "stale": 3, "score_errors": 4, "strategy_list_failed": 5})
-	if err == nil || !strings.Contains(err.Error(), "fetch_errors=1 insufficient=2 stale=3 score_errors=4 strategy_list_failed=5") {
+	err := marketScanCompletionError("deep_scan", map[string]int{"selected": 10, "scored": 5, "fetch_errors": 1, "insufficient": 2, "stale": 2}, 50)
+	if err == nil || !IsDegraded(err) || !strings.Contains(err.Error(), "coverage=50%") {
 		t.Fatalf("marketScanCompletionError(partial) = %v", err)
+	}
+	if err := marketScanCompletionError("hot_scan", map[string]int{"selected": 10, "scored": 7, "insufficient": 3}, 80); err == nil || IsDegraded(err) {
+		t.Fatalf("marketScanCompletionError(below floor) = %v, want true error", err)
+	}
+	if err := marketScanCompletionError("hot_scan", map[string]int{"selected": 10, "scored": 8, "insufficient": 2}, 80); !IsDegraded(err) {
+		t.Fatalf("marketScanCompletionError(at floor) = %v, want degraded", err)
+	}
+	if err := marketScanCompletionError("hot_scan", map[string]int{"selected": 10, "scored": 10, "score_errors": 1}, 80); err == nil || IsDegraded(err) {
+		t.Fatalf("marketScanCompletionError(score infrastructure) = %v, want true error", err)
 	}
 }
 
@@ -202,17 +244,43 @@ func TestMarketBarFreshnessUsesRegularSessionAndTradingDate(t *testing.T) {
 	}
 }
 
-func TestCurrentDataRefreshCompletionErrorOnlyRejectsSystemicFailure(t *testing.T) {
+func TestCurrentDataRefreshCompletionErrorUsesIntradayCoverage(t *testing.T) {
 	t.Parallel()
 
 	if err := currentDataRefreshCompletionError(map[string]int{}); err != nil {
 		t.Fatalf("currentDataRefreshCompletionError(empty) = %v, want nil", err)
 	}
-	if err := currentDataRefreshCompletionError(map[string]int{"tickers": 4, "updated": 1, "cache_only": 2, "daily_stale": 1}); err != nil {
-		t.Fatalf("currentDataRefreshCompletionError(partial success) = %v, want nil", err)
+	if err := currentDataRefreshCompletionError(map[string]int{"tickers": 10, "updated": 8, "cache_only": 2, "daily_stale": 1}); !IsDegraded(err) {
+		t.Fatalf("currentDataRefreshCompletionError(at floor) = %v, want degraded", err)
 	}
-	err := currentDataRefreshCompletionError(map[string]int{"tickers": 4, "cache_only": 2, "daily_stale": 1})
+	err := currentDataRefreshCompletionError(map[string]int{"tickers": 10, "updated": 7, "cache_only": 3, "daily_updated": 10})
+	if err == nil || IsDegraded(err) || !strings.Contains(err.Error(), "coverage=70%") {
+		t.Fatalf("currentDataRefreshCompletionError(below floor with daily success) = %v, want true error", err)
+	}
+	err = currentDataRefreshCompletionError(map[string]int{"tickers": 4, "daily_updated": 4, "cache_only": 2, "daily_stale": 1})
 	if err == nil || !strings.Contains(err.Error(), "cache_only=2") || !strings.Contains(err.Error(), "stale=1") {
-		t.Fatalf("currentDataRefreshCompletionError(systemic failure) = %v", err)
+		t.Fatalf("currentDataRefreshCompletionError(daily only) = %v", err)
+	}
+	if err := currentDataRefreshCompletionError(map[string]int{"tickers": 4, "updated": 4, "errors": 1}); err == nil || IsDegraded(err) {
+		t.Fatalf("currentDataRefreshCompletionError(systemic) = %v, want true error", err)
+	}
+}
+
+func TestCurrentDataRefreshHandsOffExactDegradedSelection(t *testing.T) {
+	orch := NewJobOrchestrator(OrchestratorDeps{})
+	err := orch.completeCurrentDataRefresh(map[string]int{"selected": 10, "updated": 8, "empty": 2}, []string{"AAPL", "MSFT"})
+	if !IsDegraded(err) {
+		t.Fatalf("completeCurrentDataRefresh() = %v, want degraded", err)
+	}
+	if got := orch.getRefreshedTickers(); len(got) != 2 || got[0] != "AAPL" || got[1] != "MSFT" {
+		t.Fatalf("refreshed tickers = %v, want exact degraded selection", got)
+	}
+	orch.setRefreshedTickers([]string{"KEEP"})
+	err = orch.completeCurrentDataRefresh(map[string]int{"selected": 10, "updated": 7, "empty": 3}, []string{"DROP"})
+	if err == nil || IsDegraded(err) {
+		t.Fatalf("completeCurrentDataRefresh() = %v, want true error", err)
+	}
+	if got := orch.getRefreshedTickers(); len(got) != 1 || got[0] != "KEEP" {
+		t.Fatalf("refreshed tickers after true error = %v, want prior selection unchanged", got)
 	}
 }

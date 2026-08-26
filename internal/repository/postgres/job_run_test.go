@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -107,6 +108,87 @@ func TestScanJobRunsIncludesResult(t *testing.T) {
 	}
 }
 
+func TestJobRunResultJSONBackwardCompatibility(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name        string
+		raw         string
+		wantCount   int
+		wantTickers []string
+		wantDetail  string
+	}{
+		{name: "legacy counts", raw: `{"processed":7}`, wantCount: 7},
+		{name: "counts and tickers", raw: `{"processed":7,"_tickers":["AAPL","MSFT"]}`, wantCount: 7, wantTickers: []string{"AAPL", "MSFT"}},
+		{name: "counts tickers and detail", raw: `{"processed":7,"_tickers":["AAPL","MSFT"],"_detail":"partial provider response"}`, wantCount: 7, wantTickers: []string{"AAPL", "MSFT"}, wantDetail: "partial provider response"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			counts, tickers, detail, err := decodeJobRunResult([]byte(test.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if counts["processed"] != test.wantCount || strings.Join(tickers, ",") != strings.Join(test.wantTickers, ",") || detail != test.wantDetail {
+				t.Fatalf("decoded counts=%v tickers=%v detail=%q", counts, tickers, detail)
+			}
+		})
+	}
+
+	encoded, err := encodeJobRunResult(map[string]int{"processed": 7}, []string{"AAPL", "MSFT"}, "partial provider response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts, tickers, detail, err := decodeJobRunResult(encoded)
+	if err != nil || counts["processed"] != 7 || strings.Join(tickers, ",") != "AAPL,MSFT" || detail != "partial provider response" {
+		t.Fatalf("round trip counts=%v tickers=%v detail=%q err=%v", counts, tickers, detail, err)
+	}
+}
+
+func TestJobRunResultJSONRejectsMalformedPayloads(t *testing.T) {
+	t.Parallel()
+
+	for _, raw := range []string{
+		`{"_tickers":"AAPL"}`,
+		`{"_tickers":["AAPL",2]}`,
+		`{"_tickers":null}`,
+		`{"_detail":7}`,
+		`{"_detail":null}`,
+		`{"_detail":"first","_detail":"second"}`,
+		`{"_tickers":[],"_tickers":[]}`,
+		`{"processed":1,"processed":2}`,
+		`{"processed":1.5}`,
+		`{"processed":1} {"other":2}`,
+		`[]`,
+		`null`,
+	} {
+		if _, _, _, err := decodeJobRunResult([]byte(raw)); err == nil {
+			t.Errorf("decodeJobRunResult(%s) error = nil", raw)
+		}
+	}
+	for _, key := range []string{jobRunTickersKey, jobRunDetailKey} {
+		if _, err := encodeJobRunResult(map[string]int{key: 1}, nil, ""); err == nil {
+			t.Errorf("reserved count key %q encoded without error", key)
+		}
+	}
+}
+
+func TestJobRunJSONExposesDegradedDetailNotError(t *testing.T) {
+	t.Parallel()
+	payload, err := json.Marshal(JobRun{Status: "degraded", Detail: "partial provider response"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded["detail"] != "partial provider response" {
+		t.Fatalf("detail = %#v", decoded["detail"])
+	}
+	if _, exists := decoded["error"]; exists {
+		t.Fatalf("degraded API payload exposes error: %s", payload)
+	}
+}
+
 func TestJobRunLifecycleIntegration(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newJobRunIntegrationPool(t, ctx)
@@ -131,6 +213,7 @@ func TestJobRunLifecycleIntegration(t *testing.T) {
 	run.CompletedAt = &completed
 	run.DurationNs = int64(10 * time.Second)
 	run.Result = map[string]int{"items": 3}
+	run.Tickers = []string{"AAPL", "MSFT"}
 	if err := repo.Complete(ctx, run); err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -138,15 +221,86 @@ func TestJobRunLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(stored) != 1 || stored[0].ID != run.ID || stored[0].Status != "ok" || stored[0].CompletedAt == nil || stored[0].Result["items"] != 3 {
+	if len(stored) != 1 || stored[0].ID != run.ID || stored[0].Status != "ok" || stored[0].CompletedAt == nil || stored[0].Result["items"] != 3 || strings.Join(stored[0].Tickers, ",") != "AAPL,MSFT" {
 		t.Fatalf("completed row = %+v", stored)
 	}
 	summaries, err := repo.Summaries(ctx)
 	if err != nil {
 		t.Fatalf("Summaries() error = %v", err)
 	}
-	if len(summaries) != 1 || summaries[0].LastRun == nil || !summaries[0].LastRun.Equal(completed) || summaries[0].LastResult != "ok" {
+	if len(summaries) != 1 || summaries[0].LastRun == nil || !summaries[0].LastRun.Equal(completed) || summaries[0].LastResult != "ok" || strings.Join(summaries[0].LastTickers, ",") != "AAPL,MSFT" {
 		t.Fatalf("completed summary = %+v, want terminal time %v", summaries, completed)
+	}
+
+	degraded := &JobRun{JobName: run.JobName, Status: "running", StartedAt: completed.Add(time.Second)}
+	if err := repo.Create(ctx, degraded); err != nil {
+		t.Fatal(err)
+	}
+	degradedAt := degraded.StartedAt.Add(5 * time.Second)
+	degraded.Status = "degraded"
+	degraded.CompletedAt = &degradedAt
+	degraded.DurationNs = int64(5 * time.Second)
+	degraded.Result = map[string]int{"items": 2}
+	degraded.Tickers = []string{"AAPL"}
+	degraded.Detail = "partial provider response"
+	degraded.Error = ""
+	degraded.LastErrorAt = nil
+	degraded.ConsecutiveFailures = 0
+	if err := repo.Complete(ctx, degraded); err != nil {
+		t.Fatal(err)
+	}
+	var rawResult []byte
+	var rawError *string
+	var rawLastErrorAt *time.Time
+	var rawStreak int
+	if err := pool.QueryRow(ctx, `SELECT result, error, last_error_at, consecutive_failures FROM automation_job_runs WHERE id=$1`, degraded.ID).Scan(&rawResult, &rawError, &rawLastErrorAt, &rawStreak); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rawResult), `"_detail": "partial provider response"`) || rawError != nil || rawLastErrorAt != nil || rawStreak != 0 {
+		t.Fatalf("raw degraded row result=%s error=%v last_error_at=%v streak=%d", rawResult, rawError, rawLastErrorAt, rawStreak)
+	}
+	degradedRuns, err := repo.ListByJob(ctx, run.JobName, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(degradedRuns) != 1 || degradedRuns[0].Status != "degraded" || degradedRuns[0].Error != "" || degradedRuns[0].Detail != "partial provider response" {
+		t.Fatalf("degraded API model = %+v", degradedRuns)
+	}
+	summaries, err = repo.Summaries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].LastResult != "degraded" || summaries[0].LastError != "" || summaries[0].LastDetail != "partial provider response" {
+		t.Fatalf("degraded summary = %+v", summaries)
+	}
+
+	legacyID := uuid.New()
+	legacyAt := degradedAt.Add(time.Second)
+	if _, err := pool.Exec(ctx, `INSERT INTO automation_job_runs (id, job_name, status, started_at, completed_at, result, error, consecutive_failures) VALUES ($1, $2, 'degraded', $3, $3, '{"items":1}', $4, 0)`, legacyID, "legacy_degraded_job", legacyAt, "legacy partial result"); err != nil {
+		t.Fatal(err)
+	}
+	legacyRuns, err := repo.ListByJob(ctx, "legacy_degraded_job", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacyRuns) != 1 || legacyRuns[0].Error != "legacy partial result" || legacyRuns[0].Detail != "" {
+		t.Fatalf("legacy raw history = %+v", legacyRuns)
+	}
+	summaries, err = repo.Summaries(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySummaryFound := false
+	for _, summary := range summaries {
+		if summary.JobName == "legacy_degraded_job" {
+			legacySummaryFound = true
+			if summary.LastError != "" || summary.LastDetail != "legacy partial result" {
+				t.Fatalf("legacy degraded summary = %+v", summary)
+			}
+		}
+	}
+	if !legacySummaryFound {
+		t.Fatalf("summaries = %+v, missing legacy degraded job", summaries)
 	}
 
 	orphan := &JobRun{JobName: "orphaned_job", Status: "running", StartedAt: started}

@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 
 import App from '@/App'
 import { setTokenSnapshot } from '@/shared/auth/tokenStore'
-import { buildAutomationJobStatus, buildAuthResponse, buildOrder, buildPortfolioSummary, buildPosition, buildRiskStatus, buildRun, buildStrategy, fixtureDate } from '@/test/fixtures'
+import { buildAutomationJobRun, buildAutomationJobStatus, buildAuthResponse, buildOrder, buildPortfolioSummary, buildPosition, buildRiskStatus, buildRun, buildStrategy, fixtureDate } from '@/test/fixtures'
 import { apiBaseUrl, FakeWebSocket, installAppTestHarness, resetApp, server, state, strategyId } from '@/test/app-harness'
 
 describe('first vertical slice app', () => {
@@ -47,6 +47,49 @@ describe('first vertical slice app', () => {
     expect(screen.getByText(/"scanned": 12/i)).toBeTruthy()
     expect(await screen.findByRole('table', { name: /automation run history/i })).toBeTruthy()
     expect(screen.getAllByText('completed').length).toBeGreaterThan(0)
+  })
+
+  it('shows a degraded automation on the list without claiming failure or health', async () => {
+    resetApp('/automation')
+    setTokenSnapshot(buildAuthResponse())
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([
+        buildAutomationJobStatus({ last_result: 'degraded after 12ms', last_detail: 'partial provider response', error_count: 5, consecutive_failures: 0 }),
+      ])),
+    )
+    render(<App />)
+
+    const row = (await screen.findByRole('link', { name: 'deep_scan' })).closest('tr') as HTMLElement
+    expect(within(row).getByText(/^degraded$/i)).toHaveClass('warning')
+    expect(within(row).queryByText(/^healthy$/i)).toBeNull()
+    expect(within(row).queryByText(/^failing$/i)).toBeNull()
+    expect(within(row).getByText('partial provider response')).toBeTruthy()
+    expect(within(row).getByText('0')).toBeTruthy()
+  })
+
+  it('shows a degraded automation truthfully on detail', async () => {
+    resetApp('/automation/deep_scan')
+    setTokenSnapshot(buildAuthResponse())
+    server.use(
+      http.get(`${apiBaseUrl}/automation/status`, () => HttpResponse.json([
+        buildAutomationJobStatus({ last_result: 'degraded after 12ms', last_detail: 'partial provider response', error_count: 5, consecutive_failures: 0 }),
+      ])),
+      http.get(`${apiBaseUrl}/automation/runs`, () => HttpResponse.json({
+        data: [buildAutomationJobRun({ status: 'degraded', detail: 'partial provider response' })],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      })),
+    )
+    render(<App />)
+
+    const state = (await screen.findByText('State')).closest('.nested-panel') as HTMLElement
+    expect(within(state).getByText(/^degraded$/i)).toHaveClass('warning')
+    expect(screen.getByText('degraded after 12ms')).toBeTruthy()
+    expect(screen.getByText('partial provider response')).toBeTruthy()
+    expect(screen.getByText('Diagnostic: partial provider response')).toBeTruthy()
+    expect(screen.getByText('Current errors').closest('.nested-panel')).toHaveTextContent('0')
+    expect(screen.queryByText(/^healthy$/i)).toBeNull()
   })
 
   it('separates daily review findings from review job success', async () => {

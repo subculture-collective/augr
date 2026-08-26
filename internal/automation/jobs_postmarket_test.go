@@ -23,21 +23,39 @@ func TestEasternDayStartUTCUsesTradingDayAcrossUTCMidnight(t *testing.T) {
 func TestPostMarketCompletionErrorsExposePartialCoverage(t *testing.T) {
 	t.Parallel()
 
-	if err := strategyResweepCompletionError(2); err == nil || !strings.Contains(err.Error(), "strategies failed") {
-		t.Fatalf("strategyResweepCompletionError() = %v, want sweep coverage error", err)
+	if err := strategyResweepCompletionError(map[string]int{"supported": 107, "swept": 105, "failed": 2, "stale": 2}); err == nil || !IsDegraded(err) || !strings.Contains(err.Error(), "coverage_bps=9813") || !strings.Contains(err.Error(), "stale=2") {
+		t.Fatalf("strategyResweepCompletionError(live) = %v, want detailed degraded result", err)
 	}
-	if err := optionsScanCompletionError(map[string]int{"price_fetch_failed": 1, "fetch_failed": 2, "persist_failed": 3}); err == nil || !strings.Contains(err.Error(), "price_fetch_failed=1") || !strings.Contains(err.Error(), "chain_fetch_failed=2") || !strings.Contains(err.Error(), "persist_failed=3") {
-		t.Fatalf("optionsScanCompletionError() = %v, want complete failure counts", err)
+	if err := strategyResweepCompletionError(map[string]int{"supported": 100, "swept": 79}); err == nil || IsDegraded(err) {
+		t.Fatalf("strategyResweepCompletionError(79%%) = %v, want true error", err)
+	}
+	if err := strategyResweepCompletionError(map[string]int{"supported": 100, "swept": 80, "failed": 20, "config_failed": 20}); err == nil || !IsDegraded(err) {
+		t.Fatalf("strategyResweepCompletionError(80%%) = %v, want degraded", err)
+	}
+	if err := strategyResweepCompletionError(map[string]int{"supported": 5, "failed": 5, "config_failed": 5}); err == nil || IsDegraded(err) {
+		t.Fatalf("strategyResweepCompletionError(all invalid) = %v, want true error", err)
+	}
+	if err := strategyResweepCompletionError(map[string]int{"supported": 100, "swept": 100}); err != nil {
+		t.Fatalf("strategyResweepCompletionError(complete) = %v, want nil", err)
 	}
 
-	if err := strategyResweepCompletionError(0); err != nil {
-		t.Fatalf("strategyResweepCompletionError(0) = %v, want nil", err)
+	if err := optionsScanCompletionError(map[string]int{"universe": 100, "optionable": 24, "chains": 24}); err == nil || IsDegraded(err) {
+		t.Fatalf("optionsScanCompletionError(24%%) = %v, want true error", err)
 	}
-	if err := optionsScanCompletionError(map[string]int{}); err != nil {
-		t.Fatalf("optionsScanCompletionError(empty) = %v, want nil", err)
+	if err := optionsScanCompletionError(map[string]int{"universe": 100, "optionable": 25, "chains": 20}); err == nil || !IsDegraded(err) {
+		t.Fatalf("optionsScanCompletionError(exact floors) = %v, want degraded", err)
 	}
-	if err := optionsScanCompletionError(map[string]int{"optionable": 10, "chain_insufficient": 10}); err == nil || !strings.Contains(err.Error(), "no_usable_chains=1") {
-		t.Fatalf("optionsScanCompletionError(no chains) = %v", err)
+	if err := optionsScanCompletionError(map[string]int{"universe": 100, "optionable": 27, "chains": 22, "price_empty": 73, "fetch_failed": 5}); err == nil || !IsDegraded(err) || !strings.Contains(err.Error(), "optionable_coverage_bps=2700") || !strings.Contains(err.Error(), "chain_coverage_bps=8148") {
+		t.Fatalf("optionsScanCompletionError(live) = %v, want detailed degraded result", err)
+	}
+	if err := optionsScanCompletionError(map[string]int{"universe": 100, "optionable": 25, "chains": 19}); err == nil || IsDegraded(err) {
+		t.Fatalf("optionsScanCompletionError(under chain floor) = %v, want true error", err)
+	}
+	if err := optionsScanCompletionError(map[string]int{"universe": 100, "optionable": 100, "chains": 100, "persist_failed": 1}); err == nil || IsDegraded(err) {
+		t.Fatalf("optionsScanCompletionError(persistence) = %v, want true error", err)
+	}
+	if err := optionsScanCompletionError(map[string]int{"universe": 100, "optionable": 100, "chains": 100}); err != nil {
+		t.Fatalf("optionsScanCompletionError(complete) = %v, want nil", err)
 	}
 }
 

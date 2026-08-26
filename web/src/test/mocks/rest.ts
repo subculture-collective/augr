@@ -847,6 +847,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
                 name: 'dev-paper-pipeline',
                 enabled: true,
                 running: false,
+                last_result: 'error',
                 last_error: 'fixture partial service failure',
                 error_count: 3,
                 consecutive_failures: 3,

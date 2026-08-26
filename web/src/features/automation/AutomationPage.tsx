@@ -118,6 +118,7 @@ export function AutomationPage() {
                     </th>
                     <td>
                       <JobStatePill job={job} />
+                      {automationOperationalState(job) === 'degraded' && job.last_detail ? <span className="cell-detail" title={job.last_detail}>{job.last_detail}</span> : null}
                       {job.settlement_gate ? <span className="cell-detail">{job.settlement_gate.eligible ? 'Gate ready' : `Gate ${job.settlement_gate.consecutive_dry_run_successes}/${job.settlement_gate.threshold}`} · {job.settlement_gate.would_settle_decisions} pending</span> : null}
                     </td>
                     <td>{job.schedule || 'Manual only'}</td>

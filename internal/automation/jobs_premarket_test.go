@@ -129,9 +129,11 @@ func TestGapScannerRegistrationRequiresEnabledPolygonBulkSnapshots(t *testing.T)
 func TestTickerDiscoveryRegistersInAutomationLedger(t *testing.T) {
 	t.Parallel()
 
-	orch := NewJobOrchestrator(OrchestratorDeps{TickerDiscovery: TickerDiscoveryJobConfig{
-		Enabled: true, Cron: "30 10 * * 1-5", MinADV: 100000, MaxTickers: 30,
-	}})
+	client := polygon.NewClient("test-key", nil)
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		Universe: clientUniverse(client), Polygon: client, PolygonBulkSnapshotsEnabled: true,
+		TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true, Cron: "30 10 * * 1-5", MinADV: 100000, MaxTickers: 30},
+	})
 	orch.registerTickerDiscoveryJob()
 	job := orch.jobs["ticker_discovery"]
 	if job == nil {
@@ -145,23 +147,47 @@ func TestTickerDiscoveryRegistersInAutomationLedger(t *testing.T) {
 func TestTickerDiscoveryPreservesExplicitCronTimezone(t *testing.T) {
 	t.Parallel()
 
-	orch := NewJobOrchestrator(OrchestratorDeps{TickerDiscovery: TickerDiscoveryJobConfig{
-		Enabled: true, Cron: "CRON_TZ=America/Chicago 30 5 * * 1-5",
-	}})
+	client := polygon.NewClient("test-key", nil)
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		Universe: clientUniverse(client), Polygon: client, PolygonBulkSnapshotsEnabled: true,
+		TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true, Cron: "CRON_TZ=America/Chicago 30 5 * * 1-5"},
+	})
 	orch.registerTickerDiscoveryJob()
 	if got := orch.jobs["ticker_discovery"].Schedule.Cron; got != "CRON_TZ=America/Chicago 30 5 * * 1-5" {
 		t.Fatalf("ticker_discovery cron = %q, want explicit timezone unchanged", got)
 	}
 }
 
-func TestTickerDiscoveryFailsWhenCoreDependenciesAreMissing(t *testing.T) {
+func TestTickerDiscoveryRegistrationRequiresBulkSnapshotCapability(t *testing.T) {
 	t.Parallel()
 
-	orch := NewJobOrchestrator(OrchestratorDeps{TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}})
-	orch.registerTickerDiscoveryJob()
-	if err := orch.tickerDiscovery(context.Background()); err == nil || !strings.Contains(err.Error(), "dependencies are required") {
-		t.Fatalf("tickerDiscovery() error = %v, want missing dependencies", err)
+	client := polygon.NewClient("test-key", nil)
+	univ := clientUniverse(client)
+	tests := []struct {
+		name string
+		deps OrchestratorDeps
+		want bool
+	}{
+		{name: "disabled", deps: OrchestratorDeps{Universe: univ, Polygon: client, PolygonBulkSnapshotsEnabled: true}},
+		{name: "missing bulk capability", deps: OrchestratorDeps{Universe: univ, Polygon: client, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}},
+		{name: "missing polygon client", deps: OrchestratorDeps{Universe: univ, PolygonBulkSnapshotsEnabled: true, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}},
+		{name: "missing universe", deps: OrchestratorDeps{Polygon: client, PolygonBulkSnapshotsEnabled: true, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}},
+		{name: "enabled with all prerequisites", deps: OrchestratorDeps{Universe: univ, Polygon: client, PolygonBulkSnapshotsEnabled: true, TickerDiscovery: TickerDiscoveryJobConfig{Enabled: true}}, want: true},
 	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			orch := NewJobOrchestrator(test.deps)
+			orch.registerTickerDiscoveryJob()
+			_, got := orch.jobs["ticker_discovery"]
+			if got != test.want {
+				t.Fatalf("ticker_discovery registered = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func clientUniverse(client *polygon.Client) *universe.Universe {
+	return universe.NewUniverse(nil, client, nil)
 }
 
 func TestIsKalshiRateLimit(t *testing.T) {

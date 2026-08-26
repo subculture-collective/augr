@@ -554,7 +554,9 @@ export type AutomationJobHealth = {
   enabled: boolean
   running: boolean
   last_run?: ISODate
+  last_result: string
   last_error?: string
+  last_detail?: string
   error_count: number
   consecutive_failures: number
   run_count: number
@@ -571,7 +573,6 @@ export type AutomationHealthResponse = {
 export type AutomationJobStatus = AutomationJobHealth & {
   description: string
   schedule: string
-  last_result: string
   last_summary?: Record<string, unknown>
   last_error_at?: ISODate
   stuck_for?: number
@@ -594,7 +595,10 @@ export type AutomationJobRun = {
   started_at: ISODate
   completed_at?: ISODate
   duration_ns?: number
+  result?: Record<string, number>
+  tickers?: string[]
   error?: string
+  detail?: string
   last_error_at?: ISODate
   consecutive_failures: number
   created_at: ISODate

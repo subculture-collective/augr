@@ -23,6 +23,9 @@ func Validate(cfg Config) error {
 	if cfg.Database.PoolSize <= 0 {
 		errs = append(errs, "DATABASE_POOL_SIZE must be greater than 0")
 	}
+	if cfg.HistoryRefreshWatchlistLimit <= 0 {
+		errs = append(errs, "HISTORY_REFRESH_WATCHLIST_LIMIT must be greater than 0")
+	}
 
 	if cfg.LLM.Timeout <= 0 {
 		errs = append(errs, "LLM_TIMEOUT must be greater than 0")
