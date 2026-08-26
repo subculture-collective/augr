@@ -130,14 +130,13 @@ func (o *JobOrchestrator) strategyTournament(ctx context.Context) error {
 		}
 
 		if download.ProviderRequests[strat.Ticker] == 0 {
-			summary["failed"]++
 			summary["cache_only"]++
-			o.logger.Warn("strategy_tournament: provider freshness unavailable",
+			o.logger.Warn("strategy_tournament: using persisted bars without provider contact",
 				slog.String("ticker", strat.Ticker),
 			)
-			continue
+		} else {
+			summary["provider_contacted"]++
 		}
-		summary["provider_contacted"]++
 		bars := download.Bars[strat.Ticker]
 		if len(bars) < 50 {
 			summary["failed"]++
@@ -227,13 +226,13 @@ func strategyTournamentCompletionError(summary map[string]int) error {
 	}
 	detail := fmt.Sprintf("supported=%d ranked=%d coverage_bps=%d provider_contacted=%d failed=%d config_failed=%d fetch_failed=%d cache_only=%d insufficient=%d stale=%d backtest_failed=%d nonfinite=%d",
 		supported, ranked, coverage, summary["provider_contacted"], summary["failed"], summary["config_failed"], summary["fetch_failed"], summary["cache_only"], summary["insufficient"], summary["stale"], summary["backtest_failed"], summary["nonfinite"])
-	if supported > 0 && (ranked == 0 || summary["provider_contacted"] == 0) {
-		return fmt.Errorf("strategy_tournament: zero ranking or provider coverage: %s", detail)
+	if ranked == 0 {
+		return fmt.Errorf("strategy_tournament: zero rankings: %s", detail)
 	}
-	if supported > 0 && coverage < 7000 {
+	if coverage < 7000 {
 		return fmt.Errorf("strategy_tournament: coverage below 70%%: %s", detail)
 	}
-	if summary["failed"] > 0 || coverage < 10_000 {
+	if summary["failed"] > 0 || summary["cache_only"] > 0 || coverage < 10_000 {
 		return Degradedf("strategy_tournament: completed with findings: %s", detail)
 	}
 	return nil

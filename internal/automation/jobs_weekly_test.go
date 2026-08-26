@@ -55,9 +55,10 @@ func TestStrategyTournamentCompletionCoveragePolicy(t *testing.T) {
 		{name: "below threshold", summary: map[string]int{"supported": 100, "ranked": 69, "provider_contacted": 69}, wantErr: true, contains: "below 70%"},
 		{name: "exact threshold", summary: map[string]int{"supported": 100, "ranked": 70, "provider_contacted": 70, "failed": 30}, wantErr: true, degraded: true},
 		{name: "zero ranked", summary: map[string]int{"supported": 10}, wantErr: true, contains: "zero ranking"},
-		{name: "provider untouched", summary: map[string]int{"supported": 10, "ranked": 10}, wantErr: true, contains: "provider"},
+		{name: "all fresh cache-only", summary: map[string]int{"supported": 107, "ranked": 107, "cache_only": 107}, wantErr: true, degraded: true, contains: "cache_only=107"},
 		{name: "all invalid configs", summary: map[string]int{"supported": 10, "failed": 10, "config_failed": 10}, wantErr: true, contains: "config_failed=10"},
-		{name: "live shape", summary: map[string]int{"supported": 107, "ranked": 78, "provider_contacted": 90, "failed": 29, "stale": 12}, wantErr: true, degraded: true, contains: "coverage_bps=7289"},
+		{name: "live shape", summary: map[string]int{"supported": 107, "ranked": 105, "provider_contacted": 2, "cache_only": 105, "failed": 2, "stale": 2}, wantErr: true, degraded: true, contains: "coverage_bps=9813"},
+		{name: "cache-only stale below floor", summary: map[string]int{"supported": 10, "ranked": 6, "cache_only": 10, "failed": 4, "stale": 4}, wantErr: true, contains: "below 70%"},
 		{name: "nonfinite Sharpe", summary: map[string]int{"supported": 10, "ranked": 9, "provider_contacted": 10, "failed": 1, "nonfinite": 1}, wantErr: true, degraded: true, contains: "nonfinite=1"},
 	}
 	for _, tt := range tests {
