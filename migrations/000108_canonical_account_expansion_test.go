@@ -1,6 +1,7 @@
 package migrations_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -172,10 +173,6 @@ func TestCanonicalAccountExpansionCyclesAndLocksRollback(t *testing.T) {
 func TestCanonicalAccountExpansionOldWriterCanary(t *testing.T) {
 	ctx, pool := newCanonicalExpansionPool(t)
 	strategyID := insertCanonicalExpansionStrategy(t, ctx, pool)
-	var runID, subscriptionID, intentID uuid.UUID
-	if err := pool.QueryRow(ctx, `INSERT INTO pipeline_runs(strategy_id,ticker,trade_date,started_at) VALUES($1,'SPY','2026-08-27',now()) RETURNING id`, strategyID).Scan(&runID); err != nil {
-		t.Fatal(err)
-	}
 	var leaderID, sourceID, observationID uuid.UUID
 	if err := pool.QueryRow(ctx, `INSERT INTO copy_leaders(entity_type,display_name) VALUES('individual','legacy leader') RETURNING id`).Scan(&leaderID); err != nil {
 		t.Fatal(err)
@@ -186,29 +183,30 @@ func TestCanonicalAccountExpansionOldWriterCanary(t *testing.T) {
 	if err := pool.QueryRow(ctx, `INSERT INTO copy_source_observations(source_id,provider_observation_id,observation_kind,effective_at,published_at,content_hash) VALUES($1,$2,'portfolio_snapshot',now(),now(),'hash') RETURNING id`, sourceID, uuid.NewString()).Scan(&observationID); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `INSERT INTO copy_subscriptions(leader_id,source_id,legacy_strategy_id,capital_budget) VALUES($1,$2,$3,1000) RETURNING id`, leaderID, sourceID, strategyID).Scan(&subscriptionID); err != nil {
-		t.Fatal(err)
-	}
-	if err := pool.QueryRow(ctx, `INSERT INTO copy_trade_intents(subscription_id,source_observation_id,pipeline_run_id,instrument_key,ticker,side,policy_status) VALUES($1,$2,$3,'SPY','SPY','buy','approved') RETURNING id`, subscriptionID, observationID, runID).Scan(&intentID); err != nil {
-		t.Fatal(err)
-	}
+	legacyGraph := insertLegacyPipelineCopyGraph(t, ctx, pool, strategyID, leaderID, sourceID, observationID)
+	before108 := snapshotCopyOriginFields(t, ctx, pool, legacyGraph)
 	applyCanonicalExpansion(t, ctx, pool)
+	after108 := snapshotCopyOriginFields(t, ctx, pool, legacyGraph)
+	assertCopyOriginFieldsEqual(t, "schema 107 to 108", before108, after108)
+
 	secondStrategyID := insertCanonicalExpansionStrategy(t, ctx, pool)
-	secondRunID, secondSubscriptionID, secondIntentID := insertLegacyPipelineCopyGraph(t, ctx, pool, secondStrategyID, leaderID, sourceID, observationID)
-	var subscriptionOrigin, intentOrigin uuid.UUID
+	secondGraph := insertLegacyPipelineCopyGraph(t, ctx, pool, secondStrategyID, leaderID, sourceID, observationID)
+	post108 := snapshotCopyOriginFields(t, ctx, pool, secondGraph)
+	expectedPost108 := expectedCopyOriginFields(secondGraph.subscriptionID)
+	assertCopyOriginFieldsEqual(t, "post-108 old-shape insert", expectedPost108, post108)
+
 	var nullExpansion bool
-	if err := pool.QueryRow(ctx, `SELECT subscription.origin_id,intent.origin_id,
+	if err := pool.QueryRow(ctx, `SELECT
 		(subscription.account_id IS NULL AND subscription.environment IS NULL AND intent.account_id IS NULL AND intent.environment IS NULL AND intent.pipeline_run_trade_date IS NULL AND run.account_id IS NULL AND run.environment IS NULL AND run.origin_type IS NULL AND run.origin_id IS NULL)
 		FROM copy_subscriptions subscription JOIN copy_trade_intents intent ON intent.subscription_id=subscription.id JOIN pipeline_runs run ON run.id=$3
-		WHERE subscription.id=$1 AND intent.id=$2`, subscriptionID, intentID, runID).Scan(&subscriptionOrigin, &intentOrigin, &nullExpansion); err != nil {
+		WHERE subscription.id=$1 AND intent.id=$2`, legacyGraph.subscriptionID, legacyGraph.intentID, legacyGraph.runID).Scan(&nullExpansion); err != nil {
 		t.Fatal(err)
 	}
-	if subscriptionOrigin != subscriptionID || intentOrigin != subscriptionID || !nullExpansion {
-		t.Fatalf("old writer changed: subscription origin=%s intent origin=%s nulls=%t", subscriptionOrigin, intentOrigin, nullExpansion)
+	if !nullExpansion {
+		t.Fatal("migration 108 populated expansion fields on the schema-107 graph")
 	}
-	var secondOriginsIdentical, secondNullExpansion bool
+	var secondNullExpansion bool
 	if err := pool.QueryRow(ctx, `SELECT
-		uuid_send(subscription.origin_id)=uuid_send(subscription.id) AND uuid_send(intent.origin_id)=uuid_send(subscription.id),
 		(subscription.account_id IS NULL AND subscription.environment IS NULL AND
 		 intent.account_id IS NULL AND intent.environment IS NULL AND intent.pipeline_run_trade_date IS NULL AND
 		 strategy.execution_strategy_version_id IS NULL AND
@@ -222,17 +220,33 @@ func TestCanonicalAccountExpansionOldWriterCanary(t *testing.T) {
 		JOIN strategies strategy ON strategy.id=run.strategy_id
 		JOIN copy_origin_rebalance_runs rebalance ON rebalance.subscription_id=subscription.id
 		JOIN copy_origin_rebalance_intents rebalance_intent ON rebalance_intent.run_id=rebalance.id
-		WHERE subscription.id=$1 AND intent.id=$2`, secondSubscriptionID, secondIntentID, secondRunID).Scan(&secondOriginsIdentical, &secondNullExpansion); err != nil {
+		WHERE subscription.id=$1 AND intent.id=$2`, secondGraph.subscriptionID, secondGraph.intentID, secondGraph.runID).Scan(&secondNullExpansion); err != nil {
 		t.Fatal(err)
 	}
-	if !secondOriginsIdentical || !secondNullExpansion {
-		t.Fatalf("post-108 old writer graph origins identical=%t expansion null=%t", secondOriginsIdentical, secondNullExpansion)
+	if !secondNullExpansion {
+		t.Fatal("post-108 old-shape insert populated expansion fields")
 	}
 	assertTriggerEnabled(t, ctx, pool, "copy_origin_rebalance_runs", "copy_origin_runs_append_only")
 	assertTriggerEnabled(t, ctx, pool, "copy_origin_rebalance_intents", "copy_origin_run_intents_append_only")
 }
 
-func insertLegacyPipelineCopyGraph(t *testing.T, ctx context.Context, pool *pgxpool.Pool, strategyID, leaderID, sourceID, observationID uuid.UUID) (uuid.UUID, uuid.UUID, uuid.UUID) {
+type legacyCopyGraph struct {
+	runID          uuid.UUID
+	subscriptionID uuid.UUID
+	intentID       uuid.UUID
+	rebalanceRunID uuid.UUID
+}
+
+type copyOriginFields struct {
+	subscriptionType string
+	subscriptionID   []byte
+	intentType       string
+	intentID         []byte
+	rebalanceType    string
+	rebalanceID      []byte
+}
+
+func insertLegacyPipelineCopyGraph(t *testing.T, ctx context.Context, pool *pgxpool.Pool, strategyID, leaderID, sourceID, observationID uuid.UUID) legacyCopyGraph {
 	t.Helper()
 	var runID, subscriptionID, intentID uuid.UUID
 	if err := pool.QueryRow(ctx, `INSERT INTO pipeline_runs(strategy_id,ticker,trade_date,started_at) VALUES($1,'QQQ','2026-08-27',now()) RETURNING id`, strategyID).Scan(&runID); err != nil {
@@ -253,7 +267,61 @@ func insertLegacyPipelineCopyGraph(t *testing.T, ctx context.Context, pool *pgxp
 	if _, err := pool.Exec(ctx, `INSERT INTO copy_origin_rebalance_intents(run_id,sequence,intent_id,instrument_key,source_observation_id,canonical_intent) VALUES($1,0,$2,'QQQ',$3,'{}')`, rebalanceID, intentID, observationID); err != nil {
 		t.Fatal(err)
 	}
-	return runID, subscriptionID, intentID
+	return legacyCopyGraph{runID: runID, subscriptionID: subscriptionID, intentID: intentID, rebalanceRunID: rebalanceID}
+}
+
+func snapshotCopyOriginFields(t *testing.T, ctx context.Context, pool *pgxpool.Pool, graph legacyCopyGraph) copyOriginFields {
+	t.Helper()
+	var fields copyOriginFields
+	if err := pool.QueryRow(ctx, `SELECT
+		subscription.origin_type,uuid_send(subscription.origin_id),
+		intent.origin_type,uuid_send(intent.origin_id),
+		rebalance.origin_type,uuid_send(rebalance.origin_id)
+		FROM copy_subscriptions subscription
+		JOIN copy_trade_intents intent ON intent.id=$2 AND intent.subscription_id=subscription.id
+		JOIN copy_origin_rebalance_runs rebalance ON rebalance.id=$3 AND rebalance.subscription_id=subscription.id
+		WHERE subscription.id=$1`, graph.subscriptionID, graph.intentID, graph.rebalanceRunID).Scan(
+		&fields.subscriptionType, &fields.subscriptionID,
+		&fields.intentType, &fields.intentID,
+		&fields.rebalanceType, &fields.rebalanceID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return fields
+}
+
+func expectedCopyOriginFields(subscriptionID uuid.UUID) copyOriginFields {
+	id := append([]byte(nil), subscriptionID[:]...)
+	return copyOriginFields{
+		subscriptionType: "copy_subscription",
+		subscriptionID:   append([]byte(nil), id...),
+		intentType:       "copy_subscription",
+		intentID:         append([]byte(nil), id...),
+		rebalanceType:    "copy_subscription",
+		rebalanceID:      append([]byte(nil), id...),
+	}
+}
+
+func assertCopyOriginFieldsEqual(t *testing.T, stage string, want, got copyOriginFields) {
+	t.Helper()
+	if want.subscriptionType != got.subscriptionType {
+		t.Errorf("%s copy_subscriptions.origin_type: want %q, got %q", stage, want.subscriptionType, got.subscriptionType)
+	}
+	if !bytes.Equal(want.subscriptionID, got.subscriptionID) {
+		t.Errorf("%s copy_subscriptions.origin_id bytes: want %x, got %x", stage, want.subscriptionID, got.subscriptionID)
+	}
+	if want.intentType != got.intentType {
+		t.Errorf("%s copy_trade_intents.origin_type: want %q, got %q", stage, want.intentType, got.intentType)
+	}
+	if !bytes.Equal(want.intentID, got.intentID) {
+		t.Errorf("%s copy_trade_intents.origin_id bytes: want %x, got %x", stage, want.intentID, got.intentID)
+	}
+	if want.rebalanceType != got.rebalanceType {
+		t.Errorf("%s copy_origin_rebalance_runs.origin_type: want %q, got %q", stage, want.rebalanceType, got.rebalanceType)
+	}
+	if !bytes.Equal(want.rebalanceID, got.rebalanceID) {
+		t.Errorf("%s copy_origin_rebalance_runs.origin_id bytes: want %x, got %x", stage, want.rebalanceID, got.rebalanceID)
+	}
 }
 
 func assertCanonicalExpansionOutboxContract(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
