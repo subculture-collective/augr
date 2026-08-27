@@ -318,7 +318,7 @@ func TestJobOrchestratorHydratesLatestDegradedOutcome(t *testing.T) {
 	lastRun := time.Now().UTC()
 	priorErrorAt := lastRun.Add(-time.Hour)
 	repo.summaries = []pgrepo.JobRunSummary{
-		{JobName: "job", LastRun: &lastRun, LastResult: "degraded", LastError: "stale failure", LastDetail: "partial provider response", LastErrorAt: &priorErrorAt, RunCount: 9, ErrorCount: 4, ConsecutiveFailures: 3},
+		{JobName: "job", LastRun: &lastRun, LastResult: "degraded", LastSummary: map[string]int{"processed": 7}, LastError: "stale failure", LastDetail: "partial provider response", LastErrorAt: &priorErrorAt, RunCount: 9, ErrorCount: 4, ConsecutiveFailures: 3},
 	}
 	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
 	orch.Register("job", "degraded job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
@@ -334,6 +334,9 @@ func TestJobOrchestratorHydratesLatestDegradedOutcome(t *testing.T) {
 	}
 	if status.ErrorCount != 4 || status.RunCount != 9 || !status.Enabled {
 		t.Fatalf("hydrated lifetime counters = %+v", status)
+	}
+	if status.LastSummary["processed"] != 7 {
+		t.Fatalf("LastSummary = %#v, want persisted result counts", status.LastSummary)
 	}
 }
 
@@ -1001,6 +1004,41 @@ func TestCurrentDataRefreshPayloadSurvivesRestartAndBlocksLegacyHandoff(t *testi
 	}
 	if status.LastError != "" || status.LastDetail != wantReason {
 		t.Fatalf("in-memory dependency skip = %+v", status)
+	}
+}
+
+func TestClosingCurrentDataRefreshPersistsAndHydratesNoTickerPayload(t *testing.T) {
+	completedAt := time.Date(2026, time.August, 26, 16, 5, 0, 0, easternTime)
+	repo := newRecordingAutomationJobRunRepo()
+	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+	orch.Register("current_data_refresh", "closing refresh", currentDataRefreshSpec, func(context.Context) error {
+		orch.SetLastSummary("current_data_refresh", map[string]int{"closing_mode": 1, "daily_closing_updated": 1})
+		orch.setRefreshedTickers([]string{"MUST_NOT_PERSIST"})
+		return nil
+	})
+	orch.now = func() time.Time { return completedAt }
+	orch.runDirect(orch.jobs["current_data_refresh"])
+	persisted := repo.singleRun(t)
+	if persisted.Tickers != nil {
+		t.Fatalf("closing persisted tickers = %v, want nil", persisted.Tickers)
+	}
+
+	hydratedRepo := newRecordingAutomationJobRunRepo()
+	hydratedRepo.summaries = []pgrepo.JobRunSummary{{
+		JobName: "current_data_refresh", LastRun: persisted.CompletedAt, LastResult: "ok",
+		LastSummary: map[string]int{"closing_mode": 1, "daily_closing_updated": 1},
+		LastTickers: []string{"LEGACY_SHOULD_NOT_HYDRATE"}, RunCount: 1,
+	}}
+	hydrated := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: hydratedRepo})
+	hydrated.Register("current_data_refresh", "closing refresh", currentDataRefreshSpec, func(context.Context) error { return nil })
+	hydrated.Register("hot_scan", "consumer", hotScanSpec, func(context.Context) error { return nil }, "current_data_refresh")
+	hydrated.hydrateFromDB()
+	status := singleJobStatus(t, hydrated, "current_data_refresh")
+	if status.LastSummary["daily_closing_updated"] != 1 || len(hydrated.getRefreshedTickers()) != 0 {
+		t.Fatalf("hydrated closing state = summary:%v tickers:%v", status.LastSummary, hydrated.getRefreshedTickers())
+	}
+	if dep, reason := hydrated.dependencyBlocker(hydrated.jobs["hot_scan"], completedAt.AddDate(0, 0, 1)); dep != "current_data_refresh" || reason != "latest run is from a prior automation day" {
+		t.Fatalf("next-day blocker = (%q, %q)", dep, reason)
 	}
 }
 

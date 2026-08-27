@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -18,8 +19,10 @@ import (
 )
 
 type partialResultProvider struct {
-	mu    sync.Mutex
-	calls []string
+	mu         sync.Mutex
+	calls      []string
+	emptyDaily bool
+	dailyTime  time.Time
 }
 
 func (p *partialResultProvider) GetOHLCV(_ context.Context, ticker string, timeframe data.Timeframe, _, to time.Time) ([]domain.OHLCV, error) {
@@ -32,9 +35,16 @@ func (p *partialResultProvider) GetOHLCV(_ context.Context, ticker string, timef
 	if ticker == "CANCEL" {
 		return nil, context.Canceled
 	}
+	if timeframe == data.Timeframe1d && p.emptyDaily {
+		return nil, nil
+	}
 	timestamp := to
 	if timeframe == data.Timeframe1d {
-		timestamp = expectedCompletedNYSESession(to)
+		if p.dailyTime.IsZero() {
+			timestamp = expectedCompletedNYSESession(to)
+		} else {
+			timestamp = p.dailyTime
+		}
 	}
 	return []domain.OHLCV{{Timestamp: timestamp, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}, nil
 }
@@ -88,6 +98,9 @@ func (r *partialResultHistoryRepo) ListHistoricalOHLCV(_ context.Context, filter
 			result = append(result, bar)
 		}
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Timestamp.Before(result[j].Timestamp)
+	})
 	return result, nil
 }
 
@@ -130,7 +143,7 @@ func TestCurrentDataRefreshConsumesLivePartialStatsWithoutSystemicError(t *testi
 
 	_ = orch.currentDataRefresh(context.Background())
 	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
-	if summary["errors"] != 0 || summary["provider_failures"] != 1 || summary["daily_provider_failures"] != 1 {
+	if summary["errors"] != 0 || summary["intraday_errors"] != 0 || summary["daily_errors"] != 0 || summary["provider_failures"] != 1 || summary["daily_provider_failures"] != 1 {
 		t.Fatalf("partial summary = %#v, want provider findings without systemic errors", summary)
 	}
 }
@@ -144,8 +157,69 @@ func TestCurrentDataRefreshNilStatsAreSystemic(t *testing.T) {
 	if err == nil || IsDegraded(err) {
 		t.Fatalf("currentDataRefresh() = %v, want true error", err)
 	}
-	if got := singleJobStatus(t, orch, "current_data_refresh").LastSummary["errors"]; got != 2 {
-		t.Fatalf("systemic errors = %d, want one for each nil timeframe result", got)
+	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
+	if summary["errors"] != 2 || summary["intraday_errors"] != 1 || summary["daily_errors"] != 1 {
+		t.Fatalf("systemic errors = %#v, want one for each nil timeframe result", summary)
+	}
+}
+
+func TestClosingRefreshRejectsCachedCurrentDateWithoutProviderBars(t *testing.T) {
+	start := time.Date(2026, time.August, 26, 16, 5, 0, 0, easternTime)
+	provider := &partialResultProvider{emptyDaily: true}
+	repo := &partialResultHistoryRepo{bars: []domain.HistoricalOHLCV{{
+		Ticker: "AAPL", Provider: "stock-chain", Timeframe: data.Timeframe1d.String(), Timestamp: start,
+		Open: 1, High: 1, Low: 1, Close: 1, Volume: 1,
+	}}}
+	orch := partialResultOrchestrator([]string{"AAPL"}, partialResultDataService(provider, repo))
+	orch.deps.PositionRepo = newRecordingPositionRepo(&domain.Position{Ticker: "AAPL", AssetClass: domain.AssetClassEquity})
+	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
+	orch.now = func() time.Time { return start }
+
+	err := orch.currentDataRefresh(context.Background())
+	if err == nil || IsDegraded(err) {
+		t.Fatalf("currentDataRefresh() = %v, want true error", err)
+	}
+	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
+	if summary["closing_mode"] != 1 || summary["daily_provider_requests"] != 1 || summary["daily_fresh_bars"] != 0 || summary["daily_empty"] != 1 || summary["daily_closing_updated"] != 0 {
+		t.Fatalf("closing summary = %#v", summary)
+	}
+}
+
+func TestClosingRefreshRejectsCachedCurrentDateWithStaleProviderBar(t *testing.T) {
+	start := time.Date(2026, time.August, 26, 16, 5, 0, 0, easternTime)
+	provider := &partialResultProvider{dailyTime: start.AddDate(0, 0, -1)}
+	repo := &partialResultHistoryRepo{bars: []domain.HistoricalOHLCV{{
+		Ticker: "AAPL", Provider: "stock-chain", Timeframe: data.Timeframe1d.String(), Timestamp: start,
+		Open: 1, High: 1, Low: 1, Close: 1, Volume: 1,
+	}}}
+	orch := partialResultOrchestrator([]string{"AAPL"}, partialResultDataService(provider, repo))
+	orch.deps.PositionRepo = newRecordingPositionRepo(&domain.Position{Ticker: "AAPL", AssetClass: domain.AssetClassEquity})
+	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
+	orch.now = func() time.Time { return start }
+
+	err := orch.currentDataRefresh(context.Background())
+	if err == nil || IsDegraded(err) {
+		t.Fatalf("currentDataRefresh() = %v, want true error", err)
+	}
+	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
+	if summary["daily_updated"] != 1 || summary["daily_fresh_bars"] != 1 || summary["daily_closing_updated"] != 0 {
+		t.Fatalf("closing summary = %#v", summary)
+	}
+}
+
+func TestClosingRefreshAcceptsCurrentProviderBar(t *testing.T) {
+	start := time.Date(2026, time.August, 26, 16, 5, 0, 0, easternTime)
+	orch := partialResultOrchestrator([]string{"AAPL"}, partialResultDataService(&partialResultProvider{}, &partialResultHistoryRepo{}))
+	orch.deps.PositionRepo = newRecordingPositionRepo(&domain.Position{Ticker: "AAPL", AssetClass: domain.AssetClassEquity})
+	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
+	orch.now = func() time.Time { return start }
+
+	if err := orch.currentDataRefresh(context.Background()); err != nil {
+		t.Fatalf("currentDataRefresh() error = %v", err)
+	}
+	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
+	if summary["daily_provider_requests"] != 1 || summary["daily_fresh_bars"] != 1 || summary["daily_closing_updated"] != 1 {
+		t.Fatalf("closing summary = %#v", summary)
 	}
 }
 

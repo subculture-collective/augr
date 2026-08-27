@@ -250,7 +250,7 @@ func TestJobRunLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summaries() error = %v", err)
 	}
-	if len(summaries) != 1 || summaries[0].LastRun == nil || !summaries[0].LastRun.Equal(completed) || summaries[0].LastResult != "ok" || strings.Join(summaries[0].LastTickers, ",") != "AAPL,MSFT" {
+	if len(summaries) != 1 || summaries[0].LastRun == nil || !summaries[0].LastRun.Equal(completed) || summaries[0].LastResult != "ok" || summaries[0].LastSummary["items"] != 3 || strings.Join(summaries[0].LastTickers, ",") != "AAPL,MSFT" {
 		t.Fatalf("completed summary = %+v, want terminal time %v", summaries, completed)
 	}
 

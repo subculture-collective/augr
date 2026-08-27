@@ -51,6 +51,7 @@ func (o *JobOrchestrator) registerMarketJobs() {
 // currentDataRefresh refreshes recent intraday OHLCV for open stock positions and active stock strategies.
 func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 	summary := map[string]int{
+		"closing_mode":            0,
 		"tickers":                 0,
 		"batches":                 0,
 		"updated":                 0,
@@ -67,6 +68,9 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 		"daily_provider_requests": 0,
 		"daily_provider_failures": 0,
 		"daily_fresh_bars":        0,
+		"daily_closing_updated":   0,
+		"intraday_errors":         0,
+		"daily_errors":            0,
 		"errors":                  0,
 		"positions":               0,
 		"strategies":              0,
@@ -76,6 +80,11 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 	defer func() {
 		o.SetLastSummary("current_data_refresh", summary)
 	}()
+	now := o.currentDataRefreshStart().UTC()
+	closingMode := currentDataRefreshClosingMode(now)
+	if closingMode {
+		summary["closing_mode"] = 1
+	}
 	selection, err := o.selectOperationalStockTickers(ctx, currentDataWatchlistLimit)
 	if err != nil {
 		summary["errors"]++
@@ -95,7 +104,6 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 	}
 
 	const batchSize = 10
-	now := o.now().UTC()
 	intradayFrom := now.Add(-48 * time.Hour)
 	dailyFrom := now.AddDate(0, 0, -10)
 	freshTickers := make([]string, 0, len(tickers))
@@ -111,6 +119,10 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 		summary["batches"]++
 
 		refresh := func(timeframe data.Timeframe, from time.Time, prefix string, fresh func(time.Time, []domain.OHLCV) bool) error {
+			errorKey := "intraday_errors"
+			if prefix == "daily_" {
+				errorKey = "daily_errors"
+			}
 			updatedKey := prefix + "updated"
 			emptyKey := prefix + "empty"
 			cacheOnlyKey := prefix + "cache_only"
@@ -133,6 +145,7 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 					slog.Any("error", err),
 				)
 				if download == nil {
+					summary[errorKey]++
 					summary["errors"]++
 					return nil
 				}
@@ -147,6 +160,16 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 				if download.ProviderRequests[ticker] == 0 {
 					summary[cacheOnlyKey]++
 					continue
+				}
+				providerLatest, providerLatestPresent := download.ProviderLatest[ticker]
+				if prefix == "daily_" && closingMode && closingDailyProviderProven(
+					now,
+					download.ProviderRequests[ticker],
+					download.FreshBars[ticker],
+					providerLatest,
+					providerLatestPresent,
+				) {
+					summary["daily_closing_updated"]++
 				}
 				bars := download.Bars[ticker]
 				if download.FreshBars[ticker] == 0 || len(bars) == 0 {
@@ -199,6 +222,10 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 
 func (o *JobOrchestrator) completeCurrentDataRefresh(summary map[string]int, freshTickers []string) error {
 	err := currentDataRefreshCompletionError(summary)
+	if summary["closing_mode"] == 1 {
+		o.setRefreshedTickers(nil)
+		return err
+	}
 	if err == nil || IsDegraded(err) {
 		o.setRefreshedTickers(freshTickers)
 	} else {
@@ -463,6 +490,22 @@ func currentDataRefreshCompletionError(summary map[string]int) error {
 	if selected == 0 {
 		selected = summary["tickers"]
 	}
+	if summary["closing_mode"] == 1 {
+		updated := summary["daily_closing_updated"]
+		coverage := 0
+		if selected > 0 {
+			coverage = updated * 100 / selected
+		}
+		if summary["errors"] > 0 || summary["daily_errors"] > 0 || (selected > 0 && (updated == 0 || updated*100 < selected*80)) {
+			return fmt.Errorf("current_data_refresh: unusable closing daily coverage: updated=%d selected=%d coverage=%d%% minimum=80%% errors=%d intraday_errors=%d daily_errors=%d daily(provider_failures=%d empty=%d cache_only=%d stale=%d)",
+				updated, selected, coverage, summary["errors"], summary["intraday_errors"], summary["daily_errors"], summary["daily_provider_failures"], summary["daily_empty"], summary["daily_cache_only"], summary["daily_stale"])
+		}
+		if selected == 0 || updated == selected {
+			return nil
+		}
+		return Degradedf("current_data_refresh: partial closing daily coverage: updated=%d selected=%d coverage=%d%% daily(provider_failures=%d empty=%d cache_only=%d stale=%d)",
+			updated, selected, coverage, summary["daily_provider_failures"], summary["daily_empty"], summary["daily_cache_only"], summary["daily_stale"])
+	}
 	updated := summary["updated"]
 	coverage := 0
 	if selected > 0 {
@@ -481,6 +524,36 @@ func currentDataRefreshCompletionError(summary map[string]int) error {
 	return Degradedf("current_data_refresh: partial intraday coverage: updated=%d selected=%d coverage=%d%% intraday(provider_failures=%d empty=%d cache_only=%d stale=%d) daily(provider_failures=%d empty=%d cache_only=%d stale=%d)",
 		updated, selected, coverage, summary["provider_failures"], summary["empty"], summary["cache_only"], summary["stale"],
 		summary["daily_provider_failures"], summary["daily_empty"], summary["daily_cache_only"], summary["daily_stale"])
+}
+
+func (o *JobOrchestrator) currentDataRefreshStart() time.Time {
+	job := o.jobs["current_data_refresh"]
+	if job == nil {
+		return o.currentTime()
+	}
+	job.mu.Lock()
+	if job.StartedAt != nil {
+		startedAt := *job.StartedAt
+		job.mu.Unlock()
+		return startedAt
+	}
+	job.mu.Unlock()
+	return o.currentTime()
+}
+
+func currentDataRefreshClosingMode(now time.Time) bool {
+	nowET := now.In(easternTime)
+	// This job intentionally assumes the regular 16:00 ET close. Early-close
+	// sessions remain governed by that limitation until the shared calendar
+	// exposes session-specific close times.
+	closeTime := time.Date(nowET.Year(), nowET.Month(), nowET.Day(), 16, 0, 0, 0, easternTime)
+	graceEnd := closeTime.Add(time.Duration(currentDataRefreshSpec.PostCloseGraceMinutes)*time.Minute + time.Minute)
+	return !nowET.Before(closeTime) && nowET.Before(graceEnd)
+}
+
+func closingDailyProviderProven(admittedStart time.Time, providerRequests, freshBars int, providerLatest time.Time, providerLatestPresent bool) bool {
+	return providerRequests > 0 && freshBars > 0 && providerLatestPresent &&
+		sameMarketDate(admittedStart.In(easternTime), providerLatest.In(easternTime))
 }
 
 func marketScanCompletionError(job string, summary map[string]int, minimumCoveragePercent int) error {

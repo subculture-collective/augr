@@ -394,6 +394,85 @@ func TestCurrentDataRefreshCompletionErrorUsesIntradayCoverage(t *testing.T) {
 	}
 }
 
+func TestCurrentDataRefreshClosingModeBoundaries(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{name: "before close", at: time.Date(2026, time.August, 26, 15, 59, 59, 0, easternTime)},
+		{name: "at close", at: time.Date(2026, time.August, 26, 16, 0, 0, 0, easternTime), want: true},
+		{name: "last grace minute", at: time.Date(2026, time.August, 26, 16, 30, 59, 0, easternTime), want: true},
+		{name: "after grace", at: time.Date(2026, time.August, 26, 16, 31, 0, 0, easternTime)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := currentDataRefreshClosingMode(test.at); got != test.want {
+				t.Fatalf("currentDataRefreshClosingMode(%v) = %t, want %t", test.at, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCurrentDataRefreshClosingCompletionPolicy(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		summary  map[string]int
+		wantKind string
+	}{
+		{name: "no proof", summary: map[string]int{"closing_mode": 1, "selected": 10}, wantKind: "error"},
+		{name: "below floor", summary: map[string]int{"closing_mode": 1, "selected": 10, "daily_closing_updated": 7}, wantKind: "error"},
+		{name: "exact floor", summary: map[string]int{"closing_mode": 1, "selected": 10, "daily_closing_updated": 8, "daily_empty": 2}, wantKind: "degraded"},
+		{name: "full proof ignores intraday findings", summary: map[string]int{"closing_mode": 1, "selected": 10, "daily_closing_updated": 10, "provider_failures": 4, "empty": 3, "stale": 2}},
+		{name: "daily systemic error", summary: map[string]int{"closing_mode": 1, "selected": 10, "daily_closing_updated": 10, "daily_errors": 1, "errors": 1}, wantKind: "error"},
+		{name: "intraday systemic error", summary: map[string]int{"closing_mode": 1, "selected": 10, "daily_closing_updated": 10, "intraday_errors": 1, "errors": 1}, wantKind: "error"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := currentDataRefreshCompletionError(test.summary)
+			switch test.wantKind {
+			case "error":
+				if err == nil || IsDegraded(err) {
+					t.Fatalf("completion error = %v, want true error", err)
+				}
+			case "degraded":
+				if !IsDegraded(err) {
+					t.Fatalf("completion error = %v, want degraded", err)
+				}
+			default:
+				if err != nil {
+					t.Fatalf("completion error = %v, want nil", err)
+				}
+			}
+		})
+	}
+}
+
+func TestClosingDailyProviderProvenRequiresCurrentProviderEvidence(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, time.August, 26, 16, 0, 0, 0, easternTime)
+	for _, test := range []struct {
+		name          string
+		requests      int
+		freshBars     int
+		latest        time.Time
+		latestPresent bool
+		want          bool
+	}{
+		{name: "no request", freshBars: 1, latest: start, latestPresent: true},
+		{name: "no fresh bars", requests: 1, latest: start, latestPresent: true},
+		{name: "no latest timestamp", requests: 1, freshBars: 1},
+		{name: "prior session", requests: 1, freshBars: 1, latest: start.AddDate(0, 0, -1), latestPresent: true},
+		{name: "admitted session", requests: 1, freshBars: 1, latest: start, latestPresent: true, want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := closingDailyProviderProven(start, test.requests, test.freshBars, test.latest, test.latestPresent); got != test.want {
+				t.Fatalf("closingDailyProviderProven() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCurrentDataRefreshHandsOffExactDegradedSelection(t *testing.T) {
 	orch := NewJobOrchestrator(OrchestratorDeps{})
 	err := orch.completeCurrentDataRefresh(map[string]int{"selected": 10, "updated": 8, "empty": 2}, []string{"AAPL", "MSFT"})
@@ -410,5 +489,13 @@ func TestCurrentDataRefreshHandsOffExactDegradedSelection(t *testing.T) {
 	}
 	if got := orch.getRefreshedTickers(); len(got) != 0 {
 		t.Fatalf("refreshed tickers after true error = %v, want cleared payload", got)
+	}
+	orch.setRefreshedTickers([]string{"KEEP"})
+	err = orch.completeCurrentDataRefresh(map[string]int{"closing_mode": 1, "selected": 1, "daily_closing_updated": 1}, []string{"DROP"})
+	if err != nil {
+		t.Fatalf("closing completeCurrentDataRefresh() = %v", err)
+	}
+	if got := orch.getRefreshedTickers(); len(got) != 0 {
+		t.Fatalf("closing refreshed tickers = %v, want no payload", got)
 	}
 }

@@ -31,16 +31,17 @@ type JobRun struct {
 
 // JobRunSummary holds aggregate stats for a single job name.
 type JobRunSummary struct {
-	JobName             string     `json:"job_name"`
-	LastRun             *time.Time `json:"last_run,omitempty"`
-	LastResult          string     `json:"last_result"`
-	LastError           string     `json:"last_error,omitempty"`
-	LastDetail          string     `json:"last_detail,omitempty"`
-	LastTickers         []string   `json:"last_tickers,omitempty"`
-	LastErrorAt         *time.Time `json:"last_error_at,omitempty"`
-	RunCount            int        `json:"run_count"`
-	ErrorCount          int        `json:"error_count"`
-	ConsecutiveFailures int        `json:"consecutive_failures"`
+	JobName             string         `json:"job_name"`
+	LastRun             *time.Time     `json:"last_run,omitempty"`
+	LastResult          string         `json:"last_result"`
+	LastSummary         map[string]int `json:"last_summary,omitempty"`
+	LastError           string         `json:"last_error,omitempty"`
+	LastDetail          string         `json:"last_detail,omitempty"`
+	LastTickers         []string       `json:"last_tickers,omitempty"`
+	LastErrorAt         *time.Time     `json:"last_error_at,omitempty"`
+	RunCount            int            `json:"run_count"`
+	ErrorCount          int            `json:"error_count"`
+	ConsecutiveFailures int            `json:"consecutive_failures"`
 }
 
 const (
@@ -356,11 +357,12 @@ func (r *JobRunRepo) Summaries(ctx context.Context) ([]JobRunSummary, error) {
 		}
 		summaries[i].LastErrorAt = lastErrAt
 		summaries[i].ConsecutiveFailures = consecutiveFailures
-		_, tickers, detail, decodeErr := decodeJobRunResult(resultRaw)
+		counts, tickers, detail, decodeErr := decodeJobRunResult(resultRaw)
 		if decodeErr != nil {
 			return nil, fmt.Errorf("postgres: decode latest job run result for %q: %w", s.JobName, decodeErr)
 		}
 		summaries[i].LastTickers = tickers
+		summaries[i].LastSummary = counts
 		summaries[i].LastDetail = detail
 		if status == "degraded" && detail == "" && errStr != nil {
 			summaries[i].LastDetail = *errStr

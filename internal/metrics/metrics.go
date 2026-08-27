@@ -26,6 +26,7 @@ type Metrics struct {
 	DataSourceCooldownUntil            *prometheus.GaugeVec
 	SchedulerTickTotal                 *prometheus.CounterVec
 	AutomationJobErrorsTotal           *prometheus.CounterVec
+	AutomationJobDegradedTotal         *prometheus.CounterVec
 	AlpacaReconcileRunsTotal           *prometheus.CounterVec
 	KalshiReconcileRunsTotal           *prometheus.CounterVec
 	KalshiRateLimitTotal               *prometheus.CounterVec
@@ -138,6 +139,11 @@ func New() *Metrics {
 		AutomationJobErrorsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "tradingagent_automation_job_errors_total",
 			Help: "Total automation job errors by job name.",
+		}, []string{"job_name"}),
+
+		AutomationJobDegradedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tradingagent_automation_job_degraded_total",
+			Help: "Total degraded automation job outcomes by job name.",
 		}, []string{"job_name"}),
 
 		AlpacaReconcileRunsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -263,6 +269,7 @@ func New() *Metrics {
 			Buckets: []float64{60, 300, 900, 1800, 3600, 7200, 14400, 43200, 86400},
 		}, []string{"strategy_id"}),
 	}
+	m.AutomationJobDegradedTotal.WithLabelValues("daily_review")
 
 	reg.MustRegister(
 		m.PipelineRunsTotal,
@@ -280,6 +287,7 @@ func New() *Metrics {
 		m.DataSourceCooldownUntil,
 		m.SchedulerTickTotal,
 		m.AutomationJobErrorsTotal,
+		m.AutomationJobDegradedTotal,
 		m.AlpacaReconcileRunsTotal,
 		m.KalshiReconcileRunsTotal,
 		m.KalshiRateLimitTotal,
@@ -387,6 +395,10 @@ func (m *Metrics) RecordSchedulerTick(tickType string) {
 
 func (m *Metrics) RecordAutomationJobError(jobName string) {
 	m.AutomationJobErrorsTotal.WithLabelValues(jobName).Inc()
+}
+
+func (m *Metrics) RecordAutomationJobDegraded(jobName string) {
+	m.AutomationJobDegradedTotal.WithLabelValues(jobName).Inc()
 }
 
 func (m *Metrics) RecordAlpacaReconcileRun(result string) {

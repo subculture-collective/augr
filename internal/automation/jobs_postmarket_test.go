@@ -1,6 +1,8 @@
 package automation
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -9,7 +11,9 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
+	"github.com/google/uuid"
 )
 
 func TestEasternDayStartUTCUsesTradingDayAcrossUTCMidnight(t *testing.T) {
@@ -59,24 +63,27 @@ func TestPostMarketCompletionErrorsExposePartialCoverage(t *testing.T) {
 	}
 }
 
-func TestDailyReviewCompletionErrorOnlyRejectsIncompleteEvidence(t *testing.T) {
+func TestDailyReviewCompletionErrorPrecedence(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		summary     map[string]int
-		wantErr     bool
-		wantMessage string
+		name         string
+		summary      map[string]int
+		wantDegraded bool
+		wantTrueErr  bool
+		wantMessage  string
 	}{
-		{name: "failed only succeeds", summary: map[string]int{"failed": 2}},
-		{name: "query errors fail", summary: map[string]int{"query_errors": 1}, wantErr: true, wantMessage: "query_errors=1"},
-		{name: "running fails", summary: map[string]int{"running": 1}, wantErr: true, wantMessage: "running=1"},
-		{name: "completed without signal fails", summary: map[string]int{"completed_without_signal": 1}, wantErr: true, wantMessage: "completed_without_signal=1"},
+		{name: "failed degrades", summary: map[string]int{"failed": 2}, wantDegraded: true, wantMessage: "failed=2"},
+		{name: "running snapshot degrades", summary: map[string]int{"running": 1}, wantDegraded: true, wantMessage: "running=1"},
+		{name: "cancelled degrades", summary: map[string]int{"cancelled": 1}, wantDegraded: true, wantMessage: "cancelled=1"},
+		{name: "no run degrades", summary: map[string]int{"strategies_without_runs": 1}, wantDegraded: true, wantMessage: "strategies_without_runs=1"},
+		{name: "query errors take true error precedence", summary: map[string]int{"query_errors": 1, "failed": 2}, wantTrueErr: true, wantMessage: "query_errors=1"},
+		{name: "completed without signal takes true error precedence", summary: map[string]int{"completed_without_signal": 1, "running": 1}, wantTrueErr: true, wantMessage: "completed_without_signal=1"},
 		{
-			name:        "failed plus incomplete evidence fails",
-			summary:     map[string]int{"failed": 2, "running": 1},
-			wantErr:     true,
-			wantMessage: "failed=2 running=1",
+			name:         "mixed snapshot findings degrade",
+			summary:      map[string]int{"failed": 2, "running": 1},
+			wantDegraded: true,
+			wantMessage:  "failed=2 running=1",
 		},
 		{name: "zero succeeds", summary: map[string]int{}},
 	}
@@ -85,14 +92,174 @@ func TestDailyReviewCompletionErrorOnlyRejectsIncompleteEvidence(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			err := dailyReviewCompletionError(tt.summary)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("dailyReviewCompletionError(%v) = %v, wantErr %v", tt.summary, err, tt.wantErr)
+			if tt.wantDegraded != IsDegraded(err) {
+				t.Fatalf("dailyReviewCompletionError(%v) = %v, want degraded %v", tt.summary, err, tt.wantDegraded)
+			}
+			if tt.wantTrueErr != (err != nil && !IsDegraded(err)) {
+				t.Fatalf("dailyReviewCompletionError(%v) = %v, want true error %v", tt.summary, err, tt.wantTrueErr)
 			}
 			if tt.wantMessage != "" && !strings.Contains(err.Error(), tt.wantMessage) {
 				t.Fatalf("dailyReviewCompletionError(%v) = %q, want substring %q", tt.summary, err, tt.wantMessage)
 			}
 		})
 	}
+}
+
+func TestDailyReviewUsesFixedAsOfAndReportsLiveScope(t *testing.T) {
+	asOf := time.Date(2026, time.August, 6, 20, 30, 0, 0, time.UTC)
+	strategyA, strategyB, strategyC := uuid.New(), uuid.New(), uuid.New()
+	runRepo := &dailyReviewRunRepo{runs: map[uuid.UUID][]domain.PipelineRun{
+		strategyA: {
+			{StrategyID: strategyA, StartedAt: asOf.Add(-time.Hour), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
+			{StrategyID: strategyA, StartedAt: asOf.Add(time.Second), Status: domain.PipelineStatusFailed},
+		},
+		strategyB: {
+			{StrategyID: strategyB, StartedAt: asOf.Add(-3 * time.Hour), Status: domain.PipelineStatusFailed},
+			{StrategyID: strategyB, StartedAt: asOf.Add(-2 * time.Hour), Status: domain.PipelineStatusRunning},
+			{StrategyID: strategyB, StartedAt: asOf.Add(-time.Hour), Status: domain.PipelineStatusCancelled},
+		},
+	}}
+	metricSink := &dailyReviewMetrics{stubAutomationMetrics: &stubAutomationMetrics{}}
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		StrategyRepo: &kalshiStrategyRepoStub{strategies: []domain.Strategy{
+			{ID: strategyA, Name: "a", Ticker: "AAA", Status: "active"},
+			{ID: strategyB, Name: "b", Ticker: "BBB", Status: "active"},
+			{ID: strategyC, Name: "c", Ticker: "CCC", Status: "active"},
+		}},
+		RunRepo: runRepo,
+	})
+	nowCalls := 0
+	orch.now = func() time.Time {
+		nowCalls++
+		return asOf.Add(time.Duration(nowCalls-1) * time.Hour)
+	}
+	orch.WithJobMetrics(metricSink)
+	orch.Register("daily_review", "test", dailyReviewSpec, orch.dailyReview)
+
+	err := orch.dailyReview(context.Background())
+	if err == nil || !IsDegraded(err) {
+		t.Fatalf("dailyReview() = %v, want degraded", err)
+	}
+	if nowCalls != 1 {
+		t.Fatalf("now calls = %d, want 1", nowCalls)
+	}
+	dayStart := time.Date(2026, time.August, 6, 4, 0, 0, 0, time.UTC)
+	for i, filter := range runRepo.filters {
+		if filter.StartedAfter == nil || !filter.StartedAfter.Equal(dayStart) {
+			t.Fatalf("filter %d StartedAfter = %v, want %v", i, filter.StartedAfter, dayStart)
+		}
+		if filter.StartedBefore == nil || !filter.StartedBefore.Equal(asOf) {
+			t.Fatalf("filter %d StartedBefore = %v, want %v", i, filter.StartedBefore, asOf)
+		}
+	}
+	summary := singleJobStatus(t, orch, "daily_review").LastSummary
+	want := map[string]int{
+		"generated_at_unix": int(asOf.Unix()), "scope_active_strategies": 1,
+		"strategies": 3, "strategies_without_runs": 1, "runs": 4,
+		"completed": 1, "buy": 1, "failed": 1, "running": 1, "cancelled": 1,
+	}
+	for key, value := range want {
+		if summary[key] != value {
+			t.Fatalf("summary[%q] = %d, want %d (summary=%v)", key, summary[key], value, summary)
+		}
+	}
+	if metricSink.degraded != 1 {
+		t.Fatalf("degraded metrics = %d, want 1", metricSink.degraded)
+	}
+}
+
+func TestDailyReviewNoRunDegradedResetsFailureStreakAndStoresDetail(t *testing.T) {
+	strategyID := uuid.New()
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		StrategyRepo: &kalshiStrategyRepoStub{strategies: []domain.Strategy{{ID: strategyID, Name: "idle", Ticker: "IDLE", Status: "active"}}},
+		RunRepo:      &dailyReviewRunRepo{runs: map[uuid.UUID][]domain.PipelineRun{}},
+	})
+	orch.now = func() time.Time { return time.Date(2026, time.August, 6, 20, 30, 0, 0, time.UTC) }
+	orch.Register("daily_review", "test", dailyReviewSpec, orch.dailyReview)
+	job := orch.jobs["daily_review"]
+	job.ConsecutiveFailures = 2
+	job.LastError = "prior failure"
+
+	orch.runDirect(job)
+
+	status := singleJobStatus(t, orch, "daily_review")
+	if status.LastResult != "degraded" || status.ConsecutiveFailures != 0 || status.LastError != "" {
+		t.Fatalf("daily review status = %+v, want degraded with reset failure state", status)
+	}
+	if !strings.Contains(status.LastDetail, "strategies_without_runs=1") {
+		t.Fatalf("LastDetail = %q, want no-run finding", status.LastDetail)
+	}
+	if status.LastSummary["strategies_without_runs"] != 1 || status.LastSummary["runs"] != 0 {
+		t.Fatalf("LastSummary = %v, want no fabricated runs", status.LastSummary)
+	}
+}
+
+type dailyReviewMetrics struct {
+	*stubAutomationMetrics
+	degraded int
+}
+
+func (m *dailyReviewMetrics) RecordAutomationJobDegraded(string) { m.degraded++ }
+
+type dailyReviewRunRepo struct {
+	runs    map[uuid.UUID][]domain.PipelineRun
+	filters []repository.PipelineRunFilter
+	err     error
+}
+
+func (r *dailyReviewRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
+func (r *dailyReviewRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
+	return nil, repository.ErrNotFound
+}
+
+func (r *dailyReviewRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
+	return nil, repository.ErrNotFound
+}
+
+func (r *dailyReviewRunRepo) Count(_ context.Context, filter repository.PipelineRunFilter) (int, error) {
+	r.filters = append(r.filters, filter)
+	if r.err != nil {
+		return 0, r.err
+	}
+	return len(r.filtered(filter)), nil
+}
+
+func (r *dailyReviewRunRepo) List(_ context.Context, filter repository.PipelineRunFilter, limit, offset int) ([]domain.PipelineRun, error) {
+	r.filters = append(r.filters, filter)
+	if r.err != nil {
+		return nil, r.err
+	}
+	runs := r.filtered(filter)
+	if offset >= len(runs) {
+		return nil, nil
+	}
+	end := min(offset+limit, len(runs))
+	return append([]domain.PipelineRun(nil), runs[offset:end]...), nil
+}
+
+func (r *dailyReviewRunRepo) Finalize(context.Context, uuid.UUID, time.Time, repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{}, errors.New("not implemented")
+}
+
+func (r *dailyReviewRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{}, errors.New("not implemented")
+}
+
+func (r *dailyReviewRunRepo) filtered(filter repository.PipelineRunFilter) []domain.PipelineRun {
+	if filter.StrategyID == nil {
+		return nil
+	}
+	var filtered []domain.PipelineRun
+	for _, run := range r.runs[*filter.StrategyID] {
+		if filter.StartedAfter != nil && run.StartedAt.Before(*filter.StartedAfter) {
+			continue
+		}
+		if filter.StartedBefore != nil && run.StartedAt.After(*filter.StartedBefore) {
+			continue
+		}
+		filtered = append(filtered, run)
+	}
+	return filtered
 }
 
 func TestClassifyResweepScoresSeparatesUnqualifiedSentinelsFromInvalidValues(t *testing.T) {

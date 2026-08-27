@@ -28,6 +28,12 @@ groups:
         annotations:
           summary: "Automation job {{ $labels.job_name }} failed"
           runbook: "docs/runbooks/release-readiness.md"
+      - alert: AugrDailyReviewDegraded
+        expr: increase(tradingagent_automation_job_degraded_total{job_name="daily_review"}[15m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Daily review completed with operational findings"
+          runbook: "docs/runbooks/release-readiness.md"
       - alert: AugrPolymarketReconciliationDrift
         expr: increase(tradingagent_polymarket_reconciliation_drift_total[15m]) > 0
         labels: { severity: critical }

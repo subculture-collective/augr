@@ -41,15 +41,21 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 	if o.deps.StrategyRepo == nil || o.deps.RunRepo == nil {
 		return fmt.Errorf("daily_review: strategy and pipeline run repositories are required")
 	}
+	asOf := o.now().UTC()
+	today := easternDayStartUTC(asOf)
 
 	strategies, err := listAllStrategies(ctx, o.deps.StrategyRepo, repository.StrategyFilter{Status: "active"})
 	if err != nil {
 		return fmt.Errorf("daily_review: list strategies: %w", err)
 	}
 
-	today := easternDayStartUTC(time.Now())
-
-	summary := map[string]int{"strategies": len(strategies), "query_errors": 0}
+	summary := map[string]int{
+		"strategies":              len(strategies),
+		"scope_active_strategies": 1,
+		"generated_at_unix":       int(asOf.Unix()),
+		"query_errors":            0,
+		"strategies_without_runs": 0,
+	}
 	defer func() { o.SetLastSummary("daily_review", summary) }()
 	for _, strat := range strategies {
 		if ctx.Err() != nil {
@@ -58,14 +64,23 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 
 		stratID := strat.ID
 		runs, err := listAllPipelineRuns(ctx, o.deps.RunRepo, repository.PipelineRunFilter{
-			StrategyID:   &stratID,
-			StartedAfter: &today,
+			StrategyID:    &stratID,
+			StartedAfter:  &today,
+			StartedBefore: &asOf,
 		})
 		if err != nil {
 			summary["query_errors"]++
 			o.logger.Warn("daily_review: failed to list runs",
 				slog.String("strategy", strat.Name),
 				slog.Any("error", err),
+			)
+			continue
+		}
+		if len(runs) == 0 {
+			summary["strategies_without_runs"]++
+			o.logger.Warn("daily_review: strategy has no runs in review window",
+				slog.String("ticker", strat.Ticker),
+				slog.String("strategy", strat.Name),
 			)
 			continue
 		}
@@ -86,16 +101,26 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 	}
 
 	o.logger.Info("daily_review: completed", slog.Any("summary", summary))
-	return dailyReviewCompletionError(summary)
+	completionErr := dailyReviewCompletionError(summary)
+	if IsDegraded(completionErr) {
+		if recorder, ok := o.metrics.(interface{ RecordAutomationJobDegraded(string) }); ok {
+			recorder.RecordAutomationJobDegraded("daily_review")
+		}
+	}
+	return completionErr
 }
 
 func dailyReviewCompletionError(summary map[string]int) error {
-	incompleteEvidence := summary["query_errors"] + summary[domain.PipelineStatusRunning.String()] + summary["completed_without_signal"]
-	if incompleteEvidence == 0 {
+	detail := fmt.Sprintf("query_errors=%d failed=%d running=%d cancelled=%d completed_without_signal=%d strategies_without_runs=%d",
+		summary["query_errors"], summary[domain.PipelineStatusFailed.String()], summary[domain.PipelineStatusRunning.String()], summary[domain.PipelineStatusCancelled.String()], summary["completed_without_signal"], summary["strategies_without_runs"])
+	if summary["query_errors"] > 0 || summary["completed_without_signal"] > 0 {
+		return fmt.Errorf("daily_review: incomplete daily runs: %s", detail)
+	}
+	findings := summary[domain.PipelineStatusFailed.String()] + summary[domain.PipelineStatusRunning.String()] + summary[domain.PipelineStatusCancelled.String()] + summary["strategies_without_runs"]
+	if findings == 0 {
 		return nil
 	}
-	return fmt.Errorf("daily_review: incomplete daily runs: query_errors=%d failed=%d running=%d completed_without_signal=%d",
-		summary["query_errors"], summary[domain.PipelineStatusFailed.String()], summary[domain.PipelineStatusRunning.String()], summary["completed_without_signal"])
+	return Degradedf("daily_review: completed with findings: %s", detail)
 }
 
 func listAllPipelineRuns(ctx context.Context, repo repository.PipelineRunRepository, filter repository.PipelineRunFilter) ([]domain.PipelineRun, error) {

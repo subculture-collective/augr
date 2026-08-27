@@ -945,6 +945,7 @@ func (o *JobOrchestrator) recordDependencySkip(job *RegisteredJob, at time.Time,
 	job.LastResult = "skipped: " + message
 	job.LastError = ""
 	job.LastDetail = message
+	job.LastSummary = map[string]int{"dependency_blocked": 1}
 	job.RunCount++
 	lastErrorAt := job.LastErrorAt
 	consecutiveFailures := job.ConsecutiveFailures
@@ -1056,7 +1057,7 @@ func (o *JobOrchestrator) completeRun(run *pgrepo.JobRun, job *RegisteredJob, co
 	run.CompletedAt = &completedAt
 	run.DurationNs = elapsed.Nanoseconds()
 	run.Result = result
-	if job != nil && job.Name == "current_data_refresh" && (status == "ok" || status == "degraded") {
+	if job != nil && job.Name == "current_data_refresh" && result["closing_mode"] != 1 && (status == "ok" || status == "degraded") {
 		run.Tickers = append([]string{}, o.getRefreshedTickers()...)
 	}
 	run.Error = errMsg
@@ -1126,6 +1127,7 @@ func (o *JobOrchestrator) hydrateFromDB() {
 			job.LastResult = s.LastResult
 			job.LastError = s.LastError
 			job.LastDetail = s.LastDetail
+			job.LastSummary = cloneSummary(s.LastSummary)
 			if dependencySkipped && strings.EqualFold(strings.TrimSpace(s.LastResult), "skipped") && s.LastDetail != "" {
 				job.LastResult = "skipped: " + s.LastDetail
 				job.LastError = ""
@@ -1143,7 +1145,7 @@ func (o *JobOrchestrator) hydrateFromDB() {
 				job.Enabled = false
 			}
 			job.mu.Unlock()
-			if s.JobName == "current_data_refresh" {
+			if s.JobName == "current_data_refresh" && s.LastSummary["closing_mode"] != 1 {
 				o.setRefreshedTickers(s.LastTickers)
 			}
 		}

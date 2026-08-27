@@ -50,6 +50,9 @@ func TestNew(t *testing.T) {
 	if m.AutomationJobErrorsTotal == nil {
 		t.Fatal("AutomationJobErrorsTotal is nil")
 	}
+	if m.AutomationJobDegradedTotal == nil {
+		t.Fatal("AutomationJobDegradedTotal is nil")
+	}
 	if m.PolymarketReconciliationDriftTotal == nil {
 		t.Fatal("PolymarketReconciliationDriftTotal is nil")
 	}
@@ -136,6 +139,7 @@ func TestConvenienceMethods(t *testing.T) {
 	m.SetDataSourceCooldown("reddit", time.Unix(1_700_000_300, 0))
 	m.RecordSchedulerTick("strategy")
 	m.RecordAutomationJobError("sync_positions")
+	m.RecordAutomationJobDegraded("daily_review")
 	m.RecordStaleRunReconciled()
 	m.IncDrift("quantity_mismatch")
 	m.IncTriggered("market-a")
@@ -179,6 +183,7 @@ func TestHandler(t *testing.T) {
 	m.SetDataSourceCooldown("reddit", time.Unix(1_700_000_300, 0))
 	m.RecordSchedulerTick("strategy")
 	m.RecordAutomationJobError("sync_positions")
+	m.RecordAutomationJobDegraded("daily_review")
 	m.RecordStaleRunReconciled()
 	m.IncDrift("quantity_mismatch")
 	m.IncTriggered("market-a")
@@ -226,6 +231,7 @@ func TestHandler(t *testing.T) {
 		"tradingagent_data_source_cooldown_until_unixtime",
 		"tradingagent_scheduler_tick_total",
 		"tradingagent_automation_job_errors_total",
+		"tradingagent_automation_job_degraded_total",
 		"tradingagent_polymarket_reconciliation_drift_total",
 		"tradingagent_polymarket_stop_guard_triggered_total",
 		"tradingagent_polymarket_stop_guard_send_errors_total",
@@ -331,6 +337,20 @@ tradingagent_scheduler_tick_total{type="strategy"} 1
 # TYPE tradingagent_automation_job_errors_total counter
 tradingagent_automation_job_errors_total{job_name="reconcile_orders"} 1
 tradingagent_automation_job_errors_total{job_name="sync_positions"} 2
+`,
+		},
+		{
+			name:      "automation job degraded",
+			collector: func(m *metrics.Metrics) prometheus.Collector { return m.AutomationJobDegradedTotal },
+			add: func(m *metrics.Metrics) {
+				m.RecordAutomationJobDegraded("daily_review")
+				m.RecordAutomationJobDegraded("daily_review")
+				m.RecordAutomationJobDegraded("options_scan")
+			},
+			want: `# HELP tradingagent_automation_job_degraded_total Total degraded automation job outcomes by job name.
+# TYPE tradingagent_automation_job_degraded_total counter
+tradingagent_automation_job_degraded_total{job_name="daily_review"} 2
+tradingagent_automation_job_degraded_total{job_name="options_scan"} 1
 `,
 		},
 		{

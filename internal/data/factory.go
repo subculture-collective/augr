@@ -223,13 +223,14 @@ func (s *DataService) GetNews(ctx context.Context, marketType domain.MarketType,
 
 // HistoricalOHLCVDownload describes both the stored result and provider work
 // performed by one historical download. Callers that must prove current-source
-// freshness should use ProviderRequests and FreshBars rather than treating
-// previously stored bars as newly downloaded.
+// freshness should use provider evidence rather than treating previously
+// stored bars as newly downloaded.
 type HistoricalOHLCVDownload struct {
 	Bars             map[string][]domain.OHLCV
 	ProviderRequests map[string]int
 	FreshBars        map[string]int
 	ProviderFailures map[string]int
+	ProviderLatest   map[string]time.Time
 }
 
 // DownloadHistoricalOHLCV bulk downloads and persists OHLCV history for the
@@ -279,6 +280,7 @@ func (s *DataService) DownloadHistoricalOHLCVWithStats(
 		ProviderRequests: make(map[string]int, len(tickers)),
 		FreshBars:        make(map[string]int, len(tickers)),
 		ProviderFailures: make(map[string]int, len(tickers)),
+		ProviderLatest:   make(map[string]time.Time, len(tickers)),
 	}
 	var downloadErrs []error
 	for _, ticker := range tickers {
@@ -316,6 +318,13 @@ func (s *DataService) DownloadHistoricalOHLCVWithStats(
 
 			if len(bars) > 0 {
 				result.FreshBars[trimmedTicker] += len(bars)
+				latest := result.ProviderLatest[trimmedTicker]
+				for _, bar := range bars {
+					if latest.IsZero() || bar.Timestamp.After(latest) {
+						latest = bar.Timestamp
+					}
+				}
+				result.ProviderLatest[trimmedTicker] = latest
 				if err := s.historyRepo.UpsertHistoricalOHLCV(ctx, toHistoricalOHLCV(trimmedTicker, providerName, timeframe, bars)); err != nil {
 					return nil, fmt.Errorf("data: persist historical ohlcv for %s: %w", trimmedTicker, err)
 				}
