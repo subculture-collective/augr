@@ -715,10 +715,17 @@ func withCapitalLadderRepo(ctx context.Context, fn func(*postgresrepo.CapitalLad
 	if err != nil {
 		return err
 	}
-	if version < postgresrepo.RequiredSchemaVersion {
-		return fmt.Errorf("database schema version %d is below required %d; run migrations", version, postgresrepo.RequiredSchemaVersion)
+	if err := validateCapitalLadderSchemaVersion(version); err != nil {
+		return err
 	}
 	return fn(postgresrepo.NewCapitalLadderRepo(pool))
+}
+
+func validateCapitalLadderSchemaVersion(version int) error {
+	if postgresrepo.IsSchemaVersionCompatible(version) {
+		return nil
+	}
+	return fmt.Errorf("database schema version %d is incompatible; supported range is %d through %d", version, postgresrepo.MinimumSupportedSchemaVersion, postgresrepo.MaximumSupportedSchemaVersion)
 }
 
 func (s *rootState) client() (*apiClient, error) {

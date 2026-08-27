@@ -37,6 +37,9 @@ func TestCommandHelp(t *testing.T) {
 		{"risk", "kill", "--help"},
 		{"memories", "--help"},
 		{"memories", "search", "--help"},
+		{"capital-ladder", "--help"},
+		{"capital-ladder", "promote", "--help"},
+		{"capital-ladder", "status", "--help"},
 	}
 
 	for _, args := range cases {
@@ -53,6 +56,18 @@ func TestCommandHelp(t *testing.T) {
 				t.Fatalf("help output missing usage for %v:\n%s", args, output)
 			}
 		})
+	}
+}
+
+func TestCapitalLadderSchemaCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		version int
+		wantErr bool
+	}{{version: 107, wantErr: true}, {version: 108}, {version: 109, wantErr: true}} {
+		err := validateCapitalLadderSchemaVersion(test.version)
+		if (err != nil) != test.wantErr {
+			t.Errorf("validateCapitalLadderSchemaVersion(%d) error=%v, wantErr=%t", test.version, err, test.wantErr)
+		}
 	}
 }
 

@@ -179,7 +179,10 @@ CREATE TABLE account_projection_outbox (
         (request_kind='economic_fill' AND mark_as_of IS NULL AND mark_generation='00000000-0000-0000-0000-000000000000'::UUID AND mark_source IS NULL AND mark_namespace IS NULL AND max_mark_age_microseconds IS NULL) OR
         (request_kind='mark_rebuild' AND mark_as_of IS NOT NULL AND mark_generation<>'00000000-0000-0000-0000-000000000000'::UUID AND mark_source IS NOT NULL AND mark_namespace IS NOT NULL AND max_mark_age_microseconds IS NOT NULL AND max_mark_age_microseconds>0)
     ),
-    CHECK ((status='processing')=(claimed_at IS NOT NULL AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL)),
+    CHECK (
+        (status='processing' AND claimed_at IS NOT NULL AND claimed_by IS NOT NULL AND claim_expires_at IS NOT NULL) OR
+        (status<>'processing' AND claimed_at IS NULL AND claimed_by IS NULL AND claim_expires_at IS NULL)
+    ),
     CHECK ((status='completed')=(completed_at IS NOT NULL)),
     CHECK (last_error_code IS NULL OR (last_error_code=btrim(last_error_code) AND last_error_code<>'' AND char_length(last_error_code)<=128)),
     CHECK (claimed_by IS NULL OR (claimed_by=btrim(claimed_by) AND claimed_by<>'' AND char_length(claimed_by)<=256)),
