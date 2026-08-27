@@ -1656,7 +1656,14 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	}
 	resolved := agent.ResolveConfig(strategyConfig, agent.GlobalSettings{})
 
-	result, err := r.runner.RunStrategy(ctx, strategy, agent.GlobalSettings{})
+	prepared, err := r.runner.Prepare(strategy, agent.GlobalSettings{})
+	if err != nil {
+		return nil, err
+	}
+	prepared.BindRunScope = func(run *domain.PipelineRun) error {
+		return bindStrategyRunScope(run, r.executionAccount, executionVersionID)
+	}
+	result, err := r.runner.Run(ctx, prepared)
 	if err != nil {
 		if result == nil {
 			return nil, err

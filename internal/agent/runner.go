@@ -115,6 +115,7 @@ type PreparedRun struct {
 	Runtime        RuntimeConfig
 	ConfigSnapshot json.RawMessage
 	InitialState   InitialStateSeed
+	BindRunScope   func(*domain.PipelineRun) error
 
 	// RunID may be set by the caller to reuse a pre-created pipeline run
 	// record.  When non-zero Run() skips RecordRunStart and uses this ID.
@@ -334,6 +335,11 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 	}
 	if prepared.RunID != uuid.Nil {
 		run.ID = prepared.RunID
+	}
+	if prepared.BindRunScope != nil {
+		if err := prepared.BindRunScope(&run); err != nil {
+			return nil, err
+		}
 	}
 	registered := false
 	if r.runRegistry != nil {

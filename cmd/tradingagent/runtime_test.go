@@ -1574,6 +1574,28 @@ func TestSmokeStrategyRunnerPostTerminalReadErrorReturnsCanonicalResult(t *testi
 	}
 }
 
+func TestSmokeStrategyRunnerPersistsResolvedVersionOrigin(t *testing.T) {
+	repo := &stubPipelineRunRepo{err: errors.New("stop after run persistence")}
+	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
+	runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
+	versionID := uuid.New()
+	strategyID := uuid.New()
+
+	_, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: strategyID, Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, versionID)
+	if err == nil || !strings.Contains(err.Error(), "stop after run persistence") {
+		t.Fatalf("RunStrategy() error = %v", err)
+	}
+	if repo.created == nil {
+		t.Fatal("RunStrategy() did not persist a run")
+	}
+	if repo.created.OriginType != "strategy_version" || repo.created.OriginID != versionID.String() || repo.created.OriginID == strategyID.String() {
+		t.Fatalf("persisted run origin = %q/%q, want strategy_version/%s", repo.created.OriginType, repo.created.OriginID, versionID)
+	}
+	if repo.created.AccountID != testExecutionAccountBinding.AccountID() || repo.created.Environment != testExecutionAccountBinding.Environment() {
+		t.Fatalf("persisted run account scope = %s/%s", repo.created.AccountID, repo.created.Environment)
+	}
+}
+
 func TestSmokeStrategyRunnerDispatchNotifications_RoutesSignalAndDecisionsToN8NAndDiscord(t *testing.T) {
 	t.Parallel()
 

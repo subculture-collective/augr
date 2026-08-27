@@ -44,11 +44,11 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 		run.ID = uuid.New()
 	}
 
-	_, err = r.pool.Exec(ctx,
-		`INSERT INTO pipeline_runs (
+	query := `INSERT INTO pipeline_runs (
 			id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+	args := []any{
 		run.ID,
 		run.StrategyID,
 		run.Ticker,
@@ -60,7 +60,15 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 		run.ErrorMessage,
 		configSnapshot,
 		run.PhaseTimings,
-	)
+	}
+	if run.OriginType != "" || run.OriginID != "" || run.AccountID != uuid.Nil || run.Environment != "" {
+		query = `INSERT INTO pipeline_runs (
+			id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings,
+			account_id, environment, origin_type, origin_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+		args = append(args, run.AccountID, run.Environment, run.OriginType, run.OriginID)
+	}
+	_, err = r.pool.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("postgres: create pipeline run: %w", err)
 	}
