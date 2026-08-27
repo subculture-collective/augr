@@ -50,6 +50,8 @@ func TestNewStrategyExecutionScopeRejectsIncompleteIdentity(t *testing.T) {
 		{name: "strategy version", accountID: testScopeAccountID, environment: domain.AccountEnvironmentPaperScored, run: domain.PipelineRunRef{ID: testRunID, TradeDate: testTradeDate}},
 		{name: "run ID", accountID: testScopeAccountID, environment: domain.AccountEnvironmentPaperScored, strategyID: testStrategyID, run: domain.PipelineRunRef{TradeDate: testTradeDate}},
 		{name: "trade date", accountID: testScopeAccountID, environment: domain.AccountEnvironmentPaperScored, strategyID: testStrategyID, run: domain.PipelineRunRef{ID: testRunID}},
+		{name: "non-midnight trade date", accountID: testScopeAccountID, environment: domain.AccountEnvironmentPaperScored, strategyID: testStrategyID, run: domain.PipelineRunRef{ID: testRunID, TradeDate: testTradeDate.Add(time.Hour)}},
+		{name: "non-UTC trade date", accountID: testScopeAccountID, environment: domain.AccountEnvironmentPaperScored, strategyID: testStrategyID, run: domain.PipelineRunRef{ID: testRunID, TradeDate: time.Date(2026, time.August, 27, 0, 0, 0, 0, time.FixedZone("EDT", -4*60*60))}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -93,34 +95,47 @@ func TestNewNonRunExecutionScope(t *testing.T) {
 		ledger.ExecutionOriginReconciliation,
 	} {
 		t.Run(string(originType), func(t *testing.T) {
-			first, err := NewNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, originType, "2026-08-27/session-1")
+			first, err := NewNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, originType, " authoritative-origin ")
 			if err != nil {
 				t.Fatalf("NewNonRunExecutionScope() error = %v", err)
 			}
-			second, err := NewNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, originType, "2026-08-27/session-1")
+			second, err := NewNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, originType, " authoritative-origin ")
 			if err != nil {
 				t.Fatalf("retry NewNonRunExecutionScope() error = %v", err)
 			}
 			firstType, firstID := first.Origin()
 			secondType, secondID := second.Origin()
-			if firstType != originType || secondType != originType || firstID == "" || firstID != secondID {
-				t.Fatalf("Origin() = %q/%q then %q/%q, want stable %q origin", firstType, firstID, secondType, secondID, originType)
-			}
-			if originType == ledger.ExecutionOriginOperator || originType == ledger.ExecutionOriginSettlement || originType == ledger.ExecutionOriginReconciliation {
-				wantID := economicid.DeterministicUUID(
-					nonRunOriginIDDomain+":"+string(originType),
-					testScopeAccountID.String(),
-					string(domain.AccountEnvironmentPaperScored),
-					"2026-08-27/session-1",
-				).String()
-				if firstID != wantID {
-					t.Fatalf("Origin() ID = %q, want deterministic ID %q", firstID, wantID)
-				}
+			if firstType != originType || secondType != originType || firstID != "authoritative-origin" || secondID != firstID {
+				t.Fatalf("Origin() = %q/%q then %q/%q, want preserved normalized %q origin", firstType, firstID, secondType, secondID, originType)
 			}
 			if _, ok := first.PipelineRun(); ok || first.CopyOriginRunID() != uuid.Nil {
 				t.Fatal("non-run scope contains run identity")
 			}
 		})
+	}
+}
+
+func TestNewScheduledNonRunExecutionScopeDerivesDeterministicOriginID(t *testing.T) {
+	for _, originType := range []ledger.ExecutionOriginType{ledger.ExecutionOriginOperator, ledger.ExecutionOriginSettlement, ledger.ExecutionOriginReconciliation} {
+		t.Run(string(originType), func(t *testing.T) {
+			scope, err := NewScheduledNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, originType, " occurrence-1 ")
+			if err != nil {
+				t.Fatalf("NewScheduledNonRunExecutionScope() error = %v", err)
+			}
+			_, got := scope.Origin()
+			want := economicid.DeterministicUUID(
+				nonRunOriginIDDomain+":"+string(originType),
+				testScopeAccountID.String(),
+				string(domain.AccountEnvironmentPaperScored),
+				"occurrence-1",
+			).String()
+			if got != want {
+				t.Fatalf("Origin() ID = %q, want %q", got, want)
+			}
+		})
+	}
+	if _, err := NewScheduledNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, ledger.ExecutionOriginRiskReduction, "occurrence-1"); err == nil {
+		t.Fatal("NewScheduledNonRunExecutionScope() accepted non-scheduled origin type")
 	}
 }
 

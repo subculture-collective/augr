@@ -90,12 +90,12 @@ func (p Phase) IsValid() bool {
 // AgentDecision stores the output of an agent during a pipeline run.
 type AgentDecision struct {
 	ID                   uuid.UUID          `json:"id"`
-	AccountID            uuid.UUID          `json:"account_id,omitempty"`
+	AccountID            uuid.UUID          `json:"account_id,omitzero"`
 	Environment          AccountEnvironment `json:"environment,omitempty"`
 	OriginType           string             `json:"origin_type,omitempty"`
 	OriginID             string             `json:"origin_id,omitempty"`
 	PipelineRunID        uuid.UUID          `json:"pipeline_run_id"`
-	PipelineRunTradeDate time.Time          `json:"pipeline_run_trade_date,omitempty"`
+	PipelineRunTradeDate time.Time          `json:"pipeline_run_trade_date,omitzero"`
 	AgentRole            AgentRole          `json:"agent_role"`
 	Phase                Phase              `json:"phase"`
 	RoundNumber          *int               `json:"round_number,omitempty"`
@@ -115,7 +115,7 @@ type AgentDecision struct {
 // AgentEvent stores a structured event emitted by agents or the pipeline.
 type AgentEvent struct {
 	ID                   uuid.UUID          `json:"id"`
-	AccountID            uuid.UUID          `json:"account_id,omitempty"`
+	AccountID            uuid.UUID          `json:"account_id,omitzero"`
 	Environment          AccountEnvironment `json:"environment,omitempty"`
 	OriginType           string             `json:"origin_type,omitempty"`
 	OriginID             string             `json:"origin_id,omitempty"`

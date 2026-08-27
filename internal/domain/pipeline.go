@@ -79,7 +79,7 @@ func (s PipelineSignal) IsValid() bool {
 // PipelineRun represents a single execution of a trading strategy pipeline.
 type PipelineRun struct {
 	ID             uuid.UUID          `json:"id"`
-	AccountID      uuid.UUID          `json:"account_id,omitempty"`
+	AccountID      uuid.UUID          `json:"account_id,omitzero"`
 	Environment    AccountEnvironment `json:"environment,omitempty"`
 	OriginType     string             `json:"origin_type,omitempty"`
 	OriginID       string             `json:"origin_id,omitempty"`
@@ -98,12 +98,12 @@ type PipelineRun struct {
 // PipelineRunSnapshot captures market data made available during a pipeline run.
 type PipelineRunSnapshot struct {
 	ID                   uuid.UUID          `json:"id"`
-	AccountID            uuid.UUID          `json:"account_id,omitempty"`
+	AccountID            uuid.UUID          `json:"account_id,omitzero"`
 	Environment          AccountEnvironment `json:"environment,omitempty"`
 	OriginType           string             `json:"origin_type,omitempty"`
 	OriginID             string             `json:"origin_id,omitempty"`
 	PipelineRunID        uuid.UUID          `json:"pipeline_run_id"`
-	PipelineRunTradeDate time.Time          `json:"pipeline_run_trade_date,omitempty"`
+	PipelineRunTradeDate time.Time          `json:"pipeline_run_trade_date,omitzero"`
 	DataType             string             `json:"data_type"`
 	Payload              json.RawMessage    `json:"payload"`
 	CreatedAt            time.Time          `json:"created_at"`

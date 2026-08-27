@@ -34,7 +34,7 @@ func (a AllocationDecisionAction) String() string { return string(a) }
 // AllocationDecision records a single allocator outcome.
 type AllocationDecision struct {
 	ID             uuid.UUID                `json:"id"`
-	AccountID      uuid.UUID                `json:"account_id,omitempty"`
+	AccountID      uuid.UUID                `json:"account_id,omitzero"`
 	Environment    AccountEnvironment       `json:"environment,omitempty"`
 	OriginType     string                   `json:"origin_type,omitempty"`
 	OriginID       string                   `json:"origin_id,omitempty"`

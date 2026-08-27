@@ -204,7 +204,7 @@ func (m *CopyInstrumentMapping) Validate() error {
 
 type CopySubscription struct {
 	ID                 uuid.UUID              `json:"id"`
-	AccountID          uuid.UUID              `json:"account_id,omitempty"`
+	AccountID          uuid.UUID              `json:"account_id,omitzero"`
 	Environment        AccountEnvironment     `json:"environment,omitempty"`
 	LeaderID           uuid.UUID              `json:"leader_id"`
 	SourceID           uuid.UUID              `json:"source_id"`
@@ -293,7 +293,7 @@ func (s *CopySubscription) Validate() error {
 
 type CopyTradeIntent struct {
 	ID                      uuid.UUID          `json:"id"`
-	AccountID               uuid.UUID          `json:"account_id,omitempty"`
+	AccountID               uuid.UUID          `json:"account_id,omitzero"`
 	Environment             AccountEnvironment `json:"environment,omitempty"`
 	SubscriptionID          uuid.UUID          `json:"subscription_id"`
 	OriginType              string             `json:"origin_type"`

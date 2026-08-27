@@ -103,14 +103,14 @@ func (t OrderType) IsValid() bool {
 // Order represents a trading order sent to a broker.
 type Order struct {
 	ID                       uuid.UUID          `json:"id"`
-	AccountID                uuid.UUID          `json:"account_id,omitempty"`
+	AccountID                uuid.UUID          `json:"account_id,omitzero"`
 	Environment              AccountEnvironment `json:"environment,omitempty"`
 	OriginType               string             `json:"origin_type,omitempty"`
 	OriginID                 string             `json:"origin_id,omitempty"`
 	StrategyID               *uuid.UUID         `json:"strategy_id,omitempty"`
 	PipelineRunID            *uuid.UUID         `json:"pipeline_run_id,omitempty"`
 	PipelineRunTradeDate     *time.Time         `json:"pipeline_run_trade_date,omitempty"`
-	CopyOriginRebalanceRunID uuid.UUID          `json:"copy_origin_rebalance_run_id,omitempty"`
+	CopyOriginRebalanceRunID uuid.UUID          `json:"copy_origin_rebalance_run_id,omitzero"`
 	ExternalID               string             `json:"external_id,omitempty"`
 	Ticker                   string             `json:"ticker"`
 	MarketType               MarketType         `json:"market_type,omitempty"`

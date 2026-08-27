@@ -24,7 +24,7 @@ func (s OpportunityStatus) String() string { return string(s) }
 // Opportunity represents a persisted candidate for portfolio allocation.
 type Opportunity struct {
 	ID                   uuid.UUID          `json:"id"`
-	AccountID            uuid.UUID          `json:"account_id,omitempty"`
+	AccountID            uuid.UUID          `json:"account_id,omitzero"`
 	Environment          AccountEnvironment `json:"environment,omitempty"`
 	OriginType           string             `json:"origin_type,omitempty"`
 	OriginID             string             `json:"origin_id,omitempty"`

@@ -3,6 +3,7 @@ package execution
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -33,6 +34,9 @@ func NewStrategyExecutionScope(accountID uuid.UUID, environment domain.AccountEn
 	}
 	if run.ID == uuid.Nil || run.TradeDate.IsZero() {
 		return ExecutionScope{}, fmt.Errorf("complete pipeline run identity is required")
+	}
+	if run.TradeDate.Location() != time.UTC || run.TradeDate != run.TradeDate.Truncate(24*time.Hour) {
+		return ExecutionScope{}, fmt.Errorf("pipeline run trade date must be UTC midnight")
 	}
 	return ExecutionScope{
 		accountID:      accountID,
@@ -72,14 +76,8 @@ func NewNonRunExecutionScope(accountID uuid.UUID, environment domain.AccountEnvi
 		return ExecutionScope{}, fmt.Errorf("execution origin ID is required")
 	}
 	switch originType {
-	case ledger.ExecutionOriginPortfolioRebalance, ledger.ExecutionOriginRiskReduction:
-	case ledger.ExecutionOriginOperator, ledger.ExecutionOriginSettlement, ledger.ExecutionOriginReconciliation:
-		originID = economicid.DeterministicUUID(
-			nonRunOriginIDDomain+":"+string(originType),
-			accountID.String(),
-			string(environment),
-			originID,
-		).String()
+	case ledger.ExecutionOriginPortfolioRebalance, ledger.ExecutionOriginRiskReduction,
+		ledger.ExecutionOriginOperator, ledger.ExecutionOriginSettlement, ledger.ExecutionOriginReconciliation:
 	default:
 		return ExecutionScope{}, fmt.Errorf("execution origin type %q requires a run-specific scope", originType)
 	}
@@ -89,6 +87,26 @@ func NewNonRunExecutionScope(accountID uuid.UUID, environment domain.AccountEnvi
 		originType:  originType,
 		originID:    originID,
 	}, nil
+}
+
+// NewScheduledNonRunExecutionScope derives a stable origin ID from a scheduler occurrence identity.
+func NewScheduledNonRunExecutionScope(accountID uuid.UUID, environment domain.AccountEnvironment, originType ledger.ExecutionOriginType, occurrenceID string) (ExecutionScope, error) {
+	occurrenceID = strings.TrimSpace(occurrenceID)
+	if occurrenceID == "" {
+		return ExecutionScope{}, fmt.Errorf("scheduler occurrence ID is required")
+	}
+	switch originType {
+	case ledger.ExecutionOriginOperator, ledger.ExecutionOriginSettlement, ledger.ExecutionOriginReconciliation:
+	default:
+		return ExecutionScope{}, fmt.Errorf("execution origin type %q is not scheduled", originType)
+	}
+	originID := economicid.DeterministicUUID(
+		nonRunOriginIDDomain+":"+string(originType),
+		accountID.String(),
+		string(environment),
+		occurrenceID,
+	).String()
+	return NewNonRunExecutionScope(accountID, environment, originType, originID)
 }
 
 func (s ExecutionScope) AccountID() uuid.UUID { return s.accountID }
