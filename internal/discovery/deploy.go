@@ -73,11 +73,7 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		return domain.Strategy{}, false, err
 	}
 	if existing != nil {
-		refreshed, refreshErr := loadValidatedStrategy(ctx, repo, existing.ID)
-		if refreshErr != nil {
-			return domain.Strategy{}, false, fmt.Errorf("load existing strategy with execution version: %w", refreshErr)
-		}
-		return refreshed, false, nil
+		return *existing, false, nil
 	}
 
 	strategy.ID = uuid.New()
@@ -96,11 +92,7 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		if existingAfterConflict == nil {
 			return domain.Strategy{}, false, err
 		}
-		refreshed, refreshErr := loadValidatedStrategy(ctx, repo, existingAfterConflict.ID)
-		if refreshErr != nil {
-			return domain.Strategy{}, false, fmt.Errorf("load existing strategy with execution version after conflict: %w", refreshErr)
-		}
-		return refreshed, false, nil
+		return *existingAfterConflict, false, nil
 	}
 
 	strategy.ExecutionStrategyVersionID = &versionID
@@ -139,18 +131,22 @@ func findExistingPaperStrategy(ctx context.Context, repo repository.StrategyRepo
 		return nil, fmt.Errorf("list existing strategies for %s: %w", strategy.Ticker, err)
 	}
 
+	var firstValidationErr error
 	for i := range existing {
-		if eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
-			cloned := existing[i]
-			return &cloned, nil
+		candidate := existing[i]
+		if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) && candidate.Name != strategy.Name {
+			continue
 		}
-		if existing[i].Name == strategy.Name {
-			cloned := existing[i]
-			return &cloned, nil
+		validated, validateErr := loadValidatedStrategy(ctx, repo, candidate.ID)
+		if validateErr == nil {
+			return &validated, nil
+		}
+		if firstValidationErr == nil {
+			firstValidationErr = validateErr
 		}
 	}
 
-	return nil, nil
+	return nil, firstValidationErr
 }
 
 func isUniqueViolation(err error) bool {

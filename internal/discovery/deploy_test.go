@@ -210,6 +210,29 @@ func TestCreateOrReusePaperStrategyReusesKalshiTickerDespiteDifferentName(t *tes
 	}
 }
 
+func TestCreateOrReusePaperStrategyPrefersValidBoundEventDuplicate(t *testing.T) {
+	t.Parallel()
+
+	repo := newInMemoryStrategyRepo()
+	ticker := "KX-LEGACY-DUPLICATE"
+	unbound := domain.Strategy{ID: uuid.New(), Name: "aaa legacy", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true}
+	bound := domain.Strategy{ID: uuid.New(), Name: "zzz valid", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true}
+	versionID := uuid.New()
+	bound.ExecutionStrategyVersionID = &versionID
+	repo.strategies = append(repo.strategies, unbound, bound)
+	repo.invalidBindings[unbound.ID] = true
+
+	reused, created, err := CreateOrReusePaperStrategy(context.Background(), repo, domain.Strategy{
+		Name: "new name", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || reused.ID != bound.ID || reused.ExecutionStrategyVersionID == nil || *reused.ExecutionStrategyVersionID != versionID {
+		t.Fatalf("reuse = %+v, created = %v; want valid bound duplicate %s", reused, created, bound.ID)
+	}
+}
+
 type inMemoryStrategyRepo struct {
 	strategies         []domain.Strategy
 	injectConflictOnce bool
@@ -217,10 +240,11 @@ type inMemoryStrategyRepo struct {
 	createStatuses     []string
 	updateStatuses     []string
 	mutateOnResolve    func(*inMemoryStrategyRepo, uuid.UUID)
+	invalidBindings    map[uuid.UUID]bool
 }
 
 func newInMemoryStrategyRepo() *inMemoryStrategyRepo {
-	return &inMemoryStrategyRepo{strategies: make([]domain.Strategy, 0)}
+	return &inMemoryStrategyRepo{strategies: make([]domain.Strategy, 0), invalidBindings: make(map[uuid.UUID]bool)}
 }
 
 func (r *inMemoryStrategyRepo) Create(_ context.Context, strategy *domain.Strategy) error {
@@ -234,6 +258,8 @@ func (r *inMemoryStrategyRepo) Create(_ context.Context, strategy *domain.Strate
 
 		existing := *strategy
 		existing.ID = uuid.New()
+		versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+existing.ID.String()))
+		existing.ExecutionStrategyVersionID = &versionID
 		r.strategies = append(r.strategies, existing)
 		return errors.New("ERROR: duplicate key value violates unique constraint \"idx_strategies_discovery_unique\" (SQLSTATE 23505)")
 	}
@@ -266,6 +292,9 @@ func (r *inMemoryStrategyRepo) ResolveExecutionVersionID(_ context.Context, stra
 		strategy := &r.strategies[i]
 		if strategy.ID == strategyID {
 			if strategy.ExecutionStrategyVersionID == nil {
+				if r.invalidBindings[strategyID] {
+					return uuid.Nil, errors.New("execution version binding is missing")
+				}
 				versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyID.String()))
 				strategy.ExecutionStrategyVersionID = &versionID
 			}

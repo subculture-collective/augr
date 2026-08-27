@@ -46,6 +46,16 @@ func TestBuildListQuery_NoFilters(t *testing.T) {
 	assertNotContains(t, query, " WHERE s.")
 }
 
+func TestResolveExecutionVersionQueryReadsOneJoinedSnapshot(t *testing.T) {
+	for _, fragment := range []string{
+		"s.execution_strategy_version_id", "v.id", "v.family_id", "s.market_type",
+		"strategy_legacy_snapshot_sha(s.id)", "strategy_canonical_json(s.config)",
+		"v.sha256", "v.canonical_bytes", "JOIN strategy_versions v",
+	} {
+		assertContains(t, resolveExecutionVersionSQL, fragment)
+	}
+}
+
 func TestBuildListQuery_AllFilters(t *testing.T) {
 	paper := false
 

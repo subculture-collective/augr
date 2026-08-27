@@ -76,7 +76,7 @@ func PostgresTestSearchPath(ctx context.Context, pool *pgxpool.Pool, schema stri
 }
 
 func formatPostgresTestSearchPath(schema string, extensionSchemas []string) string {
-	schemas := append([]string{schema}, extensionSchemas...)
+	schemas := append([]string{schema, ExtensionSchema}, extensionSchemas...)
 	schemas = append(schemas, "public")
 	seen := make(map[string]struct{}, len(schemas))
 	quoted := make([]string, 0, len(schemas))

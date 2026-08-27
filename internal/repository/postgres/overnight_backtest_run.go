@@ -219,7 +219,8 @@ func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *dom
 
 func findPreparedStrategy(ctx context.Context, tx pgx.Tx, strategy domain.Strategy) (*domain.Strategy, error) {
 	query := `SELECT id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id
-		FROM strategies WHERE ticker = $1 AND market_type = $2 AND is_paper = true`
+		FROM strategies WHERE ticker = $1 AND market_type = $2 AND is_paper = true
+		AND execution_strategy_version_id IS NOT NULL`
 	args := []any{strategy.Ticker, strategy.MarketType}
 	if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
 		query += ` AND name = $3`

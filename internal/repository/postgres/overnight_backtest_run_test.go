@@ -348,6 +348,39 @@ func TestOvernightBacktestRunRepoIntegration_ReuseRejectsInvalidExecutionBinding
 	}
 }
 
+func TestOvernightBacktestRunRepoIntegration_ReusePrefersBoundLegacyDuplicate(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	runRepo := NewOvernightBacktestRunRepo(pool)
+	strategyRepo := NewStrategyRepo(pool)
+	ticker := "KX-LEGACY-" + uuid.NewString()
+
+	if _, err := pool.Exec(ctx, `INSERT INTO strategies(id,name,ticker,market_type,is_paper,created_at,updated_at)
+		VALUES($1,'legacy unbound',$2,'kalshi',true,now()-interval '1 hour',now()-interval '1 hour')`, uuid.New(), ticker); err != nil {
+		t.Fatal(err)
+	}
+	bound := preparedOvernightStrategy(ticker, "bound")
+	bound.MarketType = domain.MarketTypeKalshi
+	if _, err := strategyRepo.CreateWithExecutionVersion(ctx, &bound); err != nil {
+		t.Fatal(err)
+	}
+	run := domain.NewOvernightBacktestRun()
+	run.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := runRepo.Create(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+	summary, _, err := runRepo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{{
+		ID: uuid.New(), Name: "incoming", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Reused != 1 || summary.Created != 0 {
+		t.Fatalf("summary = %+v, want one reused bound strategy", summary)
+	}
+}
+
 func TestOvernightBacktestRunRepoIntegration_ConcurrentReusePreservesBinding(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
