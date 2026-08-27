@@ -4,7 +4,7 @@ LOCK TABLE pipeline_runs, pipeline_run_snapshots, agent_decisions, agent_events,
     prediction_settlement_idempotency, execution_intents, execution_orders,
     copy_subscriptions, copy_trade_intents, copy_origin_rebalance_runs,
     copy_origin_rebalance_intents, copy_target_drift_runs, copy_target_drift_legs,
-    strategies, projection_checkpoints, account_projection_outbox,
+    strategies, projection_checkpoints, ledger_transactions, account_projection_outbox,
     account_capital_policy_bindings, capital_margin_policy_artifacts IN ACCESS EXCLUSIVE MODE;
 
 DO $rollback$

@@ -63,6 +63,11 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 			t.Errorf("down migration missing %q", fragment)
 		}
 	}
+	ledgerLock := strings.Index(down, "ledger_transactions, account_projection_outbox")
+	frontierCheck := strings.Index(down, "checkpoint.projection_version is not null")
+	if ledgerLock < 0 || frontierCheck < 0 || ledgerLock > frontierCheck {
+		t.Fatal("down migration must lock ledger_transactions before checkpoint frontier safety checks")
+	}
 }
 
 func TestCanonicalAccountExpansionCyclesAndLocksRollback(t *testing.T) {
@@ -186,11 +191,15 @@ func TestCanonicalAccountExpansionOldWriterCanary(t *testing.T) {
 	legacyGraph := insertLegacyPipelineCopyGraph(t, ctx, pool, strategyID, leaderID, sourceID, observationID)
 	before108 := snapshotCopyOriginFields(t, ctx, pool, legacyGraph)
 	applyCanonicalExpansion(t, ctx, pool)
+	assertExpansionColumnsRemainOptional(t, ctx, pool)
 	after108 := snapshotCopyOriginFields(t, ctx, pool, legacyGraph)
 	assertCopyOriginFieldsEqual(t, "schema 107 to 108", before108, after108)
 
 	secondStrategyID := insertCanonicalExpansionStrategy(t, ctx, pool)
 	secondGraph := insertLegacyPipelineCopyGraph(t, ctx, pool, secondStrategyID, leaderID, sourceID, observationID)
+	insertLegacyOperationalGraph(t, ctx, pool, secondStrategyID, secondGraph.runID)
+	insertLegacyCopyDriftGraph(t, ctx, pool, secondGraph.subscriptionID, observationID)
+	intentID, orderID := insertLegacyExecutionGraph(t, ctx, pool)
 	post108 := snapshotCopyOriginFields(t, ctx, pool, secondGraph)
 	expectedPost108 := expectedCopyOriginFields(secondGraph.subscriptionID)
 	assertCopyOriginFieldsEqual(t, "post-108 old-shape insert", expectedPost108, post108)
@@ -226,8 +235,125 @@ func TestCanonicalAccountExpansionOldWriterCanary(t *testing.T) {
 	if !secondNullExpansion {
 		t.Fatal("post-108 old-shape insert populated expansion fields")
 	}
+	var executionNulls bool
+	if err := pool.QueryRow(ctx, `SELECT intent.copy_origin_rebalance_run_id IS NULL AND execution_order.copy_origin_rebalance_run_id IS NULL
+		FROM execution_intents intent JOIN execution_orders execution_order ON execution_order.intent_id=intent.id
+		WHERE intent.id=$1 AND execution_order.id=$2`, intentID, orderID).Scan(&executionNulls); err != nil {
+		t.Fatal(err)
+	}
+	if !executionNulls {
+		t.Fatal("schema-107 execution lifecycle insert populated migration-108 columns")
+	}
+	var driftNulls bool
+	if err := pool.QueryRow(ctx, `SELECT run.origin_type='copy_subscription' AND run.origin_id=run.subscription_id AND run.account_id IS NULL AND run.environment IS NULL AND leg.account_id IS NULL AND leg.environment IS NULL AND leg.origin_type IS NULL AND leg.origin_id IS NULL
+		FROM copy_target_drift_runs run JOIN copy_target_drift_legs leg ON leg.run_id=run.id
+		WHERE run.subscription_id=$1`, secondGraph.subscriptionID).Scan(&driftNulls); err != nil {
+		t.Fatal(err)
+	}
+	if !driftNulls {
+		t.Fatal("schema-107 copy drift insert lost its origin or populated migration-108 columns")
+	}
+	assertEveryExpansionTableHasNullOldWriterRow(t, ctx, pool)
 	assertTriggerEnabled(t, ctx, pool, "copy_origin_rebalance_runs", "copy_origin_runs_append_only")
 	assertTriggerEnabled(t, ctx, pool, "copy_origin_rebalance_intents", "copy_origin_run_intents_append_only")
+}
+
+func insertLegacyOperationalGraph(t *testing.T, ctx context.Context, pool *pgxpool.Pool, strategyID, runID uuid.UUID) {
+	t.Helper()
+	orderID, positionID, tradeID, decisionID, replayID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	key := uuid.NewString()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO pipeline_run_snapshots(pipeline_run_id,data_type,payload) VALUES($1,'market','{}');
+		INSERT INTO agent_decisions(pipeline_run_id,agent_role,phase,output_text) VALUES($1,'legacy','analysis','ok');
+		INSERT INTO agent_events(pipeline_run_id,strategy_id,event_kind,title) VALUES($1,$2,'legacy','old writer');
+		INSERT INTO orders(id,strategy_id,pipeline_run_id,ticker,side,order_type,quantity) VALUES($3,$2,$1,'QQQ','buy','market',1);
+		INSERT INTO positions(id,strategy_id,ticker,side,quantity,avg_entry) VALUES($4,$2,'QQQ','long',1,10);
+		INSERT INTO trades(id,order_id,position_id,ticker,side,quantity,price) VALUES($5,$3,$4,'QQQ','buy',1,10);
+		INSERT INTO trade_decisions(id,strategy_id,pipeline_run_id,market_type,instrument_key,side,risk_status,status) VALUES($6,$2,$1,'stock','QQQ','buy','approved','candidate');
+		INSERT INTO replay_events(id,trade_decision_id,event_type,occurred_at) VALUES($7,$6,'decision_created',now());
+		INSERT INTO portfolio_opportunities(strategy_id,pipeline_run_id,market_type,ticker,side,signal,status,expires_at,dedupe_key) VALUES($2,$1,'stock','QQQ','buy','buy','queued',now()+interval '1 day',$8);
+		INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) SELECT id,$2,'paper','paper_order_intent' FROM portfolio_opportunities WHERE dedupe_key=$8;
+		INSERT INTO financial_fill_idempotency(idempotency_key,order_id,position_id,trade_id,fill_quantity,fill_price) VALUES('fill-'||$8,$3,$4,$5,1,10);
+		INSERT INTO prediction_settlement_idempotency(idempotency_key,decision_id,position_id,trade_id,replay_event_id,payout,resolved_at) VALUES('settlement-'||$8,$6,$4,$5,$7,1,now())`,
+		runID, strategyID, orderID, positionID, tradeID, decisionID, replayID, key); err != nil {
+		t.Fatalf("insert schema-107 operational graph after migration 108: %v", err)
+	}
+}
+
+func assertEveryExpansionTableHasNullOldWriterRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	for table, columns := range canonicalExpansionColumns() {
+		conditions := make([]string, len(columns))
+		for i, column := range columns {
+			conditions[i] = pgx.Identifier{column}.Sanitize() + " IS NULL"
+		}
+		var count int
+		query := `SELECT count(*) FROM ` + pgx.Identifier{table}.Sanitize() + ` WHERE ` + strings.Join(conditions, " AND ")
+		if err := pool.QueryRow(ctx, query).Scan(&count); err != nil {
+			t.Fatalf("assert old-writer row for %s: %v", table, err)
+		}
+		if count == 0 {
+			t.Errorf("%s has no schema-107-shape row with every migration-108 column NULL", table)
+		}
+	}
+}
+
+func insertLegacyCopyDriftGraph(t *testing.T, ctx context.Context, pool *pgxpool.Pool, subscriptionID, observationID uuid.UUID) {
+	t.Helper()
+	runID := uuid.New()
+	canonical := `{"schema":"copy-target-drift-session-v1","state":"prepared","subscription_id":"` + subscriptionID.String() + `","origin_type":"copy_subscription","origin_id":"` + subscriptionID.String() + `","source_observation_id":"` + observationID.String() + `","session_key":"2026-08-27/regular","calculation_version":1,"maximum_session_turnover":100,"session_budget":10,"starting_drift":10,"prepared_turnover":10,"residual_drift":0,"converged":true,"legs":[{"sequence":0,"instrument_key":"QQQ","side":"buy","current_value":0,"target_value":10,"starting_drift":10,"requested_notional":10,"projected_value":10,"residual_drift":0}]}`
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	if _, err = tx.Exec(ctx, `INSERT INTO copy_target_drift_runs(id,schema_name,state,subscription_id,origin_type,origin_id,source_observation_id,session_key,calculation_version,maximum_session_turnover,session_budget,starting_drift,prepared_turnover,residual_drift,converged,leg_count,sha256,canonical_bytes,canonical_json)
+		VALUES($1,'copy-target-drift-session-v1','prepared',$2,'copy_subscription',$2,$3,'2026-08-27/regular',1,100,10,10,10,0,true,1,encode(digest(convert_to($4,'UTF8'),'sha256'),'hex'),convert_to($4,'UTF8'),$4::JSONB)`, runID, subscriptionID, observationID, canonical); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO copy_target_drift_legs(run_id,sequence,instrument_key,side,current_value,target_value,starting_drift,requested_notional,projected_value,residual_drift,canonical_leg)
+		VALUES($1,0,'QQQ','buy',0,10,10,10,10,0,($2::JSONB)->'legs'->0)`, runID, canonical); err != nil {
+		t.Fatal(err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func insertLegacyExecutionGraph(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	fixture := commonExecutionLifecycleMigrationFixture{AccountID: uuid.MustParse("00000000-0000-4000-8000-000000000064"), InstrumentID: uuid.New(), VenueContractID: uuid.New(), QuoteSnapshotID: uuid.New(), DecisionAt: time.Date(2026, 8, 27, 19, 0, 0, 123456000, time.UTC)}
+	if _, err := pool.Exec(ctx, `INSERT INTO instruments(id,identity_key,asset_class,primary_venue,currency,tick_size,lot_size,multiplier,settlement_method,status) VALUES($1,$2,'equity','test-venue','USD',0.01,1,1,'physical','active');
+		INSERT INTO venue_contracts(id,instrument_id,venue,contract_id,currency,tick_size,lot_size,multiplier,settlement_method,valid_from,valid_to) VALUES($3,$1,'test-venue',$4,'USD',0.01,1,1,'physical',$5::TIMESTAMPTZ-interval '1 day',$5::TIMESTAMPTZ+interval '1 day');
+		INSERT INTO quote_snapshots(id,instrument_id,venue_contract_id,provider,venue,source,observation_namespace,observation_id,exchange_at,received_at,available_at,bid,ask,bid_depth_count,ask_depth_count) VALUES($6,$1,$3,'fixture','test-venue','fixture-feed','quotes/expansion',$7,$5::TIMESTAMPTZ-interval '3 seconds',$5::TIMESTAMPTZ-interval '2 seconds',$5::TIMESTAMPTZ-interval '1 second',10.24,10.26,0,0)`, fixture.InstrumentID, "figi:expansion:"+fixture.InstrumentID.String(), fixture.VenueContractID, "EXPANSION-"+strings.ToUpper(strings.ReplaceAll(fixture.InstrumentID.String(), "-", "")), fixture.DecisionAt, fixture.QuoteSnapshotID, "quote-"+fixture.InstrumentID.String()); err != nil {
+		t.Fatal(err)
+	}
+	key := "expansion-" + uuid.NewString()
+	intentID := persistRiskApprovedMigrationLifecycle(t, ctx, pool, fixture, key)
+	if err := insertMigrationLifecycleOrder(t, ctx, pool, fixture, intentID, key, "simulation", "simulation-v1"); err != nil {
+		t.Fatal(err)
+	}
+	var orderID uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT id FROM execution_orders WHERE intent_id=$1`, intentID).Scan(&orderID); err != nil {
+		t.Fatal(err)
+	}
+	return intentID, orderID
+}
+
+func assertExpansionColumnsRemainOptional(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+	t.Helper()
+	for table, columns := range canonicalExpansionColumns() {
+		for _, column := range columns {
+			var nullable string
+			var defaultValue *string
+			if err := pool.QueryRow(ctx, `SELECT is_nullable,column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2`, table, column).Scan(&nullable, &defaultValue); err != nil {
+				t.Fatalf("%s.%s: %v", table, column, err)
+			}
+			if nullable != "YES" || defaultValue != nil {
+				t.Errorf("schema-107 writer compatibility for %s.%s: nullable=%s default=%v", table, column, nullable, defaultValue)
+			}
+		}
+	}
 }
 
 type legacyCopyGraph struct {
@@ -403,7 +529,22 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 			t.Errorf("migration-108 index remains at 107: %s", index)
 		}
 	}
-	columns := map[string][]string{
+	columns := canonicalExpansionColumns()
+	for table, names := range columns {
+		for _, column := range names {
+			var count int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2`, table, column).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Errorf("migration-108 column remains at 107: %s.%s", table, column)
+			}
+		}
+	}
+}
+
+func canonicalExpansionColumns() map[string][]string {
+	return map[string][]string{
 		"strategies":                        {"execution_strategy_version_id"},
 		"pipeline_runs":                     {"account_id", "environment", "origin_type", "origin_id"},
 		"pipeline_run_snapshots":            {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
@@ -426,17 +567,6 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 		"copy_target_drift_legs":            {"account_id", "environment", "origin_type", "origin_id"},
 		"execution_intents":                 {"copy_origin_rebalance_run_id"},
 		"execution_orders":                  {"copy_origin_rebalance_run_id"},
-	}
-	for table, names := range columns {
-		for _, column := range names {
-			var count int
-			if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name=$2`, table, column).Scan(&count); err != nil {
-				t.Fatal(err)
-			}
-			if count != 0 {
-				t.Errorf("migration-108 column remains at 107: %s.%s", table, column)
-			}
-		}
 	}
 }
 

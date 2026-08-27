@@ -102,11 +102,6 @@ type postgresShadowBackend struct {
 	assessments *postgresrepo.MilestoneEvidenceRepo
 }
 
-const (
-	evidenceMinimumSchemaVersion = 108
-	evidenceMaximumSchemaVersion = 108
-)
-
 func openPostgresBackend(ctx context.Context, databaseURL string) (shadowBackend, error) {
 	db, err := postgresrepo.NewDB(ctx, databaseURL)
 	if err != nil {
@@ -117,7 +112,7 @@ func openPostgresBackend(ctx context.Context, databaseURL string) (shadowBackend
 		db.Close()
 		return nil, err
 	}
-	if version < evidenceMinimumSchemaVersion || version > evidenceMaximumSchemaVersion {
+	if !postgresrepo.IsSchemaVersionCompatible(version) {
 		db.Close()
 		return nil, fmt.Errorf("augr-evidence: schema version %d does not match required version %d", version, postgresrepo.RequiredSchemaVersion)
 	}
