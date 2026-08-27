@@ -241,6 +241,10 @@ func (s *Server) handleUpdateStrategy(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusConflict, "strategy changed since it was loaded", ErrCodeConflict)
 		return
 	}
+	if req.MarketType != nil && req.MarketType.Normalize() != strategy.MarketType.Normalize() {
+		respondError(w, http.StatusBadRequest, "market_type cannot change asset class", ErrCodeValidation)
+		return
+	}
 	before := *strategy
 	applyStrategyUpdateRequest(strategy, req)
 	if err := strategy.Validate(); err != nil {

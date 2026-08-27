@@ -1592,7 +1592,7 @@ func (p *strategyVersionPersister) PersistEvent(ctx context.Context, event *doma
 
 func bindStrategyRunScope(run *domain.PipelineRun, executionAccount domain.ExecutionAccountBinding, versionID uuid.UUID) error {
 	if err := executionAccount.Validate(); err != nil {
-		return nil
+		return err
 	}
 	scope, err := execution.NewStrategyExecutionScope(executionAccount.AccountID(), executionAccount.Environment(), versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {

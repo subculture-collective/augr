@@ -42,6 +42,7 @@ func TestNewRealStrategyRunnerRetainsExecutionAccount(t *testing.T) {
 }
 
 func withNativeAuditDeps(runner *realStrategyRunner) *realStrategyRunner {
+	runner.executionAccount = testExecutionAccountBinding
 	runner.runRepo = &stubPipelineRunRepo{}
 	runner.eventRepo = &recordingStrategyPreparationEventRepo{}
 	return runner
@@ -115,6 +116,37 @@ func TestBindStrategyRunScopeUsesResolvedVersion(t *testing.T) {
 	}
 }
 
+func TestStrategyVersionPersisterRejectsInvalidExecutionAccountWithoutWriting(t *testing.T) {
+	delegate := &countingDecisionPersister{}
+	persister := &strategyVersionPersister{delegate: delegate, versionID: uuid.New()}
+	run := &domain.PipelineRun{ID: uuid.New(), TradeDate: time.Now().UTC().Truncate(24 * time.Hour)}
+
+	if err := persister.RecordRunStart(context.Background(), run); err == nil {
+		t.Fatal("RecordRunStart() error = nil, want invalid execution-account error")
+	}
+	if delegate.runStarts != 0 {
+		t.Fatalf("delegate run starts = %d, want 0", delegate.runStarts)
+	}
+}
+
+type countingDecisionPersister struct{ runStarts int }
+
+func (p *countingDecisionPersister) RecordRunStart(context.Context, *domain.PipelineRun) error {
+	p.runStarts++
+	return nil
+}
+func (*countingDecisionPersister) FinalizeRun(context.Context, uuid.UUID, time.Time, repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{}, nil
+}
+func (*countingDecisionPersister) SupportsSnapshots() bool { return false }
+func (*countingDecisionPersister) PersistSnapshot(context.Context, *domain.PipelineRunSnapshot) error {
+	return nil
+}
+func (*countingDecisionPersister) PersistDecision(context.Context, uuid.UUID, agent.Node, *int, string, *agent.DecisionLLMResponse) error {
+	return nil
+}
+func (*countingDecisionPersister) PersistEvent(context.Context, *domain.AgentEvent) error { return nil }
+
 func TestRunStrategy_KalshiUsesNativePathBeforeLegacyOHLCV(t *testing.T) {
 	t.Parallel()
 
@@ -138,8 +170,9 @@ func TestRunKalshiNativeFailureReturnsRecognizedCancellationWinner(t *testing.T)
 			ctx, cancel := context.WithCancelCause(context.Background())
 			runRepo := &stubPipelineRunRepo{}
 			runner := &realStrategyRunner{
-				runRepo:   runRepo,
-				eventRepo: &recordingStrategyPreparationEventRepo{},
+				executionAccount: testExecutionAccountBinding,
+				runRepo:          runRepo,
+				eventRepo:        &recordingStrategyPreparationEventRepo{},
 				kalshiMarketData: cancelingKalshiMarketData{cancel: func() {
 					cancel(cause)
 				}},
@@ -369,9 +402,10 @@ func TestRunStrategy_KalshiSafeHoldPath(t *testing.T) {
 	eventRepo := &recordingStrategyPreparationEventRepo{}
 	runRepo := &stubPipelineRunRepo{}
 	runner := &realStrategyRunner{
-		runRepo:      runRepo,
-		eventRepo:    eventRepo,
-		snapshotRepo: snapshotRepo,
+		executionAccount: testExecutionAccountBinding,
+		runRepo:          runRepo,
+		eventRepo:        eventRepo,
+		snapshotRepo:     snapshotRepo,
 		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{
 			Ticker:     "KXTEST-YESNO",
 			Title:      "Will test happen?",
@@ -412,10 +446,11 @@ func TestRunStrategy_KalshiCancellationWinnerPreventsExecutionEffects(t *testing
 	runRepo := &stubPipelineRunRepo{receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
 	opportunities := &recordingOpportunityRepo{}
 	runner := &realStrategyRunner{
-		runRepo:         runRepo,
-		eventRepo:       &recordingStrategyPreparationEventRepo{},
-		snapshotRepo:    &recordingNativeSnapshotRepo{},
-		opportunityRepo: opportunities,
+		executionAccount: testExecutionAccountBinding,
+		runRepo:          runRepo,
+		eventRepo:        &recordingStrategyPreparationEventRepo{},
+		snapshotRepo:     &recordingNativeSnapshotRepo{},
+		opportunityRepo:  opportunities,
 		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{
 			Ticker: "KXTEST-YESNO", Title: "Will test happen?", Status: "active",
 			BestBidYes: 0.45, BestAskYes: 0.47, BestBidNo: 0.53, BestAskNo: 0.55,
@@ -446,7 +481,8 @@ func TestRunStrategy_KalshiCompletedWinnerLoserPreventsExecutionEffects(t *testi
 	runRepo := &stubPipelineRunRepo{receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
 	opportunities := &recordingOpportunityRepo{}
 	runner := &realStrategyRunner{
-		runRepo: runRepo, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: &recordingNativeSnapshotRepo{}, opportunityRepo: opportunities,
+		executionAccount: testExecutionAccountBinding,
+		runRepo:          runRepo, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: &recordingNativeSnapshotRepo{}, opportunityRepo: opportunities,
 		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{
 			Ticker: "KXTEST-YESNO", Title: "Will test happen?", Status: "active", BestBidYes: 0.45, BestAskYes: 0.47,
 			BestBidNo: 0.53, BestAskNo: 0.55, Volume: 1500, CloseTime: time.Now().UTC().Add(24 * time.Hour), FetchedAt: time.Now().UTC(),
@@ -511,7 +547,8 @@ func TestRunStrategy_KalshiPostTerminalErrorsReturnCanonicalResult(t *testing.T)
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &realStrategyRunner{
-				runRepo: &stubPipelineRunRepo{}, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: &recordingNativeSnapshotRepo{},
+				executionAccount: testExecutionAccountBinding,
+				runRepo:          &stubPipelineRunRepo{}, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: &recordingNativeSnapshotRepo{},
 				orderRepo: postTerminalOrderRepo{err: tc.orderErr}, positionRepo: postTerminalPositionRepo{err: tc.positionErr},
 				opportunityRepo: tc.opportunity, portfolioAllocatorMode: portfolio.AllocatorModePaper,
 				kalshiMarketData: snapshot, localPaperBroker: paper.NewPaperBroker(100_000, 0, 0), logger: slogDiscardLogger(),

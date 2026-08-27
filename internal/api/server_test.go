@@ -1393,6 +1393,28 @@ func TestUpdateStrategyRejectsStaleUpdatedAt(t *testing.T) {
 	}
 }
 
+func TestUpdateStrategyRejectsCrossAssetMarketType(t *testing.T) {
+	t.Parallel()
+	deps := testDeps()
+	repo := deps.Strategies.(*stubStrategyRepo)
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodPut, "/api/v1/strategies/"+stratA.ID.String(), map[string]any{
+		"market_type": "crypto",
+	})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d\nbody: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	body := decodeJSON[ErrorResponse](t, rr)
+	if body.Code != ErrCodeValidation {
+		t.Fatalf("code = %q, want %q", body.Code, ErrCodeValidation)
+	}
+	if got := repo.items[stratA.ID].MarketType; got != domain.MarketTypeStock {
+		t.Fatalf("persisted market type = %q, want %q", got, domain.MarketTypeStock)
+	}
+}
+
 func TestUpdateStrategyConfigValidation(t *testing.T) {
 	t.Parallel()
 

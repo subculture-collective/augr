@@ -163,6 +163,11 @@ func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *dom
 		return false, err
 	} else if existing != nil {
 		*strategy = *existing
+		versionID, err := bindExecutionVersion(ctx, tx, strategy)
+		if err != nil {
+			return false, err
+		}
+		strategy.ExecutionStrategyVersionID = &versionID
 		return false, nil
 	}
 	config, err := marshalConfig(strategy.Config)
@@ -177,6 +182,11 @@ func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *dom
 		strategy.ScheduleCron, config, strategy.Status, strategy.SkipNextRun, strategy.IsPaper,
 		strategy.Status == domain.StrategyStatusActive).Scan(&strategy.ID, &strategy.CreatedAt, &strategy.UpdatedAt)
 	if err == nil {
+		versionID, bindErr := bindExecutionVersion(ctx, tx, strategy)
+		if bindErr != nil {
+			return false, bindErr
+		}
+		strategy.ExecutionStrategyVersionID = &versionID
 		return true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -190,11 +200,16 @@ func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *dom
 		return false, fmt.Errorf("strategy insert conflicted without a matching paper strategy")
 	}
 	*strategy = *existing
+	versionID, err := bindExecutionVersion(ctx, tx, strategy)
+	if err != nil {
+		return false, err
+	}
+	strategy.ExecutionStrategyVersionID = &versionID
 	return false, nil
 }
 
 func findPreparedStrategy(ctx context.Context, tx pgx.Tx, strategy domain.Strategy) (*domain.Strategy, error) {
-	query := `SELECT id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at
+	query := `SELECT id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id
 		FROM strategies WHERE ticker = $1 AND market_type = $2 AND is_paper = true`
 	args := []any{strategy.Ticker, strategy.MarketType}
 	if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) {

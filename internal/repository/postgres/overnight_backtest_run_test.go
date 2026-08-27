@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -235,81 +234,40 @@ func TestOvernightBacktestRunRepoIntegration_CommitRollsBackAndReuses(t *testing
 	}
 }
 
+func TestOvernightBacktestRunRepoIntegration_CommitBindsPersistedExecutionVersion(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOvernightBacktestRunRepo(pool)
+	run := domain.NewOvernightBacktestRun()
+	run.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := repo.Create(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+
+	strategy := preparedOvernightStrategy("AAPL", "versioned")
+	if _, _, err := repo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy}); err != nil {
+		t.Fatal(err)
+	}
+
+	var versionID uuid.UUID
+	var canonicalConfig string
+	if err := pool.QueryRow(ctx, `SELECT s.execution_strategy_version_id,convert_from(v.config_bytes,'UTF8')
+		FROM strategies s JOIN strategy_versions v ON v.id=s.execution_strategy_version_id WHERE s.id=$1`, strategy.ID).
+		Scan(&versionID, &canonicalConfig); err != nil {
+		t.Fatal(err)
+	}
+	if versionID == uuid.Nil || canonicalConfig != `{"research_lifecycle":{"stage":"idea"}}` {
+		t.Fatalf("execution version = %s, config = %s", versionID, canonicalConfig)
+	}
+}
+
 func preparedOvernightStrategy(ticker, suffix string) domain.Strategy {
 	return domain.Strategy{ID: uuid.New(), Name: "discovery: " + ticker + " " + suffix, Ticker: ticker, MarketType: domain.MarketTypeStock, IsPaper: true, Status: domain.StrategyStatusInactive, Config: json.RawMessage(`{"research_lifecycle":{"stage":"idea"}}`)}
 }
 
 func newOvernightBacktestIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-	connString := os.Getenv("DB_URL")
-	if connString == "" {
-		connString = os.Getenv("DATABASE_URL")
-	}
-	if connString == "" {
-		t.Skip("skipping integration test: DB_URL or DATABASE_URL is not set")
-	}
-	adminPool, err := pgxpool.New(ctx, connString)
-	if err != nil {
-		t.Fatalf("failed to create admin pool: %v", err)
-	}
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
-		adminPool.Close()
-		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
-	}
-	schemaName := "integration_overnight_backtest_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+pqQuoteIdent(schemaName)); err != nil {
-		adminPool.Close()
-		t.Fatalf("failed to create test schema: %v", err)
-	}
-	config, err := pgxpool.ParseConfig(connString)
-	if err != nil {
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-		t.Fatalf("failed to parse pool config: %v", err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-		t.Fatalf("failed to create test pool: %v", err)
-	}
-	ddl := `CREATE TABLE overnight_backtest_runs (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
-		phase TEXT NOT NULL CHECK (phase IN ('screen', 'generate', 'sweep_validate_deploy', 'done')),
-		candidate_index INTEGER NOT NULL DEFAULT 0 CHECK (candidate_index >= 0),
-		candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
-		generated JSONB NOT NULL DEFAULT '[]'::jsonb,
-		errors JSONB NOT NULL DEFAULT '[]'::jsonb,
-		summary JSONB NOT NULL DEFAULT '{}'::jsonb,
-		started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		completed_at TIMESTAMPTZ
-	);
-	CREATE TABLE strategies (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, description TEXT,
-		ticker TEXT NOT NULL, market_type TEXT NOT NULL, schedule_cron TEXT, config JSONB NOT NULL DEFAULT '{}',
-		status TEXT NOT NULL DEFAULT 'inactive', skip_next_run BOOLEAN NOT NULL DEFAULT false,
-		is_paper BOOLEAN NOT NULL DEFAULT true, is_active BOOLEAN NOT NULL DEFAULT false,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);
-	CREATE UNIQUE INDEX idx_strategies_discovery_unique ON strategies (ticker, market_type, is_paper, name)
-		WHERE is_paper = true AND (name LIKE 'discovery:%' OR name LIKE 'options:%')`
-	if _, err := pool.Exec(ctx, ddl); err != nil {
-		pool.Close()
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-		t.Fatalf("failed to apply test schema DDL: %v", err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-	}
+	return newStrategyIntegrationPool(t, ctx)
 }
 
 func pqQuoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
