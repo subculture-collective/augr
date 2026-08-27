@@ -73,12 +73,11 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		return domain.Strategy{}, false, err
 	}
 	if existing != nil {
-		versionID, resolveErr := repo.ResolveExecutionVersionID(ctx, existing.ID)
-		if resolveErr != nil {
-			return domain.Strategy{}, false, fmt.Errorf("resolve existing strategy execution version: %w", resolveErr)
+		refreshed, refreshErr := loadValidatedStrategy(ctx, repo, existing.ID)
+		if refreshErr != nil {
+			return domain.Strategy{}, false, fmt.Errorf("load existing strategy with execution version: %w", refreshErr)
 		}
-		existing.ExecutionStrategyVersionID = &versionID
-		return *existing, false, nil
+		return refreshed, false, nil
 	}
 
 	strategy.ID = uuid.New()
@@ -97,16 +96,36 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		if existingAfterConflict == nil {
 			return domain.Strategy{}, false, err
 		}
-		resolvedID, resolveErr := repo.ResolveExecutionVersionID(ctx, existingAfterConflict.ID)
-		if resolveErr != nil {
-			return domain.Strategy{}, false, fmt.Errorf("resolve existing strategy execution version after conflict: %w", resolveErr)
+		refreshed, refreshErr := loadValidatedStrategy(ctx, repo, existingAfterConflict.ID)
+		if refreshErr != nil {
+			return domain.Strategy{}, false, fmt.Errorf("load existing strategy with execution version after conflict: %w", refreshErr)
 		}
-		existingAfterConflict.ExecutionStrategyVersionID = &resolvedID
-		return *existingAfterConflict, false, nil
+		return refreshed, false, nil
 	}
 
 	strategy.ExecutionStrategyVersionID = &versionID
 	return strategy, true, nil
+}
+
+func loadValidatedStrategy(ctx context.Context, repo repository.StrategyRepository, strategyID uuid.UUID) (domain.Strategy, error) {
+	for range 3 {
+		versionID, err := repo.ResolveExecutionVersionID(ctx, strategyID)
+		if err != nil {
+			return domain.Strategy{}, err
+		}
+		strategy, err := repo.Get(ctx, strategyID)
+		if err != nil {
+			return domain.Strategy{}, err
+		}
+		validatedID, err := repo.ResolveExecutionVersionID(ctx, strategyID)
+		if err != nil {
+			return domain.Strategy{}, err
+		}
+		if versionID == validatedID && strategy.ExecutionStrategyVersionID != nil && *strategy.ExecutionStrategyVersionID == validatedID {
+			return *strategy, nil
+		}
+	}
+	return domain.Strategy{}, errors.New("strategy snapshot changed while validating execution version")
 }
 
 func findExistingPaperStrategy(ctx context.Context, repo repository.StrategyRepository, strategy domain.Strategy) (*domain.Strategy, error) {

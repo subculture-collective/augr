@@ -216,6 +216,7 @@ type inMemoryStrategyRepo struct {
 	conflictTriggered  bool
 	createStatuses     []string
 	updateStatuses     []string
+	mutateOnResolve    func(*inMemoryStrategyRepo, uuid.UUID)
 }
 
 func newInMemoryStrategyRepo() *inMemoryStrategyRepo {
@@ -256,12 +257,48 @@ func (r *inMemoryStrategyRepo) CreateWithExecutionVersion(ctx context.Context, s
 }
 
 func (r *inMemoryStrategyRepo) ResolveExecutionVersionID(_ context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
-	for _, strategy := range r.strategies {
+	if r.mutateOnResolve != nil {
+		mutate := r.mutateOnResolve
+		r.mutateOnResolve = nil
+		mutate(r, strategyID)
+	}
+	for i := range r.strategies {
+		strategy := &r.strategies[i]
 		if strategy.ID == strategyID {
-			return uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyID.String())), nil
+			if strategy.ExecutionStrategyVersionID == nil {
+				versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyID.String()))
+				strategy.ExecutionStrategyVersionID = &versionID
+			}
+			return *strategy.ExecutionStrategyVersionID, nil
 		}
 	}
 	return uuid.Nil, repository.ErrNotFound
+}
+
+func TestCreateOrReusePaperStrategyReturnsSnapshotMatchingValidatedBinding(t *testing.T) {
+	t.Parallel()
+	repo := newInMemoryStrategyRepo()
+	strategy := domain.Strategy{Name: "old", Ticker: "SNAP", MarketType: domain.MarketTypeStock, IsPaper: true, Config: json.RawMessage(`{"revision":1}`)}
+	created, _, err := CreateOrReusePaperStrategy(context.Background(), repo, strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newVersionID := uuid.New()
+	repo.mutateOnResolve = func(repo *inMemoryStrategyRepo, id uuid.UUID) {
+		for i := range repo.strategies {
+			if repo.strategies[i].ID == id {
+				repo.strategies[i].Description = "new snapshot"
+				repo.strategies[i].ExecutionStrategyVersionID = &newVersionID
+			}
+		}
+	}
+	reused, didCreate, err := CreateOrReusePaperStrategy(context.Background(), repo, strategy)
+	if err != nil || didCreate {
+		t.Fatalf("reuse = %v, %v", didCreate, err)
+	}
+	if reused.ID != created.ID || reused.Description != "new snapshot" || reused.ExecutionStrategyVersionID == nil || *reused.ExecutionStrategyVersionID != newVersionID {
+		t.Fatalf("reused stale snapshot: %+v", reused)
+	}
 }
 
 func (r *inMemoryStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {

@@ -83,6 +83,9 @@ func (r *StrategyRepo) CreateWithExecutionVersion(ctx context.Context, s *domain
 
 func (r *StrategyRepo) ResolveExecutionVersionID(ctx context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
 	var versionID, familyID uuid.UUID
+	var snapshot string
+	var canonicalConfig []byte
+	var marketType domain.MarketType
 	err := r.pool.QueryRow(ctx, `SELECT v.id,v.family_id FROM strategies s
 		JOIN strategy_versions v ON v.id=s.execution_strategy_version_id
 		JOIN strategy_families f ON f.id=v.family_id
@@ -95,6 +98,22 @@ func (r *StrategyRepo) ResolveExecutionVersionID(ctx context.Context, strategyID
 	}
 	if familyID != strategycatalog.LegacyFamilyID(strategyID) {
 		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version family mismatch", strategyID)
+	}
+	err = r.pool.QueryRow(ctx, `SELECT market_type,strategy_legacy_snapshot_sha(id),convert_to(strategy_canonical_json(config),'UTF8')
+		FROM strategies WHERE id=$1`, strategyID).Scan(&marketType, &snapshot, &canonicalConfig)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: read strategy %s execution snapshot: %w", strategyID, err)
+	}
+	_, kinds, err := legacyExecutionRequirements(marketType)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	expected, err := strategycatalog.NewLegacyVersion(familyID, snapshot, canonicalConfig, kinds)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: construct strategy %s execution version: %w", strategyID, err)
+	}
+	if versionID != expected.ID() {
+		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version binding is stale", strategyID)
 	}
 	return versionID, nil
 }
