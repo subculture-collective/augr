@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/robfig/cron/v3"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
@@ -191,19 +192,21 @@ func TestHotScanRequiresAndConsumesCurrentRefreshState(t *testing.T) {
 func TestMarketJobCadenceRunsDependenciesBeforeConsumers(t *testing.T) {
 	t.Parallel()
 
-	if currentDataRefreshSpec.Cron != "30 * * * 1-5" {
+	if currentDataRefreshSpec.Cron != "45 9-16 * * 1-5" {
 		t.Fatalf("current refresh cron = %q", currentDataRefreshSpec.Cron)
 	}
-	if currentDataRefreshSpec.Type != scheduler.ScheduleTypeMarketHours || currentDataRefreshSpec.PostCloseGraceMinutes != 30 {
+	if currentDataRefreshSpec.Type != scheduler.ScheduleTypeMarketHours || currentDataRefreshSpec.PostCloseGraceMinutes != 45 {
 		t.Fatalf("current refresh schedule = %+v", currentDataRefreshSpec)
 	}
 	for _, test := range []struct {
 		now  time.Time
 		want bool
 	}{
-		{now: time.Date(2026, time.August, 6, 15, 30, 0, 0, easternTime), want: true},
-		{now: time.Date(2026, time.August, 6, 16, 30, 0, int(3*time.Millisecond), easternTime), want: true},
-		{now: time.Date(2026, time.August, 6, 16, 31, 0, 0, easternTime), want: false},
+		{now: time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime), want: true},
+		{now: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime), want: true},
+		{now: time.Date(2026, time.August, 6, 16, 45, 0, int(3*time.Millisecond), easternTime), want: true},
+		{now: time.Date(2026, time.August, 6, 16, 45, 59, 999999999, easternTime), want: true},
+		{now: time.Date(2026, time.August, 6, 16, 46, 0, 0, easternTime), want: false},
 		{now: time.Date(2026, time.August, 6, 17, 30, 0, 0, easternTime), want: false},
 	} {
 		if got := currentDataRefreshSpec.ShouldFire(test.now); got != test.want {
@@ -215,6 +218,27 @@ func TestMarketJobCadenceRunsDependenciesBeforeConsumers(t *testing.T) {
 	}
 	if deepScanSpec.Cron != "25 * * * 1-5" {
 		t.Fatalf("deep scan cron = %q, want minute 25", deepScanSpec.Cron)
+	}
+
+	schedule, err := cron.ParseStandard(currentDataRefreshSpec.Cron)
+	if err != nil {
+		t.Fatalf("parse current refresh cron: %v", err)
+	}
+	for _, test := range []struct {
+		name string
+		at   time.Time
+		want bool
+	}{
+		{name: "opening bell does not fire", at: time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime)},
+		{name: "opening delayed refresh fires", at: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime), want: true},
+		{name: "closing delayed refresh fires", at: time.Date(2026, time.August, 6, 16, 45, 0, 0, easternTime), want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			previousMinute := test.at.Add(-time.Minute)
+			if got := schedule.Next(previousMinute).Equal(test.at); got != test.want {
+				t.Fatalf("cron fires at %s = %t, want %t", test.at, got, test.want)
+			}
+		})
 	}
 }
 
@@ -230,16 +254,32 @@ func TestMarketPipelineDependenciesRequireCurrentHourlyCycle(t *testing.T) {
 		wantBlocked bool
 	}{
 		{
-			name: "opening hot scan accepts refresh at previous half-hour boundary", consumer: "hot_scan", dependency: "current_data_refresh",
-			now: time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime),
+			name: "opening hot scan accepts delayed refresh", consumer: "hot_scan", dependency: "current_data_refresh",
+			now: time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
 		},
 		{
-			name: "hot scan rejects refresh before previous half-hour boundary", consumer: "hot_scan", dependency: "current_data_refresh", wantBlocked: true,
-			now: time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 29, 59, 999999999, easternTime),
+			name: "opening hot scan rejects stale opening-bell refresh", consumer: "hot_scan", dependency: "current_data_refresh", wantBlocked: true,
+			now: time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 44, 59, 999999999, easternTime),
 		},
 		{
-			name: "manual hot scan after half-hour accepts current boundary", consumer: "hot_scan", dependency: "current_data_refresh",
-			now: time.Date(2026, time.August, 6, 10, 45, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 10, 30, 0, 0, easternTime),
+			name: "manual hot scan at 09:29 rejects same-minute refresh", consumer: "hot_scan", dependency: "current_data_refresh", wantBlocked: true,
+			now: time.Date(2026, time.August, 6, 9, 29, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 29, 0, 0, easternTime),
+		},
+		{
+			name: "manual hot scan at 09:30 rejects same-minute refresh", consumer: "hot_scan", dependency: "current_data_refresh", wantBlocked: true,
+			now: time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime),
+		},
+		{
+			name: "manual hot scan before 09:45 rejects same-second refresh", consumer: "hot_scan", dependency: "current_data_refresh", wantBlocked: true,
+			now: time.Date(2026, time.August, 6, 9, 44, 59, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 9, 44, 59, 0, easternTime),
+		},
+		{
+			name: "opening hot scan rejects prior-day refresh", consumer: "hot_scan", dependency: "current_data_refresh", wantBlocked: true,
+			now: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 5, 15, 45, 0, 0, easternTime),
+		},
+		{
+			name: "manual hot scan after quarter-to accepts current boundary", consumer: "hot_scan", dependency: "current_data_refresh",
+			now: time.Date(2026, time.August, 6, 10, 45, 0, 0, easternTime), completedAt: time.Date(2026, time.August, 6, 10, 45, 0, 0, easternTime),
 		},
 		{
 			name: "deep scan accepts hot scan at current hour boundary", consumer: "deep_scan", dependency: "hot_scan",
@@ -269,6 +309,52 @@ func TestMarketPipelineDependenciesRequireCurrentHourlyCycle(t *testing.T) {
 				t.Fatalf("dependency blocked = %t, want %t", got, test.wantBlocked)
 			}
 		})
+	}
+}
+
+func TestHotScanPipelineCycleStartsAtLatestQuarterTo(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		at   time.Time
+		want time.Time
+	}{
+		{
+			at:   time.Date(2026, time.August, 6, 9, 29, 0, 0, easternTime),
+			want: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+		},
+		{
+			at:   time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime),
+			want: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+		},
+		{
+			at:   time.Date(2026, time.August, 6, 9, 44, 59, 999999999, easternTime),
+			want: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+		},
+		{
+			at:   time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+			want: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+		},
+		{
+			at:   time.Date(2026, time.August, 6, 9, 59, 0, 0, easternTime),
+			want: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+		},
+		{
+			at:   time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime),
+			want: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+		},
+		{
+			at:   time.Date(2026, time.August, 6, 10, 44, 59, 999999999, easternTime),
+			want: time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime),
+		},
+		{
+			at:   time.Date(2026, time.August, 6, 10, 45, 0, 0, easternTime),
+			want: time.Date(2026, time.August, 6, 10, 45, 0, 0, easternTime),
+		},
+	} {
+		if got := marketPipelineCycleStart("hot_scan", test.at); !got.Equal(test.want) {
+			t.Fatalf("marketPipelineCycleStart(hot_scan, %s) = %s, want %s", test.at, got, test.want)
+		}
 	}
 }
 
@@ -403,8 +489,8 @@ func TestCurrentDataRefreshClosingModeBoundaries(t *testing.T) {
 	}{
 		{name: "before close", at: time.Date(2026, time.August, 26, 15, 59, 59, 0, easternTime)},
 		{name: "at close", at: time.Date(2026, time.August, 26, 16, 0, 0, 0, easternTime), want: true},
-		{name: "last grace minute", at: time.Date(2026, time.August, 26, 16, 30, 59, 0, easternTime), want: true},
-		{name: "after grace", at: time.Date(2026, time.August, 26, 16, 31, 0, 0, easternTime)},
+		{name: "last grace minute", at: time.Date(2026, time.August, 26, 16, 45, 59, 999999999, easternTime), want: true},
+		{name: "after grace", at: time.Date(2026, time.August, 26, 16, 46, 0, 0, easternTime)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := currentDataRefreshClosingMode(test.at); got != test.want {

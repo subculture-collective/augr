@@ -23,14 +23,14 @@ const currentDataWatchlistLimit = 0
 var (
 	currentDataRefreshSpec = scheduler.ScheduleSpec{
 		Type:                  scheduler.ScheduleTypeMarketHours,
-		Cron:                  "30 * * * 1-5", // 09:30–15:30 hourly plus 16:30 ET closing refresh
+		Cron:                  "45 9-16 * * 1-5", // 09:45–15:45 hourly plus 16:45 ET closing refresh after provider publication delay
 		SkipWeekends:          true,
 		SkipHolidays:          true,
-		PostCloseGraceMinutes: 30,
+		PostCloseGraceMinutes: 45,
 	}
 	hotScanSpec = scheduler.ScheduleSpec{
 		Type:         scheduler.ScheduleTypeMarketHours,
-		Cron:         "0 * * * 1-5", // hourly after the preceding :30 refresh
+		Cron:         "0 * * * 1-5", // hourly after the preceding :45 refresh
 		SkipWeekends: true,
 		SkipHolidays: true,
 	}
@@ -43,12 +43,12 @@ var (
 )
 
 func (o *JobOrchestrator) registerMarketJobs() {
-	o.Register("current_data_refresh", "Refresh intraday OHLCV for open stock positions and active stock strategies", currentDataRefreshSpec, o.currentDataRefresh)
+	o.Register("current_data_refresh", "Refresh stock OHLCV hourly at :45 after provider publication delay, with a final post-close refresh", currentDataRefreshSpec, o.currentDataRefresh)
 	o.Register("hot_scan", "Quick scan tickers refreshed by the current market-data run", hotScanSpec, o.hotScan, "current_data_refresh")
 	o.Register("deep_scan", "Operational holdings, strategies, and watchlist score update", deepScanSpec, o.deepScan, "hot_scan")
 }
 
-// currentDataRefresh refreshes recent intraday OHLCV for open stock positions and active stock strategies.
+// currentDataRefresh refreshes recent 5-minute and daily OHLCV for operational stock tickers.
 func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 	summary := map[string]int{
 		"closing_mode":            0,

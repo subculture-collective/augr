@@ -914,10 +914,14 @@ func marketPipelineCycleStart(jobName string, now time.Time) time.Time {
 	hour := nowET.Truncate(time.Hour)
 	switch jobName {
 	case "hot_scan":
-		if nowET.Minute() >= 30 {
-			return hour.Add(30 * time.Minute)
+		opening := time.Date(nowET.Year(), nowET.Month(), nowET.Day(), 9, 45, 0, 0, easternTime)
+		if nowET.Before(opening) {
+			return opening
 		}
-		return hour.Add(-30 * time.Minute)
+		if nowET.Minute() >= 45 {
+			return hour.Add(45 * time.Minute)
+		}
+		return hour.Add(-15 * time.Minute)
 	case "deep_scan":
 		return hour
 	default:

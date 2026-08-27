@@ -789,10 +789,11 @@ func TestCurrentDataRefreshManualRunUsesPostCloseGrace(t *testing.T) {
 		now     time.Time
 		wantRun bool
 	}{
-		{name: "closing refresh", now: time.Date(2026, time.August, 6, 16, 30, 0, 0, easternTime), wantRun: true},
-		{name: "after grace", now: time.Date(2026, time.August, 6, 16, 31, 0, 0, easternTime)},
-		{name: "holiday", now: time.Date(2026, time.December, 25, 16, 30, 0, 0, easternTime)},
-		{name: "weekend", now: time.Date(2026, time.August, 8, 16, 30, 0, 0, easternTime)},
+		{name: "closing refresh", now: time.Date(2026, time.August, 6, 16, 45, 0, 0, easternTime), wantRun: true},
+		{name: "last grace minute", now: time.Date(2026, time.August, 6, 16, 45, 59, 999999999, easternTime), wantRun: true},
+		{name: "after grace", now: time.Date(2026, time.August, 6, 16, 46, 0, 0, easternTime)},
+		{name: "holiday", now: time.Date(2026, time.December, 25, 16, 45, 0, 0, easternTime)},
+		{name: "weekend", now: time.Date(2026, time.August, 8, 16, 45, 0, 0, easternTime)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -934,7 +935,7 @@ func TestDependencyBlockerRequiresSuccessfulSameDayRun(t *testing.T) {
 func TestMarketDependencyCycleCheckMatchesHydratedState(t *testing.T) {
 	t.Parallel()
 
-	completedAt := time.Date(2026, time.August, 6, 9, 30, 0, 0, easternTime)
+	completedAt := time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime)
 	now := time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime)
 	newOrchestrator := func(repo AutomationJobRunRepository) *JobOrchestrator {
 		orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
@@ -964,7 +965,7 @@ func TestMarketDependencyCycleCheckMatchesHydratedState(t *testing.T) {
 }
 
 func TestCurrentDataRefreshPayloadSurvivesRestartAndBlocksLegacyHandoff(t *testing.T) {
-	completedAt := time.Date(2026, time.August, 6, 10, 0, 0, 0, easternTime)
+	completedAt := time.Date(2026, time.August, 6, 9, 45, 0, 0, easternTime)
 	now := completedAt.Add(5 * time.Minute)
 	newOrchestrator := func(summary pgrepo.JobRunSummary) *JobOrchestrator {
 		repo := newRecordingAutomationJobRunRepo()
@@ -1008,7 +1009,7 @@ func TestCurrentDataRefreshPayloadSurvivesRestartAndBlocksLegacyHandoff(t *testi
 }
 
 func TestClosingCurrentDataRefreshPersistsAndHydratesNoTickerPayload(t *testing.T) {
-	completedAt := time.Date(2026, time.August, 26, 16, 5, 0, 0, easternTime)
+	completedAt := time.Date(2026, time.August, 26, 16, 45, 0, 0, easternTime)
 	repo := newRecordingAutomationJobRunRepo()
 	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
 	orch.Register("current_data_refresh", "closing refresh", currentDataRefreshSpec, func(context.Context) error {
