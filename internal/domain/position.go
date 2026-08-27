@@ -1,8 +1,6 @@
 package domain
 
 import (
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,52 +26,6 @@ func (s PositionSide) IsValid() bool {
 		return true
 	}
 	return false
-}
-
-// PositionScope identifies the account and authoritative origin of a position.
-type PositionScope struct {
-	AccountID   uuid.UUID
-	Environment AccountEnvironment
-	OriginType  string
-	OriginID    string
-}
-
-// NewPosition creates a Position in a canonical execution scope.
-func NewPosition(scope PositionScope, ticker string, side PositionSide, quantity, avgEntry float64) (*Position, error) {
-	if scope.AccountID == uuid.Nil {
-		return nil, fmt.Errorf("position account ID is required")
-	}
-	if !scope.Environment.IsValid() {
-		return nil, fmt.Errorf("invalid position environment: %q", scope.Environment)
-	}
-	if scope.OriginType == "" || strings.TrimSpace(scope.OriginType) != scope.OriginType {
-		return nil, fmt.Errorf("canonical position origin type is required")
-	}
-	if scope.OriginID == "" || strings.TrimSpace(scope.OriginID) != scope.OriginID {
-		return nil, fmt.Errorf("canonical position origin ID is required")
-	}
-	if err := requireNonEmpty("ticker", ticker); err != nil {
-		return nil, err
-	}
-	if !side.IsValid() {
-		return nil, fmt.Errorf("invalid position side: %q", side)
-	}
-	if err := requirePositive("quantity", quantity); err != nil {
-		return nil, err
-	}
-	if err := requirePositive("avg_entry", avgEntry); err != nil {
-		return nil, err
-	}
-	return &Position{
-		AccountID:   scope.AccountID,
-		Environment: scope.Environment,
-		OriginType:  scope.OriginType,
-		OriginID:    scope.OriginID,
-		Ticker:      ticker,
-		Side:        side,
-		Quantity:    quantity,
-		AvgEntry:    avgEntry,
-	}, nil
 }
 
 // Position represents an open or closed trading position.
