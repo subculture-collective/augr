@@ -20,6 +20,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
+	"github.com/PatrickFanella/get-rich-quick/internal/testsupport"
 )
 
 func TestBuildListQuery_NoFilters(t *testing.T) {
@@ -419,6 +420,34 @@ func TestStrategyRepoIntegration_ResolveRejectsForeignFamilyMapping(t *testing.T
 	}
 }
 
+func TestStrategyIntegrationRelocatableExtensionsUseSharedSchema(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newStrategyIntegrationPool(t, ctx)
+	defer cleanup()
+	rows, err := pool.Query(ctx, `SELECT e.extname,n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname IN ('pgcrypto','vector') ORDER BY e.extname`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var extension, schema string
+		if err := rows.Scan(&extension, &schema); err != nil {
+			t.Fatal(err)
+		}
+		if schema != testsupport.ExtensionSchema {
+			t.Fatalf("%s extension schema = %q, want %q", extension, schema, testsupport.ExtensionSchema)
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("relocatable extension count = %d, want 2", count)
+	}
+}
+
 // assertContains fails if substr is not found in s.
 func assertContains(t *testing.T, s, substr string) {
 	t.Helper()
@@ -447,6 +476,10 @@ func newStrategyIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 	if err != nil {
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
+	if err := testsupport.PreparePostgresExtensions(ctx, adminPool); err != nil {
+		adminPool.Close()
+		t.Fatalf("failed to prepare shared extensions: %v", err)
+	}
 
 	schemaName := "integration_strategy_" + strings.ReplaceAll(uuid.New().String(), "-", "")
 	identifier := pgx.Identifier{schemaName}.Sanitize()
@@ -455,7 +488,7 @@ func newStrategyIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		t.Fatalf("failed to create test schema: %v", err)
 	}
 
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = testsupport.PostgresTestSearchPath(schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)

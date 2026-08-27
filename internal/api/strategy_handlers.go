@@ -110,6 +110,10 @@ func (s *Server) handleRunStrategy(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusConflict, "strategy execution version binding is invalid", ErrCodeConflict)
 		return
 	}
+	if strategy.ExecutionStrategyVersionID == nil || *strategy.ExecutionStrategyVersionID != executionVersionID {
+		respondError(w, http.StatusConflict, "strategy execution version changed after snapshot was loaded", ErrCodeConflict)
+		return
+	}
 
 	// Run the strategy asynchronously so the HTTP client disconnect does not
 	// cancel the pipeline context.  Return 202 Accepted immediately.

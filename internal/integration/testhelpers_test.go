@@ -17,6 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
+	"github.com/PatrickFanella/get-rich-quick/internal/testsupport"
 )
 
 // testDB holds a connection pool scoped to an isolated schema for one test.
@@ -54,6 +55,10 @@ func newTestDB(t *testing.T) *testDB {
 	if err != nil {
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
+	if err := testsupport.PreparePostgresExtensions(ctx, adminPool); err != nil {
+		adminPool.Close()
+		t.Fatalf("failed to prepare shared extensions: %v", err)
+	}
 
 	schemaName := "integ_" + strings.ReplaceAll(uuid.New().String(), "-", "")
 	identifier := pgx.Identifier{schemaName}.Sanitize()
@@ -62,7 +67,7 @@ func newTestDB(t *testing.T) *testDB {
 		t.Fatalf("failed to create test schema: %v", err)
 	}
 
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = testsupport.PostgresTestSearchPath(schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)

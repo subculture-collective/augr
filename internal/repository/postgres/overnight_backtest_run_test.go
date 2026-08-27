@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -259,6 +261,114 @@ func TestOvernightBacktestRunRepoIntegration_CommitBindsPersistedExecutionVersio
 	}
 	if versionID == uuid.Nil || canonicalConfig != `{"research_lifecycle":{"stage":"idea"}}` {
 		t.Fatalf("execution version = %s, config = %s", versionID, canonicalConfig)
+	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_ReuseRejectsInvalidExecutionBinding(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	runRepo := NewOvernightBacktestRunRepo(pool)
+	strategyRepo := NewStrategyRepo(pool)
+
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, domain.Strategy)
+		want   string
+	}{
+		{name: "missing", want: "missing", mutate: func(t *testing.T, strategy domain.Strategy) {
+			_, err := pool.Exec(ctx, `UPDATE strategies SET execution_strategy_version_id=NULL WHERE id=$1`, strategy.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "foreign family", want: "family mismatch", mutate: func(t *testing.T, strategy domain.Strategy) {
+			foreign := preparedOvernightStrategy("FOREIGN", "foreign")
+			foreign.ID = uuid.New()
+			foreignVersionID, err := strategyRepo.CreateWithExecutionVersion(ctx, &foreign)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE strategies SET execution_strategy_version_id=$1 WHERE id=$2`, foreignVersionID, strategy.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "stale", want: "stale", mutate: func(t *testing.T, strategy domain.Strategy) {
+			if _, err := pool.Exec(ctx, `UPDATE strategies SET config='{"research_lifecycle":{"stage":"candidate"}}'::jsonb WHERE id=$1`, strategy.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			strategy := preparedOvernightStrategy(fmt.Sprintf("BAD%d", i), tc.name)
+			if _, err := strategyRepo.CreateWithExecutionVersion(ctx, &strategy); err != nil {
+				t.Fatal(err)
+			}
+			originalBinding := *strategy.ExecutionStrategyVersionID
+			tc.mutate(t, strategy)
+			var bindingBefore *uuid.UUID
+			if err := pool.QueryRow(ctx, `SELECT execution_strategy_version_id FROM strategies WHERE id=$1`, strategy.ID).Scan(&bindingBefore); err != nil {
+				t.Fatal(err)
+			}
+
+			run := domain.NewOvernightBacktestRun()
+			run.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+			if err := runRepo.Create(ctx, &run); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := runRepo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CommitIfRunning() error = %v, want %q", err, tc.want)
+			}
+			var bindingAfter *uuid.UUID
+			if err := pool.QueryRow(ctx, `SELECT execution_strategy_version_id FROM strategies WHERE id=$1`, strategy.ID).Scan(&bindingAfter); err != nil {
+				t.Fatal(err)
+			}
+			if (bindingBefore == nil) != (bindingAfter == nil) || bindingBefore != nil && *bindingBefore != *bindingAfter {
+				t.Fatalf("binding repaired from %v to %v; original valid binding was %s", bindingBefore, bindingAfter, originalBinding)
+			}
+		})
+	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_ConcurrentReusePreservesBinding(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOvernightBacktestRunRepo(pool)
+	strategy := preparedOvernightStrategy("RACE", "shared")
+	runs := []domain.OvernightBacktestRun{domain.NewOvernightBacktestRun(), domain.NewOvernightBacktestRun()}
+	for i := range runs {
+		runs[i].Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+		if err := repo.Create(ctx, &runs[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(runs))
+	for i := range runs {
+		wg.Add(1)
+		go func(runID uuid.UUID) {
+			defer wg.Done()
+			_, _, err := repo.CommitIfRunning(ctx, runID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy})
+			errCh <- err
+		}(runs[i].ID)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var strategyCount, boundCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*),count(execution_strategy_version_id) FROM strategies WHERE ticker='RACE'`).Scan(&strategyCount, &boundCount); err != nil {
+		t.Fatal(err)
+	}
+	if strategyCount != 1 || boundCount != 1 {
+		t.Fatalf("strategies/bound = %d/%d, want 1/1", strategyCount, boundCount)
 	}
 }
 

@@ -804,11 +804,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...),
 				scheduler.WithRunGroup(runGroup),
 				scheduler.WithStrategyExecution(func(ctx context.Context, strategy domain.Strategy) error {
-					versionID, err := strategyRepo.ResolveExecutionVersionID(ctx, strategy.ID)
-					if err != nil {
-						return err
-					}
-					_, err = strategyRunner.RunStrategy(ctx, strategy, versionID)
+					_, err := runScheduledStrategy(ctx, strategyRepo, strategyRunner, strategy)
 					return err
 				}),
 			)
@@ -1050,11 +1046,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if cfg.Features.EnableScheduler {
 			schedOpts := []scheduler.Option{
 				scheduler.WithStrategyExecution(func(ctx context.Context, strategy domain.Strategy) error {
-					versionID, err := strategyRepo.ResolveExecutionVersionID(ctx, strategy.ID)
-					if err != nil {
-						return err
-					}
-					result, err := strategyRunner.RunStrategy(ctx, strategy, versionID)
+					result, err := runScheduledStrategy(ctx, strategyRepo, strategyRunner, strategy)
 					if err == nil && result != nil && serverRef != nil {
 						serverRef.BroadcastRunResult(result)
 					}
@@ -1394,6 +1386,17 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 	startupComplete = true
 	return server, lifecycle, lifecycle.Stop, nil
+}
+
+func runScheduledStrategy(ctx context.Context, strategies repository.StrategyRepository, runner api.StrategyRunner, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+	versionID, err := strategies.ResolveExecutionVersionID(ctx, strategy.ID)
+	if err != nil {
+		return nil, err
+	}
+	if strategy.ExecutionStrategyVersionID == nil || *strategy.ExecutionStrategyVersionID != versionID {
+		return nil, fmt.Errorf("strategy %s execution version changed after snapshot was loaded", strategy.ID)
+	}
+	return runner.RunStrategy(ctx, strategy, versionID)
 }
 
 func runtimeShouldInitializeUniverse(cfg config.Config) bool {

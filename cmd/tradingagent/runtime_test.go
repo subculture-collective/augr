@@ -48,6 +48,36 @@ import (
 
 var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
 
+type recordingScheduledStrategyRunner struct{ calls atomic.Int32 }
+
+func (r *recordingScheduledStrategyRunner) RunStrategy(context.Context, domain.Strategy, uuid.UUID) (*api.StrategyRunResult, error) {
+	r.calls.Add(1)
+	return nil, nil
+}
+
+type resolvedVersionStrategyRepo struct {
+	repository.StrategyRepository
+	versionID uuid.UUID
+}
+
+func (r resolvedVersionStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return r.versionID, nil
+}
+
+func TestRunScheduledStrategyRejectsChangedExecutionVersionBeforeRunner(t *testing.T) {
+	loadedVersionID := uuid.New()
+	strategy := domain.Strategy{ID: uuid.New(), ExecutionStrategyVersionID: &loadedVersionID}
+	runner := &recordingScheduledStrategyRunner{}
+
+	_, err := runScheduledStrategy(context.Background(), resolvedVersionStrategyRepo{versionID: uuid.New()}, runner, strategy)
+	if err == nil || !strings.Contains(err.Error(), "changed after snapshot") {
+		t.Fatalf("runScheduledStrategy() error = %v, want changed snapshot error", err)
+	}
+	if runner.calls.Load() != 0 {
+		t.Fatalf("runner calls = %d, want 0", runner.calls.Load())
+	}
+}
+
 func TestMain(m *testing.M) {
 	original := runtimeDiscoveryDeploymentReadiness
 	originalAccountLoader := runtimeLoadCanonicalAccount

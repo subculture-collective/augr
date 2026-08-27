@@ -52,11 +52,17 @@ func newTestServerWithDepsAndLogger(t *testing.T, deps Deps, logger *slog.Logger
 }
 
 func testDeps() Deps {
+	strategyA := stratA
+	strategyAVersionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyA.ID.String()))
+	strategyA.ExecutionStrategyVersionID = &strategyAVersionID
+	strategyB := stratB
+	strategyBVersionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyB.ID.String()))
+	strategyB.ExecutionStrategyVersionID = &strategyBVersionID
 	return Deps{
 		Strategies: &stubStrategyRepo{
 			items: map[uuid.UUID]domain.Strategy{
-				stratA.ID: stratA,
-				stratB.ID: stratB,
+				strategyA.ID: strategyA,
+				strategyB.ID: strategyB,
 			},
 		},
 		Runs:        &stubRunRepo{},
@@ -1117,6 +1123,30 @@ func TestRunStrategyRejectsMissingExecutionVersionBeforeAdmission(t *testing.T) 
 	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusConflict)
+	}
+	group.StopAndWait(runcontrol.Shutdown)
+}
+
+func TestRunStrategyRejectsChangedExecutionVersionBeforeAdmission(t *testing.T) {
+	deps := testDeps()
+	repo := deps.Strategies.(*stubStrategyRepo)
+	resolvedVersionID := uuid.New()
+	repo.resolvedVersionID = &resolvedVersionID
+	called := make(chan uuid.UUID, 1)
+	deps.Runner = &stubStrategyRunner{called: called}
+	group := runcontrol.NewGroup()
+	group.Stop(runcontrol.Shutdown)
+	deps.RunGroup = group
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
+	}
+	select {
+	case <-called:
+		t.Fatal("strategy runner called with stale strategy snapshot")
+	default:
 	}
 	group.StopAndWait(runcontrol.Shutdown)
 }
@@ -2412,11 +2442,12 @@ func TestNewServerRequiresDeps(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type stubStrategyRepo struct {
-	mu         sync.Mutex
-	items      map[uuid.UUID]domain.Strategy
-	lastFilter repository.StrategyFilter
-	sawList    bool
-	resolveErr error
+	mu                sync.Mutex
+	items             map[uuid.UUID]domain.Strategy
+	lastFilter        repository.StrategyFilter
+	sawList           bool
+	resolveErr        error
+	resolvedVersionID *uuid.UUID
 }
 
 type stubAPIKeyRepo struct {
@@ -2598,6 +2629,9 @@ func (s *stubStrategyRepo) ResolveExecutionVersionID(_ context.Context, strategy
 	defer s.mu.Unlock()
 	if s.resolveErr != nil {
 		return uuid.Nil, s.resolveErr
+	}
+	if s.resolvedVersionID != nil {
+		return *s.resolvedVersionID, nil
 	}
 	strategy, ok := s.items[strategyID]
 	if !ok {

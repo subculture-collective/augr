@@ -14,6 +14,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/eventmarkets"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
 type OvernightBacktestRunRepo struct{ pool *pgxpool.Pool }
@@ -163,11 +164,9 @@ func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *dom
 		return false, err
 	} else if existing != nil {
 		*strategy = *existing
-		versionID, err := bindExecutionVersion(ctx, tx, strategy)
-		if err != nil {
+		if err := validatePreparedStrategyExecutionBinding(ctx, tx, strategy); err != nil {
 			return false, err
 		}
-		strategy.ExecutionStrategyVersionID = &versionID
 		return false, nil
 	}
 	config, err := marshalConfig(strategy.Config)
@@ -200,11 +199,9 @@ func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *dom
 		return false, fmt.Errorf("strategy insert conflicted without a matching paper strategy")
 	}
 	*strategy = *existing
-	versionID, err := bindExecutionVersion(ctx, tx, strategy)
-	if err != nil {
+	if err := validatePreparedStrategyExecutionBinding(ctx, tx, strategy); err != nil {
 		return false, err
 	}
-	strategy.ExecutionStrategyVersionID = &versionID
 	return false, nil
 }
 
@@ -216,12 +213,49 @@ func findPreparedStrategy(ctx context.Context, tx pgx.Tx, strategy domain.Strate
 		query += ` AND name = $3`
 		args = append(args, strategy.Name)
 	}
-	query += ` ORDER BY created_at, id LIMIT 1`
+	query += ` ORDER BY created_at, id LIMIT 1 FOR UPDATE`
 	existing, err := scanStrategy(tx.QueryRow(ctx, query, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	return existing, err
+}
+
+func validatePreparedStrategyExecutionBinding(ctx context.Context, tx pgx.Tx, strategy *domain.Strategy) error {
+	if strategy.ExecutionStrategyVersionID == nil {
+		return fmt.Errorf("strategy %s execution version binding is missing", strategy.ID)
+	}
+	assetClass, kinds, err := legacyExecutionRequirements(strategy.MarketType)
+	if err != nil {
+		return err
+	}
+	family, err := strategycatalog.NewLegacyFamily(strategy.ID, assetClass)
+	if err != nil {
+		return err
+	}
+	var linkedFamilyID uuid.UUID
+	var snapshot string
+	var canonicalConfig []byte
+	err = tx.QueryRow(ctx, `SELECT v.family_id,strategy_legacy_snapshot_sha(s.id),convert_to(strategy_canonical_json(s.config),'UTF8')
+		FROM strategies s JOIN strategy_versions v ON v.id=s.execution_strategy_version_id
+		WHERE s.id=$1`, strategy.ID).Scan(&linkedFamilyID, &snapshot, &canonicalConfig)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("strategy %s execution version binding is missing", strategy.ID)
+	}
+	if err != nil {
+		return fmt.Errorf("validate strategy %s execution version binding: %w", strategy.ID, err)
+	}
+	if linkedFamilyID != family.ID() {
+		return fmt.Errorf("strategy %s execution version family mismatch", strategy.ID)
+	}
+	expected, err := strategycatalog.NewLegacyVersion(family.ID(), snapshot, canonicalConfig, kinds)
+	if err != nil {
+		return fmt.Errorf("construct expected strategy %s execution version: %w", strategy.ID, err)
+	}
+	if *strategy.ExecutionStrategyVersionID != expected.ID() {
+		return fmt.Errorf("strategy %s execution version binding is stale", strategy.ID)
+	}
+	return nil
 }
 
 // ReconcileActive atomically fails every active checkpoint without rewriting
