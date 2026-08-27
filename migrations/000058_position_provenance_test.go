@@ -52,7 +52,7 @@ func TestPositionProvenanceMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = adminPool.Exec(ctx, `DROP SCHEMA IF EXISTS `+pgx.Identifier{schemaName}.Sanitize()+` CASCADE`)
 	})
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

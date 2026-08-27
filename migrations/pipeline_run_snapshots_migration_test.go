@@ -126,7 +126,7 @@ func TestPipelineRunSnapshotsMigrationAppliesAgainstExistingSchema(t *testing.T)
 	if err != nil {
 		t.Fatalf("failed to parse database config: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)

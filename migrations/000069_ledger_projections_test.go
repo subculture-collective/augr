@@ -425,7 +425,7 @@ func newLedgerProjectionMigrationPool(t *testing.T) (context.Context, *pgxpool.P
 	if err != nil {
 		t.Fatal(err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -609,7 +609,7 @@ func newLedgerProjectionWriterPool(t *testing.T, ctx context.Context, ownerPool 
 	}
 	config.ConnConfig.User = roleName
 	config.ConnConfig.Password = password
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	writerPool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

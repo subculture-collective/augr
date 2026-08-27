@@ -676,7 +676,7 @@ func newCanonicalExpansionPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _, _ = admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+identifier+` CASCADE`) })
-	config.ConnConfig.RuntimeParams["search_path"] = schema + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schema)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

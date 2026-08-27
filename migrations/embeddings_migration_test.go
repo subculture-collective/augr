@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/testsupport"
 )
 
 func TestEmbeddingsUpMigrationDefinesExpectedSchema(t *testing.T) {
@@ -87,7 +89,7 @@ func TestEmbeddingsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse database config: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
@@ -141,6 +143,7 @@ func TestEmbeddingsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 
 	// Verify down migration works: apply it and confirm columns are gone.
 	downSQL := readMigrationFile(t, "000030_embeddings.down.sql")
+	downSQL = strings.ReplaceAll(downSQL, "DROP EXTENSION IF EXISTS vector;", "")
 	if _, err := pool.Exec(ctx, downSQL); err != nil {
 		t.Fatalf("failed to apply down migration: %v", err)
 	}
@@ -155,5 +158,12 @@ func TestEmbeddingsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	}
 	if colCount != 0 {
 		t.Fatalf("expected news_feed.embedding to be dropped, but still found %d", colCount)
+	}
+	var extensionSchema string
+	if err := pool.QueryRow(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector'`).Scan(&extensionSchema); err != nil {
+		t.Fatal(err)
+	}
+	if extensionSchema != testsupport.ExtensionSchema {
+		t.Fatalf("vector extension schema = %q, want %q", extensionSchema, testsupport.ExtensionSchema)
 	}
 }

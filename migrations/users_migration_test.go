@@ -80,7 +80,7 @@ func TestUsersMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse database config: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	// Migrations are stored as multi-statement SQL files, so the test uses
 	// simple protocol to execute each file in a single Exec call.
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
