@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -127,6 +128,7 @@ func (r *OvernightBacktestRunRepo) CommitIfRunning(ctx context.Context, runID uu
 		return summary, time.Time{}, fmt.Errorf("postgres: commit overnight backtest run %s: phase %s is not %s", runID, phase, domain.OvernightBacktestPhaseSweepValidateDeploy)
 	}
 
+	sortPreparedStrategiesForReuse(prepared)
 	created := 0
 	for i := range prepared {
 		wasCreated, insertErr := createOrReusePreparedStrategy(ctx, tx, &prepared[i])
@@ -157,6 +159,21 @@ func (r *OvernightBacktestRunRepo) CommitIfRunning(ctx context.Context, runID uu
 		return summary, time.Time{}, fmt.Errorf("postgres: commit overnight backtest transaction: %w", err)
 	}
 	return summary, persistedAt, nil
+}
+
+func sortPreparedStrategiesForReuse(strategies []domain.Strategy) {
+	sort.Slice(strategies, func(i, j int) bool {
+		left, right := strategyReuseKey(strategies[i]), strategyReuseKey(strategies[j])
+		return left < right
+	})
+}
+
+func strategyReuseKey(strategy domain.Strategy) string {
+	key := string(strategy.MarketType.Normalize()) + "\x00" + strategy.Ticker
+	if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
+		key += "\x00" + strategy.Name
+	}
+	return key
 }
 
 func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *domain.Strategy) (bool, error) {

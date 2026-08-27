@@ -39,6 +39,22 @@ func TestBuildOvernightBacktestListLatestLimit(t *testing.T) {
 	assertContains(t, query, "LIMIT $1")
 }
 
+func TestSortPreparedStrategiesForReuseUsesSameOrderForOppositeInputs(t *testing.T) {
+	ascending := []domain.Strategy{
+		preparedOvernightStrategy("AAA", "z"),
+		preparedOvernightStrategy("AAA", "a"),
+		preparedOvernightStrategy("ZZZ", "a"),
+	}
+	descending := []domain.Strategy{ascending[2], ascending[1], ascending[0]}
+	sortPreparedStrategiesForReuse(ascending)
+	sortPreparedStrategiesForReuse(descending)
+	for i := range ascending {
+		if strategyReuseKey(ascending[i]) != strategyReuseKey(descending[i]) {
+			t.Fatalf("opposite inputs lock in different order: %#v / %#v", ascending, descending)
+		}
+	}
+}
+
 func TestOvernightBacktestRunRepoIntegration_CRUD(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
