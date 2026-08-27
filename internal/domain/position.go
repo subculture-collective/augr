@@ -53,20 +53,24 @@ func NewPosition(ticker string, side PositionSide, quantity, avgEntry float64) (
 
 // Position represents an open or closed trading position.
 type Position struct {
-	ID            uuid.UUID    `json:"id"`
-	StrategyID    *uuid.UUID   `json:"strategy_id,omitempty"`
-	MarketType    MarketType   `json:"market_type,omitempty"`
-	Ticker        string       `json:"ticker"`
-	Side          PositionSide `json:"side"`
-	Quantity      float64      `json:"quantity"`
-	AvgEntry      float64      `json:"avg_entry"`
-	CurrentPrice  *float64     `json:"current_price,omitempty"`
-	UnrealizedPnL *float64     `json:"unrealized_pnl,omitempty"`
-	RealizedPnL   float64      `json:"realized_pnl"`
-	StopLoss      *float64     `json:"stop_loss,omitempty"`
-	TakeProfit    *float64     `json:"take_profit,omitempty"`
-	OpenedAt      time.Time    `json:"opened_at"`
-	ClosedAt      *time.Time   `json:"closed_at,omitempty"`
+	ID            uuid.UUID          `json:"id"`
+	AccountID     uuid.UUID          `json:"account_id,omitempty"`
+	Environment   AccountEnvironment `json:"environment,omitempty"`
+	OriginType    string             `json:"origin_type,omitempty"`
+	OriginID      string             `json:"origin_id,omitempty"`
+	StrategyID    *uuid.UUID         `json:"strategy_id,omitempty"`
+	MarketType    MarketType         `json:"market_type,omitempty"`
+	Ticker        string             `json:"ticker"`
+	Side          PositionSide       `json:"side"`
+	Quantity      float64            `json:"quantity"`
+	AvgEntry      float64            `json:"avg_entry"`
+	CurrentPrice  *float64           `json:"current_price,omitempty"`
+	UnrealizedPnL *float64           `json:"unrealized_pnl,omitempty"`
+	RealizedPnL   float64            `json:"realized_pnl"`
+	StopLoss      *float64           `json:"stop_loss,omitempty"`
+	TakeProfit    *float64           `json:"take_profit,omitempty"`
+	OpenedAt      time.Time          `json:"opened_at"`
+	ClosedAt      *time.Time         `json:"closed_at,omitempty"`
 
 	// Options fields (nil/zero for equity positions).
 	AssetClass         AssetClass  `json:"asset_class,omitempty"`

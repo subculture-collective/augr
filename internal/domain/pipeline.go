@@ -78,32 +78,33 @@ func (s PipelineSignal) IsValid() bool {
 
 // PipelineRun represents a single execution of a trading strategy pipeline.
 type PipelineRun struct {
-	ID             uuid.UUID       `json:"id"`
-	StrategyID     uuid.UUID       `json:"strategy_id"`
-	Ticker         string          `json:"ticker"`
-	TradeDate      time.Time       `json:"trade_date"`
-	Status         PipelineStatus  `json:"status"`
-	Signal         PipelineSignal  `json:"signal,omitempty"`
-	StartedAt      time.Time       `json:"started_at"`
-	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
-	ErrorMessage   string          `json:"error_message,omitempty"`
-	ConfigSnapshot json.RawMessage `json:"config_snapshot,omitempty"`
-	PhaseTimings   json.RawMessage `json:"phase_timings,omitempty"`
+	ID             uuid.UUID          `json:"id"`
+	AccountID      uuid.UUID          `json:"account_id,omitempty"`
+	Environment    AccountEnvironment `json:"environment,omitempty"`
+	OriginType     string             `json:"origin_type,omitempty"`
+	OriginID       string             `json:"origin_id,omitempty"`
+	StrategyID     uuid.UUID          `json:"strategy_id"`
+	Ticker         string             `json:"ticker"`
+	TradeDate      time.Time          `json:"trade_date"`
+	Status         PipelineStatus     `json:"status"`
+	Signal         PipelineSignal     `json:"signal,omitempty"`
+	StartedAt      time.Time          `json:"started_at"`
+	CompletedAt    *time.Time         `json:"completed_at,omitempty"`
+	ErrorMessage   string             `json:"error_message,omitempty"`
+	ConfigSnapshot json.RawMessage    `json:"config_snapshot,omitempty"`
+	PhaseTimings   json.RawMessage    `json:"phase_timings,omitempty"`
 }
 
 // PipelineRunSnapshot captures market data made available during a pipeline run.
 type PipelineRunSnapshot struct {
-	ID            uuid.UUID       `json:"id"`
-	PipelineRunID uuid.UUID       `json:"pipeline_run_id"`
-	DataType      string          `json:"data_type"`
-	Payload       json.RawMessage `json:"payload"`
-	CreatedAt     time.Time       `json:"created_at"`
-}
-
-// PipelineEvent represents a structured event emitted during a pipeline run.
-type PipelineEvent struct {
-	PipelineRunID uuid.UUID       `json:"pipeline_run_id"`
-	EventType     string          `json:"event_type"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	OccurredAt    time.Time       `json:"occurred_at"`
+	ID                   uuid.UUID          `json:"id"`
+	AccountID            uuid.UUID          `json:"account_id,omitempty"`
+	Environment          AccountEnvironment `json:"environment,omitempty"`
+	OriginType           string             `json:"origin_type,omitempty"`
+	OriginID             string             `json:"origin_id,omitempty"`
+	PipelineRunID        uuid.UUID          `json:"pipeline_run_id"`
+	PipelineRunTradeDate time.Time          `json:"pipeline_run_trade_date,omitempty"`
+	DataType             string             `json:"data_type"`
+	Payload              json.RawMessage    `json:"payload"`
+	CreatedAt            time.Time          `json:"created_at"`
 }

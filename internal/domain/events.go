@@ -1,6 +1,24 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// PipelineEvent represents a structured event emitted during a pipeline run.
+type PipelineEvent struct {
+	AccountID            uuid.UUID          `json:"account_id,omitempty"`
+	Environment          AccountEnvironment `json:"environment,omitempty"`
+	OriginType           string             `json:"origin_type,omitempty"`
+	OriginID             string             `json:"origin_id,omitempty"`
+	PipelineRunID        uuid.UUID          `json:"pipeline_run_id"`
+	PipelineRunTradeDate time.Time          `json:"pipeline_run_trade_date,omitempty"`
+	EventType            string             `json:"event_type"`
+	Payload              json.RawMessage    `json:"payload,omitempty"`
+	OccurredAt           time.Time          `json:"occurred_at"`
+}
 
 // EarningsEvent represents a scheduled or completed earnings report.
 type EarningsEvent struct {
