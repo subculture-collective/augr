@@ -1650,6 +1650,9 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	if executionVersionID == uuid.Nil {
 		return nil, errors.New("strategy execution version ID is required")
 	}
+	if err := r.executionAccount.Validate(); err != nil {
+		return nil, fmt.Errorf("smoke strategy runner execution account: %w", err)
+	}
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
 	if err != nil {
 		return nil, err

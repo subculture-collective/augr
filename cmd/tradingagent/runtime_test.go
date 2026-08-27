@@ -1545,7 +1545,7 @@ func TestSmokeStrategyRunnerReturnsCanonicalTerminalResultAndBlocksDownstream(t 
 			winner := domain.PipelineRun{ID: uuid.New(), TradeDate: time.Now().UTC(), Status: tc.status, Signal: domain.PipelineSignalHold, ErrorMessage: "canonical winner"}
 			repo := &stubPipelineRunRepo{panicCreate: tc.panicCreate, receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
 			core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
-			runner := &smokeStrategyRunner{runner: core, runRepo: repo, logger: slogDiscardLogger()}
+			runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
 			result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, uuid.New())
 			if err == nil {
 				t.Fatal("RunStrategy() error = nil, want terminal authority error")
@@ -1563,7 +1563,7 @@ func TestSmokeStrategyRunnerReturnsCanonicalTerminalResultAndBlocksDownstream(t 
 func TestSmokeStrategyRunnerPostTerminalReadErrorReturnsCanonicalResult(t *testing.T) {
 	repo := &stubPipelineRunRepo{err: errors.New("run read unavailable")}
 	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
-	runner := &smokeStrategyRunner{runner: core, runRepo: repo, logger: slogDiscardLogger()}
+	runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
 
 	result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, uuid.New())
 	if err == nil || !strings.Contains(err.Error(), "run read unavailable") {
