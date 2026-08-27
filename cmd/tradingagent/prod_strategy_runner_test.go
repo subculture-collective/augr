@@ -97,9 +97,21 @@ func TestRunStrategy_PolymarketUsesNativePathBeforeLegacyOHLCV(t *testing.T) {
 		Ticker:     "will-example-happen",
 		MarketType: domain.MarketTypePolymarket,
 		Status:     domain.StrategyStatusActive,
-	})
+	}, uuid.New())
 	if err == nil || !strings.Contains(err.Error(), "native data used") {
 		t.Fatalf("RunStrategy() error = %v, want native market-data error", err)
+	}
+}
+
+func TestBindStrategyRunScopeUsesResolvedVersion(t *testing.T) {
+	versionID := uuid.New()
+	strategyID := uuid.New()
+	run := domain.PipelineRun{ID: uuid.New(), StrategyID: strategyID, TradeDate: time.Now().UTC().Truncate(24 * time.Hour)}
+	if err := bindStrategyRunScope(&run, testExecutionAccountBinding, versionID); err != nil {
+		t.Fatal(err)
+	}
+	if run.OriginType != "strategy_version" || run.OriginID != versionID.String() || run.OriginID == strategyID.String() {
+		t.Fatalf("run origin = %q/%q, want resolved version %s", run.OriginType, run.OriginID, versionID)
 	}
 }
 
@@ -113,7 +125,7 @@ func TestRunStrategy_KalshiUsesNativePathBeforeLegacyOHLCV(t *testing.T) {
 		MarketType: domain.MarketTypeKalshi,
 		Status:     domain.StrategyStatusActive,
 		IsPaper:    true,
-	})
+	}, uuid.New())
 	if err == nil || !strings.Contains(err.Error(), "kalshi native data used") {
 		t.Fatalf("RunStrategy() error = %v, want native market-data error", err)
 	}
@@ -132,7 +144,7 @@ func TestRunKalshiNativeFailureReturnsRecognizedCancellationWinner(t *testing.T)
 					cancel(cause)
 				}},
 			}
-			result, err := runner.runKalshiNative(ctx, domain.Strategy{ID: uuid.New(), Ticker: "KXTEST", MarketType: domain.MarketTypeKalshi, IsPaper: true})
+			result, err := runner.runKalshiNative(ctx, domain.Strategy{ID: uuid.New(), Ticker: "KXTEST", MarketType: domain.MarketTypeKalshi, IsPaper: true}, uuid.New())
 			if !errors.Is(err, cause) || result == nil || result.Run.Status != domain.PipelineStatusCancelled {
 				t.Fatalf("runKalshiNative() = (%+v, %v), want persisted cancellation matching %v", result, err, cause)
 			}
@@ -230,7 +242,7 @@ func TestRunStrategy_KalshiLiveRoutingRespectsGatesAndClientInitialization(t *te
 		t.Parallel()
 
 		runner := withNativeAuditDeps(&realStrategyRunner{kalshiDataProvider: &fakeKalshiMarketData{label: "shared-data"}, kalshiMarketData: snapshot, logger: slogDiscardLogger()})
-		_, err := runner.RunStrategy(context.Background(), strategy)
+		_, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 		if err == nil || !strings.Contains(err.Error(), "live trading disabled") {
 			t.Fatalf("RunStrategy() error = %v, want live gate denial", err)
 		}
@@ -248,7 +260,7 @@ func TestRunStrategy_KalshiLiveRoutingRespectsGatesAndClientInitialization(t *te
 			kalshiMarketData:   snapshot,
 			logger:             slogDiscardLogger(),
 		})
-		_, err := runner.RunStrategy(context.Background(), strategy)
+		_, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 		if err == nil || !strings.Contains(err.Error(), "broker not live-allowlisted") {
 			t.Fatalf("RunStrategy() error = %v, want broker allowlist denial", err)
 		}
@@ -267,7 +279,7 @@ func TestRunStrategy_KalshiLiveRoutingRespectsGatesAndClientInitialization(t *te
 			kalshiMarketData:   snapshot,
 			logger:             slogDiscardLogger(),
 		})
-		_, err := runner.RunStrategy(context.Background(), strategy)
+		_, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 		if err == nil || !strings.Contains(err.Error(), "KALSHI_API_KEY_ID and KALSHI_PRIVATE_KEY_PEM_B64") {
 			t.Fatalf("RunStrategy() error = %v, want credential error", err)
 		}
@@ -290,7 +302,7 @@ func TestRunStrategy_KalshiLiveRoutingRespectsGatesAndClientInitialization(t *te
 			kalshiMarketData:   snapshot,
 			logger:             slogDiscardLogger(),
 		})
-		_, err := runner.RunStrategy(context.Background(), strategy)
+		_, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 		if err == nil || !strings.Contains(err.Error(), "kalshi live client is not initialised") {
 			t.Fatalf("RunStrategy() error = %v, want uninitialised live client error", err)
 		}
@@ -315,7 +327,7 @@ func TestRunStrategy_KalshiLiveRoutingRespectsGatesAndClientInitialization(t *te
 			kalshiMarketData: snapshot,
 			logger:           slogDiscardLogger(),
 		})
-		_, err := runner.RunStrategy(context.Background(), holdStrategy)
+		_, err := runner.RunStrategy(context.Background(), holdStrategy, uuid.New())
 		if err == nil || !strings.Contains(err.Error(), "kalshi live client is not initialised") {
 			t.Fatalf("RunStrategy() error = %v, want uninitialised live client error", err)
 		}
@@ -371,7 +383,7 @@ func TestRunStrategy_KalshiSafeHoldPath(t *testing.T) {
 			FetchedAt:  time.Now().UTC(),
 		}},
 	}
-	result, err := runner.RunStrategy(context.Background(), strategy)
+	result, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 	if err != nil {
 		t.Fatalf("RunStrategy() error = %v", err)
 	}
@@ -412,7 +424,7 @@ func TestRunStrategy_KalshiCancellationWinnerPreventsExecutionEffects(t *testing
 		logger: slogDiscardLogger(),
 	}
 
-	result, err := runner.RunStrategy(context.Background(), strategy)
+	result, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 	if err == nil || !strings.Contains(err.Error(), "terminal finalization lost") {
 		t.Fatalf("RunStrategy() error = %v, want terminal-authority conflict", err)
 	}
@@ -442,7 +454,7 @@ func TestRunStrategy_KalshiCompletedWinnerLoserPreventsExecutionEffects(t *testi
 		logger: slogDiscardLogger(),
 	}
 
-	result, err := runner.RunStrategy(context.Background(), strategy)
+	result, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 	if err == nil || !strings.Contains(err.Error(), "terminal finalization lost") {
 		t.Fatalf("RunStrategy() error = %v, want terminal-authority conflict", err)
 	}
@@ -505,7 +517,7 @@ func TestRunStrategy_KalshiPostTerminalErrorsReturnCanonicalResult(t *testing.T)
 				kalshiMarketData: snapshot, localPaperBroker: paper.NewPaperBroker(100_000, 0, 0), logger: slogDiscardLogger(),
 			}
 
-			result, err := runner.RunStrategy(context.Background(), strategy)
+			result, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 			if err == nil {
 				t.Fatal("RunStrategy() error = nil, want post-terminal error")
 			}
@@ -1226,7 +1238,7 @@ func TestRunStrategyPersistsPreparationRejection(t *testing.T) {
 		MarketType: domain.MarketTypeStock,
 		Config:     json.RawMessage(`{"agents":`),
 	}
-	_, err := runner.RunStrategy(context.Background(), strategy)
+	_, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
 	if err == nil {
 		t.Fatal("RunStrategy() error = nil, want invalid configuration rejection")
 	}

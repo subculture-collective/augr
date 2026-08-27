@@ -241,6 +241,29 @@ func (r *inMemoryStrategyRepo) Create(_ context.Context, strategy *domain.Strate
 	return nil
 }
 
+func (r *inMemoryStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := r.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategy.ID.String()))
+	strategy.ExecutionStrategyVersionID = &versionID
+	for i := range r.strategies {
+		if r.strategies[i].ID == strategy.ID {
+			r.strategies[i].ExecutionStrategyVersionID = &versionID
+		}
+	}
+	return versionID, nil
+}
+
+func (r *inMemoryStrategyRepo) ResolveExecutionVersionID(_ context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
+	for _, strategy := range r.strategies {
+		if strategy.ID == strategyID {
+			return uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyID.String())), nil
+		}
+	}
+	return uuid.Nil, repository.ErrNotFound
+}
+
 func (r *inMemoryStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {
 	for i := range r.strategies {
 		if r.strategies[i].ID == id {

@@ -313,13 +313,14 @@ func dropSchema(pool *pgxpool.Pool, schema string) {
 func createStrategy(t *testing.T, ctx context.Context, r *postgres.StrategyRepo, name, ticker string) *domain.Strategy {
 	t.Helper()
 	s := &domain.Strategy{
+		ID:         uuid.New(),
 		Name:       name,
 		Ticker:     ticker,
 		MarketType: domain.MarketTypeStock,
 		Status:     domain.StrategyStatusActive,
 		IsPaper:    true,
 	}
-	if err := r.Create(ctx, s); err != nil {
+	if _, err := r.CreateWithExecutionVersion(ctx, s); err != nil {
 		t.Fatalf("failed to create strategy: %v", err)
 	}
 	return s

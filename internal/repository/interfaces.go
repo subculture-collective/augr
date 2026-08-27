@@ -467,7 +467,8 @@ type AuditLogFilter struct {
 
 // StrategyRepository provides CRUD operations for strategies.
 type StrategyRepository interface {
-	Create(ctx context.Context, strategy *domain.Strategy) error
+	CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error)
+	ResolveExecutionVersionID(ctx context.Context, strategyID uuid.UUID) (uuid.UUID, error)
 	Get(ctx context.Context, id uuid.UUID) (*domain.Strategy, error)
 	List(ctx context.Context, filter StrategyFilter, limit, offset int) ([]domain.Strategy, error)
 	// Count returns the total number of strategies matching the filter (ignoring pagination).

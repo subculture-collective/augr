@@ -182,6 +182,15 @@ type portfolioAllocatorStrategyRepo struct {
 }
 
 func (r *portfolioAllocatorStrategyRepo) Create(context.Context, *domain.Strategy) error { return nil }
+func (r *portfolioAllocatorStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := r.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+func (*portfolioAllocatorStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
 
 func (r *portfolioAllocatorStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {
 	r.getCalls++

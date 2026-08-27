@@ -10,7 +10,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -139,6 +141,34 @@ func TestMarshalConfig_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestLegacyExecutionRequirements(t *testing.T) {
+	tests := []struct {
+		market domain.MarketType
+		asset  instrument.AssetClass
+		kinds  []dataset.Kind
+	}{
+		{domain.MarketTypeStock, instrument.AssetClassEquity, []dataset.Kind{dataset.KindBars}},
+		{domain.MarketTypeCrypto, instrument.AssetClassCryptoSpot, []dataset.Kind{dataset.KindBars}},
+		{domain.MarketTypeOptions, instrument.AssetClassOption, []dataset.Kind{dataset.KindBars, dataset.KindOptionChains}},
+		{domain.MarketTypeKalshi, instrument.AssetClassPredictionContract, []dataset.Kind{dataset.KindPredictionBooks, dataset.KindPredictionRules, dataset.KindResolutions}},
+		{domain.MarketTypePolymarket, instrument.AssetClassPredictionContract, []dataset.Kind{dataset.KindPredictionBooks, dataset.KindPredictionRules, dataset.KindResolutions}},
+	}
+	for _, test := range tests {
+		asset, kinds, err := legacyExecutionRequirements(test.market)
+		if err != nil || asset != test.asset || strings.Join(datasetKindsStrings(kinds), ",") != strings.Join(datasetKindsStrings(test.kinds), ",") {
+			t.Fatalf("requirements(%s) = %s/%v/%v", test.market, asset, kinds, err)
+		}
+	}
+}
+
+func datasetKindsStrings(kinds []dataset.Kind) []string {
+	values := make([]string, len(kinds))
+	for i, kind := range kinds {
+		values[i] = string(kind)
+	}
+	return values
+}
+
 func TestStrategyRepoIntegration_CreateListAndUpdateStatus(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newStrategyIntegrationPool(t, ctx)
@@ -147,6 +177,7 @@ func TestStrategyRepoIntegration_CreateListAndUpdateStatus(t *testing.T) {
 	repo := NewStrategyRepo(pool)
 
 	paused := &domain.Strategy{
+		ID:           uuid.New(),
 		Name:         "Paused Strategy",
 		Ticker:       "AAPL",
 		MarketType:   domain.MarketTypeStock,
@@ -155,7 +186,7 @@ func TestStrategyRepoIntegration_CreateListAndUpdateStatus(t *testing.T) {
 		SkipNextRun:  true,
 		IsPaper:      true,
 	}
-	if err := repo.Create(ctx, paused); err != nil {
+	if _, err := repo.CreateWithExecutionVersion(ctx, paused); err != nil {
 		t.Fatalf("Create(paused) error = %v", err)
 	}
 	if paused.ID == uuid.Nil {
@@ -180,13 +211,14 @@ func TestStrategyRepoIntegration_CreateListAndUpdateStatus(t *testing.T) {
 	}
 
 	active := &domain.Strategy{
+		ID:         uuid.New(),
 		Name:       "Active Strategy",
 		Ticker:     "MSFT",
 		MarketType: domain.MarketTypeStock,
 		Status:     domain.StrategyStatusActive,
 		IsPaper:    false,
 	}
-	if err := repo.Create(ctx, active); err != nil {
+	if _, err := repo.CreateWithExecutionVersion(ctx, active); err != nil {
 		t.Fatalf("Create(active) error = %v", err)
 	}
 
@@ -246,24 +278,26 @@ func TestStrategyRepoIntegration_DiscoveryDuplicateRejectedByUniqueIndex(t *test
 	repo := NewStrategyRepo(pool)
 
 	first := &domain.Strategy{
+		ID:         uuid.New(),
 		Name:       "discovery: PBM RSI Momentum Breakout",
 		Ticker:     "PBM",
 		MarketType: domain.MarketTypeStock,
 		Status:     domain.StrategyStatusActive,
 		IsPaper:    true,
 	}
-	if err := repo.Create(ctx, first); err != nil {
+	if _, err := repo.CreateWithExecutionVersion(ctx, first); err != nil {
 		t.Fatalf("Create(first) error = %v", err)
 	}
 
 	duplicate := &domain.Strategy{
+		ID:         uuid.New(),
 		Name:       "discovery: PBM RSI Momentum Breakout",
 		Ticker:     "PBM",
 		MarketType: domain.MarketTypeStock,
 		Status:     domain.StrategyStatusActive,
 		IsPaper:    true,
 	}
-	err := repo.Create(ctx, duplicate)
+	_, err := repo.CreateWithExecutionVersion(ctx, duplicate)
 	if err == nil {
 		t.Fatal("Create(duplicate) error = nil, want unique violation")
 	}

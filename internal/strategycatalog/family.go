@@ -81,6 +81,23 @@ func NewFamily(input FamilyInput) (*Family, error) {
 	}, nil
 }
 
+func LegacyFamilyID(strategyID uuid.UUID) uuid.UUID {
+	return economicid.DeterministicUUID(familyDomain, "legacy-"+strategyID.String())
+}
+
+func NewLegacyFamily(strategyID uuid.UUID, assetClass instrument.AssetClass) (*Family, error) {
+	if strategyID == uuid.Nil {
+		return nil, fmt.Errorf("legacy strategy ID is required")
+	}
+	identity := strategyID.String()
+	return NewFamily(FamilyInput{
+		Slug:         "legacy-" + identity,
+		Name:         "Legacy strategy " + identity,
+		Thesis:       "Execution family for legacy strategy " + identity + ".",
+		AssetClasses: []instrument.AssetClass{assetClass},
+	})
+}
+
 func FamilyFromCanonical(id uuid.UUID, digest string, raw []byte) (*Family, error) {
 	if id == uuid.Nil || !sha256Pattern.MatchString(digest) || hashBytes(raw) != digest {
 		return nil, fmt.Errorf("strategy family envelope is invalid")

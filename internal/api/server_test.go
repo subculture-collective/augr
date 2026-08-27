@@ -1084,6 +1084,43 @@ func TestRunStrategy(t *testing.T) {
 	}
 }
 
+func TestRunStrategyRoutesResolvedExecutionVersion(t *testing.T) {
+	deps := testDeps()
+	called := make(chan uuid.UUID, 1)
+	deps.Runner = &stubStrategyRunner{called: called}
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusAccepted)
+	}
+	want := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+stratA.ID.String()))
+	select {
+	case got := <-called:
+		if got != want || got == stratA.ID {
+			t.Fatalf("execution version = %s, want %s", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("strategy runner was not called")
+	}
+}
+
+func TestRunStrategyRejectsMissingExecutionVersionBeforeAdmission(t *testing.T) {
+	deps := testDeps()
+	repo := deps.Strategies.(*stubStrategyRepo)
+	repo.resolveErr = repository.ErrNotFound
+	deps.Runner = &stubStrategyRunner{called: make(chan uuid.UUID, 1)}
+	group := runcontrol.NewGroup()
+	deps.RunGroup = group
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusConflict)
+	}
+	group.StopAndWait(runcontrol.Shutdown)
+}
+
 func TestRunStrategyRejectsDuringDrain(t *testing.T) {
 	deps := testDeps()
 	deps.Runner = &stubStrategyRunner{}
@@ -2357,6 +2394,7 @@ type stubStrategyRepo struct {
 	items      map[uuid.UUID]domain.Strategy
 	lastFilter repository.StrategyFilter
 	sawList    bool
+	resolveErr error
 }
 
 type stubAPIKeyRepo struct {
@@ -2524,11 +2562,29 @@ func (s *stubUserRepo) UpdatePasswordHash(_ context.Context, id uuid.UUID, newHa
 	return fmt.Errorf("user %v: %w", id, repository.ErrNotFound)
 }
 
-func (s *stubStrategyRepo) Create(_ context.Context, strategy *domain.Strategy) error {
+func (s *stubStrategyRepo) CreateWithExecutionVersion(_ context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategy.ID.String()))
+	strategy.ExecutionStrategyVersionID = &versionID
 	s.items[strategy.ID] = *strategy
-	return nil
+	return versionID, nil
+}
+
+func (s *stubStrategyRepo) ResolveExecutionVersionID(_ context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.resolveErr != nil {
+		return uuid.Nil, s.resolveErr
+	}
+	strategy, ok := s.items[strategyID]
+	if !ok {
+		return uuid.Nil, repository.ErrNotFound
+	}
+	if strategy.ExecutionStrategyVersionID != nil {
+		return *strategy.ExecutionStrategyVersionID, nil
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyID.String())), nil
 }
 
 func (s *stubStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {
@@ -2666,6 +2722,7 @@ func (*stubRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time,
 type stubStrategyRunner struct {
 	result *StrategyRunResult
 	err    error
+	called chan uuid.UUID
 }
 
 type blockingStrategyRunner struct {
@@ -2673,15 +2730,58 @@ type blockingStrategyRunner struct {
 	finish  chan struct{}
 }
 
-func (r *blockingStrategyRunner) RunStrategy(ctx context.Context, _ domain.Strategy) (*StrategyRunResult, error) {
+func (r *blockingStrategyRunner) RunStrategy(ctx context.Context, _ domain.Strategy, _ uuid.UUID) (*StrategyRunResult, error) {
 	close(r.started)
 	<-ctx.Done()
 	<-r.finish
 	return nil, context.Cause(ctx)
 }
 
-func (s *stubStrategyRunner) RunStrategy(context.Context, domain.Strategy) (*StrategyRunResult, error) {
+func (s *stubStrategyRunner) RunStrategy(_ context.Context, _ domain.Strategy, versionID uuid.UUID) (*StrategyRunResult, error) {
+	if s.called != nil {
+		s.called <- versionID
+	}
 	return s.result, s.err
+}
+
+func (f fakeStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := f.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+func (fakeStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
+func (s *eventMarketSummaryStrategyRepoStub) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := s.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+func (*eventMarketSummaryStrategyRepoStub) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
+func (s *portfolioDiagnosticsStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := s.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+func (*portfolioDiagnosticsStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
+func (s *kalshiSummaryStrategyRepoStub) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := s.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+func (*kalshiSummaryStrategyRepoStub) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
 }
 
 // stubDecisionRepo

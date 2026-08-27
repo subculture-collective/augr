@@ -95,17 +95,18 @@ type StrategyLatestRunSummary struct {
 
 // Strategy represents a trading strategy configuration.
 type Strategy struct {
-	ID               uuid.UUID                 `json:"id"`
-	Name             string                    `json:"name"`
-	Description      string                    `json:"description,omitempty"`
-	Ticker           string                    `json:"ticker"`
-	MarketType       MarketType                `json:"market_type"`
-	ScheduleCron     string                    `json:"schedule_cron,omitempty"`
-	Config           StrategyConfig            `json:"config"`
-	Status           string                    `json:"status"`
-	SkipNextRun      bool                      `json:"skip_next_run"`
-	IsPaper          bool                      `json:"is_paper"`
-	CreatedAt        time.Time                 `json:"created_at"`
-	UpdatedAt        time.Time                 `json:"updated_at"`
-	LatestRunSummary *StrategyLatestRunSummary `json:"latest_run_summary,omitempty"`
+	ID                         uuid.UUID                 `json:"id"`
+	Name                       string                    `json:"name"`
+	Description                string                    `json:"description,omitempty"`
+	Ticker                     string                    `json:"ticker"`
+	MarketType                 MarketType                `json:"market_type"`
+	ScheduleCron               string                    `json:"schedule_cron,omitempty"`
+	Config                     StrategyConfig            `json:"config"`
+	Status                     string                    `json:"status"`
+	SkipNextRun                bool                      `json:"skip_next_run"`
+	IsPaper                    bool                      `json:"is_paper"`
+	CreatedAt                  time.Time                 `json:"created_at"`
+	UpdatedAt                  time.Time                 `json:"updated_at"`
+	ExecutionStrategyVersionID *uuid.UUID                `json:"execution_strategy_version_id,omitempty"`
+	LatestRunSummary           *StrategyLatestRunSummary `json:"latest_run_summary,omitempty"`
 }

@@ -804,7 +804,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...),
 				scheduler.WithRunGroup(runGroup),
 				scheduler.WithStrategyExecution(func(ctx context.Context, strategy domain.Strategy) error {
-					_, err := strategyRunner.RunStrategy(ctx, strategy)
+					versionID, err := strategyRepo.ResolveExecutionVersionID(ctx, strategy.ID)
+					if err != nil {
+						return err
+					}
+					_, err = strategyRunner.RunStrategy(ctx, strategy, versionID)
 					return err
 				}),
 			)
@@ -1046,7 +1050,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if cfg.Features.EnableScheduler {
 			schedOpts := []scheduler.Option{
 				scheduler.WithStrategyExecution(func(ctx context.Context, strategy domain.Strategy) error {
-					result, err := strategyRunner.RunStrategy(ctx, strategy)
+					versionID, err := strategyRepo.ResolveExecutionVersionID(ctx, strategy.ID)
+					if err != nil {
+						return err
+					}
+					result, err := strategyRunner.RunStrategy(ctx, strategy, versionID)
 					if err == nil && result != nil && serverRef != nil {
 						serverRef.BroadcastRunResult(result)
 					}
@@ -1638,7 +1646,10 @@ func newSmokeStrategyRunner(
 	}
 }
 
-func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
+	if executionVersionID == uuid.Nil {
+		return nil, errors.New("strategy execution version ID is required")
+	}
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
 	if err != nil {
 		return nil, err

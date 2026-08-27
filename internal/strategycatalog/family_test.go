@@ -65,3 +65,17 @@ func TestFamilyRejectsInvalidOrChangedStableIdentity(t *testing.T) {
 		t.Fatal("tampered stable family envelope restored")
 	}
 }
+
+func TestNewLegacyFamilyUsesDeterministicStrategyIdentity(t *testing.T) {
+	strategyID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
+	family, err := NewLegacyFamily(strategyID, instrument.AssetClassEquity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if family.Slug() != "legacy-11111111-1111-4111-8111-111111111111" {
+		t.Fatalf("slug = %q", family.Slug())
+	}
+	if family.ID() != LegacyFamilyID(strategyID) {
+		t.Fatalf("family ID = %s, want %s", family.ID(), LegacyFamilyID(strategyID))
+	}
+}

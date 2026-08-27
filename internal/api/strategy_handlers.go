@@ -105,6 +105,11 @@ func (s *Server) handleRunStrategy(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotImplemented, "manual strategy runs are not configured", ErrCodeNotImplemented)
 		return
 	}
+	executionVersionID, err := s.strategies.ResolveExecutionVersionID(r.Context(), strategy.ID)
+	if err != nil {
+		respondError(w, http.StatusConflict, "strategy execution version binding is invalid", ErrCodeConflict)
+		return
+	}
 
 	// Run the strategy asynchronously so the HTTP client disconnect does not
 	// cancel the pipeline context.  Return 202 Accepted immediately.
@@ -127,7 +132,7 @@ func (s *Server) handleRunStrategy(w http.ResponseWriter, r *http.Request) {
 		if release != nil {
 			defer release()
 		}
-		result, err := s.runner.RunStrategy(runCtx, *strategy)
+		result, err := s.runner.RunStrategy(runCtx, *strategy, executionVersionID)
 		if err != nil {
 			slog.Error("async strategy run failed", slog.String("strategy_id", id.String()), slog.String("error", err.Error()))
 			return
@@ -185,10 +190,12 @@ func (s *Server) handleCreateStrategy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	strategy.ID = uuid.New()
-	if err := s.strategies.Create(r.Context(), &strategy); err != nil {
+	versionID, err := s.strategies.CreateWithExecutionVersion(r.Context(), &strategy)
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to create strategy", ErrCodeInternal)
 		return
 	}
+	strategy.ExecutionStrategyVersionID = &versionID
 	s.writeAuditLog(r.Context(), actorOf(r), "strategy.created", "strategy", &strategy.ID,
 		map[string]any{"ticker": strategy.Ticker, "market_type": strategy.MarketType, "is_paper": strategy.IsPaper})
 	respondJSON(w, http.StatusCreated, strategy)

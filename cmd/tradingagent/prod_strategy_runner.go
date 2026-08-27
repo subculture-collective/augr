@@ -216,7 +216,10 @@ func newRealStrategyRunner(
 	return runner
 }
 
-func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
+	if executionVersionID == uuid.Nil {
+		return nil, errors.New("strategy execution version ID is required")
+	}
 	group := r.strategyRunGroup()
 	if !group.HasLease(ctx) {
 		admittedCtx, lease, err := group.Admit(ctx)
@@ -227,16 +230,16 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		defer lease.Done()
 	}
 	if strategy.MarketType.Normalize() == domain.MarketTypeKalshi {
-		return r.runKalshiNative(ctx, strategy)
+		return r.runKalshiNative(ctx, strategy, executionVersionID)
 	}
 	if strategy.MarketType.Normalize() == domain.MarketTypePolymarket {
 		if !r.cfg.Features.EnablePolymarketAutomation {
 			return nil, errors.New("polymarket execution is retired; use a Kalshi strategy")
 		}
-		return r.runPolymarketNative(ctx, strategy)
+		return r.runPolymarketNative(ctx, strategy, executionVersionID)
 	}
 
-	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy)
+	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy, executionVersionID)
 	if err != nil {
 		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, err); persistErr != nil {
 			return nil, recognizedRunControlError(ctx, errors.Join(err, persistErr))
@@ -669,7 +672,7 @@ func buildPaperSingleLegPlan(cfg *rules.OptionsRulesConfig, chain []domain.Optio
 	return execution.TradingPlan{Action: domain.PipelineSignalBuy, MarketType: domain.MarketTypeOptions, Ticker: snapshot.Contract.OCCSymbol, EntryType: "limit", EntryPrice: snapshot.Ask, PositionSize: quantity, OptionGreeks: &greeks}, nil
 }
 
-func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
 	executionStrategy := r.effectivePolymarketExecutionStrategy(strategy)
 
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
@@ -682,10 +685,17 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		ID:             uuid.New(),
 		StrategyID:     strategy.ID,
 		Ticker:         strategy.Ticker,
-		TradeDate:      now,
+		TradeDate:      now.Truncate(24 * time.Hour),
 		Status:         domain.PipelineStatusRunning,
 		StartedAt:      now,
 		ConfigSnapshot: strategy.Config,
+		AccountID:      r.executionAccount.AccountID(),
+		Environment:    r.executionAccount.Environment(),
+		OriginType:     "strategy_version",
+		OriginID:       executionVersionID.String(),
+	}
+	if err := bindStrategyRunScope(&run, r.executionAccount, executionVersionID); err != nil {
+		return nil, err
 	}
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
@@ -802,16 +812,23 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	return &api.StrategyRunResult{Run: run, Signal: run.Signal, Orders: orders, Positions: positions}, nil
 }
 
-func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
 	now := time.Now().UTC()
 	run := domain.PipelineRun{
 		ID:             uuid.New(),
 		StrategyID:     strategy.ID,
 		Ticker:         strategy.Ticker,
-		TradeDate:      now,
+		TradeDate:      now.Truncate(24 * time.Hour),
 		Status:         domain.PipelineStatusRunning,
 		StartedAt:      now,
 		ConfigSnapshot: strategy.Config,
+		AccountID:      r.executionAccount.AccountID(),
+		Environment:    r.executionAccount.Environment(),
+		OriginType:     "strategy_version",
+		OriginID:       executionVersionID.String(),
+	}
+	if err := bindStrategyRunScope(&run, r.executionAccount, executionVersionID); err != nil {
+		return nil, err
 	}
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
@@ -1489,7 +1506,7 @@ func strategyPreparationFailureReason(err error) string {
 	}
 }
 
-func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy domain.Strategy) (*agent.Runner, agent.PreparedRun, *agent.StrategyConfig, chan agent.PipelineEvent, error) {
+func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*agent.Runner, agent.PreparedRun, *agent.StrategyConfig, chan agent.PipelineEvent, error) {
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
 	if err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, err
@@ -1515,8 +1532,9 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 	if r.hub != nil {
 		eventsCh = make(chan agent.PipelineEvent, 64)
 	}
+	persister := &strategyVersionPersister{delegate: agent.NewRepoPersister(r.runRepo, r.snapshotRepo, r.decisionRepo, r.eventRepo, r.logger), executionAccount: r.executionAccount, versionID: executionVersionID}
 	runner := agent.NewRunner(definition, agent.Dependencies{
-		Persister:   agent.NewRepoPersister(r.runRepo, r.snapshotRepo, r.decisionRepo, r.eventRepo, r.logger),
+		Persister:   persister,
 		Events:      eventsCh,
 		Logger:      r.logger,
 		RunRegistry: r.runRegistry,
@@ -1534,6 +1552,58 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 
 	r.logger.Debug("prepareStrategyRun returning successfully")
 	return runner, prepared, strategyConfig, eventsCh, nil
+}
+
+type strategyVersionPersister struct {
+	delegate         agent.DecisionPersister
+	executionAccount domain.ExecutionAccountBinding
+	versionID        uuid.UUID
+}
+
+func (p *strategyVersionPersister) RecordRunStart(ctx context.Context, run *domain.PipelineRun) error {
+	if err := bindStrategyRunScope(run, p.executionAccount, p.versionID); err != nil {
+		return err
+	}
+	return p.delegate.RecordRunStart(ctx, run)
+}
+
+func (p *strategyVersionPersister) FinalizeRun(ctx context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return p.delegate.FinalizeRun(ctx, runID, tradeDate, finalization)
+}
+
+func (p *strategyVersionPersister) SupportsSnapshots() bool { return p.delegate.SupportsSnapshots() }
+func (p *strategyVersionPersister) PersistSnapshot(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error {
+	snapshot.AccountID = p.executionAccount.AccountID()
+	snapshot.Environment = p.executionAccount.Environment()
+	snapshot.OriginType = "strategy_version"
+	snapshot.OriginID = p.versionID.String()
+	return p.delegate.PersistSnapshot(ctx, snapshot)
+}
+func (p *strategyVersionPersister) PersistDecision(ctx context.Context, runID uuid.UUID, node agent.Node, roundNumber *int, output string, response *agent.DecisionLLMResponse) error {
+	return p.delegate.PersistDecision(ctx, runID, node, roundNumber, output, response)
+}
+func (p *strategyVersionPersister) PersistEvent(ctx context.Context, event *domain.AgentEvent) error {
+	event.AccountID = p.executionAccount.AccountID()
+	event.Environment = p.executionAccount.Environment()
+	event.OriginType = "strategy_version"
+	event.OriginID = p.versionID.String()
+	return p.delegate.PersistEvent(ctx, event)
+}
+
+func bindStrategyRunScope(run *domain.PipelineRun, executionAccount domain.ExecutionAccountBinding, versionID uuid.UUID) error {
+	if err := executionAccount.Validate(); err != nil {
+		return nil
+	}
+	scope, err := execution.NewStrategyExecutionScope(executionAccount.AccountID(), executionAccount.Environment(), versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	if err != nil {
+		return err
+	}
+	originType, originID := scope.Origin()
+	run.AccountID = scope.AccountID()
+	run.Environment = scope.Environment()
+	run.OriginType = string(originType)
+	run.OriginID = originID
+	return nil
 }
 
 func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig) (agent.InitialStateSeed, error) {

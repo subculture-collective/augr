@@ -1559,6 +1559,15 @@ type kalshiStrategyRepoStub struct {
 }
 
 func (s *kalshiStrategyRepoStub) Create(context.Context, *domain.Strategy) error { return nil }
+func (s *kalshiStrategyRepoStub) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := s.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+func (*kalshiStrategyRepoStub) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
 func (s *kalshiStrategyRepoStub) Get(context.Context, uuid.UUID) (*domain.Strategy, error) {
 	return nil, repository.ErrNotFound
 }

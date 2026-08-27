@@ -154,7 +154,7 @@ type StrategyRunResult struct {
 
 // StrategyRunner triggers a strategy pipeline run on demand.
 type StrategyRunner interface {
-	RunStrategy(ctx context.Context, strategy domain.Strategy) (*StrategyRunResult, error)
+	RunStrategy(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*StrategyRunResult, error)
 }
 
 type BacktestRunner interface {

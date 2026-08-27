@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -72,10 +73,17 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		return domain.Strategy{}, false, err
 	}
 	if existing != nil {
+		versionID, resolveErr := repo.ResolveExecutionVersionID(ctx, existing.ID)
+		if resolveErr != nil {
+			return domain.Strategy{}, false, fmt.Errorf("resolve existing strategy execution version: %w", resolveErr)
+		}
+		existing.ExecutionStrategyVersionID = &versionID
 		return *existing, false, nil
 	}
 
-	if err := repo.Create(ctx, &strategy); err != nil {
+	strategy.ID = uuid.New()
+	versionID, err := repo.CreateWithExecutionVersion(ctx, &strategy)
+	if err != nil {
 		// Handle races where another runner inserted the same strategy between
 		// the List and Create calls.
 		if !isUniqueViolation(err) {
@@ -89,9 +97,15 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		if existingAfterConflict == nil {
 			return domain.Strategy{}, false, err
 		}
+		resolvedID, resolveErr := repo.ResolveExecutionVersionID(ctx, existingAfterConflict.ID)
+		if resolveErr != nil {
+			return domain.Strategy{}, false, fmt.Errorf("resolve existing strategy execution version after conflict: %w", resolveErr)
+		}
+		existingAfterConflict.ExecutionStrategyVersionID = &resolvedID
 		return *existingAfterConflict, false, nil
 	}
 
+	strategy.ExecutionStrategyVersionID = &versionID
 	return strategy, true, nil
 }
 
