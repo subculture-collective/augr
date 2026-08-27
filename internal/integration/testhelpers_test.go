@@ -3,11 +3,15 @@ package integration
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -34,7 +38,7 @@ type repos struct {
 }
 
 // newTestDB creates an isolated PostgreSQL schema for the test.
-// It skips the test if neither DB_URL nor DATABASE_URL is set or -short mode is used.
+// It skips when no safe disposable DSN is configured or -short mode is used.
 func newTestDB(t *testing.T) *testDB {
 	t.Helper()
 
@@ -42,13 +46,7 @@ func newTestDB(t *testing.T) *testDB {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	databaseURL := os.Getenv("DB_URL")
-	if databaseURL == "" {
-		databaseURL = os.Getenv("DATABASE_URL")
-	}
-	if databaseURL == "" {
-		t.Skip("skipping integration test: DB_URL or DATABASE_URL is not set")
-	}
+	databaseURL, config := safeIntegrationDatabase(t)
 
 	ctx := context.Background()
 
@@ -57,24 +55,15 @@ func newTestDB(t *testing.T) *testDB {
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
-		adminPool.Close()
-		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
-	}
-
 	schemaName := "integ_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA "`+schemaName+`"`); err != nil {
+	identifier := pgx.Identifier{schemaName}.Sanitize()
+	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+identifier); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to create test schema: %v", err)
 	}
 
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		dropSchema(adminPool, schemaName)
-		adminPool.Close()
-		t.Fatalf("failed to parse pool config: %v", err)
-	}
 	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -83,7 +72,7 @@ func newTestDB(t *testing.T) *testDB {
 		t.Fatalf("failed to create test pool: %v", err)
 	}
 
-	applyDDL(t, pool)
+	applyMigrations(t, pool)
 
 	db := &testDB{
 		Pool:      pool,
@@ -98,6 +87,58 @@ func newTestDB(t *testing.T) *testDB {
 	})
 
 	return db
+}
+
+func applyMigrations(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	for _, migration := range integrationTestMigrations(t) {
+		contents, err := os.ReadFile(migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(contents)); err != nil {
+			t.Fatalf("failed to apply %s: %v", filepath.Base(migration), err)
+		}
+	}
+}
+
+func safeIntegrationDatabase(t *testing.T) (string, *pgxpool.Config) {
+	t.Helper()
+	for _, key := range []string{"TEST_DATABASE_URL", "DB_URL", "DATABASE_URL"} {
+		value := os.Getenv(key)
+		if value == "" {
+			continue
+		}
+		config, err := pgxpool.ParseConfig(value)
+		if err != nil || strings.EqualFold(config.ConnConfig.Database, "tradingagent") {
+			continue
+		}
+		return value, config
+	}
+	t.Skip("skipping integration test: no safe disposable DSN; TEST_DATABASE_URL/DB_URL/DATABASE_URL are unset, invalid, or target protected database tradingagent")
+	return "", nil
+}
+
+func integrationTestMigrations(t *testing.T) []string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve integration test path")
+	}
+	dir := filepath.Join(filepath.Dir(filename), "..", "..", "migrations")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") && entry.Name() <= "000108_canonical_account_expansion.up.sql" {
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // newRepos creates all repository implementations for the given test DB.
