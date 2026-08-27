@@ -168,15 +168,10 @@ func sortPreparedStrategiesForReuse(strategies []domain.Strategy) {
 	})
 }
 
-func strategyReuseKey(strategy domain.Strategy) string {
-	key := string(strategy.MarketType.Normalize()) + "\x00" + strategy.Ticker
-	if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
-		key += "\x00" + strategy.Name
-	}
-	return key
-}
-
 func createOrReusePreparedStrategy(ctx context.Context, tx pgx.Tx, strategy *domain.Strategy) (bool, error) {
+	if err := lockStrategyReuseKey(ctx, tx, *strategy); err != nil {
+		return false, err
+	}
 	if existing, err := findPreparedStrategy(ctx, tx, *strategy); err != nil {
 		return false, err
 	} else if existing != nil {

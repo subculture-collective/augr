@@ -22,7 +22,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create or replace function strategy_legacy_snapshot_sha",
 		"'active_thesis', s.active_thesis",
 		"add column execution_strategy_version_id uuid references strategy_versions(id) on delete restrict",
-		"create unique index uq_strategies_paper_event_market_ticker on strategies(ticker,market_type) where is_paper=true and market_type in ('kalshi','polymarket') and (is_active=true or execution_strategy_version_id is not null)",
+		"create unique index uq_strategies_paper_event_market_ticker on strategies(ticker,market_type) where is_paper=true and market_type in ('kalshi','polymarket') and execution_strategy_version_id is not null",
 		"create table account_projection_outbox",
 		"mark_generation uuid not null",
 		"mark_source text",
@@ -75,18 +75,18 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 	}
 }
 
-func TestCanonicalAccountExpansionEnforcesPaperEventTickerUniqueness(t *testing.T) {
+func TestCanonicalAccountExpansionToleratesLegacyActiveEventDuplicates(t *testing.T) {
 	ctx, pool := newCanonicalExpansionPool(t)
-	applyCanonicalExpansion(t, ctx, pool)
 	for _, marketType := range []string{"kalshi", "polymarket"} {
 		ticker := "event-" + uuid.NewString()
 		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "first", ticker, marketType); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "second", ticker, marketType); err == nil || !strings.Contains(err.Error(), "uq_strategies_paper_event_market_ticker") {
-			t.Fatalf("duplicate %s ticker error = %v", marketType, err)
+		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "second", ticker, marketType); err != nil {
+			t.Fatal(err)
 		}
 	}
+	applyCanonicalExpansion(t, ctx, pool)
 }
 
 func TestCanonicalAccountExpansionPreservesDuplicateInactiveEventStrategies(t *testing.T) {

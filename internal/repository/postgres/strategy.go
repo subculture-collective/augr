@@ -15,6 +15,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/eventmarkets"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
@@ -50,6 +51,9 @@ func (r *StrategyRepo) CreateWithExecutionVersion(ctx context.Context, s *domain
 		return uuid.Nil, fmt.Errorf("postgres: begin create strategy: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockStrategyReuseKey(ctx, tx, *s); err != nil {
+		return uuid.Nil, err
+	}
 	row := tx.QueryRow(ctx,
 		`INSERT INTO strategies (id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, is_active)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
@@ -79,6 +83,21 @@ func (r *StrategyRepo) CreateWithExecutionVersion(ctx context.Context, s *domain
 	}
 	s.ExecutionStrategyVersionID = &versionID
 	return versionID, nil
+}
+
+func lockStrategyReuseKey(ctx context.Context, tx pgx.Tx, strategy domain.Strategy) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "augr:strategy-reuse:"+strategyReuseKey(strategy)); err != nil {
+		return fmt.Errorf("postgres: lock strategy reuse key: %w", err)
+	}
+	return nil
+}
+
+func strategyReuseKey(strategy domain.Strategy) string {
+	key := string(strategy.MarketType.Normalize()) + "\x00" + strategy.Ticker
+	if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
+		key += "\x00" + strategy.Name
+	}
+	return key
 }
 
 func (r *StrategyRepo) ResolveExecutionVersionID(ctx context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
