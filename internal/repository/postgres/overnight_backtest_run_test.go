@@ -337,7 +337,10 @@ func TestOvernightBacktestRunRepoIntegration_ConcurrentReusePreservesBinding(t *
 	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
 	defer cleanup()
 	repo := NewOvernightBacktestRunRepo(pool)
-	strategy := preparedOvernightStrategy("RACE", "shared")
+	strategies := []domain.Strategy{preparedOvernightStrategy("RACE", "first"), preparedOvernightStrategy("RACE", "second")}
+	for i := range strategies {
+		strategies[i].MarketType = domain.MarketTypePolymarket
+	}
 	runs := []domain.OvernightBacktestRun{domain.NewOvernightBacktestRun(), domain.NewOvernightBacktestRun()}
 	for i := range runs {
 		runs[i].Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
@@ -350,11 +353,11 @@ func TestOvernightBacktestRunRepoIntegration_ConcurrentReusePreservesBinding(t *
 	errCh := make(chan error, len(runs))
 	for i := range runs {
 		wg.Add(1)
-		go func(runID uuid.UUID) {
+		go func(runID uuid.UUID, strategy domain.Strategy) {
 			defer wg.Done()
 			_, _, err := repo.CommitIfRunning(ctx, runID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy})
 			errCh <- err
-		}(runs[i].ID)
+		}(runs[i].ID, strategies[i])
 	}
 	wg.Wait()
 	close(errCh)

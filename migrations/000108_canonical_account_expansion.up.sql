@@ -33,6 +33,10 @@ $$ LANGUAGE sql STABLE STRICT;
 ALTER TABLE strategies
     ADD COLUMN execution_strategy_version_id UUID REFERENCES strategy_versions(id) ON DELETE RESTRICT;
 
+CREATE UNIQUE INDEX uq_strategies_paper_event_market_ticker
+    ON strategies(ticker,market_type)
+    WHERE is_paper=true AND market_type IN ('kalshi','polymarket');
+
 ALTER TABLE pipeline_runs
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),

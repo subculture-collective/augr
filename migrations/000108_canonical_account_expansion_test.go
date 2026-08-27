@@ -22,6 +22,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create or replace function strategy_legacy_snapshot_sha",
 		"'active_thesis', s.active_thesis",
 		"add column execution_strategy_version_id uuid references strategy_versions(id) on delete restrict",
+		"create unique index uq_strategies_paper_event_market_ticker on strategies(ticker,market_type) where is_paper=true and market_type in ('kalshi','polymarket')",
 		"create table account_projection_outbox",
 		"mark_generation uuid not null",
 		"mark_source text",
@@ -59,6 +60,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"enable trigger trg_account_capital_policy_bindings_immutable",
 		"drop trigger trg_validate_account_projection_outbox_row",
 		"drop function validate_account_projection_outbox_row",
+		"drop index uq_strategies_paper_event_market_ticker",
 		"expected_through_transaction_id uuid",
 		"order by effective_at desc, observed_at desc, id desc",
 	} {
@@ -70,6 +72,20 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 	frontierCheck := strings.Index(down, "checkpoint.projection_version is not null")
 	if ledgerLock < 0 || frontierCheck < 0 || ledgerLock > frontierCheck {
 		t.Fatal("down migration must lock ledger_transactions before checkpoint frontier safety checks")
+	}
+}
+
+func TestCanonicalAccountExpansionEnforcesPaperEventTickerUniqueness(t *testing.T) {
+	ctx, pool := newCanonicalExpansionPool(t)
+	applyCanonicalExpansion(t, ctx, pool)
+	for _, marketType := range []string{"kalshi", "polymarket"} {
+		ticker := "event-" + uuid.NewString()
+		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper) VALUES($1,$2,$3,true)`, "first", ticker, marketType); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper) VALUES($1,$2,$3,true)`, "second", ticker, marketType); err == nil || !strings.Contains(err.Error(), "uq_strategies_paper_event_market_ticker") {
+			t.Fatalf("duplicate %s ticker error = %v", marketType, err)
+		}
 	}
 }
 

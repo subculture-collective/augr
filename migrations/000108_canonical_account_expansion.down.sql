@@ -272,6 +272,7 @@ DROP INDEX idx_copy_target_drift_legs_account_run;
 DROP INDEX idx_conversations_account_run;
 DROP INDEX idx_conversation_messages_account_conversation;
 DROP INDEX idx_agent_memories_account_run;
+DROP INDEX uq_strategies_paper_event_market_ticker;
 
 ALTER TABLE agent_memories DROP COLUMN pipeline_run_trade_date,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE conversation_messages DROP COLUMN account_id;
