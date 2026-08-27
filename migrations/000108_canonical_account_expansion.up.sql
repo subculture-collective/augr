@@ -109,21 +109,12 @@ ALTER TABLE prediction_settlement_idempotency
 ALTER TABLE conversations
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
-    ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT,
     ADD COLUMN pipeline_run_trade_date DATE;
 ALTER TABLE conversation_messages
-    ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
-    ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
-    ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT,
-    ADD COLUMN pipeline_run_id UUID,
-    ADD COLUMN pipeline_run_trade_date DATE;
+    ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT;
 ALTER TABLE agent_memories
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
-    ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT,
     ADD COLUMN pipeline_run_trade_date DATE;
 
 ALTER TABLE copy_subscriptions
@@ -175,7 +166,7 @@ CREATE INDEX idx_copy_origin_rebalance_intents_account_run ON copy_origin_rebala
 CREATE INDEX idx_copy_target_drift_runs_account_created ON copy_target_drift_runs(account_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_copy_target_drift_legs_account_run ON copy_target_drift_legs(account_id,run_id,sequence) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_conversations_account_run ON conversations(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
-CREATE INDEX idx_conversation_messages_account_run ON conversation_messages(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
+CREATE INDEX idx_conversation_messages_account_conversation ON conversation_messages(account_id,conversation_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_agent_memories_account_run ON agent_memories(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
 
 CREATE TABLE account_projection_outbox (

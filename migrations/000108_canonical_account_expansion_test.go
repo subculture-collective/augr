@@ -39,7 +39,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create or replace function validate_canonical_projection_checkpoint",
 		"frontier_effective_at,frontier_observed_at,new.through_transaction_id",
 		"create index idx_conversations_account_run on conversations(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
-		"create index idx_conversation_messages_account_run on conversation_messages(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
+		"create index idx_conversation_messages_account_conversation on conversation_messages(account_id,conversation_id,created_at,id) where account_id is not null",
 		"create index idx_agent_memories_account_run on agent_memories(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
 	} {
 		if !strings.Contains(up, fragment) {
@@ -527,7 +527,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 		"idx_prediction_settlement_idempotency_account", "idx_copy_subscriptions_account_status", "idx_copy_trade_intents_account_created",
 		"idx_copy_origin_rebalance_runs_account_created", "idx_copy_origin_rebalance_intents_account_run",
 		"idx_copy_target_drift_runs_account_created", "idx_copy_target_drift_legs_account_run",
-		"idx_conversations_account_run", "idx_conversation_messages_account_run", "idx_agent_memories_account_run",
+		"idx_conversations_account_run", "idx_conversation_messages_account_conversation", "idx_agent_memories_account_run",
 		"uq_account_projection_outbox_request", "idx_account_projection_outbox_claimable",
 	}
 	for _, index := range indexes {
@@ -577,9 +577,9 @@ func canonicalExpansionColumns() map[string][]string {
 		"copy_target_drift_legs":            {"account_id", "environment", "origin_type", "origin_id"},
 		"execution_intents":                 {"copy_origin_rebalance_run_id"},
 		"execution_orders":                  {"copy_origin_rebalance_run_id"},
-		"conversations":                     {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
-		"conversation_messages":             {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_id", "pipeline_run_trade_date"},
-		"agent_memories":                    {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
+		"conversations":                     {"account_id", "environment", "pipeline_run_trade_date"},
+		"conversation_messages":             {"account_id"},
+		"agent_memories":                    {"account_id", "environment", "pipeline_run_trade_date"},
 	}
 }
 
