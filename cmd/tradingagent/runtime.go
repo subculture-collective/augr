@@ -453,13 +453,8 @@ type runtimeSchemaVersionError struct {
 	Required int
 }
 
-const (
-	runtimeMinimumSchemaVersion = 108
-	runtimeMaximumSchemaVersion = 108
-)
-
 func runtimeSchemaVersionCompatible(version int) bool {
-	return version >= runtimeMinimumSchemaVersion && version <= runtimeMaximumSchemaVersion
+	return pgrepo.IsSchemaVersionCompatible(version)
 }
 
 func (e *runtimeSchemaVersionError) Error() string {

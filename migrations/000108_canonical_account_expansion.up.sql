@@ -7,7 +7,8 @@ LOCK TABLE pipeline_runs, pipeline_run_snapshots, agent_decisions, agent_events,
     copy_subscriptions, copy_trade_intents, copy_origin_rebalance_runs,
     copy_origin_rebalance_intents, copy_target_drift_runs, copy_target_drift_legs,
     strategies, projection_checkpoints, account_capital_policy_bindings,
-    capital_margin_policy_artifacts IN SHARE ROW EXCLUSIVE MODE;
+    capital_margin_policy_artifacts, conversations, conversation_messages,
+    agent_memories IN SHARE ROW EXCLUSIVE MODE;
 
 CREATE OR REPLACE FUNCTION strategy_legacy_snapshot_sha(target UUID) RETURNS TEXT AS $$
     SELECT encode(digest(convert_to(jsonb_build_object(
@@ -105,6 +106,26 @@ ALTER TABLE prediction_settlement_idempotency
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
     ADD COLUMN origin_id TEXT;
 
+ALTER TABLE conversations
+    ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+    ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+    ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+    ADD COLUMN origin_id TEXT,
+    ADD COLUMN pipeline_run_trade_date DATE;
+ALTER TABLE conversation_messages
+    ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+    ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+    ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+    ADD COLUMN origin_id TEXT,
+    ADD COLUMN pipeline_run_id UUID,
+    ADD COLUMN pipeline_run_trade_date DATE;
+ALTER TABLE agent_memories
+    ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+    ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+    ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+    ADD COLUMN origin_id TEXT,
+    ADD COLUMN pipeline_run_trade_date DATE;
+
 ALTER TABLE copy_subscriptions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live'));
@@ -153,6 +174,9 @@ CREATE INDEX idx_copy_origin_rebalance_runs_account_created ON copy_origin_rebal
 CREATE INDEX idx_copy_origin_rebalance_intents_account_run ON copy_origin_rebalance_intents(account_id,run_id,sequence) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_copy_target_drift_runs_account_created ON copy_target_drift_runs(account_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_copy_target_drift_legs_account_run ON copy_target_drift_legs(account_id,run_id,sequence) WHERE account_id IS NOT NULL;
+CREATE INDEX idx_conversations_account_run ON conversations(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
+CREATE INDEX idx_conversation_messages_account_run ON conversation_messages(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
+CREATE INDEX idx_agent_memories_account_run ON agent_memories(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
 
 CREATE TABLE account_projection_outbox (
     id UUID PRIMARY KEY,

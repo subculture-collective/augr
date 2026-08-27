@@ -5,7 +5,8 @@ LOCK TABLE pipeline_runs, pipeline_run_snapshots, agent_decisions, agent_events,
     copy_subscriptions, copy_trade_intents, copy_origin_rebalance_runs,
     copy_origin_rebalance_intents, copy_target_drift_runs, copy_target_drift_legs,
     strategies, projection_checkpoints, ledger_transactions, account_projection_outbox,
-    account_capital_policy_bindings, capital_margin_policy_artifacts IN ACCESS EXCLUSIVE MODE;
+    account_capital_policy_bindings, capital_margin_policy_artifacts, conversations,
+    conversation_messages, agent_memories IN ACCESS EXCLUSIVE MODE;
 
 DO $rollback$
 DECLARE
@@ -75,7 +76,10 @@ BEGIN
        OR EXISTS(SELECT 1 FROM copy_target_drift_runs WHERE account_id IS NOT NULL OR environment IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_target_drift_legs WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM execution_intents WHERE copy_origin_rebalance_run_id IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM execution_orders WHERE copy_origin_rebalance_run_id IS NOT NULL) THEN
+       OR EXISTS(SELECT 1 FROM execution_orders WHERE copy_origin_rebalance_run_id IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM conversations WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM conversation_messages WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM agent_memories WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL) THEN
         RAISE EXCEPTION 'cannot roll back migration 108 while expansion columns are populated';
     END IF;
 
@@ -265,7 +269,13 @@ DROP INDEX idx_copy_origin_rebalance_runs_account_created;
 DROP INDEX idx_copy_origin_rebalance_intents_account_run;
 DROP INDEX idx_copy_target_drift_runs_account_created;
 DROP INDEX idx_copy_target_drift_legs_account_run;
+DROP INDEX idx_conversations_account_run;
+DROP INDEX idx_conversation_messages_account_run;
+DROP INDEX idx_agent_memories_account_run;
 
+ALTER TABLE agent_memories DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE conversation_messages DROP COLUMN pipeline_run_trade_date,DROP COLUMN pipeline_run_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE conversations DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE execution_orders DROP COLUMN copy_origin_rebalance_run_id;
 ALTER TABLE execution_intents DROP COLUMN copy_origin_rebalance_run_id;
 ALTER TABLE copy_target_drift_legs DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

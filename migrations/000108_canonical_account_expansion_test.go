@@ -38,6 +38,9 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"insert into account_capital_policy_bindings",
 		"create or replace function validate_canonical_projection_checkpoint",
 		"frontier_effective_at,frontier_observed_at,new.through_transaction_id",
+		"create index idx_conversations_account_run on conversations(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
+		"create index idx_conversation_messages_account_run on conversation_messages(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
+		"create index idx_agent_memories_account_run on agent_memories(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
 	} {
 		if !strings.Contains(up, fragment) {
 			t.Errorf("up migration missing %q", fragment)
@@ -277,6 +280,12 @@ func insertLegacyOperationalGraph(t *testing.T, ctx context.Context, pool *pgxpo
 		INSERT INTO prediction_settlement_idempotency(idempotency_key,decision_id,position_id,trade_id,replay_event_id,payout,resolved_at) VALUES('settlement-'||$8,$6,$4,$5,$7,1,now())`,
 		runID, strategyID, orderID, positionID, tradeID, decisionID, replayID, key); err != nil {
 		t.Fatalf("insert schema-107 operational graph after migration 108: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `WITH conversation AS (
+		INSERT INTO conversations(pipeline_run_id,agent_role,title) VALUES($1,'legacy','old writer') RETURNING id
+	) INSERT INTO conversation_messages(conversation_id,role,content) SELECT id,'user','legacy message' FROM conversation;
+		INSERT INTO agent_memories(agent_role,situation,pipeline_run_id) VALUES('legacy','old writer',$1)`, runID); err != nil {
+		t.Fatalf("insert schema-107 conversation and memory graph after migration 108: %v", err)
 	}
 }
 
@@ -518,6 +527,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 		"idx_prediction_settlement_idempotency_account", "idx_copy_subscriptions_account_status", "idx_copy_trade_intents_account_created",
 		"idx_copy_origin_rebalance_runs_account_created", "idx_copy_origin_rebalance_intents_account_run",
 		"idx_copy_target_drift_runs_account_created", "idx_copy_target_drift_legs_account_run",
+		"idx_conversations_account_run", "idx_conversation_messages_account_run", "idx_agent_memories_account_run",
 		"uq_account_projection_outbox_request", "idx_account_projection_outbox_claimable",
 	}
 	for _, index := range indexes {
@@ -567,6 +577,9 @@ func canonicalExpansionColumns() map[string][]string {
 		"copy_target_drift_legs":            {"account_id", "environment", "origin_type", "origin_id"},
 		"execution_intents":                 {"copy_origin_rebalance_run_id"},
 		"execution_orders":                  {"copy_origin_rebalance_run_id"},
+		"conversations":                     {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
+		"conversation_messages":             {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_id", "pipeline_run_trade_date"},
+		"agent_memories":                    {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
 	}
 }
 
