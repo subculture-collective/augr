@@ -3,17 +3,23 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
 func TestBuildListQuery_NoFilters(t *testing.T) {
@@ -307,6 +313,112 @@ func TestStrategyRepoIntegration_DiscoveryDuplicateRejectedByUniqueIndex(t *test
 	}
 }
 
+func TestStrategyRepoIntegration_RebindsEverySnapshotMutation(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newStrategyIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewStrategyRepo(pool)
+	strategy := &domain.Strategy{ID: uuid.New(), Name: "versioned", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}
+	first, err := repo.CreateWithExecutionVersion(ctx, strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := repo.TransitionPaperStatus(ctx, strategy.ID, domain.StrategyStatusActive, domain.StrategyStatusPaused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := *paused.ExecutionStrategyVersionID
+	if second == first {
+		t.Fatal("status transition retained snapshot version")
+	}
+	active, err := repo.TransitionPaperStatus(ctx, strategy.ID, domain.StrategyStatusPaused, domain.StrategyStatusActive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := *active.ExecutionStrategyVersionID
+	skipped, err := repo.MarkPaperSkipNext(ctx, strategy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fourth := *skipped.ExecutionStrategyVersionID
+	if fourth == third {
+		t.Fatal("skip-next mutation retained snapshot version")
+	}
+	if err := repo.UpdateThesis(ctx, strategy.ID, json.RawMessage(`{"claim":"momentum"}`)); err != nil {
+		t.Fatal(err)
+	}
+	fifth, err := repo.ResolveExecutionVersionID(ctx, strategy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fifth == fourth {
+		t.Fatal("thesis mutation retained snapshot version")
+	}
+	strategy, err = repo.Get(ctx, strategy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	retry, err := bindExecutionVersion(ctx, tx, strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := bindExecutionVersion(ctx, tx, strategy)
+	if err != nil || replayed != retry || retry != fifth {
+		t.Fatalf("unchanged retry versions = %s/%s, %v; want %s", retry, replayed, err, fifth)
+	}
+}
+
+func TestStrategyRepoIntegration_RejectsLegacyFamilyMismatchAndRollsBack(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newStrategyIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewStrategyRepo(pool)
+	strategyID := uuid.New()
+	family, err := strategycatalog.NewLegacyFamily(strategyID, instrument.AssetClassCryptoSpot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO strategy_families(id,schema_name,slug,name,thesis,asset_classes,sha256,canonical_bytes,canonical_json,created_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,convert_from($8,'UTF8')::jsonb,date_trunc('microseconds',now()))`, family.ID(), strategycatalog.FamilySchemaV1, family.Slug(), family.Name(), family.Thesis(), `["crypto_spot"]`, family.Digest(), family.CanonicalBytes()); err != nil {
+		t.Fatal(err)
+	}
+	strategy := &domain.Strategy{ID: strategyID, Name: "conflict", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}
+	if _, err := repo.CreateWithExecutionVersion(ctx, strategy); !errors.Is(err, repository.ErrIdempotencyConflict) {
+		t.Fatalf("CreateWithExecutionVersion() error = %v, want ErrIdempotencyConflict", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM strategies WHERE id=$1`, strategyID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("rolled-back strategy count = %d, %v", count, err)
+	}
+}
+
+func TestStrategyRepoIntegration_ResolveRejectsForeignFamilyMapping(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newStrategyIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewStrategyRepo(pool)
+	first := &domain.Strategy{ID: uuid.New(), Name: "first", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}
+	second := &domain.Strategy{ID: uuid.New(), Name: "second", Ticker: "MSFT", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}
+	if _, err := repo.CreateWithExecutionVersion(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := repo.CreateWithExecutionVersion(ctx, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE strategies SET execution_strategy_version_id=$1 WHERE id=$2`, foreign, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ResolveExecutionVersionID(ctx, first.ID); err == nil || !strings.Contains(err.Error(), "family mismatch") {
+		t.Fatalf("ResolveExecutionVersionID() error = %v, want family mismatch", err)
+	}
+}
+
 // assertContains fails if substr is not found in s.
 func assertContains(t *testing.T, s, substr string) {
 	t.Helper()
@@ -330,37 +442,21 @@ func newStrategyIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		t.Skip("skipping integration test in short mode")
 	}
 
-	connString := os.Getenv("DB_URL")
-	if connString == "" {
-		connString = os.Getenv("DATABASE_URL")
-	}
-	if connString == "" {
-		t.Skip("skipping integration test: DB_URL or DATABASE_URL is not set")
-	}
-
+	connString, config := safeStrategyTestDatabase(t)
 	adminPool, err := pgxpool.New(ctx, connString)
 	if err != nil {
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
-		adminPool.Close()
-		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
-	}
-
 	schemaName := "integration_strategy_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA "`+schemaName+`"`); err != nil {
+	identifier := pgx.Identifier{schemaName}.Sanitize()
+	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+identifier); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to create test schema: %v", err)
 	}
 
-	config, err := pgxpool.ParseConfig(connString)
-	if err != nil {
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA "`+schemaName+`" CASCADE`)
-		adminPool.Close()
-		t.Fatalf("failed to parse pool config: %v", err)
-	}
 	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -369,35 +465,16 @@ func newStrategyIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		t.Fatalf("failed to create test pool: %v", err)
 	}
 
-	ddl := []string{
-		`CREATE TYPE market_type AS ENUM ('stock', 'crypto', 'polymarket', 'options')`,
-		`CREATE TABLE strategies (
-			id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			name          TEXT NOT NULL,
-			description   TEXT NOT NULL DEFAULT '',
-			ticker        TEXT NOT NULL,
-			market_type   market_type NOT NULL,
-			schedule_cron TEXT NOT NULL DEFAULT '',
-			config        JSONB NOT NULL DEFAULT '{}',
-			status        TEXT NOT NULL DEFAULT 'active',
-			skip_next_run BOOLEAN NOT NULL DEFAULT false,
-			is_paper      BOOLEAN NOT NULL DEFAULT true,
-			is_active     BOOLEAN NOT NULL DEFAULT true,
-			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)`,
-		`CREATE UNIQUE INDEX idx_strategies_discovery_unique
-			ON strategies (ticker, market_type, is_paper, name)
-			WHERE is_paper = true
-			  AND (name LIKE 'discovery:%' OR name LIKE 'options:%')`,
-	}
-
-	for _, stmt := range ddl {
-		if _, err := pool.Exec(ctx, stmt); err != nil {
+	for _, migration := range strategyTestMigrations(t) {
+		contents, err := os.ReadFile(migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(contents)); err != nil {
 			pool.Close()
-			_, _ = adminPool.Exec(ctx, `DROP SCHEMA "`+schemaName+`" CASCADE`)
+			_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+identifier+` CASCADE`)
 			adminPool.Close()
-			t.Fatalf("failed to apply test schema DDL: %v", err)
+			t.Fatalf("failed to apply %s: %v", filepath.Base(migration), err)
 		}
 	}
 
@@ -408,4 +485,45 @@ func newStrategyIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 	}
 
 	return pool, cleanup
+}
+
+func safeStrategyTestDatabase(t *testing.T) (string, *pgxpool.Config) {
+	t.Helper()
+	for _, key := range []string{"TEST_DATABASE_URL", "DB_URL", "DATABASE_URL"} {
+		value := os.Getenv(key)
+		if value == "" {
+			continue
+		}
+		config, err := pgxpool.ParseConfig(value)
+		if err != nil {
+			continue
+		}
+		if strings.EqualFold(config.ConnConfig.Database, "tradingagent") {
+			continue
+		}
+		return value, config
+	}
+	t.Skip("skipping strategy integration test: no safe disposable DSN; TEST_DATABASE_URL/DB_URL/DATABASE_URL are unset, invalid, or target protected database tradingagent")
+	return "", nil
+}
+
+func strategyTestMigrations(t *testing.T) []string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve strategy test path")
+	}
+	dir := filepath.Join(filepath.Dir(filename), "..", "..", "..", "migrations")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") && entry.Name() <= "000108_canonical_account_expansion.up.sql" {
+			paths = append(paths, filepath.Join(dir, entry.Name()))
+		}
+	}
+	sort.Strings(paths)
+	return paths
 }

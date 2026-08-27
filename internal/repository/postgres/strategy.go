@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -108,11 +109,15 @@ func bindExecutionVersion(ctx context.Context, tx pgx.Tx, strategy *domain.Strat
 		return uuid.Nil, err
 	}
 	createdAt := time.Now().UTC().Truncate(time.Microsecond)
-	var familyExists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM strategy_families WHERE id=$1)`, family.ID()).Scan(&familyExists); err != nil {
+	var storedFamilyCanonical []byte
+	err = tx.QueryRow(ctx, `SELECT canonical_bytes FROM strategy_families WHERE id=$1`, family.ID()).Scan(&storedFamilyCanonical)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, fmt.Errorf("postgres: check legacy strategy family: %w", err)
 	}
-	if !familyExists {
+	if err == nil && !bytes.Equal(storedFamilyCanonical, family.CanonicalBytes()) {
+		return uuid.Nil, fmt.Errorf("postgres: legacy strategy family changed: %w", repository.ErrIdempotencyConflict)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
 		assetClasses, err := json.Marshal(family.AssetClasses())
 		if err != nil {
 			return uuid.Nil, err
@@ -152,6 +157,15 @@ func bindExecutionVersion(ctx context.Context, tx pgx.Tx, strategy *domain.Strat
 		version.DecisionContract(), len(version.RequiredDatasetKinds()), version.Digest(), version.CanonicalBytes(), createdAt)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("postgres: insert legacy strategy version: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		var storedVersionCanonical []byte
+		if err := tx.QueryRow(ctx, `SELECT canonical_bytes FROM strategy_versions WHERE id=$1`, version.ID()).Scan(&storedVersionCanonical); err != nil {
+			return uuid.Nil, fmt.Errorf("postgres: read legacy strategy version: %w", err)
+		}
+		if !bytes.Equal(storedVersionCanonical, version.CanonicalBytes()) {
+			return uuid.Nil, fmt.Errorf("postgres: legacy strategy version changed: %w", repository.ErrIdempotencyConflict)
+		}
 	}
 	if result.RowsAffected() > 0 {
 		for sequence, kind := range version.RequiredDatasetKinds() {
@@ -374,7 +388,12 @@ func (r *StrategyRepo) Update(ctx context.Context, s *domain.Strategy) error {
 // another. It returns ErrNotFound when no row satisfies the ID, paper-mode, and
 // status preconditions.
 func (r *StrategyRepo) TransitionPaperStatus(ctx context.Context, id uuid.UUID, fromStatus, toStatus string) (*domain.Strategy, error) {
-	row := r.pool.QueryRow(ctx,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: begin transition paper strategy: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx,
 		`UPDATE strategies
 		 SET status = $1, updated_at = NOW()
 		 WHERE id = $2 AND is_paper = TRUE AND status = $3
@@ -391,6 +410,14 @@ func (r *StrategyRepo) TransitionPaperStatus(ctx context.Context, id uuid.UUID, 
 		}
 		return nil, fmt.Errorf("postgres: transition paper strategy: %w", err)
 	}
+	versionID, err := bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: commit transition paper strategy: %w", err)
+	}
+	s.ExecutionStrategyVersionID = &versionID
 	return s, nil
 }
 
@@ -398,7 +425,12 @@ func (r *StrategyRepo) TransitionPaperStatus(ctx context.Context, id uuid.UUID, 
 // scheduled run. It returns ErrNotFound when the ID, paper-mode, and active
 // status preconditions are not all satisfied.
 func (r *StrategyRepo) MarkPaperSkipNext(ctx context.Context, id uuid.UUID) (*domain.Strategy, error) {
-	row := r.pool.QueryRow(ctx,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: begin mark paper skip-next: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx,
 		`UPDATE strategies
 		 SET skip_next_run = TRUE, updated_at = NOW()
 		 WHERE id = $1 AND is_paper = TRUE AND status = $2
@@ -414,6 +446,14 @@ func (r *StrategyRepo) MarkPaperSkipNext(ctx context.Context, id uuid.UUID) (*do
 		}
 		return nil, fmt.Errorf("postgres: mark paper skip-next: %w", err)
 	}
+	versionID, err := bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: commit mark paper skip-next: %w", err)
+	}
+	s.ExecutionStrategyVersionID = &versionID
 	return s, nil
 }
 
@@ -441,16 +481,30 @@ func (r *StrategyRepo) UpdateThesis(ctx context.Context, strategyID uuid.UUID, t
 	if len(thesis) > 0 {
 		thesisArg = []byte(thesis)
 	}
-	tag, err := r.pool.Exec(ctx,
-		`UPDATE strategies SET active_thesis = $1, updated_at = NOW() WHERE id = $2`,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin update thesis %s: %w", strategyID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx,
+		`UPDATE strategies SET active_thesis = $1, updated_at = NOW() WHERE id = $2
+		 RETURNING id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id`,
 		thesisArg,
 		strategyID,
 	)
+	s, err := scanStrategy(row)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: update thesis %s: %w", strategyID, ErrNotFound)
+		}
 		return fmt.Errorf("postgres: update thesis %s: %w", strategyID, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("postgres: update thesis %s: %w", strategyID, ErrNotFound)
+	_, err = bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit update thesis %s: %w", strategyID, err)
 	}
 	return nil
 }
