@@ -94,7 +94,7 @@ func TestStrategiesStatusMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	}
 	t.Cleanup(adminPool.Close)
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := prepareMigrationTestExtensions(ctx, adminPool); err != nil {
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
 

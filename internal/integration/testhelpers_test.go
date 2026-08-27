@@ -67,7 +67,12 @@ func newTestDB(t *testing.T) *testDB {
 		t.Fatalf("failed to create test schema: %v", err)
 	}
 
-	config.ConnConfig.RuntimeParams["search_path"] = testsupport.PostgresTestSearchPath(schemaName)
+	searchPath, err := testsupport.PostgresTestSearchPath(ctx, adminPool, schemaName)
+	if err != nil {
+		adminPool.Close()
+		t.Fatalf("failed to discover extension schemas: %v", err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = searchPath
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)

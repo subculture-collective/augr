@@ -3,6 +3,7 @@ package testsupport
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -52,6 +53,39 @@ func PreparePostgresExtensions(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-func PostgresTestSearchPath(schema string) string {
-	return pgx.Identifier{schema}.Sanitize() + "," + pgx.Identifier{ExtensionSchema}.Sanitize() + ",public"
+func PostgresTestSearchPath(ctx context.Context, pool *pgxpool.Pool, schema string) (string, error) {
+	rows, err := pool.Query(ctx, `SELECT n.nspname
+		FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace
+		WHERE e.extname IN ('pgcrypto','vector') ORDER BY e.extname`)
+	if err != nil {
+		return "", fmt.Errorf("discover extension schemas: %w", err)
+	}
+	defer rows.Close()
+	extensionSchemas := make([]string, 0, 2)
+	for rows.Next() {
+		var extensionSchema string
+		if err := rows.Scan(&extensionSchema); err != nil {
+			return "", fmt.Errorf("scan extension schema: %w", err)
+		}
+		extensionSchemas = append(extensionSchemas, extensionSchema)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("discover extension schemas rows: %w", err)
+	}
+	return formatPostgresTestSearchPath(schema, extensionSchemas), nil
+}
+
+func formatPostgresTestSearchPath(schema string, extensionSchemas []string) string {
+	schemas := append([]string{schema}, extensionSchemas...)
+	schemas = append(schemas, "public")
+	seen := make(map[string]struct{}, len(schemas))
+	quoted := make([]string, 0, len(schemas))
+	for _, name := range schemas {
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		quoted = append(quoted, pgx.Identifier{name}.Sanitize())
+	}
+	return strings.Join(quoted, ",")
 }

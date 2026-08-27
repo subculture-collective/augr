@@ -2,10 +2,10 @@ package testsupport
 
 import "testing"
 
-func TestPostgresTestSearchPathKeepsSharedExtensionsOutsideTestSchema(t *testing.T) {
-	got := PostgresTestSearchPath(`test"schema`)
-	want := `"test""schema","augr_test_extensions",public`
+func TestFormatPostgresTestSearchPathQuotesAndDeduplicatesSchemas(t *testing.T) {
+	got := formatPostgresTestSearchPath(`test"schema`, []string{`ext"schema`, "public", `ext"schema`})
+	want := `"test""schema","ext""schema","public"`
 	if got != want {
-		t.Fatalf("PostgresTestSearchPath() = %q, want %q", got, want)
+		t.Fatalf("formatPostgresTestSearchPath() = %q, want %q", got, want)
 	}
 }

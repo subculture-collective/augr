@@ -9,6 +9,10 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/testsupport"
 )
 
+func prepareMigrationTestExtensions(ctx context.Context, pool *pgxpool.Pool) error {
+	return testsupport.PreparePostgresExtensions(ctx, pool)
+}
+
 func migrationTestSearchPath(t *testing.T, ctx context.Context, databaseURL, schema string) string {
 	t.Helper()
 	config, err := pgxpool.ParseConfig(databaseURL)
@@ -26,5 +30,9 @@ func migrationTestSearchPath(t *testing.T, ctx context.Context, databaseURL, sch
 	if err := testsupport.PreparePostgresExtensions(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
-	return testsupport.PostgresTestSearchPath(schema)
+	searchPath, err := testsupport.PostgresTestSearchPath(ctx, pool, schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return searchPath
 }

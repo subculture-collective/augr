@@ -77,8 +77,8 @@ func TestEmbeddingsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	}
 	t.Cleanup(adminPool.Close)
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
-		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
+	if err := testsupport.PreparePostgresExtensions(ctx, adminPool); err != nil {
+		t.Fatalf("failed to prepare shared extensions: %v", err)
 	}
 
 	schemaName := "migr_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -228,7 +228,11 @@ func TestConcurrentEmbeddingFixturesKeepSharedExtensionAfterDown(t *testing.T) {
 		}
 		t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+identifier+` CASCADE`) })
 		config := adminConfig.Copy()
-		config.ConnConfig.RuntimeParams["search_path"] = testsupport.PostgresTestSearchPath(fixtures[i].schema)
+		searchPath, pathErr := testsupport.PostgresTestSearchPath(ctx, admin, fixtures[i].schema)
+		if pathErr != nil {
+			t.Fatal(pathErr)
+		}
+		config.ConnConfig.RuntimeParams["search_path"] = searchPath
 		config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 		fixtures[i].pool, err = pgxpool.NewWithConfig(ctx, config)
 		if err != nil {
