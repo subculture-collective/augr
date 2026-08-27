@@ -465,31 +465,16 @@ func TestStrategyRepoIntegration_ResolveRejectsForeignFamilyMapping(t *testing.T
 	}
 }
 
-func TestStrategyIntegrationRelocatableExtensionsUseSharedSchema(t *testing.T) {
+func TestStrategyIntegrationRelocatableExtensionsRemainUsable(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newStrategyIntegrationPool(t, ctx)
 	defer cleanup()
-	rows, err := pool.Query(ctx, `SELECT e.extname,n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname IN ('pgcrypto','vector') ORDER BY e.extname`)
-	if err != nil {
+	var digestLength, dimensions int
+	if err := pool.QueryRow(ctx, `SELECT octet_length(digest('fixture','sha256')),vector_dims('[1,2,3]'::vector)`).Scan(&digestLength, &dimensions); err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
-	count := 0
-	for rows.Next() {
-		var extension, schema string
-		if err := rows.Scan(&extension, &schema); err != nil {
-			t.Fatal(err)
-		}
-		if schema != testsupport.ExtensionSchema {
-			t.Fatalf("%s extension schema = %q, want %q", extension, schema, testsupport.ExtensionSchema)
-		}
-		count++
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if count != 2 {
-		t.Fatalf("relocatable extension count = %d, want 2", count)
+	if digestLength != 32 || dimensions != 3 {
+		t.Fatalf("extension results digest=%d dimensions=%d", digestLength, dimensions)
 	}
 }
 

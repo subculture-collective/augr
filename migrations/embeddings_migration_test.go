@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -63,8 +64,14 @@ func TestEmbeddingsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	}
 
 	ctx := context.Background()
-
-	adminPool, err := pgxpool.New(ctx, databaseURL)
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatalf("failed to parse database config: %v", err)
+	}
+	if config.ConnConfig.Database == "tradingagent" {
+		t.Fatal("refusing migration test against protected database tradingagent")
+	}
+	adminPool, err := pgxpool.NewWithConfig(ctx, config.Copy())
 	if err != nil {
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
@@ -85,10 +92,6 @@ func TestEmbeddingsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 		}
 	})
 
-	config, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatalf("failed to parse database config: %v", err)
-	}
 	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
@@ -159,11 +162,121 @@ func TestEmbeddingsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	if colCount != 0 {
 		t.Fatalf("expected news_feed.embedding to be dropped, but still found %d", colCount)
 	}
-	var extensionSchema string
-	if err := pool.QueryRow(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='vector'`).Scan(&extensionSchema); err != nil {
+	var dimensions int
+	if err := pool.QueryRow(ctx, `SELECT vector_dims('[1,2,3]'::vector)`).Scan(&dimensions); err != nil {
 		t.Fatal(err)
 	}
-	if extensionSchema != testsupport.ExtensionSchema {
-		t.Fatalf("vector extension schema = %q, want %q", extensionSchema, testsupport.ExtensionSchema)
+	if dimensions != 3 {
+		t.Fatalf("vector dimensions = %d, want 3", dimensions)
+	}
+}
+
+func TestConcurrentEmbeddingFixturesKeepSharedExtensionAfterDown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping migration integration test in short mode")
+	}
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = os.Getenv("DB_URL")
+	}
+	if databaseURL == "" {
+		databaseURL = os.Getenv("DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("skipping migration integration test: database URL is not set")
+	}
+	ctx := context.Background()
+	adminConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adminConfig.ConnConfig.Database == "tradingagent" {
+		t.Fatal("refusing migration test against protected database tradingagent")
+	}
+	admin, err := pgxpool.NewWithConfig(ctx, adminConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(admin.Close)
+	installedSchemas := make(map[string]string)
+	rows, err := admin.Query(ctx, `SELECT e.extname,n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname IN ('pgcrypto','vector')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var name, schema string
+		if err := rows.Scan(&name, &schema); err != nil {
+			t.Fatal(err)
+		}
+		installedSchemas[name] = schema
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	type fixture struct {
+		schema string
+		pool   *pgxpool.Pool
+	}
+	fixtures := make([]fixture, 2)
+	for i := range fixtures {
+		fixtures[i].schema = "migr_ext_concurrent_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		identifier := pgx.Identifier{fixtures[i].schema}.Sanitize()
+		if _, err := admin.Exec(ctx, `CREATE SCHEMA `+identifier); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = admin.Exec(context.Background(), `DROP SCHEMA IF EXISTS `+identifier+` CASCADE`) })
+		config := adminConfig.Copy()
+		config.ConnConfig.RuntimeParams["search_path"] = testsupport.PostgresTestSearchPath(fixtures[i].schema)
+		config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+		fixtures[i].pool, err = pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(fixtures[i].pool.Close)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(fixtures))
+	for i := range fixtures {
+		wg.Add(1)
+		go func(f fixture) {
+			defer wg.Done()
+			if err := testsupport.PreparePostgresExtensions(ctx, f.pool); err != nil {
+				errs <- err
+				return
+			}
+			_, err := f.pool.Exec(ctx, `CREATE TABLE news_feed(id bigint); CREATE TABLE social_sentiment(id bigint); `+readMigrationFile(t, "000030_embeddings.up.sql"))
+			errs <- err
+		}(fixtures[i])
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent fixture setup: %v", err)
+		}
+	}
+	for name, schema := range installedSchemas {
+		var current string
+		if err := admin.QueryRow(ctx, `SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname=$1`, name).Scan(&current); err != nil {
+			t.Fatal(err)
+		}
+		if current != schema {
+			t.Fatalf("concurrent fixture setup moved %s extension from %q to %q", name, schema, current)
+		}
+	}
+
+	downSQL := strings.ReplaceAll(readMigrationFile(t, "000030_embeddings.down.sql"), "DROP EXTENSION IF EXISTS vector;", "")
+	if _, err := fixtures[0].pool.Exec(ctx, downSQL); err != nil {
+		t.Fatalf("first fixture down: %v", err)
+	}
+	var dimensions int
+	if err := fixtures[1].pool.QueryRow(ctx, `SELECT vector_dims('[1,2,3]'::vector)`).Scan(&dimensions); err != nil {
+		t.Fatalf("second fixture lost vector after first down: %v", err)
+	}
+	if dimensions != 3 {
+		t.Fatalf("second fixture vector dimensions = %d, want 3", dimensions)
 	}
 }

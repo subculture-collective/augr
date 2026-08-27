@@ -2,7 +2,6 @@ package testsupport
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -36,25 +35,17 @@ func PreparePostgresExtensions(ctx context.Context, pool *pgxpool.Pool) error {
 		{name: "vector", relocatable: true},
 		{name: "timescaledb", relocatable: false},
 	} {
-		var installedSchema string
-		var installedRelocatable bool
-		err := conn.QueryRow(ctx, `SELECT n.nspname,e.extrelocatable FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname=$1`, extension.name).Scan(&installedSchema, &installedRelocatable)
-		if errors.Is(err, pgx.ErrNoRows) {
+		var installed bool
+		if err := conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname=$1)`, extension.name).Scan(&installed); err != nil {
+			return fmt.Errorf("inspect %s extension: %w", extension.name, err)
+		}
+		if !installed {
 			statement := `CREATE EXTENSION ` + pgx.Identifier{extension.name}.Sanitize()
 			if extension.relocatable {
 				statement += ` WITH SCHEMA ` + schema
 			}
 			if _, err := conn.Exec(ctx, statement); err != nil {
 				return fmt.Errorf("install %s extension: %w", extension.name, err)
-			}
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("inspect %s extension: %w", extension.name, err)
-		}
-		if extension.relocatable && installedRelocatable && installedSchema != ExtensionSchema {
-			if _, err := conn.Exec(ctx, `ALTER EXTENSION `+pgx.Identifier{extension.name}.Sanitize()+` SET SCHEMA `+schema); err != nil {
-				return fmt.Errorf("move %s extension to shared schema: %w", extension.name, err)
 			}
 		}
 	}
