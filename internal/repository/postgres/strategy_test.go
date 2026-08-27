@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -311,6 +312,50 @@ func TestStrategyRepoIntegration_DiscoveryDuplicateRejectedByUniqueIndex(t *test
 	errText := strings.ToLower(err.Error())
 	if !strings.Contains(errText, "unique") && !strings.Contains(errText, "duplicate") {
 		t.Fatalf("Create(duplicate) error = %v, want unique/duplicate violation", err)
+	}
+}
+
+func TestStrategyRepoIntegration_ConcurrentEventIdeasUseDatabaseUniqueness(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newStrategyIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewStrategyRepo(pool)
+	ticker := "KX-" + uuid.NewString()
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := repo.CreateWithExecutionVersion(ctx, &domain.Strategy{
+				ID: uuid.New(), Name: "idea", Ticker: ticker, MarketType: domain.MarketTypeKalshi,
+				Status: domain.StrategyStatusInactive, IsPaper: true,
+			})
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	succeeded, conflicted := 0, 0
+	for err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case strings.Contains(strings.ToLower(err.Error()), "unique") || strings.Contains(strings.ToLower(err.Error()), "duplicate"):
+			conflicted++
+		default:
+			t.Fatalf("concurrent create error = %v", err)
+		}
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM strategies WHERE ticker=$1 AND market_type='kalshi'`, ticker).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if succeeded != 1 || conflicted != 1 || count != 1 {
+		t.Fatalf("concurrent creates succeeded=%d conflicted=%d rows=%d", succeeded, conflicted, count)
 	}
 }
 

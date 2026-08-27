@@ -35,7 +35,8 @@ ALTER TABLE strategies
 
 CREATE UNIQUE INDEX uq_strategies_paper_event_market_ticker
     ON strategies(ticker,market_type)
-    WHERE is_paper=true AND market_type IN ('kalshi','polymarket');
+    WHERE is_paper=true AND market_type IN ('kalshi','polymarket')
+      AND (is_active=true OR execution_strategy_version_id IS NOT NULL);
 
 ALTER TABLE pipeline_runs
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,

@@ -22,7 +22,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create or replace function strategy_legacy_snapshot_sha",
 		"'active_thesis', s.active_thesis",
 		"add column execution_strategy_version_id uuid references strategy_versions(id) on delete restrict",
-		"create unique index uq_strategies_paper_event_market_ticker on strategies(ticker,market_type) where is_paper=true and market_type in ('kalshi','polymarket')",
+		"create unique index uq_strategies_paper_event_market_ticker on strategies(ticker,market_type) where is_paper=true and market_type in ('kalshi','polymarket') and (is_active=true or execution_strategy_version_id is not null)",
 		"create table account_projection_outbox",
 		"mark_generation uuid not null",
 		"mark_source text",
@@ -80,12 +80,55 @@ func TestCanonicalAccountExpansionEnforcesPaperEventTickerUniqueness(t *testing.
 	applyCanonicalExpansion(t, ctx, pool)
 	for _, marketType := range []string{"kalshi", "polymarket"} {
 		ticker := "event-" + uuid.NewString()
-		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper) VALUES($1,$2,$3,true)`, "first", ticker, marketType); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "first", ticker, marketType); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper) VALUES($1,$2,$3,true)`, "second", ticker, marketType); err == nil || !strings.Contains(err.Error(), "uq_strategies_paper_event_market_ticker") {
+		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "second", ticker, marketType); err == nil || !strings.Contains(err.Error(), "uq_strategies_paper_event_market_ticker") {
 			t.Fatalf("duplicate %s ticker error = %v", marketType, err)
 		}
+	}
+}
+
+func TestCanonicalAccountExpansionPreservesDuplicateInactiveEventStrategies(t *testing.T) {
+	ctx, pool := newCanonicalExpansionPool(t)
+	ticker := "legacy-event-" + uuid.NewString()
+	ids := []uuid.UUID{uuid.New(), uuid.New()}
+	for i, id := range ids {
+		if _, err := pool.Exec(ctx, `INSERT INTO strategies(id,name,ticker,market_type,is_paper,is_active,status,config)
+			VALUES($1,$2,$3,'kalshi',true,false,'inactive',$4)`, id, "legacy inactive", ticker, []byte(`{"legacy":true}`)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO pipeline_runs(id,strategy_id,ticker,trade_date,started_at)
+			VALUES($1,$2,$3,current_date,now())`, uuid.New(), id, ticker); err != nil {
+			t.Fatalf("insert audit row %d: %v", i, err)
+		}
+	}
+
+	applyCanonicalExpansion(t, ctx, pool)
+
+	var strategyCount, auditCount, boundCount int
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM strategies WHERE id=ANY($1)),
+		(SELECT count(*) FROM pipeline_runs WHERE strategy_id=ANY($1)),
+		(SELECT count(*) FROM strategies WHERE id=ANY($1) AND execution_strategy_version_id IS NOT NULL)`, ids).
+		Scan(&strategyCount, &auditCount, &boundCount); err != nil {
+		t.Fatal(err)
+	}
+	if strategyCount != 2 || auditCount != 2 || boundCount != 0 {
+		t.Fatalf("upgrade changed legacy rows: strategies=%d audit=%d bound=%d", strategyCount, auditCount, boundCount)
+	}
+
+	if _, err := pool.Exec(ctx, readMigrationFile(t, "000108_canonical_account_expansion.down.sql")); err != nil {
+		t.Fatalf("108 to 107 with duplicate inactive history: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM strategies WHERE id=ANY($1)),
+		(SELECT count(*) FROM pipeline_runs WHERE strategy_id=ANY($1))`, ids).
+		Scan(&strategyCount, &auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if strategyCount != 2 || auditCount != 2 {
+		t.Fatalf("rollback lost legacy rows: strategies=%d audit=%d", strategyCount, auditCount)
 	}
 }
 
