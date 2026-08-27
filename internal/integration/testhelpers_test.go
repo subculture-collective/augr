@@ -71,6 +71,11 @@ func newTestDB(t *testing.T) *testDB {
 		adminPool.Close()
 		t.Fatalf("failed to create test pool: %v", err)
 	}
+	t.Cleanup(func() {
+		pool.Close()
+		dropSchema(adminPool, schemaName)
+		adminPool.Close()
+	})
 
 	applyMigrations(t, pool)
 
@@ -79,12 +84,6 @@ func newTestDB(t *testing.T) *testDB {
 		AdminPool: adminPool,
 		Schema:    schemaName,
 	}
-
-	t.Cleanup(func() {
-		pool.Close()
-		dropSchema(adminPool, schemaName)
-		adminPool.Close()
-	})
 
 	return db
 }
