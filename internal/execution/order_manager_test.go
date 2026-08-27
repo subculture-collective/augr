@@ -276,7 +276,7 @@ func (r *mockOrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter re
 	return nil, nil
 }
 
-func (r *mockOrderRepo) GetByCopyOriginRun(ctx context.Context, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+func (r *mockOrderRepo) GetByCopyOriginRun(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _ uuid.UUID, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
 	return r.GetByRun(ctx, runID, filter, limit, offset)
 }
 
@@ -286,13 +286,14 @@ type mockPositionRepo struct {
 	positions []*domain.Position
 	updates   []*domain.Position
 
-	createFn        func(ctx context.Context, position *domain.Position) error
-	getFn           func(ctx context.Context, id uuid.UUID) (*domain.Position, error)
-	listFn          func(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
-	updateFn        func(ctx context.Context, position *domain.Position) error
-	deleteFn        func(ctx context.Context, id uuid.UUID) error
-	getOpenFn       func(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
-	getByStrategyFn func(ctx context.Context, strategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
+	createFn         func(ctx context.Context, position *domain.Position) error
+	getFn            func(ctx context.Context, id uuid.UUID) (*domain.Position, error)
+	listFn           func(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
+	updateFn         func(ctx context.Context, position *domain.Position) error
+	deleteFn         func(ctx context.Context, id uuid.UUID) error
+	getOpenFn        func(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
+	getByStrategyFn  func(ctx context.Context, strategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
+	executionScopeFn func(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, repository.PositionFilter, int, int) ([]domain.Position, error)
 }
 
 func (r *mockPositionRepo) Create(ctx context.Context, position *domain.Position) error {
@@ -377,6 +378,14 @@ func (r *mockPositionRepo) GetByStrategy(ctx context.Context, strategyID uuid.UU
 	}
 
 	return nil, nil
+}
+
+func (r *mockPositionRepo) GetByExecutionScope(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	if r.executionScopeFn != nil {
+		return r.executionScopeFn(ctx, accountID, environment, originType, originID, filter, limit, offset)
+	}
+	strategyID, _ := uuid.Parse(originID)
+	return r.GetByStrategy(ctx, strategyID, filter, limit, offset)
 }
 
 // mockTradeRepo implements repository.TradeRepository.
@@ -2634,8 +2643,8 @@ func TestProcessSignal_EmitsOrderEvents(t *testing.T) {
 		if events[i].PipelineRunID == nil || *events[i].PipelineRunID != runID {
 			t.Errorf("event[%d].PipelineRunID = %v, want %s", i, events[i].PipelineRunID, runID)
 		}
-		if events[i].StrategyID == nil || *events[i].StrategyID != strategyID {
-			t.Errorf("event[%d].StrategyID = %v, want %s", i, events[i].StrategyID, strategyID)
+		if events[i].StrategyID != nil {
+			t.Errorf("event[%d].StrategyID = %v, want nil legacy metadata", i, events[i].StrategyID)
 		}
 		if events[i].Metadata == nil {
 			t.Errorf("event[%d].Metadata is nil", i)
@@ -2984,6 +2993,39 @@ func TestProcessSignal_CopyScopePersistsCanonicalOrigin(t *testing.T) {
 	}
 	if order.StrategyID != nil || order.PipelineRunID != nil {
 		t.Fatalf("copy order retained strategy/run identity: %+v", order)
+	}
+}
+
+func TestProcessSignal_StrategyVersionOriginKeepsLegacyStrategyMetadataSeparate(t *testing.T) {
+	orderRepo := &mockOrderRepo{}
+	mgr := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{})
+	versionID, legacyID, runID := uuid.New(), uuid.New(), uuid.New()
+	scope, err := execution.NewStrategyExecutionScope(testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), versionID, domain.PipelineRunRef{ID: runID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}, legacyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = mgr.ProcessSignal(context.Background(), scope, defaultSignal(), defaultPlan()); err != nil {
+		t.Fatal(err)
+	}
+	order := orderRepo.orders[0]
+	if order.OriginID != versionID.String() || order.StrategyID == nil || *order.StrategyID != legacyID {
+		t.Fatalf("order attribution=%+v", order)
+	}
+}
+
+func TestProcessSignal_CopySellReadsPositionByAccountAndOrigin(t *testing.T) {
+	subscriptionID, originRunID := uuid.New(), uuid.New()
+	positionRepo := &mockPositionRepo{executionScopeFn: func(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter repository.PositionFilter, _, _ int) ([]domain.Position, error) {
+		if accountID != testExecutionAccountBinding.AccountID() || environment != testExecutionAccountBinding.Environment() || originType != "copy_subscription" || originID != subscriptionID.String() || filter.Ticker != "AAPL" {
+			t.Fatalf("position scope=%s/%s/%s/%s filter=%+v", accountID, environment, originType, originID, filter)
+		}
+		return []domain.Position{{ID: uuid.New(), AccountID: accountID, Environment: environment, OriginType: originType, OriginID: originID, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 100}}, nil
+	}}
+	mgr := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, &mockOrderRepo{}, positionRepo, &mockTradeRepo{}, &mockAuditLogRepo{})
+	plan := defaultPlan()
+	plan.PositionSize = 1
+	if err := mgr.ProcessSignal(context.Background(), copyScope(subscriptionID, originRunID), execution.FinalSignal{Signal: domain.PipelineSignalSell}, plan); err != nil {
+		t.Fatal(err)
 	}
 }
 

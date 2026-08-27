@@ -621,7 +621,7 @@ type OrderRepository interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
 	GetByRun(ctx context.Context, runID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
-	GetByCopyOriginRun(ctx context.Context, copyOriginRunID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
+	GetByCopyOriginRun(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, subscriptionID, copyOriginRunID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
 }
 
 // PositionRepository provides CRUD operations for positions.
@@ -639,6 +639,11 @@ type PositionRepository interface {
 	// CountOpen returns the total number of open (not yet closed) positions.
 	CountOpen(ctx context.Context, filter PositionFilter) (int, error)
 	GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter PositionFilter, limit, offset int) ([]domain.Position, error)
+}
+
+// ExecutionScopedPositionRepository reads positions by canonical account and origin ownership.
+type ExecutionScopedPositionRepository interface {
+	GetByExecutionScope(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter PositionFilter, limit, offset int) ([]domain.Position, error)
 }
 
 // TradeRepository provides access to executed trades.

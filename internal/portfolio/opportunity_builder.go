@@ -69,6 +69,12 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 	if input.Signal != domain.PipelineSignalBuy && input.Signal != domain.PipelineSignalSell {
 		return nil, NoActionReasonUnknown, fmt.Errorf("unsupported signal: %q", input.Signal)
 	}
+	if input.Run == nil || input.Run.ID == uuid.Nil || input.Run.AccountID == uuid.Nil || !input.Run.Environment.IsValid() || input.Run.OriginType != "strategy_version" || input.Run.OriginID == "" || input.Run.TradeDate.IsZero() {
+		return nil, NoActionReasonUnknown, fmt.Errorf("complete source run scope is required")
+	}
+	if input.Strategy.ExecutionStrategyVersionID == nil || input.Run.OriginID != input.Strategy.ExecutionStrategyVersionID.String() || input.Run.StrategyID != input.Strategy.ID {
+		return nil, NoActionReasonUnknown, fmt.Errorf("source run scope does not match strategy binding")
+	}
 
 	side := orderSideFromSignal(input.Signal)
 	if input.Decision != nil && input.Decision.Side.IsValid() {
@@ -77,6 +83,10 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 
 	createdAt := now().UTC()
 	opportunity := &domain.Opportunity{
+		AccountID:         input.Run.AccountID,
+		Environment:       input.Run.Environment,
+		OriginType:        input.Run.OriginType,
+		OriginID:          input.Run.OriginID,
 		StrategyID:        input.Strategy.ID,
 		MarketType:        marketType,
 		Ticker:            ticker,
@@ -98,13 +108,9 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		UpdatedAt:         createdAt,
 	}
 
-	if input.Run != nil {
-		runID := input.Run.ID
-		opportunity.PipelineRunID = &runID
-	} else if input.Decision != nil && input.Decision.PipelineRunID != nil {
-		runID := *input.Decision.PipelineRunID
-		opportunity.PipelineRunID = &runID
-	}
+	runID, tradeDate := input.Run.ID, input.Run.TradeDate
+	opportunity.PipelineRunID = &runID
+	opportunity.PipelineRunTradeDate = &tradeDate
 
 	switch opportunity.MarketType {
 	case domain.MarketTypeStock, domain.MarketTypeCrypto, domain.MarketTypeOptions:

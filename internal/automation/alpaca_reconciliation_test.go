@@ -264,7 +264,7 @@ func (r *recordingOrderRepo) GetByRun(_ context.Context, _ uuid.UUID, _ reposito
 	return nil, nil
 }
 
-func (r *recordingOrderRepo) GetByCopyOriginRun(_ context.Context, _ uuid.UUID, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
+func (r *recordingOrderRepo) GetByCopyOriginRun(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ uuid.UUID, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
 	return nil, nil
 }
 

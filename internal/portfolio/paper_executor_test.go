@@ -40,6 +40,7 @@ func TestPaperExecutorRejectsInvalidPreconditions(t *testing.T) {
 	runID, tradeDate, accountID, versionID := uuid.New(), time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), uuid.New(), uuid.New()
 	baseOpportunity := domain.Opportunity{
 		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(),
 		PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate,
 		StrategyID:       uuid.New(),
 		MarketType:       domain.MarketTypeStock,
@@ -82,6 +83,7 @@ func TestPaperExecutorRejectsInvalidPreconditions(t *testing.T) {
 		{name: "missing notional", opportunity: baseOpportunity, decision: func() domain.AllocationDecision { d := baseDecision; d.NotionalUSD = 0; return d }(), strategy: baseStrategy, wantReason: "missing_notional_usd"},
 		{name: "missing entry price", opportunity: func() domain.Opportunity { o := baseOpportunity; o.EntryPrice = 0; return o }(), decision: baseDecision, strategy: baseStrategy, wantReason: "missing_entry_price"},
 		{name: "missing stop loss", opportunity: func() domain.Opportunity { o := baseOpportunity; o.MaxLossPct = 0; return o }(), decision: baseDecision, strategy: baseStrategy, wantReason: "missing_stop_loss"},
+		{name: "source version mismatch", opportunity: func() domain.Opportunity { o := baseOpportunity; o.OriginID = uuid.NewString(); return o }(), decision: baseDecision, strategy: baseStrategy, wantReason: "execution_scope_mismatch"},
 	}
 
 	for _, tt := range tests {
@@ -118,6 +120,7 @@ func TestPaperExecutorExecutesValidPaperDecision(t *testing.T) {
 	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor})
 	opportunity := domain.Opportunity{
 		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(),
 		PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate,
 		StrategyID:       strategyID,
 		MarketType:       domain.MarketTypeStock,
@@ -192,6 +195,7 @@ func TestPaperExecutorConvertsProcessorErrorToExecutionRejected(t *testing.T) {
 	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor})
 	result, err := exec.ExecutePaperDecision(context.Background(), domain.Opportunity{
 		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(),
 		PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate,
 		StrategyID: strategyID,
 		MarketType: domain.MarketTypeStock,

@@ -15,5 +15,10 @@ type Store interface {
 // PlannedStore atomically registers one run and its executable intent rows.
 type PlannedStore interface {
 	Store
-	RegisterPlannedRun(context.Context, *Run, []domain.CopyTradeIntent) (*Run, []domain.CopyTradeIntent, error)
+	RegisterPlannedRun(context.Context, *Run, []domain.CopyTradeIntent) (*Run, []PlannedIntent, error)
+}
+
+type PlannedIntent struct {
+	Intent  domain.CopyTradeIntent
+	Created bool
 }

@@ -45,6 +45,11 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 	if request.Intent.ExecutablePrice == nil || *request.Intent.ExecutablePrice <= 0 || request.Intent.RequestedNotional <= 0 {
 		return PaperOrderResult{}, fmt.Errorf("copy intent has no executable price or notional")
 	}
+	if request.Subscription.AccountID != e.deps.ExecutionAccount.AccountID() || request.Subscription.Environment != e.deps.ExecutionAccount.Environment() ||
+		request.Intent.AccountID != request.Subscription.AccountID || request.Intent.Environment != request.Subscription.Environment ||
+		request.Intent.SubscriptionID != request.Subscription.ID || request.Intent.OriginType != "copy_subscription" || request.Intent.OriginID != request.Subscription.ID {
+		return PaperOrderResult{}, fmt.Errorf("copy execution attribution does not match configured account and origin")
+	}
 	balance, err := e.deps.Broker.GetAccountBalance(ctx)
 	if err != nil {
 		return PaperOrderResult{}, err
@@ -72,7 +77,7 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 	if err := manager.ProcessSignal(ctx, scope, execution.FinalSignal{Signal: signal, Confidence: 1}, execution.TradingPlan{Action: signal, MarketType: domain.MarketTypeStock, Ticker: request.Intent.Ticker, EntryType: "limit", EntryPrice: price, ReferencePrice: price, PositionSize: request.Intent.RequestedNotional / price, Confidence: 1, Rationale: "deterministic copy-subscription rebalance"}); err != nil {
 		return PaperOrderResult{}, err
 	}
-	orders, err := e.deps.Orders.GetByCopyOriginRun(ctx, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 10, 0)
+	orders, err := e.deps.Orders.GetByCopyOriginRun(ctx, e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 10, 0)
 	if err != nil {
 		return PaperOrderResult{}, err
 	}

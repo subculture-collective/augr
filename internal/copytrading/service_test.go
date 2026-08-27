@@ -248,13 +248,17 @@ func (s *plannedOriginStore) GetRun(context.Context, uuid.UUID) (*copyorigin.Run
 	return nil, repository.ErrNotFound
 }
 
-func (s *plannedOriginStore) RegisterPlannedRun(_ context.Context, run *copyorigin.Run, intents []domain.CopyTradeIntent) (*copyorigin.Run, []domain.CopyTradeIntent, error) {
+func (s *plannedOriginStore) RegisterPlannedRun(_ context.Context, run *copyorigin.Run, intents []domain.CopyTradeIntent) (*copyorigin.Run, []copyorigin.PlannedIntent, error) {
 	s.calls++
 	s.intents = append([]domain.CopyTradeIntent(nil), intents...)
 	if s.err != nil {
 		return nil, nil, s.err
 	}
-	return run, append([]domain.CopyTradeIntent(nil), intents...), nil
+	planned := make([]copyorigin.PlannedIntent, len(intents))
+	for i := range intents {
+		planned[i] = copyorigin.PlannedIntent{Intent: intents[i], Created: true}
+	}
+	return run, planned, nil
 }
 
 type completedLoserRunRepo struct {
@@ -426,7 +430,7 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 		if store.calls != 1 || len(store.intents) != 1 || result.OriginRunID == uuid.Nil || len(result.Intents) != 1 {
 			t.Fatalf("atomic calls=%d planned=%d result=%+v", store.calls, len(store.intents), result)
 		}
-		if repo.intentWrites != 1 || executor.calls != 1 {
+		if repo.intentWrites != 0 || executor.calls != 1 {
 			t.Fatalf("downstream effects: intent writes=%d orders=%d", repo.intentWrites, executor.calls)
 		}
 		if executor.request.OriginRunID != result.OriginRunID {

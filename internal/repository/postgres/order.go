@@ -207,9 +207,16 @@ func (r *OrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter reposi
 	return r.list(ctx, query, args, "get orders by run")
 }
 
-func (r *OrderRepo) GetByCopyOriginRun(ctx context.Context, copyOriginRunID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
-	query, args := buildOrderScopedListQuery("copy_origin", copyOriginRunID, filter, limit, offset)
+func (r *OrderRepo) GetByCopyOriginRun(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, subscriptionID, copyOriginRunID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+	query, args := buildOrderQuery("copy_origin", copyOrderScope{accountID, environment, subscriptionID, copyOriginRunID}, filter, limit, offset)
 	return r.list(ctx, query, args, "get orders by copy origin run")
+}
+
+type copyOrderScope struct {
+	accountID      uuid.UUID
+	environment    domain.AccountEnvironment
+	subscriptionID uuid.UUID
+	runID          uuid.UUID
 }
 
 const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
@@ -429,12 +436,18 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 	}
 
 	if scopeColumn == "copy_origin" {
-		parameter := nextArg(scopeValue)
+		scope := scopeValue.(copyOrderScope)
+		accountParameter := nextArg(scope.accountID)
+		environmentParameter := nextArg(scope.environment)
+		originParameter := nextArg(scope.subscriptionID.String())
+		runParameter := nextArg(scope.runID)
 		conditions = append(conditions,
-			"copy_origin_rebalance_run_id = "+parameter,
+			"account_id = "+accountParameter,
+			"environment = "+environmentParameter,
 			"origin_type = 'copy_subscription'",
-			"account_id = (SELECT account_id FROM copy_origin_rebalance_runs WHERE id = "+parameter+")",
-			"origin_id = (SELECT subscription_id::text FROM copy_origin_rebalance_runs WHERE id = "+parameter+")",
+			"origin_id = "+originParameter,
+			"copy_origin_rebalance_run_id = "+runParameter,
+			"EXISTS (SELECT 1 FROM copy_origin_rebalance_runs r WHERE r.id = "+runParameter+" AND r.account_id = "+accountParameter+" AND r.environment = "+environmentParameter+" AND r.subscription_id = "+nextArg(scope.subscriptionID)+" AND r.origin_type = 'copy_subscription' AND r.origin_id = "+originParameter+")",
 		)
 	} else if scopeColumn != "" {
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))

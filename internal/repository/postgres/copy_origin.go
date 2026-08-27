@@ -19,7 +19,7 @@ import (
 type CopyOriginRepo struct {
 	pool                *pgxpool.Pool
 	afterStage          func(string) error
-	createPlannedIntent func(context.Context, pgx.Tx, domain.CopyTradeIntent) (domain.CopyTradeIntent, error)
+	createPlannedIntent func(context.Context, pgx.Tx, domain.CopyTradeIntent) (copyorigin.PlannedIntent, error)
 }
 
 var (
@@ -98,7 +98,7 @@ func (r *CopyOriginRepo) RegisterRun(ctx context.Context, run *copyorigin.Run) (
 
 // RegisterPlannedRun atomically registers run attribution and the exact copy
 // intents that may subsequently produce orders.
-func (r *CopyOriginRepo) RegisterPlannedRun(ctx context.Context, run *copyorigin.Run, intents []domain.CopyTradeIntent) (*copyorigin.Run, []domain.CopyTradeIntent, error) {
+func (r *CopyOriginRepo) RegisterPlannedRun(ctx context.Context, run *copyorigin.Run, intents []domain.CopyTradeIntent) (*copyorigin.Run, []copyorigin.PlannedIntent, error) {
 	if r == nil || r.pool == nil || run == nil {
 		return nil, nil, fmt.Errorf("postgres: copy origin run is required")
 	}
@@ -114,9 +114,21 @@ func (r *CopyOriginRepo) RegisterPlannedRun(ctx context.Context, run *copyorigin
 		return nil, nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var accountID uuid.UUID
+	var environment domain.AccountEnvironment
+	var subscriptionOriginType string
+	var subscriptionOriginID uuid.UUID
+	if err = tx.QueryRow(ctx, `SELECT account_id,environment,origin_type,origin_id FROM copy_subscriptions WHERE id=$1 FOR SHARE`, envelope.SubscriptionID).Scan(&accountID, &environment, &subscriptionOriginType, &subscriptionOriginID); err != nil {
+		return nil, nil, fmt.Errorf("postgres: lock copy subscription scope: %w", err)
+	}
+	if accountID == uuid.Nil || !environment.IsValid() || subscriptionOriginType != envelope.OriginType || subscriptionOriginID.String() != envelope.OriginID {
+		return nil, nil, fmt.Errorf("postgres: copy subscription scope is invalid")
+	}
 
-	canonical := make([]domain.CopyTradeIntent, len(intents))
+	canonical := make([]copyorigin.PlannedIntent, len(intents))
 	for i := range intents {
+		intents[i].AccountID = accountID
+		intents[i].Environment = environment
 		createIntent := createCopyIntentTx
 		if r.createPlannedIntent != nil {
 			createIntent = r.createPlannedIntent
@@ -132,7 +144,7 @@ func (r *CopyOriginRepo) RegisterPlannedRun(ctx context.Context, run *copyorigin
 		}
 	}
 
-	tag, err := tx.Exec(ctx, `INSERT INTO copy_origin_rebalance_runs(id,schema_name,state,subscription_id,origin_type,origin_id,source_observation_id,calculation_version,intent_count,sha256,canonical_bytes,canonical_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,convert_from($11,'UTF8')::jsonb) ON CONFLICT(id) DO NOTHING`, run.ID(), envelope.Schema, envelope.State, envelope.SubscriptionID, envelope.OriginType, envelope.OriginID, envelope.SourceObservationID, envelope.CalculationVersion, len(envelope.Intents), run.Digest(), run.CanonicalBytes())
+	tag, err := tx.Exec(ctx, `INSERT INTO copy_origin_rebalance_runs(id,account_id,environment,schema_name,state,subscription_id,origin_type,origin_id,source_observation_id,calculation_version,intent_count,sha256,canonical_bytes,canonical_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,convert_from($13,'UTF8')::jsonb) ON CONFLICT(id) DO NOTHING`, run.ID(), accountID, environment, envelope.Schema, envelope.State, envelope.SubscriptionID, envelope.OriginType, envelope.OriginID, envelope.SourceObservationID, envelope.CalculationVersion, len(envelope.Intents), run.Digest(), run.CanonicalBytes())
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres: insert copy origin run: %w", err)
 	}
@@ -156,7 +168,7 @@ func (r *CopyOriginRepo) RegisterPlannedRun(ctx context.Context, run *copyorigin
 		if err = json.Unmarshal(raw, &intent); err != nil {
 			return nil, nil, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO copy_origin_rebalance_intents(run_id,sequence,intent_id,instrument_key,source_observation_id,canonical_intent) VALUES($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT(run_id,sequence) DO NOTHING`, run.ID(), sequence, intent.ID, intent.InstrumentKey, intent.SourceObservationID, string(raw))
+		_, err = tx.Exec(ctx, `INSERT INTO copy_origin_rebalance_intents(run_id,sequence,intent_id,account_id,environment,origin_type,origin_id,instrument_key,source_observation_id,canonical_intent) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) ON CONFLICT(run_id,sequence) DO NOTHING`, run.ID(), sequence, intent.ID, accountID, environment, envelope.OriginType, envelope.OriginID, intent.InstrumentKey, intent.SourceObservationID, string(raw))
 		if err != nil {
 			return nil, nil, fmt.Errorf("postgres: insert copy origin run intent: %w", err)
 		}
@@ -205,7 +217,7 @@ func validatePlannedIntents(envelope copyOriginEnvelope, intents []domain.CopyTr
 	return nil
 }
 
-func createCopyIntentTx(ctx context.Context, tx pgx.Tx, value domain.CopyTradeIntent) (domain.CopyTradeIntent, error) {
+func createCopyIntentTx(ctx context.Context, tx pgx.Tx, value domain.CopyTradeIntent) (copyorigin.PlannedIntent, error) {
 	intent := &value
 	if intent.Calculation == nil {
 		intent.Calculation = json.RawMessage(`{}`)
@@ -216,21 +228,21 @@ func createCopyIntentTx(ctx context.Context, tx pgx.Tx, value domain.CopyTradeIn
 	if intent.RiskReasons == nil {
 		intent.RiskReasons = []string{}
 	}
-	err := tx.QueryRow(ctx, `INSERT INTO copy_trade_intents (id,subscription_id,origin_type,origin_id,source_observation_id,pipeline_run_id,instrument_key,ticker,side,target_weight,target_value,attributed_current_value,requested_notional,executable_price,quote_gate_version,decision_quote_snapshot_id,decision_bid,decision_ask,decision_spread_bps,decision_available_at,decision_at,decision_market_status,decision_session_status,calculation_version,calculation,policy_status,policy_reasons,risk_status,risk_reasons,order_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31) ON CONFLICT (subscription_id,source_observation_id,instrument_key,calculation_version) DO NOTHING RETURNING created_at,updated_at`, intent.ID, intent.SubscriptionID, intent.OriginType, intent.OriginID, intent.SourceObservationID, intent.PipelineRunID, intent.InstrumentKey, intent.Ticker, intent.Side, intent.TargetWeight, intent.TargetValue, intent.AttributedCurrentValue, intent.RequestedNotional, intent.ExecutablePrice, intent.QuoteGateVersion, intent.DecisionQuoteSnapshotID, nullIfEmpty(intent.DecisionBid), nullIfEmpty(intent.DecisionAsk), nullIfEmpty(intent.DecisionSpreadBPS), intent.DecisionAvailableAt, intent.DecisionAt, nullIfEmpty(intent.DecisionMarketStatus), nullIfEmpty(intent.DecisionSessionStatus), intent.CalculationVersion, intent.Calculation, intent.PolicyStatus, intent.PolicyReasons, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status).Scan(&intent.CreatedAt, &intent.UpdatedAt)
+	err := tx.QueryRow(ctx, `INSERT INTO copy_trade_intents (id,account_id,environment,subscription_id,origin_type,origin_id,source_observation_id,pipeline_run_id,pipeline_run_trade_date,instrument_key,ticker,side,target_weight,target_value,attributed_current_value,requested_notional,executable_price,quote_gate_version,decision_quote_snapshot_id,decision_bid,decision_ask,decision_spread_bps,decision_available_at,decision_at,decision_market_status,decision_session_status,calculation_version,calculation,policy_status,policy_reasons,risk_status,risk_reasons,order_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34) ON CONFLICT (subscription_id,source_observation_id,instrument_key,calculation_version) DO NOTHING RETURNING created_at,updated_at`, intent.ID, nullableUUID(intent.AccountID), nullString(string(intent.Environment)), intent.SubscriptionID, intent.OriginType, intent.OriginID, intent.SourceObservationID, intent.PipelineRunID, intent.PipelineRunTradeDate, intent.InstrumentKey, intent.Ticker, intent.Side, intent.TargetWeight, intent.TargetValue, intent.AttributedCurrentValue, intent.RequestedNotional, intent.ExecutablePrice, intent.QuoteGateVersion, intent.DecisionQuoteSnapshotID, nullIfEmpty(intent.DecisionBid), nullIfEmpty(intent.DecisionAsk), nullIfEmpty(intent.DecisionSpreadBPS), intent.DecisionAvailableAt, intent.DecisionAt, nullIfEmpty(intent.DecisionMarketStatus), nullIfEmpty(intent.DecisionSessionStatus), intent.CalculationVersion, intent.Calculation, intent.PolicyStatus, intent.PolicyReasons, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status).Scan(&intent.CreatedAt, &intent.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, loadErr := scanCopyIntent(tx.QueryRow(ctx, copyIntentSelect+` WHERE subscription_id=$1 AND source_observation_id=$2 AND instrument_key=$3 AND calculation_version=$4`, intent.SubscriptionID, intent.SourceObservationID, intent.InstrumentKey, intent.CalculationVersion))
 		if loadErr != nil {
-			return domain.CopyTradeIntent{}, loadErr
+			return copyorigin.PlannedIntent{}, loadErr
 		}
 		if !sameCopyIntentCreation(existing, intent) {
-			return domain.CopyTradeIntent{}, fmt.Errorf("postgres: copy intent retry changed immutable evidence: %w", repository.ErrIdempotencyConflict)
+			return copyorigin.PlannedIntent{}, fmt.Errorf("postgres: copy intent retry changed immutable evidence: %w", repository.ErrIdempotencyConflict)
 		}
-		return *existing, nil
+		return copyorigin.PlannedIntent{Intent: *existing}, nil
 	}
 	if err != nil {
-		return domain.CopyTradeIntent{}, err
+		return copyorigin.PlannedIntent{}, err
 	}
-	return *intent, nil
+	return copyorigin.PlannedIntent{Intent: *intent, Created: true}, nil
 }
 
 func (r *CopyOriginRepo) GetRun(ctx context.Context, id uuid.UUID) (*copyorigin.Run, error) {

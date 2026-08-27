@@ -118,15 +118,20 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	}
 
 	query := `INSERT INTO portfolio_opportunities (
-		strategy_id, pipeline_run_id, market_type, ticker, side, prediction_side, signal, status, score, confidence,
+		account_id, environment, origin_type, origin_id, strategy_id, pipeline_run_id, pipeline_run_trade_date, market_type, ticker, side, prediction_side, signal, status, score, confidence,
 		edge_pct, expected_return_pct, max_loss_pct, entry_price, liquidity_usd, market_cap_usd, spread_pct, proposed_notional,
 		selected_notional, reason, reject_reason, evidence, expires_at, dedupe_key
 	)
-	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`
+	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`
 	if upsert {
 		query += ` ON CONFLICT (dedupe_key) DO UPDATE SET
+			account_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.account_id ELSE portfolio_opportunities.account_id END,
+			environment = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.environment ELSE portfolio_opportunities.environment END,
+			origin_type = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.origin_type ELSE portfolio_opportunities.origin_type END,
+			origin_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.origin_id ELSE portfolio_opportunities.origin_id END,
 			strategy_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.strategy_id ELSE portfolio_opportunities.strategy_id END,
 			pipeline_run_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.pipeline_run_id ELSE portfolio_opportunities.pipeline_run_id END,
+			pipeline_run_trade_date = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.pipeline_run_trade_date ELSE portfolio_opportunities.pipeline_run_trade_date END,
 			market_type = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.market_type ELSE portfolio_opportunities.market_type END,
 			ticker = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.ticker ELSE portfolio_opportunities.ticker END,
 			side = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.side ELSE portfolio_opportunities.side END,
@@ -153,8 +158,13 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	query += ` RETURNING id, created_at, updated_at`
 
 	row := r.pool.QueryRow(ctx, query,
+		nullableUUID(opportunity.AccountID),
+		nullString(string(opportunity.Environment)),
+		nullString(opportunity.OriginType),
+		nullString(opportunity.OriginID),
 		opportunity.StrategyID,
 		opportunity.PipelineRunID,
+		opportunity.PipelineRunTradeDate,
 		opportunity.MarketType,
 		opportunity.Ticker,
 		opportunity.Side,
@@ -185,7 +195,7 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	return nil
 }
 
-const opportunitySelectSQL = `SELECT id, strategy_id, pipeline_run_id, market_type, ticker, side, prediction_side, signal,
+const opportunitySelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, strategy_id, pipeline_run_id, pipeline_run_trade_date, market_type, ticker, side, prediction_side, signal,
 	status, score::double precision, confidence::double precision, edge_pct::double precision,
 	expected_return_pct::double precision, max_loss_pct::double precision, entry_price::double precision, liquidity_usd::double precision,
 	market_cap_usd::double precision, spread_pct::double precision, proposed_notional::double precision, selected_notional::double precision,
@@ -215,16 +225,26 @@ func (r *OpportunityRepo) list(ctx context.Context, query string, args []any, op
 
 func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 	var (
-		opportunity   domain.Opportunity
-		strategyID    uuid.UUID
-		pipelineRunID *uuid.UUID
-		score         *float64
-		evidence      []byte
+		opportunity          domain.Opportunity
+		accountID            *uuid.UUID
+		environment          *domain.AccountEnvironment
+		originType           *string
+		originID             *string
+		strategyID           uuid.UUID
+		pipelineRunID        *uuid.UUID
+		pipelineRunTradeDate *time.Time
+		score                *float64
+		evidence             []byte
 	)
 	if err := sc.Scan(
 		&opportunity.ID,
+		&accountID,
+		&environment,
+		&originType,
+		&originID,
 		&strategyID,
 		&pipelineRunID,
+		&pipelineRunTradeDate,
 		&opportunity.MarketType,
 		&opportunity.Ticker,
 		&opportunity.Side,
@@ -253,7 +273,20 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 		return nil, err
 	}
 	opportunity.StrategyID = strategyID
+	if accountID != nil {
+		opportunity.AccountID = *accountID
+	}
+	if environment != nil {
+		opportunity.Environment = *environment
+	}
+	if originType != nil {
+		opportunity.OriginType = *originType
+	}
+	if originID != nil {
+		opportunity.OriginID = *originID
+	}
 	opportunity.PipelineRunID = pipelineRunID
+	opportunity.PipelineRunTradeDate = pipelineRunTradeDate
 	opportunity.Score = score
 	opportunity.Evidence = json.RawMessage(evidence)
 	return &opportunity, nil

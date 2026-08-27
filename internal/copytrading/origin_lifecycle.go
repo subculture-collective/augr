@@ -60,7 +60,10 @@ func BuildOriginProposal(input OriginProposalInput) (*lifecycle.Aggregate, error
 	if subscription.ID == uuid.Nil ||
 		subscription.OriginType != "copy_subscription" || subscription.OriginID != subscription.ID ||
 		intent.ID == uuid.Nil || intent.SubscriptionID != subscription.ID ||
-		intent.OriginType != subscription.OriginType || intent.OriginID != subscription.OriginID {
+		intent.OriginType != subscription.OriginType || intent.OriginID != subscription.OriginID ||
+		subscription.AccountID == uuid.Nil || subscription.AccountID != input.Account.ID ||
+		intent.AccountID != subscription.AccountID || subscription.Environment != input.Account.Environment ||
+		intent.Environment != subscription.Environment {
 		return nil, fmt.Errorf("copy origin proposal attribution is invalid")
 	}
 	if !subscription.IsPaper || subscription.Status != domain.CopySubscriptionPaperActive || intent.PolicyStatus != "approved" {

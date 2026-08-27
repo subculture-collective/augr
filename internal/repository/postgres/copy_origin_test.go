@@ -181,7 +181,7 @@ func TestCopyOriginRetainedQualification(t *testing.T) {
 	t.Logf("subscription=%s origin=copy_subscription/%s run=%s sha=%s intents=%d strategies=%d", subscription.ID, subscription.ID, run.ID(), run.Digest(), children, strategiesAfter)
 }
 
-func createSchema88CopyIntent(ctx context.Context, tx pgx.Tx, value domain.CopyTradeIntent) (domain.CopyTradeIntent, error) {
+func createSchema88CopyIntent(ctx context.Context, tx pgx.Tx, value domain.CopyTradeIntent) (copyorigin.PlannedIntent, error) {
 	if value.Calculation == nil {
 		value.Calculation = json.RawMessage(`{}`)
 	}
@@ -195,5 +195,5 @@ func createSchema88CopyIntent(ctx context.Context, tx pgx.Tx, value domain.CopyT
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(ctx, `SELECT created_at,updated_at FROM copy_trade_intents WHERE subscription_id=$1 AND source_observation_id=$2 AND instrument_key=$3 AND calculation_version=$4`, value.SubscriptionID, value.SourceObservationID, value.InstrumentKey, value.CalculationVersion).Scan(&value.CreatedAt, &value.UpdatedAt)
 	}
-	return value, err
+	return copyorigin.PlannedIntent{Intent: value, Created: err == nil}, err
 }

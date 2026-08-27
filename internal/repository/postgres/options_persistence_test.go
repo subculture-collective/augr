@@ -58,7 +58,7 @@ func TestScanPositionAndTradeRestoreOptionLifecycle(t *testing.T) {
 	now := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
 	optionType, strike, group, delta := domain.OptionTypeCall, 150.0, uuid.New(), 0.4
-	position, err := scanPosition(optionPersistenceScanner{uuid.New(), (*uuid.UUID)(nil), stringPtr("options"), "AAPL271217C00150000", domain.PositionSideLong, 1.0, 2.5, (*float64)(nil), (*float64)(nil), 0.0, (*float64)(nil), (*float64)(nil), now, (*time.Time)(nil), domain.AssetClassOption, stringPtr("AAPL"), &optionType, &strike, &expiry, 100.0, &group, &delta, (*float64)(nil), (*float64)(nil), (*float64)(nil)})
+	position, err := scanPosition(optionPersistenceScanner{uuid.New(), (*uuid.UUID)(nil), (*uuid.UUID)(nil), (*domain.AccountEnvironment)(nil), (*string)(nil), (*string)(nil), stringPtr("options"), "AAPL271217C00150000", domain.PositionSideLong, 1.0, 2.5, (*float64)(nil), (*float64)(nil), 0.0, (*float64)(nil), (*float64)(nil), now, (*time.Time)(nil), domain.AssetClassOption, stringPtr("AAPL"), &optionType, &strike, &expiry, 100.0, &group, &delta, (*float64)(nil), (*float64)(nil), (*float64)(nil)})
 	if err != nil || position.UnderlyingTicker != "AAPL" || position.Delta == nil || *position.Delta != delta {
 		t.Fatalf("option position metadata lost: position=%+v err=%v", position, err)
 	}

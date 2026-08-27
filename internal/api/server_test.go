@@ -2876,7 +2876,7 @@ func (stubOrderRepo) GetByStrategy(context.Context, uuid.UUID, repository.OrderF
 func (stubOrderRepo) GetByRun(context.Context, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
 	return nil, nil
 }
-func (stubOrderRepo) GetByCopyOriginRun(context.Context, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
+func (stubOrderRepo) GetByCopyOriginRun(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
 	return nil, nil
 }
 func (stubOrderRepo) Count(context.Context, repository.OrderFilter) (int, error) { return 0, nil }

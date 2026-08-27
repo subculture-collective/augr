@@ -85,16 +85,18 @@ func TestBuildOrderScopedListQuery_StrategyScopeAndPartialFilters(t *testing.T) 
 }
 
 func TestBuildOrderScopedListQuery_CopyOriginRequiresMatchingAccountAndSubscription(t *testing.T) {
-	runID := uuid.New()
-	query, args := buildOrderScopedListQuery("copy_origin", runID, repository.OrderFilter{Ticker: "AAPL"}, 10, 0)
-	if len(args) != 4 || args[0] != runID {
+	runID, accountID, subscriptionID := uuid.New(), uuid.New(), uuid.New()
+	query, args := buildOrderQuery("copy_origin", copyOrderScope{accountID, domain.AccountEnvironmentPaperScored, subscriptionID, runID}, repository.OrderFilter{Ticker: "AAPL"}, 10, 0)
+	if len(args) != 8 || args[0] != accountID || args[3] != runID {
 		t.Fatalf("args=%v", args)
 	}
 	for _, clause := range []string{
-		"copy_origin_rebalance_run_id = $1",
+		"account_id = $1",
+		"environment = $2",
 		"origin_type = 'copy_subscription'",
-		"account_id = (SELECT account_id FROM copy_origin_rebalance_runs WHERE id = $1)",
-		"origin_id = (SELECT subscription_id::text FROM copy_origin_rebalance_runs WHERE id = $1)",
+		"origin_id = $3",
+		"copy_origin_rebalance_run_id = $4",
+		"EXISTS (SELECT 1 FROM copy_origin_rebalance_runs r WHERE r.id = $4 AND r.account_id = $1 AND r.environment = $2 AND r.subscription_id = $5 AND r.origin_type = 'copy_subscription' AND r.origin_id = $3)",
 	} {
 		assertContains(t, query, clause)
 	}

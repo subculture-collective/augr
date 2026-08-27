@@ -22,9 +22,10 @@ type ExecutionScope struct {
 	pipelineRun      domain.PipelineRunRef
 	hasPipelineRun   bool
 	copyOriginRunID  uuid.UUID
+	legacyStrategyID *uuid.UUID
 }
 
-func NewStrategyExecutionScope(accountID uuid.UUID, environment domain.AccountEnvironment, strategyVersionID uuid.UUID, run domain.PipelineRunRef) (ExecutionScope, error) {
+func NewStrategyExecutionScope(accountID uuid.UUID, environment domain.AccountEnvironment, strategyVersionID uuid.UUID, run domain.PipelineRunRef, legacyStrategyID ...uuid.UUID) (ExecutionScope, error) {
 	binding, err := domain.NewExecutionAccountBinding(accountID, environment)
 	if err != nil {
 		return ExecutionScope{}, err
@@ -38,13 +39,21 @@ func NewStrategyExecutionScope(accountID uuid.UUID, environment domain.AccountEn
 	if run.TradeDate.Location() != time.UTC || run.TradeDate != run.TradeDate.Truncate(24*time.Hour) {
 		return ExecutionScope{}, fmt.Errorf("pipeline run trade date must be UTC midnight")
 	}
-	return ExecutionScope{
+	scope := ExecutionScope{
 		executionAccount: binding,
 		originType:       ledger.ExecutionOriginStrategyVersion,
 		originID:         strategyVersionID.String(),
 		pipelineRun:      run,
 		hasPipelineRun:   true,
-	}, nil
+	}
+	if len(legacyStrategyID) > 1 || len(legacyStrategyID) == 1 && legacyStrategyID[0] == uuid.Nil {
+		return ExecutionScope{}, fmt.Errorf("legacy strategy ID must be a non-nil optional UUID")
+	}
+	if len(legacyStrategyID) == 1 {
+		id := legacyStrategyID[0]
+		scope.legacyStrategyID = &id
+	}
+	return scope, nil
 }
 
 func NewCopyExecutionScope(accountID uuid.UUID, environment domain.AccountEnvironment, subscriptionID, copyOriginRunID uuid.UUID) (ExecutionScope, error) {
@@ -123,3 +132,11 @@ func (s ExecutionScope) PipelineRun() (domain.PipelineRunRef, bool) {
 }
 
 func (s ExecutionScope) CopyOriginRunID() uuid.UUID { return s.copyOriginRunID }
+
+func (s ExecutionScope) LegacyStrategyID() *uuid.UUID {
+	if s.legacyStrategyID == nil {
+		return nil
+	}
+	id := *s.legacyStrategyID
+	return &id
+}

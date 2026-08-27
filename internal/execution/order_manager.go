@@ -229,7 +229,7 @@ func (m *OrderManager) ProcessSignal(
 	signal FinalSignal,
 	plan TradingPlan,
 ) error {
-	strategyID, runID, hasRun, err := legacyScopeIDs(scope)
+	strategyID, runID, hasRun, err := scopeOriginIDs(scope)
 	if err != nil {
 		return fmt.Errorf("order_manager: execution scope: %w", err)
 	}
@@ -255,6 +255,14 @@ func (m *OrderManager) ProcessSignal(
 	}
 	plan.Ticker = normalizedTicker
 	plan.Side = normalizedSide
+	if m.liveTrading {
+		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
+		if !allowed {
+			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_version_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
+			m.recordTradeDecision(ctx, m.newTradeDecision(scope, plan, marketType, strings.ToUpper(strings.TrimSpace(plan.Side)), 0, 0, domain.RiskDecisionRejected, []string{denial.Code + ": " + denial.Message}, domain.TradeDecisionStatusRejected))
+			return fmt.Errorf("order_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
+		}
+	}
 
 	// A stock SELL signal only makes sense as an exit for a position this
 	// strategy already owns. Do not turn discovery sell signals for unowned stock
@@ -262,7 +270,7 @@ func (m *OrderManager) ProcessSignal(
 	// actionable trades. Non-stock markets have different SELL semantics and are
 	// intentionally left to their market-specific execution/risk paths.
 	if signal.Signal == domain.PipelineSignalSell && marketType == domain.MarketTypeStock {
-		ownedQuantity, err := m.openLongPositionQuantity(ctx, strategyID, plan.Ticker)
+		ownedQuantity, err := m.openLongPositionQuantity(ctx, scope, plan.Ticker)
 		if err != nil {
 			return err
 		}
@@ -306,7 +314,7 @@ func (m *OrderManager) ProcessSignal(
 	}
 
 	if signal.Signal == domain.PipelineSignalSell && isPredictionMarket(marketType) {
-		ownedQuantity, err := m.openPredictionPositionQuantity(ctx, strategyID, marketType, plan.Ticker, plan.Side)
+		ownedQuantity, err := m.openPredictionPositionQuantity(ctx, scope, marketType, plan.Ticker, plan.Side)
 		if err != nil {
 			return err
 		}
@@ -385,28 +393,6 @@ func (m *OrderManager) ProcessSignal(
 			"signal":      signal.Signal,
 		}); auditErr != nil {
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-		}
-	}
-
-	// 1b. Live execution gate (paper/default paths skip this entirely).
-	if m.liveTrading {
-		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
-		if !allowed {
-			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
-
-			m.recordTradeDecision(ctx, m.newTradeDecision(
-				scope,
-				plan,
-				marketType,
-				strings.ToUpper(strings.TrimSpace(plan.Side)),
-				0,
-				0,
-				domain.RiskDecisionRejected,
-				[]string{denial.Code + ": " + denial.Message},
-				domain.TradeDecisionStatusRejected,
-			))
-
-			return fmt.Errorf("order_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
 		}
 	}
 
@@ -533,7 +519,7 @@ func (m *OrderManager) ProcessSignal(
 		PredictionSide:           plan.Side,
 	}
 	if originType == ledger.ExecutionOriginStrategyVersion {
-		order.StrategyID = &strategyID
+		order.StrategyID = scope.LegacyStrategyID()
 	}
 	if hasRun {
 		run, _ := scope.PipelineRun()
@@ -722,7 +708,7 @@ func planMarketType(plan TradingPlan) domain.MarketType {
 	return marketType
 }
 
-func legacyScopeIDs(scope ExecutionScope) (uuid.UUID, uuid.UUID, bool, error) {
+func scopeOriginIDs(scope ExecutionScope) (uuid.UUID, uuid.UUID, bool, error) {
 	if scope.AccountID() == uuid.Nil || !scope.Environment().IsValid() {
 		return uuid.Nil, uuid.Nil, false, fmt.Errorf("account binding is required")
 	}
@@ -774,8 +760,7 @@ func (m *OrderManager) newTradeDecision(
 	originType, originID := scope.Origin()
 	decision.OriginType, decision.OriginID = string(originType), originID
 	if originType == ledger.ExecutionOriginStrategyVersion {
-		strategyID := uuid.MustParse(originID)
-		decision.StrategyID = &strategyID
+		decision.StrategyID = scope.LegacyStrategyID()
 	}
 	if run, ok := scope.PipelineRun(); ok {
 		decision.PipelineRunID = &run.ID
@@ -847,16 +832,16 @@ func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, decisionID
 	}
 }
 
-func (m *OrderManager) openLongPositionQuantity(ctx context.Context, strategyID uuid.UUID, ticker string) (float64, error) {
+func (m *OrderManager) openLongPositionQuantity(ctx context.Context, scope ExecutionScope, ticker string) (float64, error) {
 	ticker = strings.TrimSpace(ticker)
 	if ticker == "" {
 		return 0, fmt.Errorf("order_manager: open long ownership check requires ticker")
 	}
 
-	positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{
+	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
 		Ticker: ticker,
 		Side:   domain.PositionSideLong,
-	}, riskSnapshotPositionLimit, 0)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("order_manager: get open long position for %s: %w", ticker, err)
 	}
@@ -870,16 +855,16 @@ func (m *OrderManager) openLongPositionQuantity(ctx context.Context, strategyID 
 	return total, nil
 }
 
-func (m *OrderManager) openPredictionPositionQuantity(ctx context.Context, strategyID uuid.UUID, marketType domain.MarketType, slug, side string) (float64, error) {
+func (m *OrderManager) openPredictionPositionQuantity(ctx context.Context, scope ExecutionScope, marketType domain.MarketType, slug, side string) (float64, error) {
 	slug = strings.TrimSpace(slug)
 	if slug == "" {
 		return 0, fmt.Errorf("order_manager: prediction exit ownership check requires ticker")
 	}
 
-	positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{
+	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
 		Ticker: polymarketPositionTicker(slug, side),
 		Side:   domain.PositionSideLong,
-	}, riskSnapshotPositionLimit, 0)
+	})
 	if err != nil {
 		return 0, fmt.Errorf("order_manager: get open %s position for %s:%s: %w", marketType.Normalize(), slug, strings.ToUpper(strings.TrimSpace(side)), err)
 	}
@@ -892,6 +877,15 @@ func (m *OrderManager) openPredictionPositionQuantity(ctx context.Context, strat
 	}
 
 	return total, nil
+}
+
+func (m *OrderManager) positionsByScope(ctx context.Context, scope ExecutionScope, filter repository.PositionFilter) ([]domain.Position, error) {
+	repo, ok := m.positionRepo.(repository.ExecutionScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("canonical execution-scoped position repository is required")
+	}
+	originType, originID := scope.Origin()
+	return repo.GetByExecutionScope(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, filter, riskSnapshotPositionLimit, 0)
 }
 
 func isPredictionMarket(marketType domain.MarketType) bool {
@@ -975,7 +969,7 @@ func (m *OrderManager) handleFill(
 	scope ExecutionScope,
 	decisionID uuid.UUID,
 ) error {
-	strategyID, _, _, err := legacyScopeIDs(scope)
+	_, _, _, err := scopeOriginIDs(scope)
 	if err != nil {
 		return fmt.Errorf("order_manager: fill execution scope: %w", err)
 	}
@@ -1036,10 +1030,10 @@ func (m *OrderManager) handleFill(
 	}
 	if isPredictionMarket(marketType) && order.Side == domain.OrderSideSell {
 		positionTicker := polymarketPositionTicker(order.Ticker, order.PredictionSide)
-		positions, err := m.positionRepo.GetByStrategy(ctx, *order.StrategyID, repository.PositionFilter{
+		positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
 			Ticker: positionTicker,
 			Side:   domain.PositionSideLong,
-		}, riskSnapshotPositionLimit, 0)
+		})
 		if err != nil {
 			return fmt.Errorf("order_manager: get prediction exit position for %s: %w", positionTicker, err)
 		}
@@ -1090,9 +1084,7 @@ func (m *OrderManager) handleFill(
 			AvgEntry:    fillPrice,
 			OpenedAt:    now,
 		}
-		if originType == ledger.ExecutionOriginStrategyVersion {
-			position.StrategyID = &strategyID
-		}
+		position.StrategyID = scope.LegacyStrategyID()
 
 		if plan.StopLoss > 0 {
 			position.StopLoss = &plan.StopLoss
@@ -1257,8 +1249,7 @@ func (m *OrderManager) emitOrderEvent(
 	event.OriginType = string(originType)
 	event.OriginID = originID
 	if originType == ledger.ExecutionOriginStrategyVersion {
-		strategyID := uuid.MustParse(originID)
-		event.StrategyID = &strategyID
+		event.StrategyID = scope.LegacyStrategyID()
 	}
 	if run, ok := scope.PipelineRun(); ok {
 		event.PipelineRunID = &run.ID

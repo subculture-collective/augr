@@ -31,6 +31,7 @@ import (
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	polymarketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
@@ -354,7 +355,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		if err != nil {
 			return canonical, err
 		}
-		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
 		if err != nil {
 			return canonical, err
 		}
@@ -793,7 +794,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
 		if err != nil {
 			return canonical, err
 		}
@@ -869,13 +870,6 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 		return failRun(errors.New("kalshi native: market data client is required"))
 	}
 	if !strategy.IsPaper {
-		gate, err := r.liveGateForStrategy(strategy)
-		if err != nil {
-			return failRun(err)
-		}
-		if allowed, denial := gate.Allows(&strategy.ID, brokerNameForStrategy(strategy)); !allowed {
-			return failRun(fmt.Errorf("order_manager: live execution denied for kalshi: %s", denial.Message))
-		}
 		if _, _, err := r.newBrokerForStrategy(strategy); err != nil {
 			return failRun(err)
 		}
@@ -890,7 +884,11 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 
 	var openPositions []domain.Position
 	if r.cfg.Brokers.Kalshi.AutoExitsEnabled && r.positionRepo != nil {
-		openPositions, err = r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10_000, 0)
+		scopedPositions, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
+		if !ok {
+			return failRun(errors.New("kalshi native: canonical execution-scoped position repository is required"))
+		}
+		openPositions, err = scopedPositions.GetByExecutionScope(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), string(ledger.ExecutionOriginStrategyVersion), executionVersionID.String(), repository.PositionFilter{}, 10_000, 0)
 		if err != nil {
 			return failRun(fmt.Errorf("kalshi native: load positions for exit evaluation: %w", err))
 		}
@@ -943,7 +941,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
 		if err != nil {
 			return canonical, err
 		}
@@ -2126,13 +2124,6 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 	if err != nil {
 		return nil, err
 	}
-	if !strategy.IsPaper {
-		brokerName := brokerNameForStrategy(strategy)
-		if allowed, denial := gate.Allows(&strategy.ID, brokerName); !allowed {
-			return nil, fmt.Errorf("order_manager: live execution denied for %s: %s", brokerName, denial.Message)
-		}
-	}
-
 	broker, brokerName, err := r.newBrokerForStrategy(strategy)
 	if err != nil {
 		return nil, err
@@ -2273,6 +2264,10 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 		strategyID, err := uuid.Parse(raw)
 		if err != nil {
 			return execution.LiveGateConfig{}, fmt.Errorf("parse LIVE_TRADING_ALLOWED_STRATEGIES value %q: %w", raw, err)
+		}
+		if strategy.ExecutionStrategyVersionID != nil && strategyID == strategy.ID {
+			allowedStrategies[*strategy.ExecutionStrategyVersionID] = true
+			continue
 		}
 		allowedStrategies[strategyID] = true
 	}

@@ -436,21 +436,18 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	if err != nil {
 		return nil, err
 	}
-	persistedOrigin, planned, err := s.deps.OriginRuns.RegisterPlannedRun(ctx, originRun, planned)
+	persistedOrigin, registered, err := s.deps.OriginRuns.RegisterPlannedRun(ctx, originRun, planned)
 	if err != nil {
 		return nil, err
 	}
-	result := &RebalanceResult{OriginRunID: persistedOrigin.ID(), OriginRunSHA256: persistedOrigin.Digest(), Preview: *preview, Intents: make([]domain.CopyTradeIntent, 0, len(planned))}
+	result := &RebalanceResult{OriginRunID: persistedOrigin.ID(), OriginRunSHA256: persistedOrigin.Digest(), Preview: *preview, Intents: make([]domain.CopyTradeIntent, 0, len(registered))}
 	if subscription.LegacyStrategyID == nil {
 		if s.deps.Executor == nil {
 			return result, fmt.Errorf("paper executor is unavailable")
 		}
-		for _, candidate := range planned {
-			created, createErr := s.deps.Repo.CreateIntent(ctx, &candidate)
-			if createErr != nil {
-				return result, fmt.Errorf("persist copy intent %s: %w", candidate.ID, createErr)
-			}
-			if !created || candidate.PolicyStatus != "approved" {
+		for _, plannedIntent := range registered {
+			candidate := plannedIntent.Intent
+			if !plannedIntent.Created || candidate.PolicyStatus != "approved" {
 				result.Intents = append(result.Intents, candidate)
 				continue
 			}
@@ -471,6 +468,10 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 			result.Intents = append(result.Intents, candidate)
 		}
 		return result, nil
+	}
+	planned = planned[:0]
+	for _, plannedIntent := range registered {
+		planned = append(planned, plannedIntent.Intent)
 	}
 	if s.deps.Runs == nil {
 		return nil, fmt.Errorf("pipeline run repository is unavailable")

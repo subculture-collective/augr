@@ -56,14 +56,8 @@ func realizedPnL(side domain.PositionSide, avgEntry, fillPrice, quantity float64
 }
 
 func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInput) (repository.OrderFillResult, error) {
-	if input.Order == nil || input.Order.ID == uuid.Nil || input.Order.StrategyID == nil || input.Order.Ticker == "" || input.Order.MarketType == "" || input.Trade == nil || input.IdempotencyKey == "" || input.FillIntent.Quantity <= 0 || math.IsNaN(input.FillIntent.ExecutionPrice) || math.IsInf(input.FillIntent.ExecutionPrice, 0) || input.FillIntent.ExecutionPrice < 0 {
-		return repository.OrderFillResult{}, fmt.Errorf("postgres: invalid order fill input")
-	}
-	if input.Order.Quantity <= 0 || input.Order.Side == "" || input.Order.Status == "" {
-		return repository.OrderFillResult{}, fmt.Errorf("postgres: invalid order fill input")
-	}
-	if input.Now.IsZero() {
-		return repository.OrderFillResult{}, fmt.Errorf("postgres: invalid order fill input")
+	if err := validateOrderFillInput(input); err != nil {
+		return repository.OrderFillResult{}, err
 	}
 
 	tx, err := db.Pool.BeginTx(ctx, pgx.TxOptions{})
@@ -78,8 +72,10 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	var existingFillQuantity float64
 	var existingFillPrice float64
 	var existingCreatedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT order_id, position_id, trade_id, fill_quantity, fill_price, created_at FROM financial_fill_idempotency WHERE idempotency_key = $1 FOR UPDATE`, input.IdempotencyKey).Scan(&existingOrderID, &existingPositionID, &existingTradeID, &existingFillQuantity, &existingFillPrice, &existingCreatedAt); err == nil {
-		if existingOrderID != input.Order.ID || !numeric8Equal(existingFillQuantity, input.FillIntent.Quantity) || !numeric8Equal(existingFillPrice, input.FillIntent.ExecutionPrice) {
+	var existingAccountID uuid.UUID
+	var existingEnvironment, existingOriginType, existingOriginID string
+	if err := tx.QueryRow(ctx, `SELECT order_id, position_id, trade_id, fill_quantity, fill_price, created_at, account_id, environment, origin_type, origin_id FROM financial_fill_idempotency WHERE idempotency_key = $1 FOR UPDATE`, input.IdempotencyKey).Scan(&existingOrderID, &existingPositionID, &existingTradeID, &existingFillQuantity, &existingFillPrice, &existingCreatedAt, &existingAccountID, &existingEnvironment, &existingOriginType, &existingOriginID); err == nil {
+		if existingOrderID != input.Order.ID || existingAccountID != input.Order.AccountID || existingEnvironment != string(input.Order.Environment) || existingOriginType != input.Order.OriginType || existingOriginID != input.Order.OriginID || !numeric8Equal(existingFillQuantity, input.FillIntent.Quantity) || !numeric8Equal(existingFillPrice, input.FillIntent.ExecutionPrice) {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: idempotency key %s reused with mismatched payload", input.IdempotencyKey)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -90,9 +86,13 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: select order fill idempotency: %w", err)
 	}
 
-	var persistedStatus string
-	if err := tx.QueryRow(ctx, `SELECT status FROM orders WHERE id = $1 FOR UPDATE`, input.Order.ID).Scan(&persistedStatus); err != nil {
+	var persistedStatus, persistedEnvironment, persistedOriginType, persistedOriginID string
+	var persistedAccountID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT status,account_id,environment,origin_type,origin_id FROM orders WHERE id = $1 FOR UPDATE`, input.Order.ID).Scan(&persistedStatus, &persistedAccountID, &persistedEnvironment, &persistedOriginType, &persistedOriginID); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: lock order: %w", err)
+	}
+	if persistedAccountID != input.Order.AccountID || persistedEnvironment != string(input.Order.Environment) || persistedOriginType != input.Order.OriginType || persistedOriginID != input.Order.OriginID {
+		return repository.OrderFillResult{}, fmt.Errorf("postgres: order fill scope mismatch")
 	}
 	if persistedStatus != string(domain.OrderStatusSubmitted) && persistedStatus != string(domain.OrderStatusPartial) && persistedStatus != string(domain.OrderStatusFilled) {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: order %s status %s not fill-compatible", input.Order.ID, persistedStatus)
@@ -120,13 +120,13 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	var position *domain.Position
 	var positionID *uuid.UUID
 	if order.Side == domain.OrderSideSell {
-		rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, s.market_type, p.ticker, p.side, p.quantity::double precision, p.avg_entry::double precision,
+		rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, s.market_type, p.ticker, p.side, p.quantity::double precision, p.avg_entry::double precision,
 			p.current_price::double precision, p.unrealized_pnl::double precision, p.realized_pnl::double precision, p.stop_loss::double precision,
 			p.take_profit::double precision, p.opened_at, p.closed_at, p.asset_class, p.underlying_ticker, p.option_type, p.strike::double precision,
 			p.expiry, p.contract_multiplier::double precision, p.leg_group_id, p.delta::double precision, p.gamma::double precision, p.theta::double precision, p.vega::double precision
 			FROM positions p LEFT JOIN strategies s ON s.id = p.strategy_id
-			WHERE p.strategy_id = $1 AND p.ticker = $2 AND p.side = $3 AND p.closed_at IS NULL AND p.quantity > 0
-			ORDER BY p.opened_at ASC, p.id ASC FOR UPDATE OF p`, *order.StrategyID, positionTicker, domain.PositionSideLong)
+			WHERE p.account_id = $1 AND p.environment = $2 AND p.origin_type = $3 AND p.origin_id = $4 AND p.ticker = $5 AND p.side = $6 AND p.closed_at IS NULL AND p.quantity > 0
+			ORDER BY p.opened_at ASC, p.id ASC FOR UPDATE OF p`, order.AccountID, order.Environment, order.OriginType, order.OriginID, positionTicker, domain.PositionSideLong)
 		if err != nil {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: lock polymarket position: %w", err)
 		}
@@ -198,15 +198,15 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		}
 	} else {
 		positionSide := domain.PositionSideLong
-		position = &domain.Position{ID: uuid.New(), StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: input.FillIntent.Quantity, AvgEntry: fillPrice, OpenedAt: now}
+		position = &domain.Position{ID: uuid.New(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: input.FillIntent.Quantity, AvgEntry: fillPrice, OpenedAt: now}
 		if input.StopLoss != nil {
 			position.StopLoss = input.StopLoss
 		}
 		if input.TakeProfit != nil {
 			position.TakeProfit = input.TakeProfit
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO positions (id, strategy_id, ticker, side, quantity, avg_entry, stop_loss, take_profit, opened_at, asset_class, underlying_ticker, contract_multiplier)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id, opened_at`, position.ID, position.StrategyID, position.Ticker, position.Side, position.Quantity, position.AvgEntry, position.StopLoss, position.TakeProfit, position.OpenedAt, position.AssetClass, nullString(position.UnderlyingTicker), position.ContractMultiplier).Scan(&position.ID, &position.OpenedAt); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO positions (id, strategy_id, account_id, environment, origin_type, origin_id, ticker, side, quantity, avg_entry, stop_loss, take_profit, opened_at, asset_class, underlying_ticker, contract_multiplier)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, opened_at`, position.ID, position.StrategyID, position.AccountID, position.Environment, position.OriginType, position.OriginID, position.Ticker, position.Side, position.Quantity, position.AvgEntry, position.StopLoss, position.TakeProfit, position.OpenedAt, position.AssetClass, nullString(position.UnderlyingTicker), position.ContractMultiplier).Scan(&position.ID, &position.OpenedAt); err != nil {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: create position: %w", err)
 		}
 	}
@@ -227,18 +227,26 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	trade.Price = fillPrice
 	trade.ExecutedAt = now
 	trade.CreatedAt = now
-	if err := tx.QueryRow(ctx, `INSERT INTO trades (external_id, order_id, position_id, ticker, side, quantity, price, fee, executed_at, asset_class, open_close, contract_multiplier, premium)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id, created_at`, nullString(trade.ExternalID), trade.OrderID, trade.PositionID, trade.Ticker, trade.Side, trade.Quantity, trade.Price, trade.Fee, trade.ExecutedAt, trade.AssetClass, nullString(trade.OpenClose), trade.ContractMultiplier, trade.Premium).Scan(&trade.ID, &trade.CreatedAt); err != nil {
+	trade.AccountID, trade.Environment, trade.OriginType, trade.OriginID = order.AccountID, order.Environment, order.OriginType, order.OriginID
+	if err := tx.QueryRow(ctx, `INSERT INTO trades (account_id,environment,origin_type,origin_id,external_id, order_id, position_id, ticker, side, quantity, price, fee, executed_at, asset_class, open_close, contract_multiplier, premium)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id, created_at`, trade.AccountID, trade.Environment, trade.OriginType, trade.OriginID, nullString(trade.ExternalID), trade.OrderID, trade.PositionID, trade.Ticker, trade.Side, trade.Quantity, trade.Price, trade.Fee, trade.ExecutedAt, trade.AssetClass, nullString(trade.OpenClose), trade.ContractMultiplier, trade.Premium).Scan(&trade.ID, &trade.CreatedAt); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: create trade: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `INSERT INTO financial_fill_idempotency (idempotency_key, order_id, position_id, trade_id, fill_quantity, fill_price) VALUES ($1,$2,$3,$4,$5,$6)`, input.IdempotencyKey, order.ID, positionID, trade.ID, input.FillIntent.Quantity, input.FillIntent.ExecutionPrice); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO financial_fill_idempotency (idempotency_key,account_id,environment,origin_type,origin_id,order_id,position_id,trade_id,fill_quantity,fill_price) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, input.IdempotencyKey, order.AccountID, order.Environment, order.OriginType, order.OriginID, order.ID, positionID, trade.ID, input.FillIntent.Quantity, input.FillIntent.ExecutionPrice); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: finalize fill idempotency: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: commit order fill: %w", err)
 	}
 	return repository.OrderFillResult{OrderID: order.ID, PositionID: positionID, Position: position, TradeID: trade.ID, CreatedAt: trade.CreatedAt}, nil
+}
+
+func validateOrderFillInput(input repository.OrderFillInput) error {
+	if input.Order == nil || input.Order.ID == uuid.Nil || input.Order.AccountID == uuid.Nil || !input.Order.Environment.IsValid() || strings.TrimSpace(input.Order.OriginType) == "" || strings.TrimSpace(input.Order.OriginID) == "" || input.Order.Ticker == "" || input.Order.MarketType == "" || input.Trade == nil || input.IdempotencyKey == "" || input.FillIntent.Quantity <= 0 || math.IsNaN(input.FillIntent.ExecutionPrice) || math.IsInf(input.FillIntent.ExecutionPrice, 0) || input.FillIntent.ExecutionPrice < 0 || input.Order.Quantity <= 0 || input.Order.Side == "" || input.Order.Status == "" || input.Now.IsZero() {
+		return fmt.Errorf("postgres: invalid order fill input")
+	}
+	return nil
 }
 
 // ApplyOptionFills atomically persists a complete single-leg fill or all legs

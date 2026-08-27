@@ -1715,7 +1715,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 		return canonical, err
 	}
 
-	scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
 	if err != nil {
 		return canonical, err
 	}

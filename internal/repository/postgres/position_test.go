@@ -100,6 +100,17 @@ func TestBuildPositionScopedQuery_StrategyScope(t *testing.T) {
 	assertNotContains(t, query, "closed_at IS NULL")
 }
 
+func TestBuildPositionExecutionScopeQueryRequiresCompleteOwnership(t *testing.T) {
+	accountID := uuid.New()
+	query, args := buildPositionExecutionScopeQuery(accountID, domain.AccountEnvironmentPaperScored, "copy_subscription", "subscription-1", repository.PositionFilter{Ticker: "AAPL", Side: domain.PositionSideLong}, 10, 0)
+	for _, clause := range []string{"p.account_id = $1", "p.environment = $2", "p.origin_type = $3", "p.origin_id = $4", "p.ticker = $5", "p.side = $6"} {
+		assertContains(t, query, clause)
+	}
+	if len(args) != 8 || args[0] != accountID || args[3] != "subscription-1" {
+		t.Fatalf("args=%v", args)
+	}
+}
+
 func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	t.Helper()
 

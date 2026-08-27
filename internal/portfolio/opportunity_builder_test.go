@@ -9,21 +9,23 @@ import (
 	"github.com/google/uuid"
 )
 
+func scopedOpportunitySource(market domain.MarketType, ticker string) (domain.Strategy, *domain.PipelineRun) {
+	strategyID, versionID := uuid.New(), uuid.New()
+	strategy := domain.Strategy{ID: strategyID, Ticker: ticker, MarketType: market, Status: domain.StrategyStatusActive, ExecutionStrategyVersionID: &versionID}
+	run := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC)}
+	return strategy, run
+}
+
 func TestBuildOpportunityBuyStock(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 19, 15, 4, 5, 0, time.UTC)
-	strategyID := uuid.New()
-	runID := uuid.New()
+	strategy, run := scopedOpportunitySource(domain.MarketTypeStock, "AAPL")
+	strategyID, runID := strategy.ID, run.ID
 
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
-		Strategy: domain.Strategy{
-			ID:         strategyID,
-			Ticker:     "AAPL",
-			MarketType: domain.MarketTypeStock,
-			Status:     domain.StrategyStatusActive,
-		},
-		Run:               &domain.PipelineRun{ID: runID},
+		Strategy:          strategy,
+		Run:               run,
 		Signal:            domain.PipelineSignalBuy,
 		PredictionSide:    "yes",
 		Confidence:        0.8,
@@ -69,6 +71,9 @@ func TestBuildOpportunityBuyStock(t *testing.T) {
 	if opportunity.PipelineRunID == nil || *opportunity.PipelineRunID != runID {
 		t.Fatalf("pipeline run id = %#v, want %s", opportunity.PipelineRunID, runID)
 	}
+	if opportunity.AccountID != run.AccountID || opportunity.Environment != run.Environment || opportunity.OriginType != run.OriginType || opportunity.OriginID != run.OriginID || opportunity.PipelineRunTradeDate == nil || !opportunity.PipelineRunTradeDate.Equal(run.TradeDate) {
+		t.Fatalf("opportunity source scope=%+v run=%+v", opportunity, run)
+	}
 	if opportunity.Evidence == nil || string(opportunity.Evidence) != "{}" {
 		t.Fatalf("evidence = %s, want {}", opportunity.Evidence)
 	}
@@ -101,14 +106,11 @@ func TestBuildOpportunityKalshiTTL(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 19, 15, 4, 5, 0, time.UTC)
+	strategy, run := scopedOpportunitySource(domain.MarketTypeKalshi, "ELECTION")
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
-		Strategy: domain.Strategy{
-			ID:         uuid.New(),
-			Ticker:     "ELECTION",
-			MarketType: domain.MarketTypeKalshi,
-			Status:     domain.StrategyStatusActive,
-		},
-		Signal: domain.PipelineSignalSell,
+		Strategy: strategy,
+		Run:      run,
+		Signal:   domain.PipelineSignalSell,
 	}, OpportunityBuilderConfig{Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatalf("BuildOpportunity() error = %v", err)
@@ -153,14 +155,11 @@ func TestBuildOpportunityInactiveStrategy(t *testing.T) {
 
 func TestBuildOpportunityDecisionSideOverridesSignal(t *testing.T) {
 	t.Parallel()
+	strategy, run := scopedOpportunitySource(domain.MarketTypeStock, "TSLA")
 
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
-		Strategy: domain.Strategy{
-			ID:         uuid.New(),
-			Ticker:     "TSLA",
-			MarketType: domain.MarketTypeStock,
-			Status:     domain.StrategyStatusActive,
-		},
+		Strategy: strategy,
+		Run:      run,
 		Decision: &domain.TradeDecision{Side: domain.OrderSideSell},
 		Signal:   domain.PipelineSignalBuy,
 	}, OpportunityBuilderConfig{})
@@ -180,14 +179,11 @@ func TestBuildOpportunityDecisionSideOverridesSignal(t *testing.T) {
 
 func TestBuildOpportunityClampsNegativeMetrics(t *testing.T) {
 	t.Parallel()
+	strategy, run := scopedOpportunitySource(domain.MarketTypeOptions, "SPY")
 
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
-		Strategy: domain.Strategy{
-			ID:         uuid.New(),
-			Ticker:     "SPY",
-			MarketType: domain.MarketTypeOptions,
-			Status:     domain.StrategyStatusActive,
-		},
+		Strategy:          strategy,
+		Run:               run,
 		Signal:            domain.PipelineSignalSell,
 		Confidence:        -0.5,
 		EdgePct:           -1,

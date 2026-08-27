@@ -495,6 +495,8 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 			PipelineRunTradeDate: &tradeDate,
 			AccountID:            accountID,
 			Environment:          domain.AccountEnvironmentPaperScored,
+			OriginType:           "strategy_version",
+			OriginID:             versionID.String(),
 			Status:               domain.OpportunityStatusQueued,
 			MarketType:           domain.MarketTypeStock,
 			Ticker:               "AAPL",

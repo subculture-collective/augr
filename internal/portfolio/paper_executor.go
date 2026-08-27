@@ -118,10 +118,14 @@ func (e *PaperExecutor) ExecutePaperDecision(ctx context.Context, opportunity do
 		Side:         paperPlanSide(opportunity),
 	}
 
-	if strategy.ExecutionStrategyVersionID == nil || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
+	if opportunity.AccountID == uuid.Nil || !opportunity.Environment.IsValid() || opportunity.OriginType != "strategy_version" || opportunity.OriginID == "" || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
 		return e.rejected("missing_execution_scope"), nil
 	}
-	scope, err := execution.NewStrategyExecutionScope(opportunity.AccountID, opportunity.Environment, *strategy.ExecutionStrategyVersionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
+	versionID, err := uuid.Parse(opportunity.OriginID)
+	if err != nil || strategy.ExecutionStrategyVersionID == nil || *strategy.ExecutionStrategyVersionID != versionID {
+		return e.rejected("execution_scope_mismatch"), nil
+	}
+	scope, err := execution.NewStrategyExecutionScope(opportunity.AccountID, opportunity.Environment, versionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, strategy.ID)
 	if err != nil {
 		return e.rejected("invalid_execution_scope"), nil
 	}

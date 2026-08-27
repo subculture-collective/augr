@@ -39,12 +39,16 @@ func TestBuildOriginProposalUsesSubscriptionWithoutStrategyVersion(t *testing.T)
 	}
 
 	for name, mutate := range map[string]func(*OriginProposalInput){
-		"subscription origin": func(value *OriginProposalInput) { value.Subscription.OriginID = uuid.New() },
-		"intent origin":       func(value *OriginProposalInput) { value.Intent.OriginID = uuid.New() },
-		"intent parent":       func(value *OriginProposalInput) { value.Intent.SubscriptionID = uuid.New() },
-		"nonpaper":            func(value *OriginProposalInput) { value.Subscription.IsPaper = false },
-		"unapproved":          func(value *OriginProposalInput) { value.Intent.PolicyStatus = "rejected" },
-		"wrong side":          func(value *OriginProposalInput) { value.QuantityDelta = value.QuantityDelta.Neg() },
+		"subscription origin":      func(value *OriginProposalInput) { value.Subscription.OriginID = uuid.New() },
+		"intent origin":            func(value *OriginProposalInput) { value.Intent.OriginID = uuid.New() },
+		"intent parent":            func(value *OriginProposalInput) { value.Intent.SubscriptionID = uuid.New() },
+		"subscription account":     func(value *OriginProposalInput) { value.Subscription.AccountID = uuid.New() },
+		"intent account":           func(value *OriginProposalInput) { value.Intent.AccountID = uuid.New() },
+		"subscription environment": func(value *OriginProposalInput) { value.Subscription.Environment = domain.AccountEnvironmentShadow },
+		"intent environment":       func(value *OriginProposalInput) { value.Intent.Environment = domain.AccountEnvironmentShadow },
+		"nonpaper":                 func(value *OriginProposalInput) { value.Subscription.IsPaper = false },
+		"unapproved":               func(value *OriginProposalInput) { value.Intent.PolicyStatus = "rejected" },
+		"wrong side":               func(value *OriginProposalInput) { value.QuantityDelta = value.QuantityDelta.Neg() },
 	} {
 		value := input
 		mutate(&value)
@@ -105,9 +109,11 @@ func originProposalFixture(t *testing.T) OriginProposalInput {
 	subscriptionID := uuid.New()
 	subscription := domain.DefaultCopySubscription()
 	subscription.ID, subscription.OriginType, subscription.OriginID = subscriptionID, "copy_subscription", subscriptionID
+	subscription.AccountID, subscription.Environment = account.ID, account.Environment
 	subscription.LeaderID, subscription.SourceID = uuid.New(), uuid.New()
 	subscription.Status = domain.CopySubscriptionPaperActive
 	intent := domain.CopyTradeIntent{
+		AccountID: account.ID, Environment: account.Environment,
 		ID: uuid.New(), SubscriptionID: subscriptionID, OriginType: "copy_subscription", OriginID: subscriptionID,
 		SourceObservationID: uuid.New(), InstrumentKey: "AAPL", Ticker: "AAPL", Side: domain.OrderSideBuy,
 		RequestedNotional: 1000, CalculationVersion: 1, PolicyStatus: "approved",

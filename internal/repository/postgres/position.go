@@ -35,15 +35,19 @@ func NewPositionRepo(pool *pgxpool.Pool) *PositionRepo {
 func (r *PositionRepo) Create(ctx context.Context, position *domain.Position) error {
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO positions (
-			strategy_id, ticker, side, quantity, avg_entry,
+			strategy_id, account_id, environment, origin_type, origin_id, ticker, side, quantity, avg_entry,
 			current_price, unrealized_pnl, realized_pnl,
 			stop_loss, take_profit, closed_at, asset_class, underlying_ticker,
 			option_type, strike, expiry, contract_multiplier, leg_group_id,
 			delta, gamma, theta, vega
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		 RETURNING id, opened_at`,
 		position.StrategyID,
+		nullableUUID(position.AccountID),
+		nullString(string(position.Environment)),
+		nullString(position.OriginType),
+		nullString(position.OriginID),
 		position.Ticker,
 		position.Side,
 		position.Quantity,
@@ -246,7 +250,12 @@ func (r *PositionRepo) GetByStrategy(ctx context.Context, strategyID uuid.UUID, 
 	return r.list(ctx, query, args, "get positions by strategy")
 }
 
-const positionSelectSQL = `SELECT p.id, p.strategy_id, s.market_type, p.ticker, p.side,
+func (r *PositionRepo) GetByExecutionScope(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	query, args := buildPositionExecutionScopeQuery(accountID, environment, originType, originID, filter, limit, offset)
+	return r.list(ctx, query, args, "get positions by execution scope")
+}
+
+const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, s.market_type, p.ticker, p.side,
 		p.quantity::double precision, p.avg_entry::double precision,
 		p.current_price::double precision, p.unrealized_pnl::double precision,
 		p.realized_pnl::double precision, p.stop_loss::double precision,
@@ -288,6 +297,10 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	var (
 		position      domain.Position
 		strategyID    *uuid.UUID
+		accountID     *uuid.UUID
+		environment   *domain.AccountEnvironment
+		originType    *string
+		originID      *string
 		marketType    *string
 		currentPrice  *float64
 		unrealizedPnL *float64
@@ -300,6 +313,10 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	err := sc.Scan(
 		&position.ID,
 		&strategyID,
+		&accountID,
+		&environment,
+		&originType,
+		&originID,
 		&marketType,
 		&position.Ticker,
 		&position.Side,
@@ -322,6 +339,18 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	}
 
 	position.StrategyID = strategyID
+	if accountID != nil {
+		position.AccountID = *accountID
+	}
+	if environment != nil {
+		position.Environment = *environment
+	}
+	if originType != nil {
+		position.OriginType = *originType
+	}
+	if originID != nil {
+		position.OriginID = *originID
+	}
 	if marketType != nil {
 		position.MarketType = domain.MarketType(strings.TrimSpace(*marketType)).Normalize()
 	}
@@ -510,6 +539,10 @@ func buildPositionScopedQuery(scopeColumn string, scopeValue uuid.UUID, filter r
 	return buildPositionQuery(scopeColumn, scopeValue, false, filter, limit, offset)
 }
 
+func buildPositionExecutionScopeQuery(accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter repository.PositionFilter, limit, offset int) (string, []any) {
+	return buildPositionQuery("execution_scope", []any{accountID, environment, originType, originID}, false, filter, limit, offset)
+}
+
 func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filter repository.PositionFilter, limit, offset int) (string, []any) {
 	var (
 		conditions []string
@@ -523,7 +556,10 @@ func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filte
 		return fmt.Sprintf("$%d", argIdx)
 	}
 
-	if scopeColumn != "" {
+	if scopeColumn == "execution_scope" {
+		values := scopeValue.([]any)
+		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.environment = "+nextArg(values[1]), "p.origin_type = "+nextArg(values[2]), "p.origin_id = "+nextArg(values[3]))
+	} else if scopeColumn != "" {
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))
 	}
 

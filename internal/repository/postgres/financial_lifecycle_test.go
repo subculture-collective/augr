@@ -14,6 +14,19 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+func TestValidateOrderFillInputAcceptsCanonicalStrategyFreeCopyFill(t *testing.T) {
+	now := time.Now().UTC()
+	order := &domain.Order{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "copy_subscription", OriginID: uuid.NewString(), Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusSubmitted, Quantity: 1}
+	input := repository.OrderFillInput{IdempotencyKey: "copy-fill", Order: order, FillIntent: repository.OrderFillIntent{Side: domain.OrderSideBuy, Quantity: 1, ExecutionPrice: 100}, Now: now, Trade: &domain.Trade{ID: uuid.New()}}
+	if err := validateOrderFillInput(input); err != nil {
+		t.Fatalf("strategy-free canonical fill rejected: %v", err)
+	}
+	order.AccountID = uuid.Nil
+	if err := validateOrderFillInput(input); err == nil {
+		t.Fatal("account-free fill accepted")
+	}
+}
+
 func TestFinancialLifecycle_FirstDeliveryReplayRollbackAndPositions(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)

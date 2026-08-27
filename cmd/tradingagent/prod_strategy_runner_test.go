@@ -45,6 +45,7 @@ func withNativeAuditDeps(runner *realStrategyRunner) *realStrategyRunner {
 	runner.executionAccount = testExecutionAccountBinding
 	runner.runRepo = &stubPipelineRunRepo{}
 	runner.eventRepo = &recordingStrategyPreparationEventRepo{}
+	runner.snapshotRepo = &recordingNativeSnapshotRepo{}
 	return runner
 }
 
@@ -276,26 +277,28 @@ func TestRunStrategy_KalshiLiveRoutingRespectsGatesAndClientInitialization(t *te
 
 		runner := withNativeAuditDeps(&realStrategyRunner{kalshiDataProvider: &fakeKalshiMarketData{label: "shared-data"}, kalshiMarketData: snapshot, logger: slogDiscardLogger()})
 		_, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
-		if err == nil || !strings.Contains(err.Error(), "live trading disabled") {
+		if err == nil || !strings.Contains(err.Error(), "live trading is disabled") {
 			t.Fatalf("RunStrategy() error = %v, want live gate denial", err)
 		}
 	})
 
-	t.Run("missing broker allowlist is denied by gate", func(t *testing.T) {
+	t.Run("hold does not invoke live execution gate", func(t *testing.T) {
 		t.Parallel()
 
 		runner := withNativeAuditDeps(&realStrategyRunner{
 			cfg: config.Config{
 				Features:                     config.FeatureFlags{EnableLiveTrading: true},
 				LiveTradingAllowedStrategies: []string{strategy.ID.String()},
+				Brokers:                      config.BrokerConfigs{Kalshi: config.KalshiConfig{APIKeyID: "kalshi-key-id", PrivateKeyPEMB64: "base64-private-key"}},
 			},
 			kalshiDataProvider: &fakeKalshiMarketData{label: "shared-data"},
 			kalshiMarketData:   snapshot,
+			kalshiLiveClient:   &fakeKalshiLiveClient{},
 			logger:             slogDiscardLogger(),
 		})
 		_, err := runner.RunStrategy(context.Background(), strategy, uuid.New())
-		if err == nil || !strings.Contains(err.Error(), "broker not live-allowlisted") {
-			t.Fatalf("RunStrategy() error = %v, want broker allowlist denial", err)
+		if err != nil {
+			t.Fatalf("RunStrategy() error = %v", err)
 		}
 	})
 
@@ -520,6 +523,10 @@ func (r postTerminalPositionRepo) GetByStrategy(context.Context, uuid.UUID, repo
 	return nil, r.err
 }
 
+func (r postTerminalPositionRepo) GetByExecutionScope(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return nil, r.err
+}
+
 func TestRunStrategy_KalshiPostTerminalErrorsReturnCanonicalResult(t *testing.T) {
 	strategy := domain.Strategy{
 		ID: uuid.New(), Name: "kalshi post-terminal", Ticker: "KXTEST-YESNO", MarketType: domain.MarketTypeKalshi,
@@ -562,6 +569,35 @@ func TestRunStrategy_KalshiPostTerminalErrorsReturnCanonicalResult(t *testing.T)
 				t.Fatalf("RunStrategy() result = %+v, want canonical completed result", result)
 			}
 		})
+	}
+}
+
+type scopedKalshiPositionRepo struct {
+	stubPositionRepo
+	accountID   uuid.UUID
+	environment domain.AccountEnvironment
+	originType  string
+	originID    string
+}
+
+func (r *scopedKalshiPositionRepo) GetByExecutionScope(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, _ repository.PositionFilter, _, _ int) ([]domain.Position, error) {
+	r.accountID, r.environment, r.originType, r.originID = accountID, environment, originType, originID
+	return nil, errors.New("scoped position read")
+}
+
+func TestRunStrategy_KalshiAutoExitReadsCanonicalExecutionScope(t *testing.T) {
+	strategy := domain.Strategy{ID: uuid.New(), Name: "kalshi scoped exit", Ticker: "KXTEST-YESNO", MarketType: domain.MarketTypeKalshi, Status: domain.StrategyStatusActive, IsPaper: true, Config: mustKalshiConfig(t, map[string]any{"template": "microstructure", "direction": "YES", "confidence": 0.72, "fair_probability": 0.72, "calibration": "external_model_v1", "source_references": []string{"model_run:test-1"}, "time_horizon": "days", "entry_price_max": 0.50})}
+	positions := &scopedKalshiPositionRepo{}
+	runner := &realStrategyRunner{
+		cfg: config.Config{Brokers: config.BrokerConfigs{Kalshi: config.KalshiConfig{AutoExitsEnabled: true}}}, executionAccount: testExecutionAccountBinding,
+		runRepo: &stubPipelineRunRepo{}, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: &recordingNativeSnapshotRepo{}, positionRepo: positions,
+		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{Ticker: strategy.Ticker, Status: "active", BestBidYes: .45, BestAskYes: .47, BestBidNo: .53, BestAskNo: .55, CloseTime: time.Now().Add(time.Hour), FetchedAt: time.Now()}}, logger: slogDiscardLogger(),
+	}
+	if _, err := runner.RunStrategy(context.Background(), strategy, uuid.New()); err == nil || !strings.Contains(err.Error(), "scoped position read") {
+		t.Fatalf("RunStrategy() error=%v", err)
+	}
+	if positions.accountID != testExecutionAccountBinding.AccountID() || positions.environment != testExecutionAccountBinding.Environment() || positions.originType != "strategy_version" || positions.originID == "" || positions.originID == strategy.ID.String() {
+		t.Fatalf("position scope=%s/%s/%s/%s", positions.accountID, positions.environment, positions.originType, positions.originID)
 	}
 }
 
@@ -620,7 +656,8 @@ func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 
 	repo := &recordingOpportunityRepo{}
 	runner := &realStrategyRunner{opportunityRepo: repo}
-	strategy := domain.Strategy{ID: uuid.New(), Ticker: "SAFE", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}
+	versionID := uuid.New()
+	strategy := domain.Strategy{ID: uuid.New(), Ticker: "SAFE", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}
 	finalSignal := execution.FinalSignal{Signal: domain.PipelineSignalBuy, Confidence: 0.8}
 	plan := execution.TradingPlan{EntryPrice: 100, PositionSize: 2, RiskReward: 3, Confidence: 0.8}
 
@@ -636,7 +673,7 @@ func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 		t.Fatalf("queued opportunities = %#v, want none from failed or mismatched runs", repo.queued)
 	}
 
-	completed := &domain.PipelineRun{ID: uuid.New(), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
+	completed := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategy.ID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
 	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, completed, finalSignal, plan); err != nil {
 		t.Fatalf("recordPortfolioOpportunity() error = %v", err)
 	}
@@ -648,8 +685,9 @@ func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 func TestRecordPortfolioOpportunitySurfacesRequiredPersistenceLoss(t *testing.T) {
 	t.Parallel()
 
-	strategy := domain.Strategy{ID: uuid.New(), Ticker: "SAFE", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}
-	run := &domain.PipelineRun{ID: uuid.New(), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
+	versionID := uuid.New()
+	strategy := domain.Strategy{ID: uuid.New(), Ticker: "SAFE", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}
+	run := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategy.ID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
 	signal := execution.FinalSignal{Signal: domain.PipelineSignalBuy, Confidence: 0.8}
 	plan := execution.TradingPlan{EntryPrice: 100, PositionSize: 2, RiskReward: 3, Confidence: 0.8}
 
