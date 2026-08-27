@@ -142,6 +142,17 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestRuntimeSchemaVersionRequiresExpansion(t *testing.T) {
+	for _, tt := range []struct {
+		version int
+		want    bool
+	}{{107, false}, {108, true}, {109, false}} {
+		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
+			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
+		}
+	}
+}
+
 func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 	origNewDB := runtimeNewDB
 	origCurrentSchemaVersion := runtimeCurrentSchemaVersion

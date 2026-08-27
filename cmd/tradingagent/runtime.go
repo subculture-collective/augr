@@ -453,6 +453,15 @@ type runtimeSchemaVersionError struct {
 	Required int
 }
 
+const (
+	runtimeMinimumSchemaVersion = 108
+	runtimeMaximumSchemaVersion = 108
+)
+
+func runtimeSchemaVersionCompatible(version int) bool {
+	return version >= runtimeMinimumSchemaVersion && version <= runtimeMaximumSchemaVersion
+}
+
 func (e *runtimeSchemaVersionError) Error() string {
 	return fmt.Sprintf(
 		"database schema version mismatch (%s): current version %d, required version %d; run migrations, then restart the process. Migrations applied after process start require a fresh process restart",
@@ -470,7 +479,7 @@ func ensureRuntimeSchemaCompatible(ctx context.Context, db *pgrepo.DB) (int, int
 	required := pgrepo.RequiredSchemaVersion
 	status := string(pgrepo.CompareSchemaVersion(current, required))
 
-	if !pgrepo.IsSchemaVersionCompatible(current) {
+	if !runtimeSchemaVersionCompatible(current) {
 		state := status
 		return current, required, status, &runtimeSchemaVersionError{
 			State:    state,
@@ -1296,7 +1305,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			return false
 		}
 		return operations.BuildReadiness(operations.BuildInput{
-			Database: databaseReady, Schema: pgrepo.IsSchemaVersionCompatible(currentSchemaVersion),
+			Database: databaseReady, Schema: runtimeSchemaVersionCompatible(currentSchemaVersion),
 			DecisionJournal: tradeDecisionRepo != nil, Scheduler: deps.Automation != nil,
 			OptionsData:          deps.OptionsProvider != nil,
 			PolymarketData:       cfg.Features.EnablePolymarketAutomation && deps.PolymarketClient != nil,
