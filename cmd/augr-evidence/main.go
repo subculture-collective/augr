@@ -112,7 +112,7 @@ func openPostgresBackend(ctx context.Context, databaseURL string) (shadowBackend
 		db.Close()
 		return nil, err
 	}
-	if version != postgresrepo.RequiredSchemaVersion {
+	if !postgresrepo.IsSchemaVersionCompatible(version) {
 		db.Close()
 		return nil, fmt.Errorf("augr-evidence: schema version %d does not match required version %d", version, postgresrepo.RequiredSchemaVersion)
 	}

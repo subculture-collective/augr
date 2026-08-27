@@ -63,7 +63,7 @@ func openEconomicBackend(ctx context.Context, url string) (economicBackend, erro
 		return nil, err
 	}
 	version, err := postgresrepo.CurrentSchemaVersion(ctx, db.Pool)
-	if err != nil || version != postgresrepo.RequiredSchemaVersion {
+	if err != nil || !postgresrepo.IsSchemaVersionCompatible(version) {
 		db.Close()
 		if err != nil {
 			return nil, err

@@ -162,7 +162,7 @@ func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 		return &pgrepo.DB{}, nil
 	}
 	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) {
-		return pgrepo.RequiredSchemaVersion - 1, nil
+		return pgrepo.MinimumSupportedSchemaVersion - 1, nil
 	}
 	runtimeNewPaperAccountRepo = func(*pgrepo.DB) repository.PaperAccountRepository { return stubPaperAccountRepo{} }
 	runtimeAfterSchemaGate = func() { proceeded.Store(true) }
@@ -179,14 +179,14 @@ func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 	if mismatchErr.State != "behind" {
 		t.Fatalf("mismatchErr.State = %q, want behind", mismatchErr.State)
 	}
-	if mismatchErr.Current != pgrepo.RequiredSchemaVersion-1 {
-		t.Fatalf("mismatchErr.Current = %d, want %d", mismatchErr.Current, pgrepo.RequiredSchemaVersion-1)
+	if mismatchErr.Current != pgrepo.MinimumSupportedSchemaVersion-1 {
+		t.Fatalf("mismatchErr.Current = %d, want %d", mismatchErr.Current, pgrepo.MinimumSupportedSchemaVersion-1)
 	}
 	if mismatchErr.Required != pgrepo.RequiredSchemaVersion {
 		t.Fatalf("mismatchErr.Required = %d, want %d", mismatchErr.Required, pgrepo.RequiredSchemaVersion)
 	}
 	for _, want := range []string{
-		fmt.Sprintf("current version %d", pgrepo.RequiredSchemaVersion-1),
+		fmt.Sprintf("current version %d", pgrepo.MinimumSupportedSchemaVersion-1),
 		fmt.Sprintf("required version %d", pgrepo.RequiredSchemaVersion),
 		"run migrations, then restart the process",
 		"fresh process restart",

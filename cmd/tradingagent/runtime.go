@@ -470,16 +470,15 @@ func ensureRuntimeSchemaCompatible(ctx context.Context, db *pgrepo.DB) (int, int
 	required := pgrepo.RequiredSchemaVersion
 	status := string(pgrepo.CompareSchemaVersion(current, required))
 
-	switch state := status; state {
-	case "behind", "ahead":
+	if !pgrepo.IsSchemaVersionCompatible(current) {
+		state := status
 		return current, required, status, &runtimeSchemaVersionError{
 			State:    state,
 			Current:  current,
 			Required: required,
 		}
-	default:
-		return current, required, status, nil
 	}
+	return current, required, status, nil
 }
 
 func evaluateRuntimeDiscoveryReadiness(ctx context.Context, reportRepo *pgrepo.ReportArtifactRepo, runRepo *pgrepo.OvernightBacktestRunRepo, now time.Time, logger *slog.Logger) (*automation.DiscoveryReadiness, error) {
@@ -1297,7 +1296,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			return false
 		}
 		return operations.BuildReadiness(operations.BuildInput{
-			Database: databaseReady, Schema: currentSchemaVersion == requiredSchemaVersion,
+			Database: databaseReady, Schema: pgrepo.IsSchemaVersionCompatible(currentSchemaVersion),
 			DecisionJournal: tradeDecisionRepo != nil, Scheduler: deps.Automation != nil,
 			OptionsData:          deps.OptionsProvider != nil,
 			PolymarketData:       cfg.Features.EnablePolymarketAutomation && deps.PolymarketClient != nil,
