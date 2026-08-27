@@ -48,6 +48,7 @@ func (p *SettlementPreview) GetDecisionIDs() []uuid.UUID {
 
 // Settler durably cash-settles side-qualified paper event contracts.
 type Settler struct {
+	executionAccount   domain.ExecutionAccountBinding
 	financialLifecycle repository.FinancialLifecycleRepository
 	decisions          settlementDecisionRepository
 	positions          repository.PositionRepository
@@ -56,8 +57,8 @@ type Settler struct {
 	now                func() time.Time
 }
 
-func NewSettler(financialLifecycle repository.FinancialLifecycleRepository, decisions settlementDecisionRepository, positions repository.PositionRepository, trades repository.TradeRepository, replay repository.ReplayEventRepository) *Settler {
-	return &Settler{financialLifecycle: financialLifecycle, decisions: decisions, positions: positions, trades: trades, replay: replay, now: time.Now}
+func NewSettler(executionAccount domain.ExecutionAccountBinding, financialLifecycle repository.FinancialLifecycleRepository, decisions settlementDecisionRepository, positions repository.PositionRepository, trades repository.TradeRepository, replay repository.ReplayEventRepository) *Settler {
+	return &Settler{executionAccount: executionAccount, financialLifecycle: financialLifecycle, decisions: decisions, positions: positions, trades: trades, replay: replay, now: time.Now}
 }
 
 // SettleMarket settles every still-open paper decision for one resolved market.

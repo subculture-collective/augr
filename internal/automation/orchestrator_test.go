@@ -25,6 +25,15 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
+
+func TestNewJobOrchestratorRetainsExecutionAccount(t *testing.T) {
+	orch := NewJobOrchestrator(OrchestratorDeps{ExecutionAccount: testExecutionAccountBinding})
+	if orch.deps.ExecutionAccount != testExecutionAccountBinding {
+		t.Fatal("orchestrator did not retain execution account")
+	}
+}
+
 func TestDiscoveryReadinessLockOmitsFiveJobsAndRecordsSortedDiagnostics(t *testing.T) {
 	readiness := &DiscoveryReadiness{Reason: pgrepo.DiscoveryDeploymentUnavailableReason, Err: pgrepo.ErrDiscoveryDeploymentImmutableBinding}
 	orch := NewJobOrchestrator(OrchestratorDeps{DiscoveryReadiness: readiness})
@@ -1308,7 +1317,7 @@ func TestJobOrchestratorRegisterAllAddsKalshiSettlement(t *testing.T) {
 	t.Parallel()
 	orch := NewJobOrchestrator(OrchestratorDeps{
 		KalshiCatalog:     kalshiCatalogStub{},
-		PredictionSettler: predictionexecution.NewSettler(nil, nil, nil, nil, nil),
+		PredictionSettler: predictionexecution.NewSettler(testExecutionAccountBinding, nil, nil, nil, nil, nil),
 	})
 	orch.RegisterAll()
 	status := singleJobStatus(t, orch, "kalshi_settlement")

@@ -196,26 +196,8 @@ var (
 	runtimeLoadCanonicalAccount = func(ctx context.Context, db *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
 		return pgrepo.NewAccountRepo(db.Pool).GetByID(ctx, accountID)
 	}
-	runtimeNewStrategyRepo = func(deps runtimeDependencies, db *pgrepo.DB) (*pgrepo.StrategyRepo, error) {
-		var repo *pgrepo.StrategyRepo
-		err := constructRuntimeScoped(deps, func() error {
-			repo = pgrepo.NewStrategyRepo(db.Pool)
-			return nil
-		})
-		return repo, err
-	}
-	runtimeConstructStock               runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructOptions             runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructKalshi              runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructPolymarket          runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructCopy                runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructSettlement          runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructRestart             runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructRisk                runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructProjection          runtimeScopedConstructor = constructRuntimeScoped
-	runtimeConstructAutomation          runtimeScopedConstructor = constructRuntimeScoped
-	runtimeNewServer                                             = api.NewServer
-	runtimeDiscoveryDeploymentReadiness                          = func(ctx context.Context, repo *pgrepo.ReportArtifactRepo) (bool, string, error) {
+	runtimeNewServer                    = api.NewServer
+	runtimeDiscoveryDeploymentReadiness = func(ctx context.Context, repo *pgrepo.ReportArtifactRepo) (bool, string, error) {
 		return repo.DiscoveryDeploymentReadiness(ctx)
 	}
 	runtimeReconcileOvernightBacktests = func(ctx context.Context, repo *pgrepo.OvernightBacktestRunRepo, at time.Time, reason string) (int, error) {
@@ -253,23 +235,22 @@ type runtimeLifecycle struct {
 // runtimeDependencies is the single immutable account binding shared by
 // account-scoped runtime components.
 type runtimeDependencies struct {
-	accountID       uuid.UUID
-	environment     domain.AccountEnvironment
-	paperEvaluation domain.PaperEvaluationProfile
+	executionAccount domain.ExecutionAccountBinding
+	paperEvaluation  domain.PaperEvaluationProfile
 }
 
-type runtimeScopedConstructor func(runtimeDependencies, func() error) error
-
-func constructRuntimeScoped(deps runtimeDependencies, construct func() error) error {
-	if deps.accountID == uuid.Nil || (deps.environment != domain.AccountEnvironmentPaperScored && deps.environment != domain.AccountEnvironmentPaperStress) {
-		return fmt.Errorf("invalid runtime account binding")
+func runtimeConstructBound(deps runtimeDependencies, construct func(domain.ExecutionAccountBinding) error) error {
+	if err := deps.executionAccount.Validate(); err != nil {
+		return fmt.Errorf("invalid runtime account binding: %w", err)
 	}
-	return construct()
+	return construct(deps.executionAccount)
 }
 
-func (d runtimeDependencies) AccountID() uuid.UUID { return d.accountID }
+func (d runtimeDependencies) AccountID() uuid.UUID { return d.executionAccount.AccountID() }
 
-func (d runtimeDependencies) Environment() domain.AccountEnvironment { return d.environment }
+func (d runtimeDependencies) Environment() domain.AccountEnvironment {
+	return d.executionAccount.Environment()
+}
 
 func parseCanonicalAccountID(raw string) (uuid.UUID, error) {
 	if strings.TrimSpace(raw) == "" {
@@ -318,7 +299,11 @@ func validateExecutionAccountBinding(cfg config.Config, accountID uuid.UUID, acc
 		!account.BuyingPowerMultiplier.Equal(decimal.NewFromFloat(profile.BuyingPowerMultiplier)) {
 		return runtimeDependencies{}, fmt.Errorf("canonical account %s does not match its paper-evaluation profile", accountID)
 	}
-	return runtimeDependencies{accountID: accountID, environment: account.Environment, paperEvaluation: profile}, nil
+	binding, err := domain.NewExecutionAccountBinding(accountID, account.Environment)
+	if err != nil {
+		return runtimeDependencies{}, fmt.Errorf("bind canonical account %s: %w", accountID, err)
+	}
+	return runtimeDependencies{executionAccount: binding, paperEvaluation: profile}, nil
 }
 
 func (l *runtimeLifecycle) Start() error {
@@ -563,10 +548,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	surfersMetrics := surfersMetricsInst
 	sharedLLMBudget := llm.BuildLLMBudget(cfg.LLM)
 
-	strategyRepo, err := runtimeNewStrategyRepo(runtimeDeps, db)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+	strategyRepo := pgrepo.NewStrategyRepo(db.Pool)
 	runRepo := pgrepo.NewPipelineRunRepo(db.Pool)
 	snapshotRepo := pgrepo.NewPipelineRunSnapshotRepo(db.Pool)
 	decisionRepo := pgrepo.NewAgentDecisionRepo(db.Pool)
@@ -581,8 +563,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	replayEventRepo := pgrepo.NewReplayEventRepo(db.Pool)
 	tradeDecisionRecorder := execution.NewTradeDecisionJournalRecorder(tradeDecisionRepo, replayEventRepo)
 	var predictionSettler *predictionexecution.Settler
-	if err := runtimeConstructSettlement(runtimeDeps, func() error {
-		predictionSettler = predictionexecution.NewSettler(db, tradeDecisionRepo, positionRepo, tradeRepo, replayEventRepo)
+	if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+		predictionSettler = predictionexecution.NewSettler(executionAccount, db, tradeDecisionRepo, positionRepo, tradeRepo, replayEventRepo)
 		return nil
 	}); err != nil {
 		return nil, nil, nil, err
@@ -617,8 +599,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	runRegistry := agent.NewRunContextRegistry()
 
 	var riskEngine *risk.RiskEngineImpl
-	if err := runtimeConstructRisk(runtimeDeps, func() error {
+	if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 		riskEngine = risk.NewRiskEngine(
+			executionAccount,
 			risk.PositionLimits{
 				MaxPerPositionPct:    cfg.Risk.MaxPositionSizePct,
 				MaxTotalPct:          1.0,
@@ -649,9 +632,14 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 	var projectionReader *pgrepo.ProjectionReader
 	var cutoverEvidenceReader *pgrepo.ProjectionReader
-	if err := runtimeConstructProjection(runtimeDeps, func() error {
-		projectionReader = pgrepo.NewProjectionReader(db.Pool)
-		cutoverEvidenceReader = pgrepo.NewProjectionReader(db.Pool)
+	if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+		projectionReader = pgrepo.NewProjectionReader(executionAccount, db.Pool)
+		return nil
+	}); err != nil {
+		return nil, nil, nil, err
+	}
+	if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+		cutoverEvidenceReader = pgrepo.NewProjectionReader(executionAccount, db.Pool)
 		return nil
 	}); err != nil {
 		return nil, nil, nil, err
@@ -723,18 +711,13 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if cfg.Features.EnablePolymarketAutomation {
 		deps.PolymarketAccountRepo = polymarketAccountRepo
 		deps.PolymarketWatchedRepo = polymarketWatchedRepo
-		if err := runtimeConstructPolymarket(runtimeDeps, func() error {
-			polymarketReadClient := polymarketexecution.NewClient(cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, logger)
-			polymarketReadClient.SetAPIBaseURL(cfg.Brokers.Polymarket.APIBaseURL)
-			polymarketReadClient.SetGatewayBaseURL(cfg.Brokers.Polymarket.GatewayBaseURL)
-			if polymarketL2Configured(cfg.Brokers.Polymarket) {
-				polymarketReadClient.SetL2Auth(cfg.Brokers.Polymarket.Address, cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, cfg.Brokers.Polymarket.Passphrase)
-			}
-			deps.PolymarketClient = polymarketReadClient
-			return nil
-		}); err != nil {
-			return nil, nil, nil, err
+		polymarketReadClient := polymarketexecution.NewClient(cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, logger)
+		polymarketReadClient.SetAPIBaseURL(cfg.Brokers.Polymarket.APIBaseURL)
+		polymarketReadClient.SetGatewayBaseURL(cfg.Brokers.Polymarket.GatewayBaseURL)
+		if polymarketL2Configured(cfg.Brokers.Polymarket) {
+			polymarketReadClient.SetL2Auth(cfg.Brokers.Polymarket.Address, cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, cfg.Brokers.Polymarket.Passphrase)
 		}
+		deps.PolymarketClient = polymarketReadClient
 	}
 	var polymarketFeed *polymarketws.Feed
 	var buildPolymarketFeed func() (*polymarketws.Feed, error)
@@ -799,7 +782,13 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if strings.EqualFold(cfg.Environment, "smoke") {
 		pipeline := newSmokePipeline(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)
 		runner := newSmokeRunner(runRepo, snapshotRepo, decisionRepo, eventRepo, runRegistry, logger)
-		strategyRunner := newSmokeStrategyRunner(runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, db, notificationManager, tradeDecisionRecorder, logger)
+		var strategyRunner api.StrategyRunner
+		if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+			strategyRunner = newSmokeStrategyRunner(executionAccount, runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, db, notificationManager, tradeDecisionRecorder, logger)
+			return nil
+		}); err != nil {
+			return nil, nil, nil, err
+		}
 		deps.Runner = strategyRunner
 		if cfg.Features.EnableScheduler {
 			sched = scheduler.NewScheduler(
@@ -829,12 +818,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		var kalshiDataClient, kalshiExecClient *kalshidata.Client
 		var kalshiGov *provgov.ProviderGovernor
 		var kalshiErr error
-		if err := runtimeConstructKalshi(runtimeDeps, func() error {
-			kalshiDataClient, kalshiExecClient, kalshiGov, kalshiErr = newRuntimeKalshiClients(cfg, appMetrics, logger, db)
-			return nil
-		}); err != nil {
-			return nil, nil, nil, err
-		}
+		kalshiDataClient, kalshiExecClient, kalshiGov, kalshiErr = newRuntimeKalshiClients(cfg, appMetrics, logger, db)
 		_ = kalshiGov
 
 		reg := data.NewProviderRegistry()
@@ -874,13 +858,19 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			polymarketClient.SetL2Auth(cfg.Brokers.Polymarket.Address, cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, cfg.Brokers.Polymarket.Passphrase)
 			polymarketClient.SetAPIBaseURL(cfg.Brokers.Polymarket.APIBaseURL)
 			polymarketClient.SetGatewayBaseURL(cfg.Brokers.Polymarket.GatewayBaseURL)
-			polymarketExecutionReconciler = polymarketexecution.NewReconciler(polymarketexecution.ReconcilerDeps{
-				Broker:       polymarketexecution.NewBroker(polymarketClient),
-				PositionRepo: positionRepo,
-				AuditLogRepo: auditLogRepo,
-				Metrics:      appMetrics,
-				Logger:       logger,
-			})
+			if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+				polymarketExecutionReconciler = polymarketexecution.NewReconciler(polymarketexecution.ReconcilerDeps{
+					ExecutionAccount: executionAccount,
+					Broker:           polymarketexecution.NewBroker(polymarketClient),
+					PositionRepo:     positionRepo,
+					AuditLogRepo:     auditLogRepo,
+					Metrics:          appMetrics,
+					Logger:           logger,
+				})
+				return nil
+			}); err != nil {
+				return nil, nil, nil, err
+			}
 		}
 		if strings.TrimSpace(cfg.Brokers.Alpaca.APIKey) != "" && strings.TrimSpace(cfg.Brokers.Alpaca.APISecret) != "" {
 			alpacaClient := alpacaexecution.NewClient(
@@ -890,10 +880,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				logger,
 			)
 			var alpacaAdapter *automation.AlpacaClientAdapter
-			if err := runtimeConstructRestart(runtimeDeps, func() error {
+			if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 				alpacaAdapter = automation.NewAlpacaClientAdapter(alpacaClient)
 				alpacaReconciler = automation.NewAlpacaReconciler(automation.AlpacaReconcilerDeps{
-					Broker: alpacaAdapter, PLAggregate: pgrepo.NewAlpacaPLAggregateRepo(db.Pool), StrategyRepo: strategyRepo,
+					ExecutionAccount: executionAccount,
+					Broker:           alpacaAdapter, PLAggregate: pgrepo.NewAlpacaPLAggregateRepo(db.Pool), StrategyRepo: strategyRepo,
 					OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo, AuditLogRepo: auditLogRepo, Logger: logger,
 				})
 				return nil
@@ -916,12 +907,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if strings.TrimSpace(cfg.DataProviders.Polygon.APIKey) != "" {
 			optProviders = append(optProviders, polygon.NewOptionsProvider(polygon.NewClient(cfg.DataProviders.Polygon.APIKey, logger, polygonLimiter)))
 		}
-		if err := runtimeConstructOptions(runtimeDeps, func() error {
-			deps.OptionsProvider = data.NewOptionsProviderChain(logger, optProviders...)
-			return nil
-		}); err != nil {
-			return nil, nil, nil, err
-		}
+		deps.OptionsProvider = data.NewOptionsProviderChain(logger, optProviders...)
 		deps.ResearchScanner = service.NewResearchScannerService(deps.OptionsProvider, deps.PolymarketClient, logger)
 		// Events provider: Finnhub provides earnings, filings, economic, IPO calendars.
 		if strings.TrimSpace(cfg.DataProviders.Finnhub.APIKey) != "" {
@@ -944,8 +930,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				kalshiLiveClient = liveClient
 			}
 		}
-		if err := runtimeConstructStock(runtimeDeps, func() error {
+		if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 			strategyRunner = newRealStrategyRunner(
+				executionAccount,
 				cfg,
 				dataService,
 				runRepo,
@@ -993,7 +980,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		} else {
 			logger.Warn("copy trading SEC refresh disabled: SEC_EDGAR_APP_EMAIL is not configured")
 		}
-		if err := runtimeConstructCopy(runtimeDeps, func() error {
+		if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 			deps.CopyTrading = copytrading.NewService(copytrading.ServiceDeps{
 				Repo:        copyTradingRepo,
 				OriginRuns:  pgrepo.NewCopyOriginRepo(db.Pool),
@@ -1010,7 +997,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					Venue: "alpaca", ObservationNamespace: "quotes/alpaca",
 				},
 				Executor: copytrading.NewOrderManagerExecutor(copytrading.OrderManagerExecutorDeps{
-					Broker: strategyRunner.localPaperBroker, Risk: riskEngine, Positions: positionRepo,
+					ExecutionAccount: executionAccount,
+					Broker:           strategyRunner.localPaperBroker, Risk: riskEngine, Positions: positionRepo,
 					Orders: orderRepo, Trades: tradeRepo, FinancialLifecycle: db, Audit: auditLogRepo,
 					Events: eventRepo, DecisionRecorder: tradeDecisionRecorder, Metrics: appMetrics, Logger: logger,
 				}),
@@ -1036,7 +1024,12 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		} else {
 			kalshiCatalog = kalshidiscovery.NewClientWithProvenance(kalshiDataClient, cfg.Brokers.Kalshi.APIBaseURL, cfg.Brokers.Kalshi.Demo)
 			if kalshiLiveClient != nil && strings.TrimSpace(cfg.Brokers.Kalshi.APIKeyID) != "" && strings.TrimSpace(cfg.Brokers.Kalshi.PrivateKeyPEMB64) != "" {
-				kalshiExecutionReconciler = kalshiexecution.NewReconciler(kalshiexecution.ReconcilerDeps{Broker: kalshiexecution.NewBroker(kalshiLiveClient), PositionRepo: positionRepo, Logger: logger})
+				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+					kalshiExecutionReconciler = kalshiexecution.NewReconciler(kalshiexecution.ReconcilerDeps{ExecutionAccount: executionAccount, Broker: kalshiexecution.NewBroker(kalshiLiveClient), PositionRepo: positionRepo, Logger: logger})
+					return nil
+				}); err != nil {
+					return nil, nil, nil, err
+				}
 			}
 		}
 
@@ -1114,8 +1107,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					PaperBroker:            strategyRunner.localPaperBroker,
 				})
 				var orch *automation.JobOrchestrator
-				if err := runtimeConstructAutomation(runtimeDeps, func() error {
+				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 					orch = automation.NewJobOrchestrator(automation.OrchestratorDeps{
+						ExecutionAccount:            executionAccount,
 						DiscoveryReadiness:          discoveryReadiness,
 						Universe:                    deps.Universe,
 						Polygon:                     polygonClientForAuto,
@@ -1582,6 +1576,7 @@ func newRedisHealthCheck(cfg config.Config) (api.HealthCheck, func()) {
 }
 
 type smokeStrategyRunner struct {
+	executionAccount      domain.ExecutionAccountBinding
 	runner                *agent.Runner
 	runRepo               repository.PipelineRunRepository
 	decisionRepo          repository.AgentDecisionRepository
@@ -1599,6 +1594,7 @@ type smokeStrategyRunner struct {
 }
 
 func newSmokeStrategyRunner(
+	executionAccount domain.ExecutionAccountBinding,
 	runner *agent.Runner,
 	runRepo repository.PipelineRunRepository,
 	decisionRepo repository.AgentDecisionRepository,
@@ -1621,6 +1617,7 @@ func newSmokeStrategyRunner(
 	}
 
 	return &smokeStrategyRunner{
+		executionAccount:      executionAccount,
 		runner:                runner,
 		runRepo:               runRepo,
 		decisionRepo:          decisionRepo,

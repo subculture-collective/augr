@@ -8,7 +8,7 @@ import (
 
 // NewPosition creates a position stamped with its canonical execution scope.
 func NewPosition(scope ExecutionScope, ticker string, side domain.PositionSide, quantity, avgEntry float64) (*domain.Position, error) {
-	if err := validateExecutionAccount(scope.accountID, scope.environment); err != nil {
+	if err := scope.executionAccount.Validate(); err != nil {
 		return nil, err
 	}
 	if scope.originType == "" || scope.originID == "" {
@@ -28,8 +28,8 @@ func NewPosition(scope ExecutionScope, ticker string, side domain.PositionSide, 
 	}
 
 	return &domain.Position{
-		AccountID:   scope.accountID,
-		Environment: scope.environment,
+		AccountID:   scope.AccountID(),
+		Environment: scope.Environment(),
 		OriginType:  string(scope.originType),
 		OriginID:    scope.originID,
 		Ticker:      ticker,

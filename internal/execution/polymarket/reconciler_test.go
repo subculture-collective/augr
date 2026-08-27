@@ -264,6 +264,17 @@ func newReconcilerTestHarness(brokerPositions, localPositions []domain.Position)
 	return reconciler, auditRepo, metrics
 }
 
+func TestNewReconcilerRetainsExecutionAccount(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := NewReconciler(ReconcilerDeps{ExecutionAccount: binding})
+	if reconciler.executionAccount != binding {
+		t.Fatal("reconciler did not retain execution account")
+	}
+}
+
 func assertSingleDrift(t *testing.T, entries []*domain.AuditLogEntry, wantType, wantKey string, wantLocal, wantExternal float64) {
 	t.Helper()
 	if got := len(entries); got != 1 {

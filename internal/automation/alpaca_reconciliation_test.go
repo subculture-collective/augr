@@ -15,6 +15,17 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+func TestNewAlpacaReconcilerRetainsExecutionAccount(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: binding})
+	if reconciler.executionAccount != binding {
+		t.Fatal("reconciler did not retain execution account")
+	}
+}
+
 type alpacaReconciliationBrokerStub struct {
 	positions []domain.Position
 	orders    []BrokerOrderSnapshot

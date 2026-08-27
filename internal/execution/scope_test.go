@@ -28,6 +28,9 @@ func TestNewStrategyExecutionScope(t *testing.T) {
 	}
 
 	assertScopeIdentity(t, scope, ledger.ExecutionOriginStrategyVersion, testStrategyID.String())
+	if scope.executionAccount.AccountID() != testScopeAccountID || scope.executionAccount.Environment() != domain.AccountEnvironmentPaperScored {
+		t.Fatalf("retained binding = %s/%q", scope.executionAccount.AccountID(), scope.executionAccount.Environment())
+	}
 	gotRun, ok := scope.PipelineRun()
 	if !ok || gotRun.ID != run.ID || !gotRun.TradeDate.Equal(run.TradeDate) {
 		t.Fatalf("PipelineRun() = %+v, %t; want %+v, true", gotRun, ok, run)

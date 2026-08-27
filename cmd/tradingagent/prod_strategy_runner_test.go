@@ -27,6 +27,20 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
 
+func TestNewRealStrategyRunnerRetainsExecutionAccount(t *testing.T) {
+	runner := newRealStrategyRunner(
+		testExecutionAccountBinding,
+		config.Config{},
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		slogDiscardLogger(),
+	)
+	t.Cleanup(runner.polymarketWorkerStop)
+	if runner.executionAccount != testExecutionAccountBinding {
+		t.Fatal("real runner did not retain execution account")
+	}
+}
+
 func withNativeAuditDeps(runner *realStrategyRunner) *realStrategyRunner {
 	runner.runRepo = &stubPipelineRunRepo{}
 	runner.eventRepo = &recordingStrategyPreparationEventRepo{}

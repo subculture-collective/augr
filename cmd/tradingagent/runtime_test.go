@@ -46,6 +46,8 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
+
 func TestMain(m *testing.M) {
 	original := runtimeDiscoveryDeploymentReadiness
 	originalAccountLoader := runtimeLoadCanonicalAccount
@@ -685,149 +687,50 @@ func TestExecutionAccountRejectsNonFinitePaperValuesWithoutPanic(t *testing.T) {
 	}
 }
 
-func TestExecutionAccountFailureStopsBeforeScopedConstructors(t *testing.T) {
-	originalNewDB := runtimeNewDB
-	originalSchemaVersion := runtimeCurrentSchemaVersion
-	originalLoader := runtimeLoadCanonicalAccount
-	originalStrategyRepo := runtimeNewStrategyRepo
-	originalCloseDB := runtimeCloseDB
-	originalConstructors := []runtimeScopedConstructor{
-		runtimeConstructStock, runtimeConstructOptions, runtimeConstructKalshi, runtimeConstructPolymarket,
-		runtimeConstructCopy, runtimeConstructSettlement, runtimeConstructRestart, runtimeConstructRisk,
-		runtimeConstructProjection, runtimeConstructAutomation,
-	}
-	t.Cleanup(func() {
-		runtimeNewDB = originalNewDB
-		runtimeCurrentSchemaVersion = originalSchemaVersion
-		runtimeLoadCanonicalAccount = originalLoader
-		runtimeNewStrategyRepo = originalStrategyRepo
-		runtimeCloseDB = originalCloseDB
-		runtimeConstructStock = originalConstructors[0]
-		runtimeConstructOptions = originalConstructors[1]
-		runtimeConstructKalshi = originalConstructors[2]
-		runtimeConstructPolymarket = originalConstructors[3]
-		runtimeConstructCopy = originalConstructors[4]
-		runtimeConstructSettlement = originalConstructors[5]
-		runtimeConstructRestart = originalConstructors[6]
-		runtimeConstructRisk = originalConstructors[7]
-		runtimeConstructProjection = originalConstructors[8]
-		runtimeConstructAutomation = originalConstructors[9]
-	})
-
+func TestRuntimeConstructBoundValidatesAndPassesBinding(t *testing.T) {
 	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
-	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) { return &pgrepo.DB{}, nil }
-	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) { return pgrepo.RequiredSchemaVersion, nil }
-	var constructors atomic.Int32
-	runtimeNewStrategyRepo = func(runtimeDependencies, *pgrepo.DB) (*pgrepo.StrategyRepo, error) {
-		constructors.Add(1)
-		return &pgrepo.StrategyRepo{}, nil
+	binding, err := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
 	}
-	observeConstructor := func(runtimeDependencies, func() error) error {
-		constructors.Add(1)
+	deps := runtimeDependencies{executionAccount: binding}
+	called := false
+	if err := runtimeConstructBound(deps, func(got domain.ExecutionAccountBinding) error {
+		called = true
+		if got.AccountID() != accountID || got.Environment() != domain.AccountEnvironmentPaperScored {
+			t.Fatalf("binding = %s/%s", got.AccountID(), got.Environment())
+		}
 		return nil
+	}); err != nil {
+		t.Fatalf("runtimeConstructBound() error = %v", err)
 	}
-	runtimeConstructStock = observeConstructor
-	runtimeConstructOptions = observeConstructor
-	runtimeConstructKalshi = observeConstructor
-	runtimeConstructPolymarket = observeConstructor
-	runtimeConstructCopy = observeConstructor
-	runtimeConstructSettlement = observeConstructor
-	runtimeConstructRestart = observeConstructor
-	runtimeConstructRisk = observeConstructor
-	runtimeConstructProjection = observeConstructor
-	runtimeConstructAutomation = observeConstructor
-	runtimeCloseDB = func(*pgrepo.DB) {}
-
-	valid := validRuntimeAccount(accountID)
-	stressCash := valid
-	stressCash.Environment = domain.AccountEnvironmentPaperStress
-	stressCash.StorageNamespace = "paper_stress/default"
-	stressCash.EvidenceClass = domain.PaperEvidenceClassSynthetic
-	stressCash.BuyingPowerMultiplier = decimal.Zero
-	stressCash.MarginProfile = domain.MarginProfileCash
-	for _, test := range []struct {
-		name      string
-		configure func(*config.Config)
-		loaded    domain.Account
-		loadErr   error
-		wantErr   string
-	}{
-		{name: "missing ID", configure: func(c *config.Config) { c.CanonicalAccountID = "" }, loaded: valid, wantErr: "is required"},
-		{name: "malformed ID", configure: func(c *config.Config) { c.CanonicalAccountID = "bad" }, loaded: valid, wantErr: "valid non-zero UUID"},
-		{name: "load failure", loaded: valid, loadErr: errors.New("account unavailable"), wantErr: "account unavailable"},
-		{name: "wrong loaded ID", loaded: func() domain.Account { a := valid; a.ID = uuid.New(); return a }(), wantErr: "was not loaded"},
-		{name: "invalid invariant", loaded: func() domain.Account { a := valid; a.Name = ""; return a }(), wantErr: "account name and venue are required"},
-		{name: "inactive", loaded: func() domain.Account { a := valid; a.Status = domain.AccountStatusPaused; return a }(), wantErr: "must be active"},
-		{name: "live", loaded: func() domain.Account {
-			a := valid
-			a.Environment = domain.AccountEnvironmentLive
-			a.EvidenceClass = "non_promotion"
-			return a
-		}(), wantErr: "paper_scored or paper_stress"},
-		{name: "environment mismatch", loaded: func() domain.Account {
-			a := valid
-			a.Environment = domain.AccountEnvironmentPaperStress
-			a.StorageNamespace = "paper_stress/default"
-			a.EvidenceClass = domain.PaperEvidenceClassSynthetic
-			return a
-		}(), wantErr: "does not match"},
-		{name: "stress zero buying power cash margin", configure: func(c *config.Config) {
-			c.Paper.EvaluationMode = domain.PaperEvaluationModeStress
-			c.Paper.BuyingPowerMultiplier = 0
-		}, loaded: stressCash, wantErr: "stress-unlimited"},
-		{name: "NaN paper value", configure: func(c *config.Config) { c.Paper.InitialCapital = math.NaN() }, loaded: valid, wantErr: "must be finite"},
-		{name: "infinite paper value", configure: func(c *config.Config) { c.Paper.BuyingPowerMultiplier = math.Inf(1) }, loaded: valid, wantErr: "must be finite"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			constructors.Store(0)
-			runtimeLoadCanonicalAccount = func(context.Context, *pgrepo.DB, uuid.UUID) (*domain.Account, error) {
-				account := test.loaded
-				return &account, test.loadErr
-			}
-			cfg := runtimeTestConfig(config.Config{})
-			if test.configure != nil {
-				test.configure(&cfg)
-			}
-			_, _, _, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
-			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-				t.Fatalf("newAPIServer() error = %v, want %q", err, test.wantErr)
-			}
-			if got := constructors.Load(); got != 0 {
-				t.Fatalf("scoped constructor calls = %d, want 0", got)
-			}
-		})
+	if !called {
+		t.Fatal("callback was not called")
 	}
 }
 
-func TestScopedConstructorsExposeCanonicalBinding(t *testing.T) {
-	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
-	deps := runtimeDependencies{accountID: accountID, environment: domain.AccountEnvironmentPaperScored}
-	constructors := []struct {
-		name string
-		call runtimeScopedConstructor
-	}{
-		{name: "stock", call: runtimeConstructStock}, {name: "options", call: runtimeConstructOptions},
-		{name: "Kalshi", call: runtimeConstructKalshi}, {name: "Polymarket", call: runtimeConstructPolymarket},
-		{name: "copy", call: runtimeConstructCopy}, {name: "settlement", call: runtimeConstructSettlement},
-		{name: "restart", call: runtimeConstructRestart}, {name: "risk", call: runtimeConstructRisk},
-		{name: "projection", call: runtimeConstructProjection}, {name: "automation", call: runtimeConstructAutomation},
+func TestRuntimeConstructBoundRejectsInvalidBindingBeforeCallback(t *testing.T) {
+	called := false
+	err := runtimeConstructBound(runtimeDependencies{}, func(domain.ExecutionAccountBinding) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("runtimeConstructBound() error = nil")
 	}
-	for _, constructor := range constructors {
-		t.Run(constructor.name, func(t *testing.T) {
-			called := false
-			if err := constructor.call(deps, func() error {
-				called = true
-				if deps.AccountID() != accountID || deps.Environment() != domain.AccountEnvironmentPaperScored {
-					t.Fatalf("binding = %s/%s", deps.AccountID(), deps.Environment())
-				}
-				return nil
-			}); err != nil {
-				t.Fatalf("constructor error = %v", err)
-			}
-			if !called {
-				t.Fatal("underlying constructor was not called")
-			}
-		})
+	if called {
+		t.Fatal("callback called for invalid binding")
+	}
+}
+
+func TestNewSmokeStrategyRunnerRetainsExecutionAccount(t *testing.T) {
+	runner := newSmokeStrategyRunner(testExecutionAccountBinding, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, slogDiscardLogger())
+	smoke, ok := runner.(*smokeStrategyRunner)
+	if !ok {
+		t.Fatalf("runner type = %T", runner)
+	}
+	if smoke.executionAccount != testExecutionAccountBinding {
+		t.Fatal("smoke runner did not retain execution account")
 	}
 }
 
@@ -2148,7 +2051,7 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 	t.Parallel()
 
 	positionRepo := stubPositionRepo{}
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
 	runner := &realStrategyRunner{
 		positionRepo: positionRepo,
 		riskEngine:   engine,
@@ -2320,7 +2223,7 @@ func TestRealStrategyRunnerExecutionMetricsHelpers(t *testing.T) {
 	t.Parallel()
 
 	positionRepo := metricPositionRepo{count: 2}
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
 	if err := engine.ActivateKillSwitch(context.Background(), "test"); err != nil {
 		t.Fatalf("ActivateKillSwitch() error = %v", err)
 	}

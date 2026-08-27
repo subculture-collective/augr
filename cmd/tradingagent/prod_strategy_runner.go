@@ -83,6 +83,7 @@ type polymarketTickFeed interface {
 }
 
 type realStrategyRunner struct {
+	executionAccount       domain.ExecutionAccountBinding
 	runGroupMu             sync.Mutex
 	runGroup               *runcontrol.Group
 	cfg                    config.Config
@@ -125,6 +126,7 @@ type realStrategyRunner struct {
 }
 
 func newRealStrategyRunner(
+	executionAccount domain.ExecutionAccountBinding,
 	cfg config.Config,
 	dataService marketDataService,
 	runRepo repository.PipelineRunRepository,
@@ -154,6 +156,7 @@ func newRealStrategyRunner(
 
 	workerCtx, workerStop := context.WithCancel(context.Background())
 	runner := &realStrategyRunner{
+		executionAccount:      executionAccount,
 		runGroup:              runcontrol.NewGroup(),
 		cfg:                   cfg,
 		globals:               globalSettingsFromConfig(cfg),

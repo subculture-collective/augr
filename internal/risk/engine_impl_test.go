@@ -8,11 +8,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
+
+func TestNewRiskEngineRetainsExecutionAccount(t *testing.T) {
+	engine := newTestEngine()
+	if engine.executionAccount != testExecutionAccountBinding {
+		t.Fatal("risk engine did not retain execution account")
+	}
+}
+
 func newTestEngine() *RiskEngineImpl {
-	e := NewRiskEngine(DefaultPositionLimits(), DefaultCircuitBreakerConfig(), nil, nil)
+	e := NewRiskEngine(testExecutionAccountBinding, DefaultPositionLimits(), DefaultCircuitBreakerConfig(), nil, nil)
 	// Disable file and env mechanisms by default so existing tests are unaffected.
 	e.fileExistsFunc = func(string) bool { return false }
 	e.getEnvFunc = func(string) string { return "" }

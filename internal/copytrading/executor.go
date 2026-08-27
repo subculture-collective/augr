@@ -13,6 +13,7 @@ import (
 )
 
 type OrderManagerExecutorDeps struct {
+	ExecutionAccount   domain.ExecutionAccountBinding
 	Broker             *paper.PaperBroker
 	Risk               risk.RiskEngine
 	Positions          repository.PositionRepository

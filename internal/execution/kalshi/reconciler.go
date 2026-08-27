@@ -17,9 +17,10 @@ const kalshiReconcilePageSize = 1000
 
 // ReconcilerDeps configures the read-only Kalshi reconciliation check.
 type ReconcilerDeps struct {
-	Broker       execution.Broker
-	PositionRepo repository.PositionRepository
-	Logger       *slog.Logger
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           execution.Broker
+	PositionRepo     repository.PositionRepository
+	Logger           *slog.Logger
 }
 
 // DriftRecord describes one read-only reconciliation mismatch.
@@ -44,9 +45,10 @@ type Result struct {
 
 // Reconciler compares live broker positions to local open Kalshi positions.
 type Reconciler struct {
-	broker       execution.Broker
-	positionRepo repository.PositionRepository
-	logger       *slog.Logger
+	executionAccount domain.ExecutionAccountBinding
+	broker           execution.Broker
+	positionRepo     repository.PositionRepository
+	logger           *slog.Logger
 }
 
 // NewReconciler constructs a read-only Kalshi reconciler.
@@ -55,7 +57,7 @@ func NewReconciler(deps ReconcilerDeps) *Reconciler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Reconciler{broker: deps.Broker, positionRepo: deps.PositionRepo, logger: logger}
+	return &Reconciler{executionAccount: deps.ExecutionAccount, broker: deps.Broker, positionRepo: deps.PositionRepo, logger: logger}
 }
 
 // Check compares broker and local Kalshi positions without mutating state.

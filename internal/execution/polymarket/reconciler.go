@@ -24,11 +24,12 @@ type ReconcilerMetrics interface {
 }
 
 type ReconcilerDeps struct {
-	Broker       execution.Broker
-	PositionRepo repository.PositionRepository
-	AuditLogRepo repository.AuditLogRepository
-	Metrics      ReconcilerMetrics
-	Logger       *slog.Logger
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           execution.Broker
+	PositionRepo     repository.PositionRepository
+	AuditLogRepo     repository.AuditLogRepository
+	Metrics          ReconcilerMetrics
+	Logger           *slog.Logger
 }
 
 type ReconcileSummary struct {
@@ -55,11 +56,12 @@ type reconciledPosition struct {
 }
 
 type Reconciler struct {
-	broker       execution.Broker
-	positionRepo repository.PositionRepository
-	auditLogRepo repository.AuditLogRepository
-	metrics      ReconcilerMetrics
-	logger       *slog.Logger
+	executionAccount domain.ExecutionAccountBinding
+	broker           execution.Broker
+	positionRepo     repository.PositionRepository
+	auditLogRepo     repository.AuditLogRepository
+	metrics          ReconcilerMetrics
+	logger           *slog.Logger
 
 	mu   sync.Mutex
 	seen map[string]struct{}
@@ -71,12 +73,13 @@ func NewReconciler(deps ReconcilerDeps) *Reconciler {
 		logger = slog.Default()
 	}
 	return &Reconciler{
-		broker:       deps.Broker,
-		positionRepo: deps.PositionRepo,
-		auditLogRepo: deps.AuditLogRepo,
-		metrics:      deps.Metrics,
-		logger:       logger,
-		seen:         make(map[string]struct{}),
+		executionAccount: deps.ExecutionAccount,
+		broker:           deps.Broker,
+		positionRepo:     deps.PositionRepo,
+		auditLogRepo:     deps.AuditLogRepo,
+		metrics:          deps.Metrics,
+		logger:           logger,
+		seen:             make(map[string]struct{}),
 	}
 }
 

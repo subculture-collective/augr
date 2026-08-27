@@ -21,6 +21,8 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
 
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
+
 // ---------------------------------------------------------------------------
 // Mock implementations
 // ---------------------------------------------------------------------------
@@ -1583,7 +1585,7 @@ func TestProcessSignal_RejectsWhenPerMarketExposureWouldExceedLimit(t *testing.T
 			tradeRepo := &mockTradeRepo{}
 			auditRepo := &mockAuditLogRepo{}
 
-			realRiskEng := risk.NewRiskEngine(risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slog.Default())
+			realRiskEng := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slog.Default())
 			realRiskEng.SetFileExistsFunc(func(string) bool { return false })
 			realRiskEng.SetGetEnvFunc(func(string) string { return "" })
 

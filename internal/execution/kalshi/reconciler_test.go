@@ -200,3 +200,14 @@ func newReconcilerTestHarness(brokerPositions, localPositions []domain.Position)
 		PositionRepo: &reconcilerPositionRepoStub{positions: localPositions},
 	})
 }
+
+func TestNewReconcilerRetainsExecutionAccount(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := NewReconciler(ReconcilerDeps{ExecutionAccount: binding})
+	if reconciler.executionAccount != binding {
+		t.Fatal("reconciler did not retain execution account")
+	}
+}

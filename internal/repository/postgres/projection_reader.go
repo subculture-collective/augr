@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/google/uuid"
@@ -15,19 +16,28 @@ import (
 )
 
 // ProjectionReader is the HTTP runtime's read-only canonical valuation seam.
-type ProjectionReader struct{ pool *pgxpool.Pool }
+type ProjectionReader struct {
+	executionAccount domain.ExecutionAccountBinding
+	pool             *pgxpool.Pool
+}
 
 var (
 	_ repository.ProjectionReader      = (*ProjectionReader)(nil)
 	_ repository.CutoverEvidenceReader = (*ProjectionReader)(nil)
 )
 
-func NewProjectionReader(pool *pgxpool.Pool) *ProjectionReader { return &ProjectionReader{pool: pool} }
+func NewProjectionReader(executionAccount domain.ExecutionAccountBinding, pool *pgxpool.Pool) *ProjectionReader {
+	return &ProjectionReader{executionAccount: executionAccount, pool: pool}
+}
 
 func (reader *ProjectionReader) GetLatestPortfolioProjection(ctx context.Context, accountID uuid.UUID, generatedAt time.Time) (*repository.ProjectionSnapshot, error) {
-	if reader == nil || reader.pool == nil || accountID == uuid.Nil {
+	if reader == nil || accountID != reader.executionAccount.AccountID() {
+		return nil, repository.ErrNotFound
+	}
+	if reader.pool == nil {
 		return nil, fmt.Errorf("postgres: projection reader and account ID are required")
 	}
+	boundAccountID := reader.executionAccount.AccountID()
 	var checkpoint ledger.ProjectionCheckpoint
 	var maxMarkAgeMicroseconds int64
 	var reconciliation pgtype.Bool
@@ -66,7 +76,7 @@ func (reader *ProjectionReader) GetLatestPortfolioProjection(ctx context.Context
 		   >= c.as_of-c.max_mark_age_microseconds*interval '1 microsecond',true))
 	FROM projection_checkpoints c
 	WHERE c.account_id=$1 AND c.projection_type=$2 AND c.projection_version IS NOT NULL AND c.as_of <= $3
-	ORDER BY c.as_of DESC,c.created_at DESC,c.id DESC LIMIT 1`, accountID, ledger.PortfolioProjectionType, generatedAt.UTC()).Scan(
+	ORDER BY c.as_of DESC,c.created_at DESC,c.id DESC LIMIT 1`, boundAccountID, ledger.PortfolioProjectionType, generatedAt.UTC()).Scan(
 		&checkpoint.ID, &checkpoint.AccountID, &checkpoint.ProjectionType, &checkpoint.ThroughTransactionID,
 		&checkpoint.ProjectionVersion, &checkpoint.AsOf, &checkpoint.FIFO, &checkpoint.BaseCurrency,
 		&checkpoint.MarkSource, &checkpoint.MarkNamespace, &maxMarkAgeMicroseconds,
@@ -100,9 +110,13 @@ func (reader *ProjectionReader) GetLatestPortfolioProjection(ctx context.Context
 }
 
 func (reader *ProjectionReader) GetCutoverEvidenceInventory(ctx context.Context, accountID uuid.UUID) (*repository.CutoverEvidenceInventory, error) {
-	if reader == nil || reader.pool == nil || accountID == uuid.Nil {
+	if reader == nil || accountID != reader.executionAccount.AccountID() {
+		return nil, repository.ErrNotFound
+	}
+	if reader.pool == nil {
 		return nil, fmt.Errorf("postgres: cutover evidence reader and account ID are required")
 	}
+	boundAccountID := reader.executionAccount.AccountID()
 	var inventory repository.CutoverEvidenceInventory
 	var scopeID, scopeAccountID pgtype.UUID
 	err := reader.pool.QueryRow(ctx, `SELECT
@@ -112,7 +126,7 @@ func (reader *ProjectionReader) GetCutoverEvidenceInventory(ctx context.Context,
 		(SELECT count(*) FROM report_artifacts r JOIN backtest_runs br ON br.id=r.backtest_run_id WHERE r.scope_id=selected.id AND br.scope_id IS DISTINCT FROM r.scope_id),
 		(SELECT count(*) FROM report_artifacts r WHERE r.scope_id=selected.id AND r.status='completed' AND (r.backtest_run_id IS NULL OR r.report_sha256 IS NULL OR r.report_bytes IS NULL))
 	FROM (SELECT s.id,s.account_id FROM paper_evaluation_scopes s JOIN report_artifacts r ON r.scope_id=s.id
-		 WHERE s.account_id=$1 AND r.status='completed' ORDER BY r.completed_at DESC NULLS LAST,r.id DESC LIMIT 1) selected`, accountID).Scan(
+		 WHERE s.account_id=$1 AND r.status='completed' ORDER BY r.completed_at DESC NULLS LAST,r.id DESC LIMIT 1) selected`, boundAccountID).Scan(
 		&scopeID, &scopeAccountID, &inventory.ScopedArtifacts, &inventory.LegacyArtifacts, &inventory.ScopeMismatchCount, &inventory.MissingCanonicalLinks,
 	)
 	if err != nil {

@@ -90,14 +90,15 @@ type BrokerFillSnapshot struct {
 
 // AlpacaReconcilerDeps bundles repository and broker dependencies.
 type AlpacaReconcilerDeps struct {
-	Broker       AlpacaReconciliationBroker
-	PLAggregate  repository.AlpacaPLAggregateRepository
-	StrategyRepo StrategyLookupRepository
-	OrderRepo    OrderPersistence
-	PositionRepo PositionPersistence
-	TradeRepo    TradePersistence
-	AuditLogRepo repository.AuditLogRepository
-	Logger       *slog.Logger
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           AlpacaReconciliationBroker
+	PLAggregate      repository.AlpacaPLAggregateRepository
+	StrategyRepo     StrategyLookupRepository
+	OrderRepo        OrderPersistence
+	PositionRepo     PositionPersistence
+	TradeRepo        TradePersistence
+	AuditLogRepo     repository.AuditLogRepository
+	Logger           *slog.Logger
 }
 
 // AlpacaReconcileSummary reports how many local records changed during a run.
@@ -189,14 +190,15 @@ func (r *AlpacaReconciler) ReconciliationReport(ctx context.Context) (AlpacaPLRe
 
 // AlpacaReconciler imports Alpaca broker state into local orders, positions, and trades tables.
 type AlpacaReconciler struct {
-	broker       AlpacaReconciliationBroker
-	plAggregate  repository.AlpacaPLAggregateRepository
-	strategyRepo StrategyLookupRepository
-	orderRepo    OrderPersistence
-	positionRepo PositionPersistence
-	tradeRepo    TradePersistence
-	auditLogRepo repository.AuditLogRepository
-	logger       *slog.Logger
+	executionAccount domain.ExecutionAccountBinding
+	broker           AlpacaReconciliationBroker
+	plAggregate      repository.AlpacaPLAggregateRepository
+	strategyRepo     StrategyLookupRepository
+	orderRepo        OrderPersistence
+	positionRepo     PositionPersistence
+	tradeRepo        TradePersistence
+	auditLogRepo     repository.AuditLogRepository
+	logger           *slog.Logger
 }
 
 func NewAlpacaReconciler(deps AlpacaReconcilerDeps) *AlpacaReconciler {
@@ -205,14 +207,15 @@ func NewAlpacaReconciler(deps AlpacaReconcilerDeps) *AlpacaReconciler {
 		logger = slog.Default()
 	}
 	return &AlpacaReconciler{
-		broker:       deps.Broker,
-		plAggregate:  deps.PLAggregate,
-		strategyRepo: deps.StrategyRepo,
-		orderRepo:    deps.OrderRepo,
-		positionRepo: deps.PositionRepo,
-		tradeRepo:    deps.TradeRepo,
-		auditLogRepo: deps.AuditLogRepo,
-		logger:       logger,
+		executionAccount: deps.ExecutionAccount,
+		broker:           deps.Broker,
+		plAggregate:      deps.PLAggregate,
+		strategyRepo:     deps.StrategyRepo,
+		orderRepo:        deps.OrderRepo,
+		positionRepo:     deps.PositionRepo,
+		tradeRepo:        deps.TradeRepo,
+		auditLogRepo:     deps.AuditLogRepo,
+		logger:           logger,
 	}
 }
 

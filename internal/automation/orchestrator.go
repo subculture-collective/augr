@@ -117,6 +117,7 @@ type TickerDiscoveryJobConfig struct {
 
 // OrchestratorDeps bundles external dependencies required by the orchestrator.
 type OrchestratorDeps struct {
+	ExecutionAccount             domain.ExecutionAccountBinding
 	DiscoveryReadiness           *DiscoveryReadiness
 	Universe                     *universe.Universe
 	Polygon                      *polygon.Client
