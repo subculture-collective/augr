@@ -42,16 +42,38 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 )
 
 func TestMain(m *testing.M) {
 	original := runtimeDiscoveryDeploymentReadiness
+	originalAccountLoader := runtimeLoadCanonicalAccount
 	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
 		return true, "", nil
 	}
+	runtimeLoadCanonicalAccount = func(_ context.Context, _ *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
+		return &domain.Account{
+			ID: accountID, Environment: domain.AccountEnvironmentPaperScored, Status: domain.AccountStatusActive,
+			StorageNamespace: "paper_scored/default", EvidenceClass: domain.PaperEvidenceClassPromotion,
+			StartingCapital: decimal.NewFromInt(100_000), BuyingPowerMultiplier: decimal.NewFromInt(2),
+		}, nil
+	}
 	code := m.Run()
 	runtimeDiscoveryDeploymentReadiness = original
+	runtimeLoadCanonicalAccount = originalAccountLoader
 	os.Exit(code)
+}
+
+func runtimeTestConfig(cfg config.Config) config.Config {
+	cfg.CanonicalAccountID = "00000000-0000-4000-8000-000000000064"
+	cfg.Paper = config.PaperConfig{
+		EvaluationMode:        domain.PaperEvaluationModeScored,
+		InitialCapital:        config.DefaultPaperInitialCapital,
+		BuyingPowerMultiplier: config.DefaultPaperBuyingPowerMultiplier,
+		SlippageBPS:           config.DefaultPaperSlippageBPS,
+		FeePct:                config.DefaultPaperFeePct,
+	}
+	return cfg
 }
 
 func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *testing.T) {
@@ -135,7 +157,7 @@ func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 	runtimeAfterSchemaGate = func() { proceeded.Store(true) }
 	runtimeCloseDB = func(*pgrepo.DB) { closed.Store(true) }
 
-	_, _, _, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if err == nil {
 		t.Fatal("newAPIServer() error = nil, want schema mismatch")
 	}
@@ -195,7 +217,7 @@ func TestNewAPIServerSchemaAheadFailsFast(t *testing.T) {
 	runtimeAfterSchemaGate = func() { proceeded.Store(true) }
 	runtimeCloseDB = func(*pgrepo.DB) { closed.Store(true) }
 
-	_, _, _, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if err == nil {
 		t.Fatal("newAPIServer() error = nil, want schema mismatch")
 	}
@@ -276,7 +298,7 @@ func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
 		return &api.Server{}, nil
 	}
 
-	server, sched, cleanup, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	server, sched, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -287,7 +309,7 @@ func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
 		t.Fatal("newAPIServer() lifecycle = nil, want composite lifecycle when scheduler disabled")
 	}
 	smokeServer, smokeSched, smokeCleanup, err := newAPIServer(
-		context.Background(), config.Config{Environment: "smoke"}, slogDiscardLogger(),
+		context.Background(), runtimeTestConfig(config.Config{Environment: "smoke"}), slogDiscardLogger(),
 	)
 	if err != nil {
 		t.Fatalf("newAPIServer(smoke) error = %v", err)
@@ -356,7 +378,7 @@ func TestNewAPIServerSchemaDBUnreachableFailsBeforeSchemaGate(t *testing.T) {
 	runtimeAfterSchemaGate = func() { proceeded.Store(true) }
 	runtimeCloseDB = func(*pgrepo.DB) { closed.Store(true) }
 
-	_, _, _, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if !errors.Is(err, startupErr) {
 		t.Fatalf("newAPIServer() error = %v, want %v", err, startupErr)
 	}
@@ -535,7 +557,7 @@ func TestNewAPIServerInvalidProjectionAccountFailsBeforeDBAllocation(t *testing.
 		return nil, errors.New("unexpected DB allocation")
 	}
 
-	cfg := config.Config{Server: config.ServerConfig{ProjectionAccountID: "not-a-uuid"}}
+	cfg := config.Config{CanonicalAccountID: "not-a-uuid"}
 	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
 	if err == nil || !strings.Contains(err.Error(), "PROJECTION_ACCOUNT_ID") {
 		t.Fatalf("newAPIServer() error = %v, want projection account validation error", err)
@@ -545,6 +567,110 @@ func TestNewAPIServerInvalidProjectionAccountFailsBeforeDBAllocation(t *testing.
 	}
 	if allocations.Load() != 0 {
 		t.Fatalf("DB allocations = %d, want 0", allocations.Load())
+	}
+}
+
+func TestBindExecutionAccount(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	validProfile := config.PaperConfig{
+		EvaluationMode:        domain.PaperEvaluationModeScored,
+		InitialCapital:        config.DefaultPaperInitialCapital,
+		BuyingPowerMultiplier: config.DefaultPaperBuyingPowerMultiplier,
+		SlippageBPS:           config.DefaultPaperSlippageBPS,
+		FeePct:                config.DefaultPaperFeePct,
+	}
+	validAccount := domain.Account{
+		ID: accountID, Environment: domain.AccountEnvironmentPaperScored,
+		Status: domain.AccountStatusActive, StorageNamespace: "paper_scored/default",
+		EvidenceClass:   domain.PaperEvidenceClassPromotion,
+		StartingCapital: decimal.NewFromInt(100_000), BuyingPowerMultiplier: decimal.NewFromInt(2),
+	}
+
+	tests := []struct {
+		name    string
+		account string
+		loaded  domain.Account
+		profile config.PaperConfig
+		wantErr string
+	}{
+		{name: "missing", profile: validProfile, loaded: validAccount, wantErr: "PROJECTION_ACCOUNT_ID is required"},
+		{name: "malformed", account: "not-a-uuid", profile: validProfile, loaded: validAccount, wantErr: "valid non-zero UUID"},
+		{name: "inactive", account: accountID.String(), profile: validProfile, loaded: func() domain.Account { a := validAccount; a.Status = domain.AccountStatusPaused; return a }(), wantErr: "must be active"},
+		{name: "live", account: accountID.String(), profile: validProfile, loaded: func() domain.Account { a := validAccount; a.Environment = domain.AccountEnvironmentLive; return a }(), wantErr: "paper_scored or paper_stress"},
+		{name: "environment mismatch", account: accountID.String(), profile: validProfile, loaded: func() domain.Account {
+			a := validAccount
+			a.Environment = domain.AccountEnvironmentPaperStress
+			a.EvidenceClass = domain.PaperEvidenceClassSynthetic
+			a.StorageNamespace = "paper_stress/default"
+			return a
+		}(), wantErr: "does not match"},
+		{name: "valid", account: accountID.String(), profile: validProfile, loaded: validAccount},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loads := 0
+			parsedID, err := parseCanonicalAccountID(test.account)
+			var deps runtimeDependencies
+			if err == nil {
+				loads++
+				account := test.loaded
+				deps, err = validateExecutionAccountBinding(config.Config{CanonicalAccountID: test.account, Paper: test.profile}, parsedID, &account)
+			}
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("bindExecutionAccount() error = %v, want %q", err, test.wantErr)
+				}
+				if test.name == "missing" || test.name == "malformed" {
+					if loads != 0 {
+						t.Fatalf("account loads = %d, want 0", loads)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bindExecutionAccount() error = %v", err)
+			}
+			if deps.AccountID() != accountID || deps.Environment() != domain.AccountEnvironmentPaperScored {
+				t.Fatalf("runtime binding = %s/%s", deps.AccountID(), deps.Environment())
+			}
+		})
+	}
+}
+
+func TestExecutionAccountFailureStopsBeforeScopedConstructors(t *testing.T) {
+	originalNewDB := runtimeNewDB
+	originalSchemaVersion := runtimeCurrentSchemaVersion
+	originalLoader := runtimeLoadCanonicalAccount
+	originalStrategyRepo := runtimeNewStrategyRepo
+	originalCloseDB := runtimeCloseDB
+	t.Cleanup(func() {
+		runtimeNewDB = originalNewDB
+		runtimeCurrentSchemaVersion = originalSchemaVersion
+		runtimeLoadCanonicalAccount = originalLoader
+		runtimeNewStrategyRepo = originalStrategyRepo
+		runtimeCloseDB = originalCloseDB
+	})
+
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) { return &pgrepo.DB{}, nil }
+	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) { return pgrepo.RequiredSchemaVersion, nil }
+	runtimeLoadCanonicalAccount = func(context.Context, *pgrepo.DB, uuid.UUID) (*domain.Account, error) {
+		return &domain.Account{ID: accountID, Environment: domain.AccountEnvironmentPaperScored, Status: domain.AccountStatusPaused}, nil
+	}
+	var constructors atomic.Int32
+	runtimeNewStrategyRepo = func(runtimeDependencies, *pgrepo.DB) *pgrepo.StrategyRepo {
+		constructors.Add(1)
+		return &pgrepo.StrategyRepo{}
+	}
+	runtimeCloseDB = func(*pgrepo.DB) {}
+
+	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
+	if err == nil || !strings.Contains(err.Error(), "must be active") {
+		t.Fatalf("newAPIServer() error = %v, want inactive account error", err)
+	}
+	if constructors.Load() != 0 {
+		t.Fatalf("scoped constructors = %d, want 0", constructors.Load())
 	}
 }
 
@@ -574,7 +700,7 @@ func TestNewAPIServerPaperBootstrapFailureClosesDBExactlyOnce(t *testing.T) {
 	}
 	runtimeCloseDB = func(*pgrepo.DB) { closes.Add(1) }
 
-	_, _, cleanup, err := newAPIServer(context.Background(), config.Config{Environment: "development"}, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{Environment: "development"}), slogDiscardLogger())
 	if !errors.Is(err, startupErr) {
 		t.Fatalf("newAPIServer() error = %v, want %v", err, startupErr)
 	}
@@ -624,7 +750,7 @@ func TestNewAPIServerPolymarketResolutionFailureIsNonFatal(t *testing.T) {
 	t.Setenv("POLYMARKET_WS_ENABLED", "true")
 	t.Setenv("POLYMARKET_WS_SLUGS", "slug-a")
 
-	server, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	server, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -692,7 +818,7 @@ func TestNewAPIServerWiresAlpacaReconcileAutomationJob(t *testing.T) {
 		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434", APIKey: "test-key"}}},
 	}
 
-	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -793,7 +919,7 @@ func TestNewAPIServerWiresPolymarketReconcileAutomationJob(t *testing.T) {
 		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434", APIKey: "test-key"}}},
 	}
 
-	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -878,7 +1004,7 @@ func TestNewAPIServerWiresKalshiDiscoveryAndMarkingAutomationJobs(t *testing.T) 
 		}},
 	}
 
-	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}

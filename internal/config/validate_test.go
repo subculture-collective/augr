@@ -68,6 +68,7 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	t.Setenv("LIVE_TRADING_ALLOWED_STRATEGIES", "11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222")
 	t.Setenv("LIVE_TRADING_ALLOWED_BROKERS", "Alpaca,Binance")
 	t.Setenv("HISTORY_REFRESH_WATCHLIST_LIMIT", "321")
+	t.Setenv("PROJECTION_ACCOUNT_ID", "00000000-0000-4000-8000-000000000064")
 
 	cfg, err := Load()
 	if err != nil {
@@ -79,6 +80,9 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	}
 	if cfg.HistoryRefreshWatchlistLimit != 321 {
 		t.Fatalf("cfg.HistoryRefreshWatchlistLimit = %d, want 321", cfg.HistoryRefreshWatchlistLimit)
+	}
+	if cfg.CanonicalAccountID != "00000000-0000-4000-8000-000000000064" {
+		t.Fatalf("cfg.CanonicalAccountID = %q, want configured projection account", cfg.CanonicalAccountID)
 	}
 
 	if cfg.Server.Port != 9090 {
@@ -580,6 +584,7 @@ func TestValidateRejectsInvalidPaperEvaluationProfile(t *testing.T) {
 
 func validConfig() Config {
 	return Config{
+		CanonicalAccountID:           "00000000-0000-4000-8000-000000000064",
 		HistoryRefreshWatchlistLimit: 250,
 		Environment:                  "test",
 		Server: ServerConfig{
@@ -649,6 +654,16 @@ func validConfig() Config {
 				},
 			},
 		},
+	}
+}
+
+func TestValidateRequiresExecutionAccount(t *testing.T) {
+	cfg := validConfig()
+	cfg.CanonicalAccountID = ""
+
+	err := Validate(cfg)
+	if err == nil || !strings.Contains(err.Error(), "PROJECTION_ACCOUNT_ID is required") {
+		t.Fatalf("Validate() error = %v, want canonical account error", err)
 	}
 }
 
@@ -913,6 +928,7 @@ func clearConfigEnv(t *testing.T) {
 		"APP_ENV",
 		"APP_HOST",
 		"APP_PORT",
+		"PROJECTION_ACCOUNT_ID",
 		"DATABASE_URL",
 		"DATABASE_POOL_SIZE",
 		"DATABASE_SSL_MODE",
@@ -1011,4 +1027,5 @@ func clearConfigEnv(t *testing.T) {
 	} {
 		t.Setenv(key, "")
 	}
+	t.Setenv("PROJECTION_ACCOUNT_ID", "00000000-0000-4000-8000-000000000064")
 }

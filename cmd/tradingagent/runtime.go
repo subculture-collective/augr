@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 	redis "github.com/redis/go-redis/v9"
+	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/agent"
 	"github.com/PatrickFanella/get-rich-quick/internal/api"
@@ -191,6 +192,12 @@ var (
 	runtimeNewPaperAccountRepo  func(*pgrepo.DB) repository.PaperAccountRepository = func(db *pgrepo.DB) repository.PaperAccountRepository {
 		return pgrepo.NewPaperAccountRepo(db)
 	}
+	runtimeLoadCanonicalAccount = func(ctx context.Context, db *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
+		return pgrepo.NewAccountRepo(db.Pool).GetByID(ctx, accountID)
+	}
+	runtimeNewStrategyRepo = func(_ runtimeDependencies, db *pgrepo.DB) *pgrepo.StrategyRepo {
+		return pgrepo.NewStrategyRepo(db.Pool)
+	}
 	runtimeNewServer                    = api.NewServer
 	runtimeDiscoveryDeploymentReadiness = func(ctx context.Context, repo *pgrepo.ReportArtifactRepo) (bool, string, error) {
 		return repo.DiscoveryDeploymentReadiness(ctx)
@@ -225,6 +232,55 @@ type runtimeLifecycle struct {
 	startAutomation func() error
 	startSignal     func() error
 	teardown        *runtimeTeardown
+}
+
+// runtimeDependencies is the single immutable account binding shared by
+// account-scoped runtime components.
+type runtimeDependencies struct {
+	accountID       uuid.UUID
+	environment     domain.AccountEnvironment
+	paperEvaluation domain.PaperEvaluationProfile
+}
+
+func (d runtimeDependencies) AccountID() uuid.UUID { return d.accountID }
+
+func (d runtimeDependencies) Environment() domain.AccountEnvironment { return d.environment }
+
+func parseCanonicalAccountID(raw string) (uuid.UUID, error) {
+	if strings.TrimSpace(raw) == "" {
+		return uuid.Nil, fmt.Errorf("PROJECTION_ACCOUNT_ID is required")
+	}
+	accountID, err := uuid.Parse(strings.TrimSpace(raw))
+	if err != nil || accountID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("parse PROJECTION_ACCOUNT_ID: valid non-zero UUID required")
+	}
+	return accountID, nil
+}
+
+func validateExecutionAccountBinding(cfg config.Config, accountID uuid.UUID, account *domain.Account) (runtimeDependencies, error) {
+	if account == nil || account.ID != accountID {
+		return runtimeDependencies{}, fmt.Errorf("canonical account %s was not loaded", accountID)
+	}
+	if account.Status != domain.AccountStatusActive {
+		return runtimeDependencies{}, fmt.Errorf("canonical account %s must be active", accountID)
+	}
+	if account.Environment != domain.AccountEnvironmentPaperScored && account.Environment != domain.AccountEnvironmentPaperStress {
+		return runtimeDependencies{}, fmt.Errorf("canonical account %s must use paper_scored or paper_stress, got %s", accountID, account.Environment)
+	}
+	profile, err := cfg.Paper.EvaluationProfile()
+	if err != nil {
+		return runtimeDependencies{}, fmt.Errorf("load canonical account paper-evaluation profile: %w", err)
+	}
+	if account.Environment != domain.AccountEnvironment(profile.Mode) {
+		return runtimeDependencies{}, fmt.Errorf("canonical account environment %s does not match paper-evaluation profile %s", account.Environment, profile.Mode)
+	}
+	if account.EvidenceClass != profile.EvidenceClass ||
+		(account.StorageNamespace != profile.StorageNamespace && !strings.HasPrefix(account.StorageNamespace, profile.StorageNamespace+"/")) ||
+		!account.StartingCapital.Equal(decimal.NewFromFloat(profile.InitialCapital)) ||
+		!account.BuyingPowerMultiplier.Equal(decimal.NewFromFloat(profile.BuyingPowerMultiplier)) {
+		return runtimeDependencies{}, fmt.Errorf("canonical account %s does not match its paper-evaluation profile", accountID)
+	}
+	return runtimeDependencies{accountID: accountID, environment: account.Environment, paperEvaluation: profile}, nil
 }
 
 func (l *runtimeLifecycle) Start() error {
@@ -429,11 +485,9 @@ func evaluateRuntimeDiscoveryReadiness(ctx context.Context, reportRepo *pgrepo.R
 }
 
 func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (*api.Server, cli.SchedulerLifecycle, func(), error) {
-	if cfg.Server.ProjectionAccountID != "" {
-		accountID, err := uuid.Parse(cfg.Server.ProjectionAccountID)
-		if err != nil || accountID == uuid.Nil {
-			return nil, nil, nil, fmt.Errorf("parse PROJECTION_ACCOUNT_ID: valid non-zero UUID required")
-		}
+	accountID, err := parseCanonicalAccountID(cfg.CanonicalAccountID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	db, err := runtimeNewDB(ctx, cfg.Database.URL)
 	if err != nil {
@@ -452,21 +506,26 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		return nil, nil, nil, err
 	}
 	runtimeAfterSchemaGate()
+	account, err := runtimeLoadCanonicalAccount(ctx, db, accountID)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load canonical account %s: %w", accountID, err)
+	}
+	runtimeDeps, err := validateExecutionAccountBinding(cfg, accountID, account)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	closeKalshiProjectionDB := func() {}
 
 	redisHealth, closeRedis := newRedisHealthCheck(cfg)
 
 	appMetrics := metrics.New()
-	var paperEvaluation *domain.PaperEvaluationProfile
-	if paperProfile, profileErr := cfg.Paper.EvaluationProfile(); profileErr == nil {
-		appMetrics.SetPaperEvaluationProfile(string(paperProfile.Mode), paperProfile.StorageNamespace, paperProfile.EvidenceClass)
-		paperEvaluation = &paperProfile
-	}
+	paperEvaluation := runtimeDeps.paperEvaluation
+	appMetrics.SetPaperEvaluationProfile(string(paperEvaluation.Mode), paperEvaluation.StorageNamespace, paperEvaluation.EvidenceClass)
 	surfersMetricsOnce.Do(func() { surfersMetricsInst = observability.NewSurfersMetrics(prometheus.DefaultRegisterer) })
 	surfersMetrics := surfersMetricsInst
 	sharedLLMBudget := llm.BuildLLMBudget(cfg.LLM)
 
-	strategyRepo := pgrepo.NewStrategyRepo(db.Pool)
+	strategyRepo := runtimeNewStrategyRepo(runtimeDeps, db)
 	runRepo := pgrepo.NewPipelineRunRepo(db.Pool)
 	snapshotRepo := pgrepo.NewPipelineRunSnapshotRepo(db.Pool)
 	decisionRepo := pgrepo.NewAgentDecisionRepo(db.Pool)
@@ -559,7 +618,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		Risk:                   riskEngine,
 		RiskBreaker:            riskBreaker,
 		RiskBreakerLister:      riskBreakerRepo,
-		PaperEvaluation:        paperEvaluation,
+		PaperEvaluation:        &paperEvaluation,
 		Settings:               settingsSvc,
 		Prompts:                promptSettingsSvc,
 		DBHealth:               api.HealthCheckFunc(db.Pool.Ping),
@@ -1130,10 +1189,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	apiCfg.Port = cfg.Server.Port
 	apiCfg.JWTSecret = cfg.Server.JWTSecret
 	apiCfg.RefreshTokenTTL = 24 * time.Hour
-	if cfg.Server.ProjectionAccountID != "" {
-		accountID, _ := uuid.Parse(cfg.Server.ProjectionAccountID)
-		apiCfg.ProjectionAccountID = &accountID
-	}
+	canonicalAccountID := runtimeDeps.AccountID()
+	apiCfg.ProjectionAccountID = &canonicalAccountID
 
 	deps.ReleaseReadiness = operations.SourceFunc(func(checkCtx context.Context) (operations.ReadinessReport, error) {
 		databaseReady := db.Pool.Ping(checkCtx) == nil

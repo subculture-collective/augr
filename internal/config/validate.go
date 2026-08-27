@@ -15,6 +15,9 @@ func Validate(cfg Config) error {
 	if strings.TrimSpace(cfg.Database.URL) == "" {
 		errs = append(errs, "DATABASE_URL is required")
 	}
+	if strings.TrimSpace(cfg.CanonicalAccountID) == "" {
+		errs = append(errs, "PROJECTION_ACCOUNT_ID is required")
+	}
 
 	if cfg.Server.Port <= 0 {
 		errs = append(errs, "APP_PORT must be greater than 0")
