@@ -36,7 +36,6 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		`KALSHI_DRY_RUN=true`,
 		`ENABLE_POLYMARKET_AUTOMATION=false`,
 		`OLLAMA_API_KEY=smoke-key`,
-		`PROJECTION_ACCOUNT_ID=00000000-0000-4000-8000-000000000064`,
 		`compose build app`,
 		`BUILT_APP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${PROJECT_NAME}-app:latest"`,
 		`org.opencontainers.image.revision`,
@@ -91,6 +90,17 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Fatalf("verify-prod-build.sh missing required content %q", want)
 		}
+	}
+
+	const projectionAccountLine = `PROJECTION_ACCOUNT_ID=00000000-0000-4000-8000-000000000064`
+	projectionAccountLines := 0
+	for _, line := range strings.Split(script, "\n") {
+		if line == projectionAccountLine {
+			projectionAccountLines++
+		}
+	}
+	if projectionAccountLines != 1 {
+		t.Fatalf("verify-prod-build.sh exact %s lines = %d, want 1", projectionAccountLine, projectionAccountLines)
 	}
 
 	for _, unwanted := range []string{

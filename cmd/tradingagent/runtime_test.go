@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -52,16 +53,24 @@ func TestMain(m *testing.M) {
 		return true, "", nil
 	}
 	runtimeLoadCanonicalAccount = func(_ context.Context, _ *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
-		return &domain.Account{
-			ID: accountID, Environment: domain.AccountEnvironmentPaperScored, Status: domain.AccountStatusActive,
-			StorageNamespace: "paper_scored/default", EvidenceClass: domain.PaperEvidenceClassPromotion,
-			StartingCapital: decimal.NewFromInt(100_000), BuyingPowerMultiplier: decimal.NewFromInt(2),
-		}, nil
+		account := validRuntimeAccount(accountID)
+		return &account, nil
 	}
 	code := m.Run()
 	runtimeDiscoveryDeploymentReadiness = original
 	runtimeLoadCanonicalAccount = originalAccountLoader
 	os.Exit(code)
+}
+
+func validRuntimeAccount(accountID uuid.UUID) domain.Account {
+	return domain.Account{
+		ID: accountID, Name: "canonical paper", Environment: domain.AccountEnvironmentPaperScored,
+		Venue: "alpaca", BaseCurrency: "USD", StorageNamespace: "paper_scored/default",
+		EvidenceClass: domain.PaperEvidenceClassPromotion, StartingCapital: decimal.NewFromInt(100_000),
+		BuyingPowerMultiplier: decimal.NewFromInt(2), MarginProfile: domain.MarginProfileRegT,
+		Status: domain.AccountStatusActive, CreatedBy: "migration", CreationMetadata: []byte(`{}`),
+		CreatedAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC),
+	}
 }
 
 func runtimeTestConfig(cfg config.Config) config.Config {
@@ -579,12 +588,7 @@ func TestBindExecutionAccount(t *testing.T) {
 		SlippageBPS:           config.DefaultPaperSlippageBPS,
 		FeePct:                config.DefaultPaperFeePct,
 	}
-	validAccount := domain.Account{
-		ID: accountID, Environment: domain.AccountEnvironmentPaperScored,
-		Status: domain.AccountStatusActive, StorageNamespace: "paper_scored/default",
-		EvidenceClass:   domain.PaperEvidenceClassPromotion,
-		StartingCapital: decimal.NewFromInt(100_000), BuyingPowerMultiplier: decimal.NewFromInt(2),
-	}
+	validAccount := validRuntimeAccount(accountID)
 
 	tests := []struct {
 		name    string
@@ -596,7 +600,12 @@ func TestBindExecutionAccount(t *testing.T) {
 		{name: "missing", profile: validProfile, loaded: validAccount, wantErr: "PROJECTION_ACCOUNT_ID is required"},
 		{name: "malformed", account: "not-a-uuid", profile: validProfile, loaded: validAccount, wantErr: "valid non-zero UUID"},
 		{name: "inactive", account: accountID.String(), profile: validProfile, loaded: func() domain.Account { a := validAccount; a.Status = domain.AccountStatusPaused; return a }(), wantErr: "must be active"},
-		{name: "live", account: accountID.String(), profile: validProfile, loaded: func() domain.Account { a := validAccount; a.Environment = domain.AccountEnvironmentLive; return a }(), wantErr: "paper_scored or paper_stress"},
+		{name: "live", account: accountID.String(), profile: validProfile, loaded: func() domain.Account {
+			a := validAccount
+			a.Environment = domain.AccountEnvironmentLive
+			a.EvidenceClass = "non_promotion"
+			return a
+		}(), wantErr: "paper_scored or paper_stress"},
 		{name: "environment mismatch", account: accountID.String(), profile: validProfile, loaded: func() domain.Account {
 			a := validAccount
 			a.Environment = domain.AccountEnvironmentPaperStress
@@ -604,6 +613,18 @@ func TestBindExecutionAccount(t *testing.T) {
 			a.StorageNamespace = "paper_stress/default"
 			return a
 		}(), wantErr: "does not match"},
+		{name: "missing account name", account: accountID.String(), profile: validProfile, loaded: func() domain.Account { a := validAccount; a.Name = ""; return a }(), wantErr: "account name and venue are required"},
+		{name: "stress zero buying power with cash margin", account: accountID.String(), profile: config.PaperConfig{
+			EvaluationMode: domain.PaperEvaluationModeStress, InitialCapital: 100_000, BuyingPowerMultiplier: 0,
+		}, loaded: func() domain.Account {
+			a := validAccount
+			a.Environment = domain.AccountEnvironmentPaperStress
+			a.StorageNamespace = "paper_stress/default"
+			a.EvidenceClass = domain.PaperEvidenceClassSynthetic
+			a.BuyingPowerMultiplier = decimal.Zero
+			a.MarginProfile = domain.MarginProfileCash
+			return a
+		}(), wantErr: "zero buying-power multiplier requires the stress-unlimited margin profile"},
 		{name: "valid", account: accountID.String(), profile: validProfile, loaded: validAccount},
 	}
 
@@ -638,39 +659,175 @@ func TestBindExecutionAccount(t *testing.T) {
 	}
 }
 
+func TestExecutionAccountRejectsNonFinitePaperValuesWithoutPanic(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	account := validRuntimeAccount(accountID)
+	for _, test := range []struct {
+		name   string
+		mutate func(*config.PaperConfig)
+	}{
+		{name: "NaN initial capital", mutate: func(c *config.PaperConfig) { c.InitialCapital = math.NaN() }},
+		{name: "infinite initial capital", mutate: func(c *config.PaperConfig) { c.InitialCapital = math.Inf(1) }},
+		{name: "NaN buying power", mutate: func(c *config.PaperConfig) { c.BuyingPowerMultiplier = math.NaN() }},
+		{name: "infinite buying power", mutate: func(c *config.PaperConfig) { c.BuyingPowerMultiplier = math.Inf(1) }},
+		{name: "NaN slippage", mutate: func(c *config.PaperConfig) { c.SlippageBPS = math.NaN() }},
+		{name: "infinite slippage", mutate: func(c *config.PaperConfig) { c.SlippageBPS = math.Inf(1) }},
+		{name: "NaN fee", mutate: func(c *config.PaperConfig) { c.FeePct = math.NaN() }},
+		{name: "infinite fee", mutate: func(c *config.PaperConfig) { c.FeePct = math.Inf(1) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := runtimeTestConfig(config.Config{})
+			test.mutate(&cfg.Paper)
+			if _, err := validateExecutionAccountBinding(cfg, accountID, &account); err == nil || !strings.Contains(err.Error(), "finite") {
+				t.Fatalf("validateExecutionAccountBinding() error = %v, want finite-value error", err)
+			}
+		})
+	}
+}
+
 func TestExecutionAccountFailureStopsBeforeScopedConstructors(t *testing.T) {
 	originalNewDB := runtimeNewDB
 	originalSchemaVersion := runtimeCurrentSchemaVersion
 	originalLoader := runtimeLoadCanonicalAccount
 	originalStrategyRepo := runtimeNewStrategyRepo
 	originalCloseDB := runtimeCloseDB
+	originalConstructors := []runtimeScopedConstructor{
+		runtimeConstructStock, runtimeConstructOptions, runtimeConstructKalshi, runtimeConstructPolymarket,
+		runtimeConstructCopy, runtimeConstructSettlement, runtimeConstructRestart, runtimeConstructRisk,
+		runtimeConstructProjection, runtimeConstructAutomation,
+	}
 	t.Cleanup(func() {
 		runtimeNewDB = originalNewDB
 		runtimeCurrentSchemaVersion = originalSchemaVersion
 		runtimeLoadCanonicalAccount = originalLoader
 		runtimeNewStrategyRepo = originalStrategyRepo
 		runtimeCloseDB = originalCloseDB
+		runtimeConstructStock = originalConstructors[0]
+		runtimeConstructOptions = originalConstructors[1]
+		runtimeConstructKalshi = originalConstructors[2]
+		runtimeConstructPolymarket = originalConstructors[3]
+		runtimeConstructCopy = originalConstructors[4]
+		runtimeConstructSettlement = originalConstructors[5]
+		runtimeConstructRestart = originalConstructors[6]
+		runtimeConstructRisk = originalConstructors[7]
+		runtimeConstructProjection = originalConstructors[8]
+		runtimeConstructAutomation = originalConstructors[9]
 	})
 
 	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
 	runtimeNewDB = func(context.Context, string) (*pgrepo.DB, error) { return &pgrepo.DB{}, nil }
 	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) { return pgrepo.RequiredSchemaVersion, nil }
-	runtimeLoadCanonicalAccount = func(context.Context, *pgrepo.DB, uuid.UUID) (*domain.Account, error) {
-		return &domain.Account{ID: accountID, Environment: domain.AccountEnvironmentPaperScored, Status: domain.AccountStatusPaused}, nil
-	}
 	var constructors atomic.Int32
-	runtimeNewStrategyRepo = func(runtimeDependencies, *pgrepo.DB) *pgrepo.StrategyRepo {
+	runtimeNewStrategyRepo = func(runtimeDependencies, *pgrepo.DB) (*pgrepo.StrategyRepo, error) {
 		constructors.Add(1)
-		return &pgrepo.StrategyRepo{}
+		return &pgrepo.StrategyRepo{}, nil
 	}
+	observeConstructor := func(runtimeDependencies, func() error) error {
+		constructors.Add(1)
+		return nil
+	}
+	runtimeConstructStock = observeConstructor
+	runtimeConstructOptions = observeConstructor
+	runtimeConstructKalshi = observeConstructor
+	runtimeConstructPolymarket = observeConstructor
+	runtimeConstructCopy = observeConstructor
+	runtimeConstructSettlement = observeConstructor
+	runtimeConstructRestart = observeConstructor
+	runtimeConstructRisk = observeConstructor
+	runtimeConstructProjection = observeConstructor
+	runtimeConstructAutomation = observeConstructor
 	runtimeCloseDB = func(*pgrepo.DB) {}
 
-	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
-	if err == nil || !strings.Contains(err.Error(), "must be active") {
-		t.Fatalf("newAPIServer() error = %v, want inactive account error", err)
+	valid := validRuntimeAccount(accountID)
+	stressCash := valid
+	stressCash.Environment = domain.AccountEnvironmentPaperStress
+	stressCash.StorageNamespace = "paper_stress/default"
+	stressCash.EvidenceClass = domain.PaperEvidenceClassSynthetic
+	stressCash.BuyingPowerMultiplier = decimal.Zero
+	stressCash.MarginProfile = domain.MarginProfileCash
+	for _, test := range []struct {
+		name      string
+		configure func(*config.Config)
+		loaded    domain.Account
+		loadErr   error
+		wantErr   string
+	}{
+		{name: "missing ID", configure: func(c *config.Config) { c.CanonicalAccountID = "" }, loaded: valid, wantErr: "is required"},
+		{name: "malformed ID", configure: func(c *config.Config) { c.CanonicalAccountID = "bad" }, loaded: valid, wantErr: "valid non-zero UUID"},
+		{name: "load failure", loaded: valid, loadErr: errors.New("account unavailable"), wantErr: "account unavailable"},
+		{name: "wrong loaded ID", loaded: func() domain.Account { a := valid; a.ID = uuid.New(); return a }(), wantErr: "was not loaded"},
+		{name: "invalid invariant", loaded: func() domain.Account { a := valid; a.Name = ""; return a }(), wantErr: "account name and venue are required"},
+		{name: "inactive", loaded: func() domain.Account { a := valid; a.Status = domain.AccountStatusPaused; return a }(), wantErr: "must be active"},
+		{name: "live", loaded: func() domain.Account {
+			a := valid
+			a.Environment = domain.AccountEnvironmentLive
+			a.EvidenceClass = "non_promotion"
+			return a
+		}(), wantErr: "paper_scored or paper_stress"},
+		{name: "environment mismatch", loaded: func() domain.Account {
+			a := valid
+			a.Environment = domain.AccountEnvironmentPaperStress
+			a.StorageNamespace = "paper_stress/default"
+			a.EvidenceClass = domain.PaperEvidenceClassSynthetic
+			return a
+		}(), wantErr: "does not match"},
+		{name: "stress zero buying power cash margin", configure: func(c *config.Config) {
+			c.Paper.EvaluationMode = domain.PaperEvaluationModeStress
+			c.Paper.BuyingPowerMultiplier = 0
+		}, loaded: stressCash, wantErr: "stress-unlimited"},
+		{name: "NaN paper value", configure: func(c *config.Config) { c.Paper.InitialCapital = math.NaN() }, loaded: valid, wantErr: "must be finite"},
+		{name: "infinite paper value", configure: func(c *config.Config) { c.Paper.BuyingPowerMultiplier = math.Inf(1) }, loaded: valid, wantErr: "must be finite"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			constructors.Store(0)
+			runtimeLoadCanonicalAccount = func(context.Context, *pgrepo.DB, uuid.UUID) (*domain.Account, error) {
+				account := test.loaded
+				return &account, test.loadErr
+			}
+			cfg := runtimeTestConfig(config.Config{})
+			if test.configure != nil {
+				test.configure(&cfg)
+			}
+			_, _, _, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("newAPIServer() error = %v, want %q", err, test.wantErr)
+			}
+			if got := constructors.Load(); got != 0 {
+				t.Fatalf("scoped constructor calls = %d, want 0", got)
+			}
+		})
 	}
-	if constructors.Load() != 0 {
-		t.Fatalf("scoped constructors = %d, want 0", constructors.Load())
+}
+
+func TestScopedConstructorsExposeCanonicalBinding(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	deps := runtimeDependencies{accountID: accountID, environment: domain.AccountEnvironmentPaperScored}
+	constructors := []struct {
+		name string
+		call runtimeScopedConstructor
+	}{
+		{name: "stock", call: runtimeConstructStock}, {name: "options", call: runtimeConstructOptions},
+		{name: "Kalshi", call: runtimeConstructKalshi}, {name: "Polymarket", call: runtimeConstructPolymarket},
+		{name: "copy", call: runtimeConstructCopy}, {name: "settlement", call: runtimeConstructSettlement},
+		{name: "restart", call: runtimeConstructRestart}, {name: "risk", call: runtimeConstructRisk},
+		{name: "projection", call: runtimeConstructProjection}, {name: "automation", call: runtimeConstructAutomation},
+	}
+	for _, constructor := range constructors {
+		t.Run(constructor.name, func(t *testing.T) {
+			called := false
+			if err := constructor.call(deps, func() error {
+				called = true
+				if deps.AccountID() != accountID || deps.Environment() != domain.AccountEnvironmentPaperScored {
+					t.Fatalf("binding = %s/%s", deps.AccountID(), deps.Environment())
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("constructor error = %v", err)
+			}
+			if !called {
+				t.Fatal("underlying constructor was not called")
+			}
+		})
 	}
 }
 
