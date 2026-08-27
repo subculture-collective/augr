@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
@@ -15,8 +16,7 @@ type paperProcessorStub struct {
 	called int
 	signal execution.FinalSignal
 	plan   execution.TradingPlan
-	strat  uuid.UUID
-	runID  uuid.UUID
+	scope  execution.ExecutionScope
 	err    error
 	result PaperOrderResult
 }
@@ -25,8 +25,7 @@ func (p *paperProcessorStub) ProcessPaperOrder(_ context.Context, req PaperOrder
 	p.called++
 	p.signal = req.Signal
 	p.plan = req.Plan
-	p.strat = req.StrategyID
-	p.runID = req.RunID
+	p.scope = req.Scope
 	if p.result.OrderID == nil && !p.result.Skipped && p.err == nil {
 		id := uuid.New()
 		p.result.OrderID = &id
@@ -38,7 +37,10 @@ func (p *paperProcessorStub) ProcessPaperOrder(_ context.Context, req PaperOrder
 func TestPaperExecutorRejectsInvalidPreconditions(t *testing.T) {
 	t.Parallel()
 
+	runID, tradeDate, accountID, versionID := uuid.New(), time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), uuid.New(), uuid.New()
 	baseOpportunity := domain.Opportunity{
+		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
+		PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate,
 		StrategyID:       uuid.New(),
 		MarketType:       domain.MarketTypeStock,
 		Ticker:           "AAPL",
@@ -57,11 +59,12 @@ func TestPaperExecutorRejectsInvalidPreconditions(t *testing.T) {
 		Reasons:     []string{"score=91.0"},
 	}
 	baseStrategy := domain.Strategy{
-		ID:         baseOpportunity.StrategyID,
-		Ticker:     "AAPL",
-		MarketType: domain.MarketTypeStock,
-		Status:     domain.StrategyStatusActive,
-		IsPaper:    true,
+		ID:                         baseOpportunity.StrategyID,
+		Ticker:                     "AAPL",
+		MarketType:                 domain.MarketTypeStock,
+		Status:                     domain.StrategyStatusActive,
+		IsPaper:                    true,
+		ExecutionStrategyVersionID: &versionID,
 	}
 
 	tests := []struct {
@@ -109,9 +112,13 @@ func TestPaperExecutorExecutesValidPaperDecision(t *testing.T) {
 	t.Parallel()
 
 	strategyID := uuid.New()
+	versionID, accountID, runID := uuid.New(), uuid.New(), uuid.New()
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	processor := &paperProcessorStub{}
 	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor})
 	opportunity := domain.Opportunity{
+		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
+		PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate,
 		StrategyID:       strategyID,
 		MarketType:       domain.MarketTypeStock,
 		Ticker:           "AAPL",
@@ -130,11 +137,12 @@ func TestPaperExecutorExecutesValidPaperDecision(t *testing.T) {
 		Reasons:     []string{"score=91.0", "multiplier=1.00"},
 	}
 	strategy := domain.Strategy{
-		ID:         strategyID,
-		Ticker:     "AAPL",
-		MarketType: domain.MarketTypeStock,
-		Status:     domain.StrategyStatusActive,
-		IsPaper:    true,
+		ID:                         strategyID,
+		Ticker:                     "AAPL",
+		MarketType:                 domain.MarketTypeStock,
+		Status:                     domain.StrategyStatusActive,
+		IsPaper:                    true,
+		ExecutionStrategyVersionID: &versionID,
 	}
 
 	result, err := exec.ExecutePaperDecision(context.Background(), opportunity, decision, strategy)
@@ -168,8 +176,9 @@ func TestPaperExecutorExecutesValidPaperDecision(t *testing.T) {
 	if processor.plan.PositionSize != 25 {
 		t.Fatalf("position size = %v, want 25", processor.plan.PositionSize)
 	}
-	if processor.strat != strategyID {
-		t.Fatalf("strategy id = %s, want %s", processor.strat, strategyID)
+	_, originID := processor.scope.Origin()
+	if originID != versionID.String() {
+		t.Fatalf("scope origin = %s, want strategy version %s", originID, versionID)
 	}
 }
 
@@ -177,9 +186,13 @@ func TestPaperExecutorConvertsProcessorErrorToExecutionRejected(t *testing.T) {
 	t.Parallel()
 
 	strategyID := uuid.New()
+	versionID, accountID, runID := uuid.New(), uuid.New(), uuid.New()
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	processor := &paperProcessorStub{err: errors.New("boom")}
 	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor})
 	result, err := exec.ExecutePaperDecision(context.Background(), domain.Opportunity{
+		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
+		PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate,
 		StrategyID: strategyID,
 		MarketType: domain.MarketTypeStock,
 		Ticker:     "AAPL",
@@ -193,11 +206,12 @@ func TestPaperExecutorConvertsProcessorErrorToExecutionRejected(t *testing.T) {
 		Action:      domain.AllocationDecisionActionPaperOrderIntent,
 		NotionalUSD: 2500,
 	}, domain.Strategy{
-		ID:         strategyID,
-		Ticker:     "AAPL",
-		MarketType: domain.MarketTypeStock,
-		Status:     domain.StrategyStatusActive,
-		IsPaper:    true,
+		ID:                         strategyID,
+		Ticker:                     "AAPL",
+		MarketType:                 domain.MarketTypeStock,
+		Status:                     domain.StrategyStatusActive,
+		IsPaper:                    true,
+		ExecutionStrategyVersionID: &versionID,
 	})
 	if err != nil {
 		t.Fatalf("ExecutePaperDecision() error = %v", err)

@@ -49,25 +49,26 @@ const (
 
 // Order is the immutable route command. Current status is replayed from events.
 type Order struct {
-	ID                   uuid.UUID
-	IntentID             uuid.UUID
-	AccountID            uuid.UUID
-	InstrumentID         uuid.UUID
-	IdempotencyKey       string
-	ClientOrderID        string
-	Side                 Side
-	OrderType            OrderType
-	TimeInForce          TimeInForce
-	Quantity             decimal.Decimal
-	LimitPrice           *decimal.Decimal
-	StopPrice            *decimal.Decimal
-	Venue                string
-	VenueContractID      uuid.UUID
-	RouteQuoteSnapshotID uuid.UUID
-	RoutedAt             time.Time
-	PolicyKind           PolicyKind
-	PolicyVersion        string
-	CreatedAt            time.Time
+	ID                       uuid.UUID
+	IntentID                 uuid.UUID
+	AccountID                uuid.UUID
+	CopyOriginRebalanceRunID uuid.UUID
+	InstrumentID             uuid.UUID
+	IdempotencyKey           string
+	ClientOrderID            string
+	Side                     Side
+	OrderType                OrderType
+	TimeInForce              TimeInForce
+	Quantity                 decimal.Decimal
+	LimitPrice               *decimal.Decimal
+	StopPrice                *decimal.Decimal
+	Venue                    string
+	VenueContractID          uuid.UUID
+	RouteQuoteSnapshotID     uuid.UUID
+	RoutedAt                 time.Time
+	PolicyKind               PolicyKind
+	PolicyVersion            string
+	CreatedAt                time.Time
 }
 
 // OrderBinding immutably associates the canonical order with one external
@@ -150,23 +151,24 @@ func Route(aggregate *Aggregate, input RouteInput) (*Transition, error) {
 		createdAt = time.Now().UTC().Truncate(time.Microsecond)
 	}
 	order := Order{
-		IntentID:             aggregate.Intent.ID,
-		AccountID:            aggregate.Intent.AccountID,
-		InstrumentID:         aggregate.Intent.InstrumentID,
-		IdempotencyKey:       orderKey,
-		Side:                 sideForDelta(*aggregate.AllocatedQuantity),
-		OrderType:            input.OrderType,
-		TimeInForce:          input.TimeInForce,
-		Quantity:             quantity,
-		LimitPrice:           limitPrice,
-		StopPrice:            stopPrice,
-		Venue:                input.VenueContract.Venue,
-		VenueContractID:      input.VenueContract.ID,
-		RouteQuoteSnapshotID: input.RouteSnapshot.ID,
-		RoutedAt:             routedAt,
-		PolicyKind:           input.PolicyKind,
-		PolicyVersion:        policyVersion,
-		CreatedAt:            createdAt,
+		IntentID:                 aggregate.Intent.ID,
+		AccountID:                aggregate.Intent.AccountID,
+		CopyOriginRebalanceRunID: aggregate.Intent.CopyOriginRebalanceRunID,
+		InstrumentID:             aggregate.Intent.InstrumentID,
+		IdempotencyKey:           orderKey,
+		Side:                     sideForDelta(*aggregate.AllocatedQuantity),
+		OrderType:                input.OrderType,
+		TimeInForce:              input.TimeInForce,
+		Quantity:                 quantity,
+		LimitPrice:               limitPrice,
+		StopPrice:                stopPrice,
+		Venue:                    input.VenueContract.Venue,
+		VenueContractID:          input.VenueContract.ID,
+		RouteQuoteSnapshotID:     input.RouteSnapshot.ID,
+		RoutedAt:                 routedAt,
+		PolicyKind:               input.PolicyKind,
+		PolicyVersion:            policyVersion,
+		CreatedAt:                createdAt,
 	}
 	order.ID = economicid.DeterministicUUID(orderIDDomain, order.IntentID.String(), order.IdempotencyKey)
 	order.ClientOrderID = order.ID.String()
@@ -275,6 +277,7 @@ func SameOrderPayload(left, right *Order) bool {
 		return false
 	}
 	return left.ID == right.ID && left.IntentID == right.IntentID && left.AccountID == right.AccountID &&
+		left.CopyOriginRebalanceRunID == right.CopyOriginRebalanceRunID &&
 		left.InstrumentID == right.InstrumentID && left.IdempotencyKey == right.IdempotencyKey &&
 		left.ClientOrderID == right.ClientOrderID && left.Side == right.Side && left.OrderType == right.OrderType &&
 		left.TimeInForce == right.TimeInForce && left.Quantity.Equal(right.Quantity) &&

@@ -84,6 +84,22 @@ func TestBuildOrderScopedListQuery_StrategyScopeAndPartialFilters(t *testing.T) 
 	assertNotContains(t, query, "order_type =")
 }
 
+func TestBuildOrderScopedListQuery_CopyOriginRequiresMatchingAccountAndSubscription(t *testing.T) {
+	runID := uuid.New()
+	query, args := buildOrderScopedListQuery("copy_origin", runID, repository.OrderFilter{Ticker: "AAPL"}, 10, 0)
+	if len(args) != 4 || args[0] != runID {
+		t.Fatalf("args=%v", args)
+	}
+	for _, clause := range []string{
+		"copy_origin_rebalance_run_id = $1",
+		"origin_type = 'copy_subscription'",
+		"account_id = (SELECT account_id FROM copy_origin_rebalance_runs WHERE id = $1)",
+		"origin_id = (SELECT subscription_id::text FROM copy_origin_rebalance_runs WHERE id = $1)",
+	} {
+		assertContains(t, query, clause)
+	}
+}
+
 func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	t.Helper()
 

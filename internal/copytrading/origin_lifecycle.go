@@ -41,14 +41,15 @@ func (e *OriginLifecycleExecutor) Propose(ctx context.Context, input OriginPropo
 // intent. OVR-502 supplies the fresh executable decision snapshot; this
 // adapter owns attribution and cannot create a strategy-version origin.
 type OriginProposalInput struct {
-	Subscription     domain.CopySubscription
-	Intent           domain.CopyTradeIntent
-	Account          domain.Account
-	Instrument       instrument.Instrument
-	DecisionSnapshot marketdata.QuoteSnapshot
-	QuantityDelta    decimal.Decimal
-	DecisionAt       time.Time
-	CreatedAt        time.Time
+	Subscription             domain.CopySubscription
+	Intent                   domain.CopyTradeIntent
+	Account                  domain.Account
+	Instrument               instrument.Instrument
+	DecisionSnapshot         marketdata.QuoteSnapshot
+	QuantityDelta            decimal.Decimal
+	DecisionAt               time.Time
+	CreatedAt                time.Time
+	CopyOriginRebalanceRunID uuid.UUID
 }
 
 // BuildOriginProposal constructs the immutable common-lifecycle proposal for
@@ -81,16 +82,17 @@ func BuildOriginProposal(input OriginProposalInput) (*lifecycle.Aggregate, error
 	createdAt := input.CreatedAt.UTC().Truncate(time.Microsecond)
 	key := fmt.Sprintf("copy_subscription/%s/%s/%s/%d", subscription.ID, intent.SourceObservationID, intent.InstrumentKey, intent.CalculationVersion)
 	return lifecycle.Propose(lifecycle.ProposeInput{
-		Account:              input.Account,
-		Instrument:           input.Instrument,
-		DecisionSnapshot:     input.DecisionSnapshot,
-		IdempotencyKey:       key,
-		DesiredQuantityDelta: input.QuantityDelta,
-		DecisionAt:           decisionAt,
-		OriginType:           ledger.ExecutionOriginCopySubscription,
-		OriginID:             subscription.ID.String(),
-		StrategyVersionID:    "",
-		Metadata:             metadata,
+		Account:                  input.Account,
+		Instrument:               input.Instrument,
+		DecisionSnapshot:         input.DecisionSnapshot,
+		IdempotencyKey:           key,
+		DesiredQuantityDelta:     input.QuantityDelta,
+		DecisionAt:               decisionAt,
+		OriginType:               ledger.ExecutionOriginCopySubscription,
+		OriginID:                 subscription.ID.String(),
+		CopyOriginRebalanceRunID: input.CopyOriginRebalanceRunID,
+		StrategyVersionID:        "",
+		Metadata:                 metadata,
 		Event: lifecycle.EventInput{
 			Source:          "augr",
 			SourceNamespace: "copy_subscription/" + subscription.ID.String(),

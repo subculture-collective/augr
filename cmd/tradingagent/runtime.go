@@ -1715,8 +1715,13 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 		return canonical, err
 	}
 
+	scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	if err != nil {
+		return canonical, err
+	}
 	if err := orderManager.ProcessSignal(
 		ctx,
+		scope,
 		execution.FinalSignal{
 			Signal:     signal,
 			Confidence: state.FinalSignal.Confidence,
@@ -1737,8 +1742,6 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 			Side:             state.TradingPlan.Side,
 			DecisionMetadata: executionDecisionMetadata(ctx, r.decisionRepo, r.logger, run.ID),
 		},
-		strategy.ID,
-		run.ID,
 	); err != nil {
 		return canonical, err
 	}
@@ -1751,7 +1754,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	positions, err := r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
 	if err != nil {
 		return canonical, err
 	}

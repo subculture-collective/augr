@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
@@ -224,10 +225,15 @@ func (m *OrderManager) currentTime() time.Time {
 // ProcessSignal executes the full order lifecycle for a trading signal.
 func (m *OrderManager) ProcessSignal(
 	ctx context.Context,
+	scope ExecutionScope,
 	signal FinalSignal,
 	plan TradingPlan,
-	strategyID, runID uuid.UUID,
 ) error {
+	strategyID, runID, hasRun, err := legacyScopeIDs(scope)
+	if err != nil {
+		return fmt.Errorf("order_manager: execution scope: %w", err)
+	}
+	originType, originID := scope.Origin()
 	marketType := planMarketType(plan)
 	predictionExitMaxQuantity := 0.0
 	stockExitMaxQuantity := 0.0
@@ -264,8 +270,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.InfoContext(ctx, "sell signal has no open long position, skipping order", "ticker", plan.Ticker, "strategy_id", strategyID)
 
 			decision := m.newTradeDecision(
-				strategyID,
-				runID,
+				scope,
 				plan,
 				marketType,
 				string(domain.OrderSideSell),
@@ -313,8 +318,7 @@ func (m *OrderManager) ProcessSignal(
 				rejectionReason = "unowned_kalshi_exit_no_open_position"
 			}
 			decision := m.newTradeDecision(
-				strategyID,
-				runID,
+				scope,
 				plan,
 				marketType,
 				string(domain.OrderSideSell),
@@ -391,8 +395,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
 
 			m.recordTradeDecision(ctx, m.newTradeDecision(
-				strategyID,
-				runID,
+				scope,
 				plan,
 				marketType,
 				strings.ToUpper(strings.TrimSpace(plan.Side)),
@@ -483,8 +486,7 @@ func (m *OrderManager) ProcessSignal(
 	if !approved {
 		m.logger.WarnContext(ctx, "position limits rejected", "ticker", plan.Ticker, "reason", reason)
 		m.recordTradeDecision(ctx, m.newTradeDecision(
-			strategyID,
-			runID,
+			scope,
 			plan,
 			marketType,
 			strings.ToUpper(strings.TrimSpace(plan.Side)),
@@ -514,18 +516,30 @@ func (m *OrderManager) ProcessSignal(
 	orderType := m.entryTypeToOrderType(plan.EntryType)
 
 	order := &domain.Order{
-		ID:             uuid.New(),
-		StrategyID:     &strategyID,
-		PipelineRunID:  &runID,
-		Ticker:         plan.Ticker,
-		MarketType:     marketType,
-		Side:           side,
-		OrderType:      orderType,
-		Quantity:       quantity,
-		Status:         domain.OrderStatusPending,
-		Broker:         m.brokerName,
-		CreatedAt:      now,
-		PredictionSide: plan.Side,
+		ID:                       uuid.New(),
+		AccountID:                scope.AccountID(),
+		Environment:              scope.Environment(),
+		OriginType:               string(originType),
+		OriginID:                 originID,
+		CopyOriginRebalanceRunID: scope.CopyOriginRunID(),
+		Ticker:                   plan.Ticker,
+		MarketType:               marketType,
+		Side:                     side,
+		OrderType:                orderType,
+		Quantity:                 quantity,
+		Status:                   domain.OrderStatusPending,
+		Broker:                   m.brokerName,
+		CreatedAt:                now,
+		PredictionSide:           plan.Side,
+	}
+	if originType == ledger.ExecutionOriginStrategyVersion {
+		order.StrategyID = &strategyID
+	}
+	if hasRun {
+		run, _ := scope.PipelineRun()
+		order.PipelineRunID = &runID
+		tradeDate := run.TradeDate
+		order.PipelineRunTradeDate = &tradeDate
 	}
 	if riskReducingExit {
 		intent := domain.PositionIntentSellToClose
@@ -573,8 +587,7 @@ func (m *OrderManager) ProcessSignal(
 		}
 		m.recordOrderMetric(order.Side, order.Status)
 		m.recordTradeDecision(ctx, m.newTradeDecision(
-			strategyID,
-			runID,
+			scope,
 			plan,
 			order.MarketType,
 			string(order.Side),
@@ -595,8 +608,7 @@ func (m *OrderManager) ProcessSignal(
 	}
 
 	decision := m.newTradeDecision(
-		strategyID,
-		runID,
+		scope,
 		plan,
 		order.MarketType,
 		string(order.Side),
@@ -624,7 +636,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
 
-		m.emitOrderEvent(ctx, OrderEventRejected, order, strategyID, runID)
+		m.emitOrderEvent(ctx, OrderEventRejected, order, scope)
 
 		return fmt.Errorf("order_manager: submit order: %w", err)
 	}
@@ -645,7 +657,7 @@ func (m *OrderManager) ProcessSignal(
 		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 	}
 
-	m.emitOrderEvent(ctx, OrderEventSubmitted, order, strategyID, runID)
+	m.emitOrderEvent(ctx, OrderEventSubmitted, order, scope)
 
 	// 7. Check order status and handle fill.
 	status, err := m.broker.GetOrderStatus(ctx, externalID)
@@ -657,7 +669,7 @@ func (m *OrderManager) ProcessSignal(
 
 	switch status {
 	case domain.OrderStatusFilled:
-		return m.handleFill(ctx, order, plan, strategyID, runID, decision.ID)
+		return m.handleFill(ctx, order, plan, scope, decision.ID)
 	case domain.OrderStatusCancelled:
 		if err := m.orderRepo.Update(ctx, order); err != nil {
 			return fmt.Errorf("order_manager: update %s order: %w", status, err)
@@ -668,7 +680,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
 
-		m.emitOrderEvent(ctx, OrderEventCancelled, order, strategyID, runID)
+		m.emitOrderEvent(ctx, OrderEventCancelled, order, scope)
 
 		return nil
 	case domain.OrderStatusRejected:
@@ -681,7 +693,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
 
-		m.emitOrderEvent(ctx, OrderEventRejected, order, strategyID, runID)
+		m.emitOrderEvent(ctx, OrderEventRejected, order, scope)
 
 		return nil
 	default:
@@ -710,8 +722,21 @@ func planMarketType(plan TradingPlan) domain.MarketType {
 	return marketType
 }
 
+func legacyScopeIDs(scope ExecutionScope) (uuid.UUID, uuid.UUID, bool, error) {
+	if scope.AccountID() == uuid.Nil || !scope.Environment().IsValid() {
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("account binding is required")
+	}
+	_, originID := scope.Origin()
+	originUUID, err := uuid.Parse(originID)
+	if err != nil {
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("UUID execution origin is required: %w", err)
+	}
+	run, hasRun := scope.PipelineRun()
+	return originUUID, run.ID, hasRun, nil
+}
+
 func (m *OrderManager) newTradeDecision(
-	strategyID, runID uuid.UUID,
+	scope ExecutionScope,
 	plan TradingPlan,
 	marketType domain.MarketType,
 	side string,
@@ -722,8 +747,8 @@ func (m *OrderManager) newTradeDecision(
 ) *domain.TradeDecision {
 	decision := &domain.TradeDecision{
 		ID:               uuid.New(),
-		StrategyID:       &strategyID,
-		PipelineRunID:    &runID,
+		AccountID:        scope.AccountID(),
+		Environment:      scope.Environment(),
 		MarketType:       marketType.Normalize(),
 		InstrumentKey:    strings.TrimSpace(plan.Ticker),
 		Side:             domain.OrderSide(strings.ToLower(strings.TrimSpace(side))),
@@ -745,6 +770,17 @@ func (m *OrderManager) newTradeDecision(
 		Status:           status,
 		CreatedAt:        m.currentTime(),
 		UpdatedAt:        m.currentTime(),
+	}
+	originType, originID := scope.Origin()
+	decision.OriginType, decision.OriginID = string(originType), originID
+	if originType == ledger.ExecutionOriginStrategyVersion {
+		strategyID := uuid.MustParse(originID)
+		decision.StrategyID = &strategyID
+	}
+	if run, ok := scope.PipelineRun(); ok {
+		decision.PipelineRunID = &run.ID
+		tradeDate := run.TradeDate
+		decision.PipelineRunTradeDate = &tradeDate
 	}
 	if plan.DecisionMetadata != nil {
 		decision.PromptText = plan.DecisionMetadata.PromptText
@@ -936,8 +972,13 @@ func (m *OrderManager) handleFill(
 	ctx context.Context,
 	order *domain.Order,
 	plan TradingPlan,
-	strategyID, runID, decisionID uuid.UUID,
+	scope ExecutionScope,
+	decisionID uuid.UUID,
 ) error {
+	strategyID, _, _, err := legacyScopeIDs(scope)
+	if err != nil {
+		return fmt.Errorf("order_manager: fill execution scope: %w", err)
+	}
 	now := m.currentTime()
 	order.FilledQuantity = order.Quantity
 	order.FilledAt = &now
@@ -949,6 +990,7 @@ func (m *OrderManager) handleFill(
 	}
 
 	marketType := order.MarketType.Normalize()
+	originType, originID := scope.Origin()
 	if m.financialRepo == nil {
 		if err := m.orderRepo.Update(ctx, order); err != nil {
 			return fmt.Errorf("order_manager: update filled order: %w", err)
@@ -957,7 +999,7 @@ func (m *OrderManager) handleFill(
 	}
 	var position *domain.Position
 	if m.financialRepo != nil {
-		trade := &domain.Trade{ID: uuid.New(), OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: order.FilledQuantity, Price: fillPrice, ExecutedAt: now}
+		trade := &domain.Trade{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: order.FilledQuantity, Price: fillPrice, ExecutedAt: now}
 		var stopLoss, takeProfit *float64
 		if plan.StopLoss > 0 {
 			stopLoss = &plan.StopLoss
@@ -988,7 +1030,7 @@ func (m *OrderManager) handleFill(
 			}
 		}
 		if !result.Replayed {
-			m.emitOrderEvent(ctx, OrderEventFilled, order, strategyID, runID)
+			m.emitOrderEvent(ctx, OrderEventFilled, order, scope)
 		}
 		return nil
 	}
@@ -1036,14 +1078,20 @@ func (m *OrderManager) handleFill(
 		}
 
 		position = &domain.Position{
-			ID:         uuid.New(),
-			StrategyID: &strategyID,
-			MarketType: marketType,
-			Ticker:     positionTicker,
-			Side:       positionSide,
-			Quantity:   order.FilledQuantity,
-			AvgEntry:   fillPrice,
-			OpenedAt:   now,
+			ID:          uuid.New(),
+			AccountID:   scope.AccountID(),
+			Environment: scope.Environment(),
+			OriginType:  string(originType),
+			OriginID:    originID,
+			MarketType:  marketType,
+			Ticker:      positionTicker,
+			Side:        positionSide,
+			Quantity:    order.FilledQuantity,
+			AvgEntry:    fillPrice,
+			OpenedAt:    now,
+		}
+		if originType == ledger.ExecutionOriginStrategyVersion {
+			position.StrategyID = &strategyID
 		}
 
 		if plan.StopLoss > 0 {
@@ -1060,15 +1108,19 @@ func (m *OrderManager) handleFill(
 	}
 
 	trade := &domain.Trade{
-		ID:         uuid.New(),
-		OrderID:    &order.ID,
-		PositionID: &position.ID,
-		Ticker:     order.Ticker,
-		Side:       order.Side,
-		Quantity:   order.FilledQuantity,
-		Price:      fillPrice,
-		ExecutedAt: now,
-		CreatedAt:  now,
+		ID:          uuid.New(),
+		AccountID:   scope.AccountID(),
+		Environment: scope.Environment(),
+		OriginType:  string(originType),
+		OriginID:    originID,
+		OrderID:     &order.ID,
+		PositionID:  &position.ID,
+		Ticker:      order.Ticker,
+		Side:        order.Side,
+		Quantity:    order.FilledQuantity,
+		Price:       fillPrice,
+		ExecutedAt:  now,
+		CreatedAt:   now,
 	}
 
 	if err := m.tradeRepo.Create(ctx, trade); err != nil {
@@ -1103,14 +1155,14 @@ func (m *OrderManager) handleFill(
 		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 	}
 
-	m.emitOrderEvent(ctx, OrderEventFilled, order, strategyID, runID)
+	m.emitOrderEvent(ctx, OrderEventFilled, order, scope)
 
 	return nil
 }
 
 // HandleFillForTest exposes handleFill for focused unit coverage.
-func (m *OrderManager) HandleFillForTest(ctx context.Context, order *domain.Order, plan TradingPlan, strategyID, runID, decisionID uuid.UUID) error {
-	return m.handleFill(ctx, order, plan, strategyID, runID, decisionID)
+func (m *OrderManager) HandleFillForTest(ctx context.Context, order *domain.Order, plan TradingPlan, scope ExecutionScope, decisionID uuid.UUID) error {
+	return m.handleFill(ctx, order, plan, scope, decisionID)
 }
 
 // signalToSide maps a pipeline signal to an order side.
@@ -1169,7 +1221,7 @@ func (m *OrderManager) emitOrderEvent(
 	ctx context.Context,
 	eventKind string,
 	order *domain.Order,
-	strategyID, runID uuid.UUID,
+	scope ExecutionScope,
 ) {
 	if m.agentEventRepo == nil {
 		return
@@ -1191,15 +1243,27 @@ func (m *OrderManager) emitOrderEvent(
 	title := fmt.Sprintf("Order %s: %s %.4g %s", eventKind, order.Side, order.Quantity, order.Ticker)
 
 	event := &domain.AgentEvent{
-		ID:            uuid.New(),
-		PipelineRunID: &runID,
-		StrategyID:    &strategyID,
-		AgentRole:     domain.AgentRoleTrader,
-		EventKind:     eventKind,
-		Title:         title,
-		Tags:          []string{"order", eventKind},
-		Metadata:      meta,
-		CreatedAt:     m.currentTime(),
+		ID:          uuid.New(),
+		AccountID:   scope.AccountID(),
+		Environment: scope.Environment(),
+		AgentRole:   domain.AgentRoleTrader,
+		EventKind:   eventKind,
+		Title:       title,
+		Tags:        []string{"order", eventKind},
+		Metadata:    meta,
+		CreatedAt:   m.currentTime(),
+	}
+	originType, originID := scope.Origin()
+	event.OriginType = string(originType)
+	event.OriginID = originID
+	if originType == ledger.ExecutionOriginStrategyVersion {
+		strategyID := uuid.MustParse(originID)
+		event.StrategyID = &strategyID
+	}
+	if run, ok := scope.PipelineRun(); ok {
+		event.PipelineRunID = &run.ID
+		tradeDate := run.TradeDate
+		event.PipelineRunTradeDate = &tradeDate
 	}
 
 	if err := m.agentEventRepo.Create(ctx, event); err != nil {

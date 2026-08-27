@@ -621,6 +621,7 @@ type OrderRepository interface {
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
 	GetByRun(ctx context.Context, runID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
+	GetByCopyOriginRun(ctx context.Context, copyOriginRunID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
 }
 
 // PositionRepository provides CRUD operations for positions.

@@ -354,7 +354,11 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		if err != nil {
 			return canonical, err
 		}
-		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
+		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+		if err != nil {
+			return canonical, err
+		}
+		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
 	}
@@ -374,7 +378,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	positions, err := r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
 	if err != nil {
 		return canonical, err
 	}
@@ -789,7 +793,11 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
+		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+		if err != nil {
+			return canonical, err
+		}
+		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
 	}
@@ -800,7 +808,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	positions, err := r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
 	if err != nil {
 		return canonical, err
 	}
@@ -935,7 +943,11 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
+		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+		if err != nil {
+			return canonical, err
+		}
+		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
 	}
@@ -952,7 +964,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 	var positions []domain.Position
 	if r.positionRepo != nil {
-		positions, err = r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+		positions, err = r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
 		if err != nil {
 			return canonical, err
 		}

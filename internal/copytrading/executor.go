@@ -65,13 +65,14 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 		signal = domain.PipelineSignalSell
 	}
 	price := *request.Intent.ExecutablePrice
-	if request.Subscription.LegacyStrategyID == nil {
-		return PaperOrderResult{}, fmt.Errorf("origin-native copy execution handoff is not configured")
+	scope, err := execution.NewCopyExecutionScope(e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID)
+	if err != nil {
+		return PaperOrderResult{}, fmt.Errorf("copy execution scope: %w", err)
 	}
-	if err := manager.ProcessSignal(ctx, execution.FinalSignal{Signal: signal, Confidence: 1}, execution.TradingPlan{Action: signal, MarketType: domain.MarketTypeStock, Ticker: request.Intent.Ticker, EntryType: "limit", EntryPrice: price, ReferencePrice: price, PositionSize: request.Intent.RequestedNotional / price, Confidence: 1, Rationale: "deterministic copy-subscription rebalance"}, *request.Subscription.LegacyStrategyID, request.Run.ID); err != nil {
+	if err := manager.ProcessSignal(ctx, scope, execution.FinalSignal{Signal: signal, Confidence: 1}, execution.TradingPlan{Action: signal, MarketType: domain.MarketTypeStock, Ticker: request.Intent.Ticker, EntryType: "limit", EntryPrice: price, ReferencePrice: price, PositionSize: request.Intent.RequestedNotional / price, Confidence: 1, Rationale: "deterministic copy-subscription rebalance"}); err != nil {
 		return PaperOrderResult{}, err
 	}
-	orders, err := e.deps.Orders.GetByRun(ctx, request.Run.ID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 10, 0)
+	orders, err := e.deps.Orders.GetByCopyOriginRun(ctx, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 10, 0)
 	if err != nil {
 		return PaperOrderResult{}, err
 	}

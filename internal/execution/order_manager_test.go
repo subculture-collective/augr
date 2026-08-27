@@ -23,6 +23,22 @@ import (
 
 var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
 
+func strategyScope(strategyVersionID, runID uuid.UUID) execution.ExecutionScope {
+	scope, err := execution.NewStrategyExecutionScope(testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), strategyVersionID, domain.PipelineRunRef{ID: runID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		panic(err)
+	}
+	return scope
+}
+
+func copyScope(subscriptionID, originRunID uuid.UUID) execution.ExecutionScope {
+	scope, err := execution.NewCopyExecutionScope(testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), subscriptionID, originRunID)
+	if err != nil {
+		panic(err)
+	}
+	return scope
+}
+
 // ---------------------------------------------------------------------------
 // Mock implementations
 // ---------------------------------------------------------------------------
@@ -258,6 +274,10 @@ func (r *mockOrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter re
 	}
 
 	return nil, nil
+}
+
+func (r *mockOrderRepo) GetByCopyOriginRun(ctx context.Context, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+	return r.GetByRun(ctx, runID, filter, limit, offset)
 }
 
 // mockPositionRepo implements repository.PositionRepository.
@@ -608,7 +628,7 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	metrics := &mockMetricsRecorder{}
 	financialRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, TradeID: uuid.New(), Replayed: false, PositionID: nil}}
 	mgr := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, auditRepo).WithFinancialLifecycleRepo(financialRepo).WithMetrics(metrics)
-	if err := mgr.HandleFillForTest(context.Background(), order, plan, strategyID, runID, decisionID); err != nil {
+	if err := mgr.HandleFillForTest(context.Background(), order, plan, strategyScope(strategyID, runID), decisionID); err != nil {
 		t.Fatalf("HandleFillForTest() error = %v", err)
 	}
 	if financialRepo.called != 1 {
@@ -630,7 +650,7 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	positionRepo2 := &mockPositionRepo{}
 	metrics2 := &mockMetricsRecorder{}
 	mgr2 := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, &mockOrderRepo{}, positionRepo2, tradeRepo2, auditRepo2).WithFinancialLifecycleRepo(replayRepo).WithMetrics(metrics2)
-	if err := mgr2.HandleFillForTest(context.Background(), order2, plan, strategyID, runID, decisionID); err != nil {
+	if err := mgr2.HandleFillForTest(context.Background(), order2, plan, strategyScope(strategyID, runID), decisionID); err != nil {
 		t.Fatalf("HandleFillForTest replay() error = %v", err)
 	}
 	if len(auditRepo2.entries) != 0 || len(tradeRepo2.trades) != 0 || len(positionRepo2.positions) != 0 || len(metrics2.records) != 0 {
@@ -644,7 +664,7 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	positionRepo3 := &mockPositionRepo{}
 	auditRepo3 := &mockAuditLogRepo{}
 	mgr3 := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, orderRepo3, positionRepo3, tradeRepo3, auditRepo3).WithFinancialLifecycleRepo(failingRepo)
-	if err := mgr3.HandleFillForTest(context.Background(), order3, plan, strategyID, runID, decisionID); err == nil {
+	if err := mgr3.HandleFillForTest(context.Background(), order3, plan, strategyScope(strategyID, runID), decisionID); err == nil {
 		t.Fatal("expected financial repo error")
 	}
 	if len(orderRepo3.updates) != 0 || len(positionRepo3.positions) != 0 || len(tradeRepo3.trades) != 0 || len(auditRepo3.entries) != 0 {
@@ -691,7 +711,7 @@ func TestOrderManager_CarriesKalshiReferencePriceToBroker(t *testing.T) {
 	plan.Ticker = "KXTEST"
 	plan.Side = "YES"
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, strategyID, runID); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, runID), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if submitted == nil {
@@ -739,7 +759,7 @@ func TestOrderManager_PersistsExactPaperFillPriceAcrossRepos(t *testing.T) {
 	}
 
 	mgr := execution.NewOrderManager(broker, "paper", &mockRiskEngine{}, positionRepo, orderRepo, tradeRepo, &mockAuditLogRepo{}, nil, execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: 0.02}, slog.Default())
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, strategyID, runID); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, runID), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if createdOrder == nil || persistedOrder == nil || persistedTrade == nil || persistedPosition == nil {
@@ -785,13 +805,7 @@ func TestProcessSignal_HappyPath(t *testing.T) {
 
 	plan := defaultPlan()
 	plan.MarketType = domain.MarketTypeCrypto
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		plan,
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan)
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -880,7 +894,7 @@ func TestProcessSignal_PolymarketPositionTickerIncludesPredictionSide(t *testing
 	plan.EntryPrice = 0.43
 	plan.Side = "NO"
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if len(positionRepo.positions) != 1 {
@@ -906,7 +920,7 @@ func TestProcessSignal_PredictionSuffixInferencePersistsBaseTickerAndSide(t *tes
 	plan.Side = ""
 	plan.EntryPrice = 0.43
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if len(orderRepo.orders) != 1 {
@@ -938,7 +952,7 @@ func TestProcessSignal_PredictionMixedCaseSuffixBuyAndSellReuseNormalizedIdentit
 	buyPlan.Side = ""
 	buyPlan.EntryPrice = 0.50
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), buyPlan, strategyID, uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), defaultSignal(), buyPlan); err != nil {
 		t.Fatalf("buy ProcessSignal() unexpected error: %v", err)
 	}
 	if len(orderRepo.orders) != 1 {
@@ -968,7 +982,7 @@ func TestProcessSignal_PredictionMixedCaseSuffixBuyAndSellReuseNormalizedIdentit
 	sellPlan.EntryPrice = 0.60
 	sellPlan.Action = domain.PipelineSignalSell
 
-	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, sellPlan, strategyID, uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, sellPlan); err != nil {
 		t.Fatalf("sell ProcessSignal() unexpected error: %v", err)
 	}
 	if len(orderRepo.orders) != 2 {
@@ -992,7 +1006,7 @@ func TestProcessSignal_PredictionNoSuffixRejectedBeforeCreateOrSubmit(t *testing
 	plan.Ticker = "will-example-happen"
 	plan.Side = ""
 
-	err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New())
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1018,7 +1032,7 @@ func TestProcessSignal_PredictionInvalidIdentityRejectedBeforeOwnershipQuery(t *
 	plan.Side = ""
 	plan.Action = domain.PipelineSignalSell
 
-	err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, uuid.New(), uuid.New())
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan)
 	if err == nil || !strings.Contains(err.Error(), "requires valid side YES or NO") {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1052,7 +1066,7 @@ func TestProcessSignal_PredictionQualifiedTickerNormalizesBeforePersistence(t *t
 	plan.Side = "YES"
 	plan.EntryPrice = 0.43
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if submitCalls != 1 {
@@ -1087,7 +1101,7 @@ func TestProcessSignal_PredictionConflictingTickerSuffixRejectedBeforeCreate(t *
 	plan.Ticker = "will-example-happen:NO"
 	plan.Side = "YES"
 
-	err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New())
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan)
 	if err == nil {
 		t.Fatal("expected conflict error")
 	}
@@ -1130,7 +1144,7 @@ func TestProcessSignal_PolymarketBuyUsesUSDCCapForQuantity(t *testing.T) {
 		slog.Default(),
 	)
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if len(orderRepo.orders) != 1 {
@@ -1181,7 +1195,7 @@ func TestProcessSignal_PolymarketExitClosesSideQualifiedPosition(t *testing.T) {
 	plan.EntryPrice = 0.50
 	plan.Action = domain.PipelineSignalSell
 
-	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 
@@ -1250,7 +1264,7 @@ func TestProcessSignal_PolymarketExitQuantityCappedToOwnedPosition(t *testing.T)
 	plan.EntryPrice = 0.50
 	plan.Action = domain.PipelineSignalSell
 
-	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if len(orderRepo.orders) != 1 {
@@ -1304,7 +1318,7 @@ func TestProcessSignal_PolymarketPartialCloseReducesQuantity(t *testing.T) {
 	plan.EntryPrice = 0.50
 	plan.Action = domain.PipelineSignalSell
 
-	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 
@@ -1348,7 +1362,7 @@ func TestProcessSignal_KalshiExitUsesOwnedQuantityAndClosesPosition(t *testing.T
 	plan.PositionSize = 100
 	plan.Action = domain.PipelineSignalSell
 
-	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 	if len(orderRepo.orders) != 1 || orderRepo.orders[0].Side != domain.OrderSideSell || orderRepo.orders[0].Quantity != 100 {
@@ -1382,7 +1396,7 @@ func TestProcessSignal_PolymarketSellWithoutMatchingPositionSkipped(t *testing.T
 	plan.EntryPrice = 0.50
 	plan.Action = domain.PipelineSignalSell
 
-	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, uuid.New(), uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 
@@ -1437,7 +1451,7 @@ func TestProcessSignal_PolymarketExitClosesNoPosition(t *testing.T) {
 	plan.EntryPrice = 0.50
 	plan.Action = domain.PipelineSignalSell
 
-	if err := mgr.ProcessSignal(context.Background(), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan, strategyID, uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 
@@ -1494,13 +1508,7 @@ func TestProcessSignal_BuildsPortfolioForRiskChecks(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -1613,7 +1621,7 @@ func TestProcessSignal_RejectsWhenPerMarketExposureWouldExceedLimit(t *testing.T
 				slog.Default(),
 			)
 
-			err := mgr.ProcessSignal(context.Background(), defaultSignal(), tc.plan, uuid.New(), uuid.New())
+			err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), tc.plan)
 			if err == nil {
 				t.Fatalf("ProcessSignal() expected error when per-market exposure would exceed limit; captured=%v", captured.MarketExposurePct)
 			}
@@ -1651,13 +1659,7 @@ func TestProcessSignal_KillSwitchActive(t *testing.T) {
 	plan := defaultPlan()
 	plan.MarketType = domain.MarketTypeCrypto
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		plan,
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan)
 
 	if err == nil {
 		t.Fatal("ProcessSignal() expected error when kill switch active")
@@ -1705,13 +1707,7 @@ func TestProcessSignal_KillSwitchAdmitsVerifiedReduceOnlyStockExit(t *testing.T)
 	plan.EntryPrice = 100
 	plan.PositionSize = 10
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
-		plan,
-		strategyID,
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, plan)
 	if err != nil {
 		t.Fatalf("ProcessSignal() error = %v", err)
 	}
@@ -1744,13 +1740,7 @@ func TestProcessSignal_RiskCheckRejection(t *testing.T) {
 	plan := defaultPlan()
 	plan.MarketType = domain.MarketTypeCrypto
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		plan,
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan)
 
 	if err == nil {
 		t.Fatal("ProcessSignal() expected error when risk check rejects")
@@ -1797,13 +1787,7 @@ func TestProcessSignal_RecordsPaperDecisionAndAttachesOrder(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -1865,7 +1849,7 @@ func TestProcessSignal_RecordsTradeDecisionWithLLMMetadata(t *testing.T) {
 		CostUSD:          &costUSD,
 	}
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() error = %v", err)
 	}
 	if len(recorder.decisions) == 0 {
@@ -1906,7 +1890,7 @@ func TestProcessSignal_LiveGateBlocksBrokerSubmission(t *testing.T) {
 
 	plan := defaultPlan()
 	plan.MarketType = domain.MarketTypeCrypto
-	err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, strategyID, uuid.New())
+	err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), defaultSignal(), plan)
 	if err == nil {
 		t.Fatal("expected live gate error")
 	}
@@ -1955,7 +1939,7 @@ func TestProcessSignal_RecordsLiveDecisionAndAttachesLiveOrder(t *testing.T) {
 		slog.Default(),
 	).WithDecisionRecorder(recorder).WithLiveTrading(true).WithLiveGate(gate)
 
-	err := mgr.ProcessSignal(context.Background(), defaultSignal(), defaultPlan(), strategyID, uuid.New())
+	err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -1987,13 +1971,7 @@ func TestProcessSignal_PreTradeRejection(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 
 	if err == nil {
 		t.Fatal("ProcessSignal() expected error when pre-trade check rejects")
@@ -2038,13 +2016,7 @@ func TestProcessSignal_AuditLogEntries(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2081,13 +2053,7 @@ func TestProcessSignal_HoldSignalSkipped(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		execution.FinalSignal{Signal: domain.PipelineSignalHold, Confidence: 0.5},
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalHold, Confidence: 0.5}, defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error for hold signal: %v", err)
 	}
@@ -2135,13 +2101,7 @@ func TestProcessSignal_HoldSignalSkipsPredictionNormalizationForPredictionMarket
 
 			mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-			err := mgr.ProcessSignal(
-				context.Background(),
-				execution.FinalSignal{Signal: domain.PipelineSignalHold, Confidence: 0.5},
-				execution.TradingPlan{MarketType: marketType, Ticker: "MARKET", Side: "", Action: domain.PipelineSignalBuy},
-				uuid.New(),
-				uuid.New(),
-			)
+			err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalHold, Confidence: 0.5}, execution.TradingPlan{MarketType: marketType, Ticker: "MARKET", Side: "", Action: domain.PipelineSignalBuy})
 			if err != nil {
 				t.Fatalf("ProcessSignal() unexpected error for %s hold signal: %v", marketType, err)
 			}
@@ -2187,21 +2147,15 @@ func TestProcessSignal_SellSignal(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
-		execution.TradingPlan{
-			Action:     domain.PipelineSignalSell,
-			MarketType: domain.MarketTypeStock,
-			Ticker:     "TSLA",
-			EntryType:  "market",
-			EntryPrice: 200.0,
-			StopLoss:   210.0,
-			TakeProfit: 180.0,
-		},
-		strategyID,
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, execution.TradingPlan{
+		Action:     domain.PipelineSignalSell,
+		MarketType: domain.MarketTypeStock,
+		Ticker:     "TSLA",
+		EntryType:  "market",
+		EntryPrice: 200.0,
+		StopLoss:   210.0,
+		TakeProfit: 180.0,
+	})
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2239,20 +2193,14 @@ func TestProcessSignal_SellSignalWithoutOpenLongPositionSkipped(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
-		execution.TradingPlan{
-			Action:     domain.PipelineSignalSell,
-			Ticker:     "TSLA",
-			EntryType:  "market",
-			EntryPrice: 200.0,
-			StopLoss:   210.0,
-			TakeProfit: 180.0,
-		},
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, execution.TradingPlan{
+		Action:     domain.PipelineSignalSell,
+		Ticker:     "TSLA",
+		EntryType:  "market",
+		EntryPrice: 200.0,
+		StopLoss:   210.0,
+		TakeProfit: 180.0,
+	})
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2301,19 +2249,13 @@ func TestProcessSignal_NonStockSellWithoutOpenLongIsNotStockGuarded(t *testing.T
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
-		execution.TradingPlan{
-			Action:     domain.PipelineSignalSell,
-			MarketType: domain.MarketTypeCrypto,
-			Ticker:     "BTCUSD",
-			EntryType:  "market",
-			EntryPrice: 100,
-		},
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, execution.TradingPlan{
+		Action:     domain.PipelineSignalSell,
+		MarketType: domain.MarketTypeCrypto,
+		Ticker:     "BTCUSD",
+		EntryType:  "market",
+		EntryPrice: 100,
+	})
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2351,19 +2293,13 @@ func TestProcessSignal_StockSellRequiresTickerForOwnershipCheck(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9},
-		execution.TradingPlan{
-			Action:     domain.PipelineSignalSell,
-			MarketType: domain.MarketTypeStock,
-			Ticker:     " ",
-			EntryType:  "market",
-			EntryPrice: 100,
-		},
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalSell, Confidence: 0.9}, execution.TradingPlan{
+		Action:     domain.PipelineSignalSell,
+		MarketType: domain.MarketTypeStock,
+		Ticker:     " ",
+		EntryType:  "market",
+		EntryPrice: 100,
+	})
 	if err == nil {
 		t.Fatal("ProcessSignal() error = nil, want ticker ownership error")
 	}
@@ -2390,13 +2326,7 @@ func TestProcessSignal_BrokerSubmitError(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithDecisionRecorder(recorder)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 
 	if err == nil {
 		t.Fatal("ProcessSignal() expected error on broker submit failure")
@@ -2457,13 +2387,7 @@ func TestProcessSignal_OrderCancelled(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2490,13 +2414,7 @@ func TestProcessSignal_LimitOrder(t *testing.T) {
 	plan := defaultPlan()
 	plan.EntryType = "limit"
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		plan,
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan)
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2527,7 +2445,7 @@ func TestProcessSignal_RecordsOrderMetrics(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo).WithMetrics(metrics)
 
-	err := mgr.ProcessSignal(context.Background(), defaultSignal(), defaultPlan(), uuid.New(), uuid.New())
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2570,13 +2488,7 @@ func TestProcessSignal_UsesInjectedClockForLifecycleTimestamps(t *testing.T) {
 	now := time.Date(2026, 3, 25, 14, 45, 0, 0, time.UTC)
 	mgr.SetNowFunc(func() time.Time { return now })
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2654,13 +2566,7 @@ func TestProcessSignal_EntryTypeVariants(t *testing.T) {
 			plan := defaultPlan()
 			plan.EntryType = tc.entryType
 
-			err := mgr.ProcessSignal(
-				context.Background(),
-				defaultSignal(),
-				plan,
-				uuid.New(),
-				uuid.New(),
-			)
+			err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan)
 			if err != nil {
 				t.Fatalf("ProcessSignal() unexpected error: %v", err)
 			}
@@ -2706,13 +2612,7 @@ func TestProcessSignal_EmitsOrderEvents(t *testing.T) {
 	strategyID := uuid.New()
 	runID := uuid.New()
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		strategyID,
-		runID,
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(strategyID, runID), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
@@ -2779,13 +2679,7 @@ func TestProcessSignal_NilEventRepo_NoPanic(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() with nil event repo: %v", err)
 	}
@@ -2824,13 +2718,7 @@ func TestProcessSignal_EventRepoError_DoesNotFailOrder(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err != nil {
 		t.Fatalf("ProcessSignal() should succeed even when event repo fails: %v", err)
 	}
@@ -2877,13 +2765,7 @@ func TestProcessSignal_ZeroPositionSize(t *testing.T) {
 		slog.Default(),
 	)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err == nil {
 		t.Fatal("expected error for zero position size")
 	}
@@ -2936,7 +2818,7 @@ func TestProcessSignal_KellySizingUsesUnitsAndExposure(t *testing.T) {
 	plan.EntryPrice = 50
 	plan.StopLoss = 45
 
-	if err := mgr.ProcessSignal(context.Background(), defaultSignal(), plan, uuid.New(), uuid.New()); err != nil {
+	if err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan); err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
 
@@ -2967,13 +2849,7 @@ func TestProcessSignal_ZeroEquity(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err == nil {
 		t.Fatal("expected error for zero equity")
 	}
@@ -3000,13 +2876,7 @@ func TestProcessSignal_TradeCreationFailure_PartialFill(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err == nil {
 		t.Fatal("expected error when trade creation fails")
 	}
@@ -3052,13 +2922,7 @@ func TestProcessSignal_BalanceError(t *testing.T) {
 
 	mgr := newTestOrderManager(broker, riskEng, orderRepo, positionRepo, tradeRepo, auditRepo)
 
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	if err == nil {
 		t.Fatal("expected error when broker is unreachable")
 	}
@@ -3091,19 +2955,35 @@ func TestProcessSignal_AuditLogFailure_NonFatal(t *testing.T) {
 
 	// Kill switch is active, so ProcessSignal will try to audit and then return error.
 	// The audit failure itself should be non-fatal (logged, not propagated).
-	err := mgr.ProcessSignal(
-		context.Background(),
-		defaultSignal(),
-		defaultPlan(),
-		uuid.New(),
-		uuid.New(),
-	)
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
 	// Error should be about kill switch, not about audit failure.
 	if err == nil {
 		t.Fatal("expected kill switch error")
 	}
 	if !contains(err.Error(), "kill switch") {
 		t.Errorf("expected kill switch error, got: %v", err)
+	}
+}
+
+func TestProcessSignal_CopyScopePersistsCanonicalOrigin(t *testing.T) {
+	orderRepo := &mockOrderRepo{}
+	positionRepo := &mockPositionRepo{}
+	tradeRepo := &mockTradeRepo{}
+	mgr := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, &mockAuditLogRepo{})
+	subscriptionID, originRunID := uuid.New(), uuid.New()
+
+	if err := mgr.ProcessSignal(context.Background(), copyScope(subscriptionID, originRunID), defaultSignal(), defaultPlan()); err != nil {
+		t.Fatal(err)
+	}
+	if len(orderRepo.orders) != 1 {
+		t.Fatalf("orders=%d, want 1", len(orderRepo.orders))
+	}
+	order := orderRepo.orders[0]
+	if order.AccountID != testExecutionAccountBinding.AccountID() || order.Environment != testExecutionAccountBinding.Environment() || order.OriginType != "copy_subscription" || order.OriginID != subscriptionID.String() || order.CopyOriginRebalanceRunID != originRunID {
+		t.Fatalf("order scope=%+v", order)
+	}
+	if order.StrategyID != nil || order.PipelineRunID != nil {
+		t.Fatalf("copy order retained strategy/run identity: %+v", order)
 	}
 }
 

@@ -28,7 +28,7 @@ type PriceProvider interface {
 type PaperOrderRequest struct {
 	Subscription domain.CopySubscription
 	Intent       domain.CopyTradeIntent
-	Run          domain.PipelineRun
+	OriginRunID  uuid.UUID
 }
 
 type PaperOrderResult struct {
@@ -428,20 +428,49 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	if err != nil {
 		return nil, err
 	}
+	if s.deps.OriginRuns == nil {
+		return nil, fmt.Errorf("copy origin run repository is unavailable")
+	}
+	planned := append([]domain.CopyTradeIntent(nil), preview.Intents...)
+	originRun, err := copyorigin.NewRun(*subscription, planned)
+	if err != nil {
+		return nil, err
+	}
+	persistedOrigin, planned, err := s.deps.OriginRuns.RegisterPlannedRun(ctx, originRun, planned)
+	if err != nil {
+		return nil, err
+	}
+	result := &RebalanceResult{OriginRunID: persistedOrigin.ID(), OriginRunSHA256: persistedOrigin.Digest(), Preview: *preview, Intents: make([]domain.CopyTradeIntent, 0, len(planned))}
 	if subscription.LegacyStrategyID == nil {
-		if s.deps.OriginRuns == nil {
-			return nil, fmt.Errorf("copy origin run repository is unavailable")
+		if s.deps.Executor == nil {
+			return result, fmt.Errorf("paper executor is unavailable")
 		}
-		intents := append([]domain.CopyTradeIntent(nil), preview.Intents...)
-		run, runErr := copyorigin.NewRun(*subscription, intents)
-		if runErr != nil {
-			return nil, runErr
+		for _, candidate := range planned {
+			created, createErr := s.deps.Repo.CreateIntent(ctx, &candidate)
+			if createErr != nil {
+				return result, fmt.Errorf("persist copy intent %s: %w", candidate.ID, createErr)
+			}
+			if !created || candidate.PolicyStatus != "approved" {
+				result.Intents = append(result.Intents, candidate)
+				continue
+			}
+			executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
+			candidate.OrderID = executionResult.OrderID
+			if executeErr != nil {
+				candidate.Status, candidate.RiskStatus = "risk_rejected", "rejected"
+				candidate.RiskReasons = []string{executeErr.Error()}
+			} else {
+				candidate.Status, candidate.RiskStatus = "ordered", "approved"
+				if executionResult.Status == domain.OrderStatusFilled {
+					candidate.Status = "filled"
+				}
+			}
+			if updateErr := s.deps.Repo.UpdateIntent(ctx, &candidate); updateErr != nil {
+				return result, fmt.Errorf("update copy intent %s: %w", candidate.ID, updateErr)
+			}
+			result.Intents = append(result.Intents, candidate)
 		}
-		persisted, intents, persistErr := s.deps.OriginRuns.RegisterPlannedRun(ctx, run, intents)
-		if persistErr != nil {
-			return nil, persistErr
-		}
-		return &RebalanceResult{OriginRunID: persisted.ID(), OriginRunSHA256: persisted.Digest(), Preview: *preview, Intents: intents}, nil
+		return result, nil
 	}
 	if s.deps.Runs == nil {
 		return nil, fmt.Errorf("pipeline run repository is unavailable")
@@ -462,8 +491,7 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	if err := s.deps.Runs.Create(ctx, &run); err != nil {
 		return nil, err
 	}
-	result := &RebalanceResult{Run: run, Preview: *preview, Intents: make([]domain.CopyTradeIntent, 0, len(preview.Intents))}
-	planned := append([]domain.CopyTradeIntent(nil), preview.Intents...)
+	result.Run = run
 	buyOrders := 0
 	sellOrders := 0
 	approvedOrders := 0
@@ -594,7 +622,7 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
-		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, Run: receipt.Run})
+		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
 		candidate.OrderID = executionResult.OrderID
 		if executeErr != nil {
 			candidate.Status = "risk_rejected"

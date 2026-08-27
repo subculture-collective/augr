@@ -39,16 +39,23 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO orders (
-			strategy_id, pipeline_run_id, external_id, ticker, market_type, side, order_type,
+			strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
+			pipeline_run_trade_date, copy_origin_rebalance_run_id, external_id, ticker, market_type, side, order_type,
 			quantity, limit_price, stop_price, filled_quantity, filled_avg_price,
 			status, broker, submitted_at, filled_at, asset_class, underlying_ticker,
 			option_type, strike, expiry, contract_multiplier, position_intent, leg_group_id,
 			prediction_side, polymarket_intent
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
+		nullableUUID(order.AccountID),
+		nullString(string(order.Environment)),
+		nullString(order.OriginType),
+		nullString(order.OriginID),
+		order.PipelineRunTradeDate,
+		nullableUUID(order.CopyOriginRebalanceRunID),
 		nullString(order.ExternalID),
 		order.Ticker,
 		marketType,
@@ -116,34 +123,24 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 		`UPDATE orders
 		 SET strategy_id = $1,
 		     pipeline_run_id = $2,
-		     external_id = $3,
-		     ticker = $4,
-		     market_type = $5,
-		     side = $6,
-		     order_type = $7,
-		     quantity = $8,
-		     limit_price = $9,
-		     stop_price = $10,
-		     filled_quantity = $11,
-		     filled_avg_price = $12,
-		     status = $13,
-		     broker = $14,
-		     submitted_at = $15,
-		     filled_at = $16
-		     , asset_class = $17
-		     , underlying_ticker = $18
-		     , option_type = $19
-		     , strike = $20
-		     , expiry = $21
-		     , contract_multiplier = $22
-		     , position_intent = $23
-		     , leg_group_id = $24
-		     , prediction_side = $25
-		     , polymarket_intent = $26
-		 WHERE id = $27
+		     account_id = $3, environment = $4, origin_type = $5, origin_id = $6,
+		     pipeline_run_trade_date = $7, copy_origin_rebalance_run_id = $8,
+		     external_id = $9, ticker = $10, market_type = $11, side = $12,
+		     order_type = $13, quantity = $14, limit_price = $15, stop_price = $16,
+		     filled_quantity = $17, filled_avg_price = $18, status = $19, broker = $20,
+		     submitted_at = $21, filled_at = $22, asset_class = $23, underlying_ticker = $24,
+		     option_type = $25, strike = $26, expiry = $27, contract_multiplier = $28,
+		     position_intent = $29, leg_group_id = $30, prediction_side = $31, polymarket_intent = $32
+		 WHERE id = $33
 		 RETURNING id`,
 		order.StrategyID,
 		order.PipelineRunID,
+		nullableUUID(order.AccountID),
+		nullString(string(order.Environment)),
+		nullString(order.OriginType),
+		nullString(order.OriginID),
+		order.PipelineRunTradeDate,
+		nullableUUID(order.CopyOriginRebalanceRunID),
 		nullString(order.ExternalID),
 		order.Ticker,
 		marketType,
@@ -210,7 +207,13 @@ func (r *OrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter reposi
 	return r.list(ctx, query, args, "get orders by run")
 }
 
-const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, external_id, ticker, market_type, side,
+func (r *OrderRepo) GetByCopyOriginRun(ctx context.Context, copyOriginRunID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+	query, args := buildOrderScopedListQuery("copy_origin", copyOriginRunID, filter, limit, offset)
+	return r.list(ctx, query, args, "get orders by copy origin run")
+}
+
+const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
+		pipeline_run_trade_date, copy_origin_rebalance_run_id, external_id, ticker, market_type, side,
 		order_type, quantity::double precision, limit_price::double precision,
 		stop_price::double precision, filled_quantity::double precision,
 		filled_avg_price::double precision, status, broker, submitted_at,
@@ -248,24 +251,35 @@ func (r *OrderRepo) list(ctx context.Context, query string, args []any, op strin
 // value when NULL.
 func scanOrder(sc scanner) (*domain.Order, error) {
 	var (
-		order          domain.Order
-		strategyID     *uuid.UUID
-		pipelineRunID  *uuid.UUID
-		externalID     *string
-		marketType     *string
-		limitPrice     *float64
-		stopPrice      *float64
-		filledAvgPrice *float64
-		broker         *string
-		underlying     *string
-		submittedAt    *time.Time
-		filledAt       *time.Time
+		order           domain.Order
+		strategyID      *uuid.UUID
+		pipelineRunID   *uuid.UUID
+		accountID       *uuid.UUID
+		environment     *domain.AccountEnvironment
+		originType      *string
+		originID        *string
+		copyOriginRunID *uuid.UUID
+		externalID      *string
+		marketType      *string
+		limitPrice      *float64
+		stopPrice       *float64
+		filledAvgPrice  *float64
+		broker          *string
+		underlying      *string
+		submittedAt     *time.Time
+		filledAt        *time.Time
 	)
 
 	err := sc.Scan(
 		&order.ID,
 		&strategyID,
 		&pipelineRunID,
+		&accountID,
+		&environment,
+		&originType,
+		&originID,
+		&order.PipelineRunTradeDate,
+		&copyOriginRunID,
 		&externalID,
 		&order.Ticker,
 		&marketType,
@@ -298,6 +312,21 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 
 	order.StrategyID = strategyID
 	order.PipelineRunID = pipelineRunID
+	if accountID != nil {
+		order.AccountID = *accountID
+	}
+	if environment != nil {
+		order.Environment = *environment
+	}
+	if originType != nil {
+		order.OriginType = *originType
+	}
+	if originID != nil {
+		order.OriginID = *originID
+	}
+	if copyOriginRunID != nil {
+		order.CopyOriginRebalanceRunID = *copyOriginRunID
+	}
 	order.LimitPrice = limitPrice
 	order.StopPrice = stopPrice
 	order.FilledAvgPrice = filledAvgPrice
@@ -399,7 +428,15 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 		return fmt.Sprintf("$%d", argIdx)
 	}
 
-	if scopeColumn != "" {
+	if scopeColumn == "copy_origin" {
+		parameter := nextArg(scopeValue)
+		conditions = append(conditions,
+			"copy_origin_rebalance_run_id = "+parameter,
+			"origin_type = 'copy_subscription'",
+			"account_id = (SELECT account_id FROM copy_origin_rebalance_runs WHERE id = "+parameter+")",
+			"origin_id = (SELECT subscription_id::text FROM copy_origin_rebalance_runs WHERE id = "+parameter+")",
+		)
+	} else if scopeColumn != "" {
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))
 	}
 

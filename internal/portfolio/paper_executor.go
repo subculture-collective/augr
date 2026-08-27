@@ -20,8 +20,7 @@ type PaperOrderProcessor interface {
 type PaperOrderRequest struct {
 	Signal      execution.FinalSignal
 	Plan        execution.TradingPlan
-	StrategyID  uuid.UUID
-	RunID       uuid.UUID
+	Scope       execution.ExecutionScope
 	NotionalUSD float64
 }
 
@@ -119,8 +118,14 @@ func (e *PaperExecutor) ExecutePaperDecision(ctx context.Context, opportunity do
 		Side:         paperPlanSide(opportunity),
 	}
 
-	runID := uuid.New()
-	orderResult, err := e.deps.Processor.ProcessPaperOrder(ctx, PaperOrderRequest{Signal: finalSignal, Plan: plan, StrategyID: strategy.ID, RunID: runID, NotionalUSD: decision.NotionalUSD})
+	if strategy.ExecutionStrategyVersionID == nil || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
+		return e.rejected("missing_execution_scope"), nil
+	}
+	scope, err := execution.NewStrategyExecutionScope(opportunity.AccountID, opportunity.Environment, *strategy.ExecutionStrategyVersionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
+	if err != nil {
+		return e.rejected("invalid_execution_scope"), nil
+	}
+	orderResult, err := e.deps.Processor.ProcessPaperOrder(ctx, PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD})
 	if err != nil {
 		return PaperExecutionResult{
 			Action:      domain.AllocationDecisionActionExecutionRejected,

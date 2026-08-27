@@ -78,13 +78,17 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if p.deps.DecisionRecorder != nil {
 		manager = manager.WithDecisionRecorder(p.deps.DecisionRecorder)
 	}
-	if err := manager.ProcessSignal(ctx, request.Signal, request.Plan, request.StrategyID, request.RunID); err != nil {
+	if err := manager.ProcessSignal(ctx, request.Scope, request.Signal, request.Plan); err != nil {
 		return PaperOrderResult{}, err
 	}
 	if p.deps.OrderRepo == nil {
 		return PaperOrderResult{Skipped: true, Reason: "missing_order_repo"}, nil
 	}
-	orders, err := p.deps.OrderRepo.GetByRun(ctx, request.RunID, repository.OrderFilter{}, 10, 0)
+	run, ok := request.Scope.PipelineRun()
+	if !ok {
+		return PaperOrderResult{Skipped: true, Reason: "missing_pipeline_run"}, nil
+	}
+	orders, err := p.deps.OrderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		return PaperOrderResult{}, err
 	}

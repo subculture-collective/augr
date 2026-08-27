@@ -119,6 +119,25 @@ func TestStrategyOriginRequiresMatchingStrategyVersion(t *testing.T) {
 	}
 }
 
+func TestCopyOriginRequiresAndCarriesRebalanceRun(t *testing.T) {
+	input := validProposeInput(t)
+	input.OriginType = ledger.ExecutionOriginCopySubscription
+	input.OriginID = uuid.NewString()
+	input.StrategyVersionID = ""
+	if _, err := Propose(input); err == nil {
+		t.Fatal("Propose() accepted copy origin without rebalance run")
+	}
+	runID := uuid.New()
+	input.CopyOriginRebalanceRunID = runID
+	aggregate, err := Propose(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aggregate.Intent.CopyOriginRebalanceRunID != runID {
+		t.Fatalf("copy run=%s, want %s", aggregate.Intent.CopyOriginRebalanceRunID, runID)
+	}
+}
+
 func TestIntentRejectsNonObjectMetadata(t *testing.T) {
 	input := validProposeInput(t)
 	input.Metadata = json.RawMessage(`[]`)

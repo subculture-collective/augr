@@ -121,6 +121,10 @@ func (r *cancellationRaceCopyRepo) CreateIntent(context.Context, *domain.CopyTra
 	return true, nil
 }
 
+func (r *cancellationRaceCopyRepo) UpdateIntent(context.Context, *domain.CopyTradeIntent) error {
+	return nil
+}
+
 type cancellationRacePrices struct {
 	snapshot PriceSnapshot
 }
@@ -149,10 +153,14 @@ func (r *cancellationWinnerRunRepo) Finalize(ctx context.Context, id uuid.UUID, 
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: r.winner}, nil
 }
 
-type countingCopyExecutor struct{ calls int }
+type countingCopyExecutor struct {
+	calls   int
+	request PaperOrderRequest
+}
 
-func (e *countingCopyExecutor) ExecuteCopyOrder(context.Context, PaperOrderRequest) (PaperOrderResult, error) {
+func (e *countingCopyExecutor) ExecuteCopyOrder(_ context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
 	e.calls++
+	e.request = request
 	return PaperOrderResult{}, nil
 }
 
@@ -323,6 +331,7 @@ func TestRebalanceCancellationWinnerPreventsIntentsAndOrders(t *testing.T) {
 	subscription := domain.DefaultCopySubscription()
 	subscription.ID = uuid.New()
 	subscription.SourceID = uuid.New()
+	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
 	subscription.Status = domain.CopySubscriptionPaperActive
 	subscription.LegacyStrategyID = &strategyID
 	observation := domain.CopySourceObservation{ID: uuid.New()}
@@ -343,7 +352,7 @@ func TestRebalanceCancellationWinnerPreventsIntentsAndOrders(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	runs := &cancellationWinnerRunRepo{winner: domain.PipelineRun{Status: domain.PipelineStatusCancelled, Signal: domain.PipelineSignalHold, ErrorMessage: "operator cancelled"}, cancel: cancel}
 	executor := &countingCopyExecutor{}
-	service := NewService(ServiceDeps{Repo: repo, Runs: runs, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+	service := NewService(ServiceDeps{Repo: repo, OriginRuns: &plannedOriginStore{}, Runs: runs, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
 
 	result, err := service.Rebalance(ctx, subscription.ID)
 	if err == nil {
@@ -365,6 +374,7 @@ func TestRebalanceCompletedWinnerLoserPreventsIntentsAndOrders(t *testing.T) {
 	strategyID := uuid.New()
 	subscription := domain.DefaultCopySubscription()
 	subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
+	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
 	subscription.Status, subscription.LegacyStrategyID = domain.CopySubscriptionPaperActive, &strategyID
 	repo := &cancellationRaceCopyRepo{
 		subscription: subscription,
@@ -375,7 +385,7 @@ func TestRebalanceCompletedWinnerLoserPreventsIntentsAndOrders(t *testing.T) {
 	availableAt := now.Add(-time.Second)
 	prices := cancellationRacePrices{snapshot: PriceSnapshot{Ticker: "AAPL", QuoteSnapshotID: uuid.New(), Bid: "99", Ask: "100", AvailableAt: &availableAt, MarketStatus: "open", SessionStatus: "regular", AvgDollarVolume: 1_000_000_000}}
 	executor := &countingCopyExecutor{}
-	service := NewService(ServiceDeps{Repo: repo, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+	service := NewService(ServiceDeps{Repo: repo, OriginRuns: &plannedOriginStore{}, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
 
 	result, err := service.Rebalance(context.Background(), subscription.ID)
 	if err == nil || !strings.Contains(err.Error(), "lost terminal authority") {
@@ -395,6 +405,7 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 	subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
 	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
 	subscription.Status = domain.CopySubscriptionPaperActive
+	subscription.MaxSpreadBPS = 200
 	repo := &cancellationRaceCopyRepo{
 		subscription: subscription,
 		observation:  domain.CopySourceObservation{ID: uuid.New()},
@@ -415,12 +426,16 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 		if store.calls != 1 || len(store.intents) != 1 || result.OriginRunID == uuid.Nil || len(result.Intents) != 1 {
 			t.Fatalf("atomic calls=%d planned=%d result=%+v", store.calls, len(store.intents), result)
 		}
-		if repo.intentWrites != 0 || executor.calls != 0 {
-			t.Fatalf("non-atomic/downstream effects: intent writes=%d orders=%d", repo.intentWrites, executor.calls)
+		if repo.intentWrites != 1 || executor.calls != 1 {
+			t.Fatalf("downstream effects: intent writes=%d orders=%d", repo.intentWrites, executor.calls)
+		}
+		if executor.request.OriginRunID != result.OriginRunID {
+			t.Fatalf("executor origin run=%s, persisted=%s", executor.request.OriginRunID, result.OriginRunID)
 		}
 	})
 
 	t.Run("failure", func(t *testing.T) {
+		repo.intentWrites, executor.calls = 0, 0
 		store := &plannedOriginStore{err: errors.New("transaction rolled back")}
 		service := NewService(ServiceDeps{Repo: repo, OriginRuns: store, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
 		result, err := service.Rebalance(context.Background(), subscription.ID)
@@ -438,6 +453,7 @@ func newLegacyEffectService(repo *effectCopyRepo, runs *authorizedRunRepo, event
 	strategyID := uuid.New()
 	subscription := domain.DefaultCopySubscription()
 	subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
+	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
 	subscription.Status, subscription.LegacyStrategyID = domain.CopySubscriptionPaperActive, &strategyID
 	subscription.MaxSpreadBPS = 200
 	repo.subscription = subscription
@@ -447,7 +463,7 @@ func newLegacyEffectService(repo *effectCopyRepo, runs *authorizedRunRepo, event
 	availableAt := now.Add(-time.Second)
 	prices := cancellationRacePrices{snapshot: PriceSnapshot{Ticker: "AAPL", QuoteSnapshotID: uuid.New(), Bid: "99", Ask: "100", AvailableAt: &availableAt, MarketStatus: "open", SessionStatus: "regular", AvgDollarVolume: 1_000_000_000}}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewService(ServiceDeps{Repo: repo, Runs: runs, Events: events, Prices: prices, Executor: executor, Logger: logger, Now: func() time.Time { return now }}), subscription.ID
+	return NewService(ServiceDeps{Repo: repo, OriginRuns: &plannedOriginStore{}, Runs: runs, Events: events, Prices: prices, Executor: executor, Logger: logger, Now: func() time.Time { return now }}), subscription.ID
 }
 
 func decodeEventMetadata(t *testing.T, event domain.AgentEvent) map[string]any {

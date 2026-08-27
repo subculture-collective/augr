@@ -34,7 +34,7 @@ func TestBuildOriginProposalUsesSubscriptionWithoutStrategyVersion(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Intent.ID != second.Intent.ID || first.Intent.OriginType != ledger.ExecutionOriginCopySubscription || first.Intent.OriginID != input.Subscription.ID.String() || first.Intent.StrategyVersionID != "" {
+	if first.Intent.ID != second.Intent.ID || first.Intent.OriginType != ledger.ExecutionOriginCopySubscription || first.Intent.OriginID != input.Subscription.ID.String() || first.Intent.CopyOriginRebalanceRunID != input.CopyOriginRebalanceRunID || first.Intent.StrategyVersionID != "" {
 		t.Fatalf("proposal=%+v replay=%+v", first.Intent, second.Intent)
 	}
 
@@ -115,5 +115,6 @@ func originProposalFixture(t *testing.T) OriginProposalInput {
 	return OriginProposalInput{
 		Subscription: subscription, Intent: intent, Account: *account, Instrument: *reference,
 		DecisionSnapshot: *snapshot, QuantityDelta: decimal.NewFromInt(10), DecisionAt: now, CreatedAt: now,
+		CopyOriginRebalanceRunID: uuid.New(),
 	}
 }

@@ -135,6 +135,7 @@ func ApplyTransition(aggregate *Aggregate, transition *Transition) (*Aggregate, 
 		if transition.Order == nil || aggregate.Order != nil || event.OrderID == nil || *event.OrderID != transition.Order.ID ||
 			transition.Binding != nil || transition.Fill != nil || transition.Normalization != nil ||
 			transition.Order.IntentID != aggregate.Intent.ID || transition.Order.AccountID != aggregate.Intent.AccountID ||
+			transition.Order.CopyOriginRebalanceRunID != aggregate.Intent.CopyOriginRebalanceRunID ||
 			transition.Order.InstrumentID != aggregate.Intent.InstrumentID || next.AllocatedQuantity == nil ||
 			!transition.Order.Quantity.Equal(next.AllocatedQuantity.Abs()) ||
 			transition.Order.Side != sideForDelta(*next.AllocatedQuantity) ||

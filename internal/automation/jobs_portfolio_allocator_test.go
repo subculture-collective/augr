@@ -225,17 +225,15 @@ func (r *portfolioAllocatorStrategyRepo) GetThesisRaw(context.Context, uuid.UUID
 }
 
 type portfolioPaperProcessorStub struct {
-	called     int
-	signal     execution.FinalSignal
-	plan       execution.TradingPlan
-	strategyID uuid.UUID
+	called int
+	signal execution.FinalSignal
+	plan   execution.TradingPlan
 }
 
 func (p *portfolioPaperProcessorStub) ProcessPaperOrder(_ context.Context, req portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
 	p.called++
 	p.signal = req.Signal
 	p.plan = req.Plan
-	p.strategyID = req.StrategyID
 	id := uuid.New()
 	return portfolio.PaperOrderResult{OrderID: &id, Status: domain.OrderStatusFilled}, nil
 }
@@ -487,39 +485,45 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 
 	now := time.Now()
 	runID := uuid.New()
+	tradeDate := now.UTC().Truncate(24 * time.Hour)
+	accountID, versionID := uuid.New(), uuid.New()
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{
 		{
-			ID:                uuid.MustParse("11111111-1111-1111-1111-111111111111"),
-			StrategyID:        uuid.MustParse("22222222-2222-2222-2222-222222222222"),
-			PipelineRunID:     &runID,
-			Status:            domain.OpportunityStatusQueued,
-			MarketType:        domain.MarketTypeStock,
-			Ticker:            "AAPL",
-			Side:              domain.OrderSideBuy,
-			Signal:            domain.PipelineSignalBuy,
-			Confidence:        1,
-			EdgePct:           0.05,
-			ExpectedReturnPct: 0.1,
-			MaxLossPct:        0.05,
-			EntryPrice:        100,
-			LiquidityUSD:      5_000_000,
-			MarketCapUSD:      10_000_000_000,
-			SpreadPct:         0.001,
-			ProposedNotional:  2_000,
-			Reason:            "strong paper opportunity",
-			ExpiresAt:         now.Add(24 * time.Hour),
-			CreatedAt:         now.Add(-time.Hour),
-			DedupeKey:         "aapl-paper-1",
+			ID:                   uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			StrategyID:           uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+			PipelineRunID:        &runID,
+			PipelineRunTradeDate: &tradeDate,
+			AccountID:            accountID,
+			Environment:          domain.AccountEnvironmentPaperScored,
+			Status:               domain.OpportunityStatusQueued,
+			MarketType:           domain.MarketTypeStock,
+			Ticker:               "AAPL",
+			Side:                 domain.OrderSideBuy,
+			Signal:               domain.PipelineSignalBuy,
+			Confidence:           1,
+			EdgePct:              0.05,
+			ExpectedReturnPct:    0.1,
+			MaxLossPct:           0.05,
+			EntryPrice:           100,
+			LiquidityUSD:         5_000_000,
+			MarketCapUSD:         10_000_000_000,
+			SpreadPct:            0.001,
+			ProposedNotional:     2_000,
+			Reason:               "strong paper opportunity",
+			ExpiresAt:            now.Add(24 * time.Hour),
+			CreatedAt:            now.Add(-time.Hour),
+			DedupeKey:            "aapl-paper-1",
 		},
 	}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	strategyRepo := &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{
-		ID:         opportunityRepo.items[0].StrategyID,
-		Name:       "paper-aapl",
-		Ticker:     "AAPL",
-		MarketType: domain.MarketTypeStock,
-		Status:     domain.StrategyStatusActive,
-		IsPaper:    true,
+		ID:                         opportunityRepo.items[0].StrategyID,
+		Name:                       "paper-aapl",
+		Ticker:                     "AAPL",
+		MarketType:                 domain.MarketTypeStock,
+		Status:                     domain.StrategyStatusActive,
+		IsPaper:                    true,
+		ExecutionStrategyVersionID: &versionID,
 	}}
 	processor := &portfolioPaperProcessorStub{}
 	positionRepo, accountBalance := paperAllocatorStateDeps()
