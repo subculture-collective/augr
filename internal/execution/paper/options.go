@@ -234,7 +234,7 @@ func (b *PaperBroker) RollbackOptionOrder(ctx context.Context, externalID string
 	if err := b.reverseOptionPositionLocked(effect); err != nil {
 		return err
 	}
-	delete(b.orders, externalID)
+	order.Status, order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = domain.OrderStatusRejected, 0, nil, nil
 	delete(b.optionOrderEffects, externalID)
 	b.balance.BuyingPower = b.balance.Cash
 	b.balance.Equity = b.markToMarketEquityLocked()
@@ -265,6 +265,25 @@ func (b *PaperBroker) RollbackOptionSpread(ctx context.Context, externalIDs []st
 	}
 	delete(b.optionSpreads, key)
 	delete(b.optionSpreadEffects, key)
+	for parentID, status := range b.optionSpreadOrders {
+		if len(status.Legs) != len(externalIDs) {
+			continue
+		}
+		matches := true
+		for i := range externalIDs {
+			if status.Legs[i].ExternalID != externalIDs[i] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			for i := range status.Legs {
+				status.Legs[i].Status = execution.BrokerOrderStatus{Status: domain.OrderStatusRejected}
+			}
+			b.optionSpreadOrders[parentID] = status
+			break
+		}
+	}
 	b.balance.BuyingPower = b.balance.Cash
 	b.balance.Equity = b.markToMarketEquityLocked()
 	return nil

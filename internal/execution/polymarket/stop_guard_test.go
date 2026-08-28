@@ -303,7 +303,7 @@ func TestStopGuard_DurableClaimAllowsOneSendAcrossInstances(t *testing.T) {
 }
 
 func TestStopGuardResolvesAmbiguousReservationCommitBeforeSend(t *testing.T) {
-	broker := &fakeBroker{}
+	broker := &fakeBroker{lookupErr: execution.ErrBrokerOrderNotFound}
 	claims := &sharedExitClaims{createErrAfterCommit: true}
 	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims})
 	if err != nil {
@@ -317,6 +317,30 @@ func TestStopGuardResolvesAmbiguousReservationCommitBeforeSend(t *testing.T) {
 	if broker.sendCalls.Load() != 1 || claims.reservedOrder == nil || claims.reservedOrder.ExternalID != "" {
 		_, resolveErr := g.resolveStopReservation(context.Background(), g.byID[positionID.String()], positionID)
 		t.Fatalf("ambiguous reservation recovery sends=%d reservation=%+v resolve=%v", broker.sendCalls.Load(), claims.reservedOrder, resolveErr)
+	}
+}
+
+func TestStopGuardAdoptsOtherWorkersReservationAndReconcilesBeforeSend(t *testing.T) {
+	positionID := uuid.New()
+	intent := domain.PositionIntentSellToClose
+	reserved := &domain.Order{ID: uuid.New(), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "adopted", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", ClientOrderID: "other-worker-client"}
+	claims := &sharedExitClaims{claims: map[uuid.UUID]uuid.UUID{positionID: reserved.ID}, reservedOrder: reserved}
+	broker := &fakeBroker{lookupStatus: domain.OrderStatusSubmitted, lookupExternalID: "provider-existing"}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := scopedGuardPosition(Position{ID: positionID.String(), Slug: "adopted", Side: "BUY", OutcomeSide: "YES", Size: 1, StopPx: .45})
+	position.OriginType, position.OriginID = reserved.OriginType, reserved.OriginID
+	if err := g.RegisterEntry(position); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "adopted", Side: "YES", Price: .4, ReceivedAt: time.Now()})
+	if broker.sendCalls.Load() != 0 {
+		t.Fatalf("adopted reservation submitted again: sends=%d", broker.sendCalls.Load())
+	}
+	if got := g.byID[positionID.String()].order; got.ID != reserved.ID || got.ClientOrderID != reserved.ClientOrderID || got.ExternalID != "provider-existing" {
+		t.Fatalf("adopted order not reconciled: id=%s want=%s client=%q want=%q external=%q", got.ID, reserved.ID, got.ClientOrderID, reserved.ClientOrderID, got.ExternalID)
 	}
 }
 

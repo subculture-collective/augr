@@ -2,6 +2,7 @@ package execution
 
 import (
 	"fmt"
+	"math"
 	"sort"
 
 	"github.com/google/uuid"
@@ -23,7 +24,8 @@ func (r OptionsReconciliation) Healthy() bool { return len(r.Findings) == 0 }
 // reports inconsistencies but does not invent repairs or broker state.
 func ReconcileOptionsLifecycle(orders []domain.Order, positions []domain.Position, trades []domain.Trade) OptionsReconciliation {
 	result := OptionsReconciliation{}
-	tradesByOrder, openByPosition, closeByPosition := map[uuid.UUID]int{}, map[uuid.UUID]int{}, map[uuid.UUID]int{}
+	tradesByOrder := map[uuid.UUID]int{}
+	openByPosition, closeByPosition := map[uuid.UUID]float64{}, map[uuid.UUID]float64{}
 	for _, trade := range trades {
 		if trade.AssetClass != domain.AssetClassOption {
 			continue
@@ -34,10 +36,10 @@ func ReconcileOptionsLifecycle(orders []domain.Order, positions []domain.Positio
 		}
 		if trade.PositionID != nil {
 			if trade.OpenClose == "open" {
-				openByPosition[*trade.PositionID]++
+				openByPosition[*trade.PositionID] += trade.Quantity
 			}
 			if trade.OpenClose == "close" {
-				closeByPosition[*trade.PositionID]++
+				closeByPosition[*trade.PositionID] += trade.Quantity
 			}
 		}
 	}
@@ -62,14 +64,20 @@ func ReconcileOptionsLifecycle(orders []domain.Order, positions []domain.Positio
 			continue
 		}
 		result.OptionPositions++
-		if openByPosition[position.ID] == 0 {
+		opened, closed := openByPosition[position.ID], closeByPosition[position.ID]
+		if opened <= 0 {
 			result.Findings = append(result.Findings, fmt.Sprintf("option position %s has no opening trade", position.ID))
 		}
-		if position.ClosedAt != nil && closeByPosition[position.ID] == 0 {
+		if position.ClosedAt != nil && closed <= 0 {
 			result.Findings = append(result.Findings, fmt.Sprintf("closed option position %s has no closing trade", position.ID))
 		}
-		if position.ClosedAt == nil && closeByPosition[position.ID] > 0 {
-			result.Findings = append(result.Findings, fmt.Sprintf("open option position %s already has a closing trade", position.ID))
+		remaining := opened - closed
+		wantRemaining := position.Quantity
+		if position.ClosedAt != nil {
+			wantRemaining = 0
+		}
+		if opened > 0 && (remaining < -1e-8 || math.Abs(remaining-wantRemaining) > 1e-8) {
+			result.Findings = append(result.Findings, fmt.Sprintf("option position %s trade quantities do not match remaining quantity", position.ID))
 		}
 		if position.LegGroupID != nil {
 			groups[*position.LegGroupID] = append(groups[*position.LegGroupID], position)

@@ -136,7 +136,16 @@ func settleExpiredOptionPositionsLocked(ctx context.Context, scope ExecutionScop
 			SettledAt: now.UTC(), ExitReason: settlement.reason,
 		}
 		if _, err := settlementRepo.SettleOptionPosition(ctx, settlementInput); err != nil {
-			return summary, fmt.Errorf("options expiry: settle position %s: %w", settlement.positionID, err)
+			resolver, ok := settlementRepo.(repository.OptionSettlementCommitResolver)
+			if !ok {
+				return summary, fmt.Errorf("options expiry: settle position %s: %w", settlement.positionID, err)
+			}
+			resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_, committed, resolveErr := resolver.ResolveOptionSettlementCommit(resolveCtx, settlementInput)
+			cancel()
+			if resolveErr != nil || !committed {
+				return summary, fmt.Errorf("options expiry: resolve settlement commit for %s: %w", settlement.positionID, errors.Join(err, resolveErr))
+			}
 		}
 		if len(states) > 0 && states[0] != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)

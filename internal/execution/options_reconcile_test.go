@@ -13,8 +13,8 @@ func TestReconcileOptionsLifecycleHealthyAndBrokenGraphs(t *testing.T) {
 	orderID, positionID, groupID := uuid.New(), uuid.New(), uuid.New()
 	now := time.Now().UTC()
 	orders := []domain.Order{{ID: orderID, MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Status: domain.OrderStatusFilled}}
-	positions := []domain.Position{{ID: positionID, AssetClass: domain.AssetClassOption, LegGroupID: &groupID}, {ID: uuid.New(), AssetClass: domain.AssetClassOption, LegGroupID: &groupID}}
-	trades := []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, AssetClass: domain.AssetClassOption, OpenClose: "open"}, {ID: uuid.New(), PositionID: &positions[1].ID, AssetClass: domain.AssetClassOption, OpenClose: "open"}}
+	positions := []domain.Position{{ID: positionID, Quantity: 1, AssetClass: domain.AssetClassOption, LegGroupID: &groupID}, {ID: uuid.New(), Quantity: 1, AssetClass: domain.AssetClassOption, LegGroupID: &groupID}}
+	trades := []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Quantity: 1, AssetClass: domain.AssetClassOption, OpenClose: "open"}, {ID: uuid.New(), PositionID: &positions[1].ID, Quantity: 1, AssetClass: domain.AssetClassOption, OpenClose: "open"}}
 	healthy := ReconcileOptionsLifecycle(orders, positions, trades)
 	if !healthy.Healthy() || healthy.LegGroups != 1 {
 		t.Fatalf("healthy graph findings=%v", healthy.Findings)
@@ -23,6 +23,18 @@ func TestReconcileOptionsLifecycleHealthyAndBrokenGraphs(t *testing.T) {
 	broken := ReconcileOptionsLifecycle(orders, positions, trades[:1])
 	if broken.Healthy() || len(broken.Findings) < 3 {
 		t.Fatalf("broken graph not detected: %+v", broken)
+	}
+}
+
+func TestReconcileOptionsLifecycleAcceptsAccountedPartialClose(t *testing.T) {
+	positionID := uuid.New()
+	position := domain.Position{ID: positionID, Quantity: 3, AssetClass: domain.AssetClassOption}
+	trades := []domain.Trade{
+		{ID: uuid.New(), PositionID: &positionID, Quantity: 5, AssetClass: domain.AssetClassOption, OpenClose: "open"},
+		{ID: uuid.New(), PositionID: &positionID, Quantity: 2, AssetClass: domain.AssetClassOption, OpenClose: "close"},
+	}
+	if result := ReconcileOptionsLifecycle(nil, []domain.Position{position}, trades); !result.Healthy() {
+		t.Fatalf("valid partial close findings=%v", result.Findings)
 	}
 }
 

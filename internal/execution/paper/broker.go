@@ -317,6 +317,7 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 		if b.balance.Cash < totalCost {
 			order.Status = domain.OrderStatusRejected
 			b.orders[externalID] = cloneOrder(order)
+			delete(b.orderEffects, externalID)
 			return externalID, errors.Join(execution.ErrBrokerOrderRejected, fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalCost, b.balance.Cash))
 		}
 		b.balance.Cash -= totalCost
@@ -355,7 +356,9 @@ func (b *PaperBroker) RollbackOrderFill(ctx context.Context, externalID string) 
 	} else {
 		b.positions[effect.ticker] = clonePosition(effect.position)
 	}
-	delete(b.orders, id)
+	if order := b.orders[id]; order != nil {
+		order.Status, order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = domain.OrderStatusRejected, 0, nil, nil
+	}
 	delete(b.orderEffects, id)
 	return nil
 }

@@ -82,6 +82,7 @@ type guardEntry struct {
 	state      atomic.Int32
 	receivedAt time.Time
 	claimed    atomic.Bool
+	adopted    atomic.Bool
 }
 
 type StopGuard struct {
@@ -180,11 +181,11 @@ func (g *StopGuard) registerEntry(pos Position, initialState guardState) error {
 	case short:
 		intent = "ORDER_INTENT_BUY_SHORT"
 	}
-	side := "BUY"
+	side := domain.OrderSideBuy
 	if long {
-		side = "SELL"
+		side = domain.OrderSideSell
 	}
-	order := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: slug, MarketType: domain.MarketTypePolymarket, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, Status: domain.OrderStatusPending, Broker: "polymarket", PredictionSide: outcome, PolymarketIntent: intent, CreatedAt: time.Now().UTC()}
+	order := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: slug, MarketType: domain.MarketTypePolymarket, Side: side, OrderType: domain.OrderTypeMarket, Quantity: pos.Size, Status: domain.OrderStatusPending, Broker: "polymarket", PredictionSide: outcome, PolymarketIntent: intent, CreatedAt: time.Now().UTC()}
 	positionIntent := domain.PositionIntentBuyToClose
 	if order.Side == domain.OrderSideSell {
 		positionIntent = domain.PositionIntentSellToClose
@@ -445,6 +446,7 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 }
 
 func (g *StopGuard) claimStopExitLocked(ctx context.Context, entry *guardEntry, positionID uuid.UUID) error {
+	entry.adopted.Store(false)
 	err := g.exitRepo.CreatePredictionExitOrderAndReserve(ctx, entry.order.AccountID, entry.order.Environment, entry.order.OriginType, entry.order.OriginID, positionID, entry.order)
 	if err != nil {
 		resolved, resolveErr := g.resolveStopReservation(ctx, entry, positionID)
@@ -452,6 +454,7 @@ func (g *StopGuard) claimStopExitLocked(ctx context.Context, entry *guardEntry, 
 			return errors.Join(err, resolveErr)
 		}
 		entry.order = resolved
+		entry.adopted.Store(true)
 	}
 	entry.claimed.Store(true)
 	return nil
@@ -466,8 +469,8 @@ func (g *StopGuard) resolveStopReservation(ctx context.Context, entry *guardEntr
 	if err != nil {
 		return nil, fmt.Errorf("polymarket: resolve prediction exit reservation: %w", err)
 	}
-	if order.ID != entry.order.ID || order.AccountID != entry.order.AccountID || order.Environment != entry.order.Environment || order.OriginType != entry.order.OriginType || order.OriginID != entry.order.OriginID ||
-		order.ClientOrderID != entry.order.ClientOrderID || order.Quantity-order.FilledQuantity != entry.order.Quantity-entry.order.FilledQuantity || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != entry.order.OrderType ||
+	if order.AccountID != entry.order.AccountID || order.Environment != entry.order.Environment || order.OriginType != entry.order.OriginType || order.OriginID != entry.order.OriginID ||
+		order.Quantity-order.FilledQuantity != entry.order.Quantity-entry.order.FilledQuantity || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != entry.order.OrderType ||
 		order.Ticker != entry.order.Ticker || order.PredictionSide != entry.order.PredictionSide || order.PolymarketIntent != entry.order.PolymarketIntent || order.Side != entry.order.Side || order.PositionIntent == nil || entry.order.PositionIntent == nil || *order.PositionIntent != *entry.order.PositionIntent {
 		return nil, errors.New("polymarket: resolved prediction exit reservation does not match claimed order")
 	}
@@ -475,6 +478,12 @@ func (g *StopGuard) resolveStopReservation(ctx context.Context, entry *guardEntr
 }
 
 func (g *StopGuard) submitReservedStopLocked(ctx context.Context, entry *guardEntry, positionID uuid.UUID) {
+	if entry.adopted.Swap(false) {
+		if !g.recoverClaimedExit(ctx, entry, positionID) {
+			entry.state.Store(int32(guardArmed))
+		}
+		return
+	}
 	freshTemplate, err := g.broker.PrepareTemplate(entry.order)
 	if err != nil {
 		entry.state.Store(int32(guardArmed))
@@ -606,6 +615,7 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 	if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(externalID), submittedAt); err != nil {
 		return false
 	}
+	entry.order.ExternalID, entry.order.Status, entry.order.SubmittedAt = strings.TrimSpace(externalID), result.Status, &submittedAt
 	entry.state.Store(int32(guardArmed))
 	return true
 }

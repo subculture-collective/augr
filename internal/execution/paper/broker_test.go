@@ -96,6 +96,9 @@ func TestPaperBrokerSubmitOrder_MarketOrderWithoutReferenceFailsClosed(t *testin
 	if status != domain.OrderStatusRejected {
 		t.Fatalf("stored unpriced order status = %q", status)
 	}
+	if _, ok := broker.orderEffects[externalID]; ok {
+		t.Fatal("insufficient-cash rejection retained an unused rollback snapshot")
+	}
 }
 
 func TestPaperBrokerSubmitOrder_DeductsFee(t *testing.T) {

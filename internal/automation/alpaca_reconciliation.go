@@ -60,6 +60,7 @@ type TradePersistence interface {
 // BrokerOrderSnapshot captures the broker-facing order state needed to hydrate local orders.
 type BrokerOrderSnapshot struct {
 	ExternalID     string
+	ClientOrderID  string
 	StrategyIDHint *uuid.UUID
 	Ticker         string
 	Side           domain.OrderSide
@@ -258,12 +259,19 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: list local orders: %w", err)
 	}
 	orderByExternalID := make(map[string]*domain.Order, len(existingOrders))
+	orderByClientID := make(map[string]*domain.Order, len(existingOrders))
 	for i := range existingOrders {
 		order := existingOrders[i]
-		if strings.TrimSpace(order.ExternalID) == "" {
+		if r.executionAccount.AccountID() != uuid.Nil && (order.AccountID != r.executionAccount.AccountID() || order.Environment != r.executionAccount.Environment()) {
 			continue
 		}
 		cloned := order
+		if clientID := strings.TrimSpace(order.ClientOrderID); clientID != "" {
+			orderByClientID[clientID] = &cloned
+		}
+		if strings.TrimSpace(order.ExternalID) == "" {
+			continue
+		}
 		orderByExternalID[order.ExternalID] = &cloned
 	}
 
@@ -313,6 +321,19 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 				}
 				summary.OrdersUpdated++
 			}
+			continue
+		}
+		if existing, ok := orderByClientID[strings.TrimSpace(snapshot.ClientOrderID)]; ok && strings.TrimSpace(snapshot.ClientOrderID) != "" {
+			if strings.TrimSpace(existing.ExternalID) != "" && existing.ExternalID != snapshot.ExternalID {
+				return summary, fmt.Errorf("alpaca_reconcile: client order %s is already bound to %s", snapshot.ClientOrderID, existing.ExternalID)
+			}
+			existing.ExternalID = snapshot.ExternalID
+			applyOrderSnapshot(existing, snapshot, strategyID)
+			if err := r.orderRepo.Update(ctx, existing); err != nil {
+				return summary, fmt.Errorf("alpaca_reconcile: bind accepted client order %s: %w", snapshot.ClientOrderID, err)
+			}
+			orderByExternalID[snapshot.ExternalID] = existing
+			summary.OrdersUpdated++
 			continue
 		}
 
@@ -615,6 +636,7 @@ func snapshotToOrder(snapshot BrokerOrderSnapshot, strategyID *uuid.UUID) *domai
 	return &domain.Order{
 		StrategyID:     strategyID,
 		ExternalID:     snapshot.ExternalID,
+		ClientOrderID:  snapshot.ClientOrderID,
 		Ticker:         snapshot.Ticker,
 		Side:           snapshot.Side,
 		OrderType:      snapshot.OrderType,

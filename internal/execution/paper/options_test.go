@@ -199,6 +199,10 @@ func TestSubmitSpreadOrderAtomicallyDebitsVertical(t *testing.T) {
 	if len(positions) != 0 || balance.Equity != 10000 {
 		t.Fatalf("spread rollback accounting positions=%+v balance=%+v", positions, balance)
 	}
+	status, err := broker.GetSpreadOrderStatusByClientOrderIDResult(context.Background(), "spread-test")
+	if err != nil || len(status.Legs) != 2 || status.Legs[0].Status.Status != domain.OrderStatusRejected || status.Legs[1].Status.Status != domain.OrderStatusRejected {
+		t.Fatalf("spread rollback parent evidence=%+v err=%v", status, err)
+	}
 	if err := broker.RollbackOptionSpread(context.Background(), ids); err == nil {
 		t.Fatal("duplicate spread rollback must fail")
 	}

@@ -465,8 +465,9 @@ func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, cl
 		SELECT i.id FROM copy_trade_intents i JOIN copy_subscriptions s ON s.id=i.subscription_id
 		WHERE i.id=$1 AND i.account_id=$4 AND s.account_id=$4 AND i.environment=s.environment AND i.environment=$5
 		 AND i.origin_type='copy_subscription' AND s.origin_type='copy_subscription'
-		 AND i.origin_id=s.id AND s.origin_id=s.id AND s.status='paper_active' AND s.is_paper=true
+		 AND i.origin_id=s.id AND s.origin_id=s.id AND s.is_paper=true
 		 AND i.policy_status='approved' AND (i.status IN ('received','ordered','partial') OR (i.status='failed' AND i.risk_status='pending'))
+		 AND (s.status='paper_active' OR (i.status IN ('ordered','partial') AND i.order_id IS NOT NULL))
 		 AND (i.status NOT IN ('ordered','partial') OR i.order_id IS NOT NULL)
 		 AND (i.order_id IS NULL OR EXISTS (
 			SELECT 1 FROM orders o JOIN copy_origin_rebalance_intents ri ON ri.run_id=o.copy_origin_rebalance_run_id AND ri.intent_id=i.id
@@ -492,9 +493,9 @@ func (r *CopyTradingRepo) GetClaimedIntentExecution(ctx context.Context, intentI
 	if err != nil {
 		return nil, nil, copyRepoNotFound("claimed intent", err)
 	}
-	subscription, err := scanCopySubscription(tx.QueryRow(ctx, copySubscriptionSelect+` WHERE id=$1 AND account_id=$2 AND environment=$3 AND status='paper_active' AND is_paper=true FOR SHARE`, intent.SubscriptionID, r.accountID, intent.Environment))
+	subscription, err := scanCopySubscription(tx.QueryRow(ctx, copySubscriptionSelect+` WHERE id=$1 AND account_id=$2 AND environment=$3 AND is_paper=true FOR SHARE`, intent.SubscriptionID, r.accountID, intent.Environment))
 	if err != nil {
-		return nil, nil, copyRepoNotFound("active claimed subscription", err)
+		return nil, nil, copyRepoNotFound("claimed subscription", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, err

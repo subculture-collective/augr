@@ -808,6 +808,10 @@ type OptionSettlementRepository interface {
 	SettleOptionPosition(ctx context.Context, input OptionPositionSettlementInput) (OptionPositionSettlementResult, error)
 }
 
+type OptionSettlementCommitResolver interface {
+	ResolveOptionSettlementCommit(context.Context, OptionPositionSettlementInput) (OptionPositionSettlementResult, bool, error)
+}
+
 type OptionSettlementSyncRetryRepository interface {
 	HasOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) (bool, error)
 	ResolveOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) error

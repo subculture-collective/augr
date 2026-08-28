@@ -469,7 +469,7 @@ func TestFinancialLifecycle_SettlePredictionDecisionReplayAndRollback(t *testing
 	if res.DecisionID != decisionID || res.TradeID == uuid.Nil || res.ReplayEventID == nil {
 		t.Fatalf("unexpected result %+v", res)
 	}
-	again, err := repo.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + decisionID.String(), Decision: decision, PositionTicker: "KX-TEST:YES", Payout: 1, ResolvedAt: resolvedAt})
+	again, err := repo.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + decisionID.String(), Decision: decision, PositionTicker: "KX-TEST:YES", Payout: 1, ResolvedAt: resolvedAt.Add(time.Hour)})
 	if err != nil || again.TradeID != res.TradeID || again.ReplayEventID == nil || *again.ReplayEventID != *res.ReplayEventID {
 		t.Fatalf("expected exact replay, got %+v err=%v", again, err)
 	}

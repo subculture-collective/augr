@@ -639,6 +639,43 @@ func TestSyncResumesUnfinishedRunsBeforeNewFilingWork(t *testing.T) {
 	}
 }
 
+func TestInactiveSubscriptionRecoversOnlyEffectfulIntents(t *testing.T) {
+	binding, _ := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	base := domain.DefaultCopySubscription()
+	base.ID, base.SourceID = uuid.New(), uuid.New()
+	base.AccountID, base.Environment = binding.AccountID(), binding.Environment()
+	base.OriginType, base.OriginID, base.Status = "copy_subscription", base.ID, domain.CopySubscriptionPaperActive
+	price := 100.0
+	for _, tc := range []struct {
+		status    string
+		effectful bool
+		wantCalls int
+	}{{"received", false, 0}, {"ordered", true, 1}, {"partial", true, 1}} {
+		t.Run(tc.status, func(t *testing.T) {
+			intent := domain.CopyTradeIntent{ID: uuid.New(), AccountID: binding.AccountID(), Environment: binding.Environment(), SubscriptionID: base.ID, OriginType: "copy_subscription", OriginID: base.ID, SourceObservationID: uuid.New(), InstrumentKey: "AAPL", Ticker: "AAPL", Side: domain.OrderSideBuy, RequestedNotional: 100, ExecutablePrice: &price, CalculationVersion: CalculationVersion, PolicyStatus: "approved", RiskStatus: "approved", Status: tc.status}
+			if tc.effectful {
+				id := uuid.New()
+				intent.OrderID = &id
+			}
+			run, err := copyorigin.NewRun(base, []domain.CopyTradeIntent{intent})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inactive := base
+			inactive.Status = domain.CopySubscriptionPaused
+			repo := &cancellationRaceCopyRepo{subscription: inactive, observation: domain.CopySourceObservation{ID: intent.SourceObservationID}, mapping: domain.CopyInstrumentMapping{Ticker: "AAPL"}, intent: &intent}
+			executor := &countingCopyExecutor{}
+			service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, Executor: executor, Now: time.Now})
+			if _, err := service.executePlannedRun(context.Background(), &inactive, run, []copyorigin.PlannedIntent{{Intent: intent}}, Preview{}); err != nil {
+				t.Fatal(err)
+			}
+			if executor.calls != tc.wantCalls {
+				t.Fatalf("inactive %s executor calls=%d, want %d", tc.status, executor.calls, tc.wantCalls)
+			}
+		})
+	}
+}
+
 func newLegacyEffectService(repo *effectCopyRepo, runs *authorizedRunRepo, events *effectEventRepo, executor PaperOrderExecutor) (*Service, uuid.UUID) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	strategyID := uuid.New()

@@ -27,6 +27,7 @@ type AlpacaClientAdapter struct {
 
 type alpacaOrderResponse struct {
 	ID             string `json:"id"`
+	ClientOrderID  string `json:"client_order_id"`
 	Symbol         string `json:"symbol"`
 	Side           string `json:"side"`
 	Type           string `json:"type"`
@@ -212,6 +213,7 @@ func mapAlpacaOrderSnapshot(raw alpacaOrderResponse) (BrokerOrderSnapshot, error
 
 	return BrokerOrderSnapshot{
 		ExternalID:     externalID,
+		ClientOrderID:  strings.TrimSpace(raw.ClientOrderID),
 		Ticker:         ticker,
 		Side:           side,
 		OrderType:      orderType,

@@ -361,6 +361,10 @@ func TestProcessOptionSignal_RollsBackPaperFillWhenAtomicPersistenceFails(t *tes
 	if len(orderRepo.updates) != 1 || orderRepo.updates[0].Status != domain.OrderStatusRejected || orderRepo.updates[0].FilledQuantity != 0 || orderRepo.updates[0].FilledAt != nil {
 		t.Fatalf("compensated order was not durably rejected: %+v", orderRepo.updates)
 	}
+	brokerStatus, statusErr := broker.GetOrderStatus(context.Background(), orderRepo.updates[0].ExternalID)
+	if statusErr != nil || brokerStatus != domain.OrderStatusRejected {
+		t.Fatalf("compensated broker evidence status=%s err=%v", brokerStatus, statusErr)
+	}
 }
 
 func TestProcessOptionSignalCommitAckLossKeepsConfirmedPaperFill(t *testing.T) {

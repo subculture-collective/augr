@@ -900,6 +900,25 @@ func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionP
 	return repository.OptionPositionSettlementResult{PositionID: input.PositionID, TradeID: tradeID}, nil
 }
 
+func (db *DB) ResolveOptionSettlementCommit(ctx context.Context, input repository.OptionPositionSettlementInput) (repository.OptionPositionSettlementResult, bool, error) {
+	var positionID, tradeID, accountID uuid.UUID
+	var environment domain.AccountEnvironment
+	var originType, originID, reason string
+	var price float64
+	var settledAt time.Time
+	err := db.Pool.QueryRow(ctx, `SELECT position_id,trade_id,account_id,environment,origin_type,origin_id,settlement_price::double precision,settled_at,exit_reason FROM option_settlement_idempotency WHERE idempotency_key=$1`, input.IdempotencyKey).Scan(&positionID, &tradeID, &accountID, &environment, &originType, &originID, &price, &settledAt, &reason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.OptionPositionSettlementResult{}, false, nil
+	}
+	if err != nil {
+		return repository.OptionPositionSettlementResult{}, false, err
+	}
+	if positionID != input.PositionID || accountID != input.AccountID || environment != input.Environment || originType != input.OriginType || originID != input.OriginID || !numeric8Equal(price, input.SettlementPrice) || !settledAt.Equal(input.SettledAt.UTC()) || reason != input.ExitReason {
+		return repository.OptionPositionSettlementResult{}, false, fmt.Errorf("postgres: option settlement commit identity mismatch")
+	}
+	return repository.OptionPositionSettlementResult{PositionID: positionID, TradeID: tradeID}, true, nil
+}
+
 func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
 	if input.Decision == nil || input.Decision.ID == uuid.Nil || input.IdempotencyKey == "" || input.ResolvedAt.IsZero() || math.IsNaN(input.Payout) || math.IsInf(input.Payout, 0) || input.Payout < 0 || input.Payout > 1 {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: invalid settlement input")
@@ -941,7 +960,7 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	var existingEnvironment domain.AccountEnvironment
 	var existingOriginType, existingOriginID string
 	if err := tx.QueryRow(ctx, `SELECT idempotency_key,decision_id,position_id,trade_id,replay_event_id,payout,resolved_at,created_at,account_id,environment,origin_type,origin_id FROM prediction_settlement_idempotency WHERE idempotency_key=$1 OR decision_id=$2 FOR UPDATE`, input.IdempotencyKey, input.Decision.ID).Scan(&idempotencyKey, &decisionID, &positionID, &tradeID, &replayEventID, &payout, &resolvedAt, &createdAt, &existingAccountID, &existingEnvironment, &existingOriginType, &existingOriginID); err == nil {
-		if idempotencyKey != input.IdempotencyKey || decisionID != input.Decision.ID || existingAccountID != input.AccountID || existingEnvironment != input.Environment || existingOriginType != input.OriginType || existingOriginID != input.OriginID || math.IsNaN(payout) || math.IsInf(payout, 0) || !numeric8Equal(payout, input.Payout) || !resolvedAt.Equal(input.ResolvedAt.UTC()) {
+		if idempotencyKey != input.IdempotencyKey || decisionID != input.Decision.ID || existingAccountID != input.AccountID || existingEnvironment != input.Environment || existingOriginType != input.OriginType || existingOriginID != input.OriginID || math.IsNaN(payout) || math.IsInf(payout, 0) || !numeric8Equal(payout, input.Payout) {
 			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: idempotency mismatch for decision %s", input.Decision.ID)
 		}
 		if err := tx.Commit(ctx); err != nil {

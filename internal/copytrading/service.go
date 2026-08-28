@@ -610,6 +610,9 @@ func (s *Service) executePlannedRun(ctx context.Context, subscription *domain.Co
 			return result, err
 		}
 		retryable := candidate.Status == "received" || candidate.Status == "ordered" || candidate.Status == "partial" || (candidate.Status == "failed" && candidate.RiskStatus == "pending")
+		if subscription.Status != domain.CopySubscriptionPaperActive || !subscription.IsPaper {
+			retryable = (candidate.Status == "ordered" || candidate.Status == "partial") && candidate.OrderID != nil
+		}
 		if candidate.PolicyStatus != "approved" || !retryable {
 			result.Intents = append(result.Intents, candidate)
 			continue

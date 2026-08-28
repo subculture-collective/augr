@@ -694,6 +694,29 @@ func TestAlpacaReconcilerReconcile_ImportsOrdersPositionsAndFills(t *testing.T) 
 	}
 }
 
+func TestAlpacaReconcilerBindsAcceptedOrderByClientIDBeforeImport(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := uuid.New()
+	local := &domain.Order{ID: localID, AccountID: binding.AccountID(), Environment: binding.Environment(), ClientOrderID: "augr-pending", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, Broker: "alpaca"}
+	foreign := &domain.Order{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperStress, ClientOrderID: "augr-pending", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, Broker: "alpaca"}
+	orders := newRecordingOrderRepo(local, foreign)
+	broker := &alpacaReconciliationBrokerStub{orders: []BrokerOrderSnapshot{{ExternalID: "provider-accepted", ClientOrderID: "augr-pending", Ticker: "AAPL", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusSubmitted, Broker: "alpaca"}}}
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: binding, Broker: broker, OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: newRecordingTradeRepo(orders)})
+	summary, err := reconciler.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.OrdersCreated != 0 || summary.OrdersUpdated != 1 || len(orders.updated) != 1 || orders.updated[0].ID != localID || orders.updated[0].ExternalID != "provider-accepted" {
+		t.Fatalf("client-id recovery summary=%+v created=%d updated=%+v", summary, len(orders.created), orders.updated)
+	}
+	if foreign.ExternalID != "" {
+		t.Fatalf("foreign environment order was rebound: %+v", foreign)
+	}
+}
+
 func TestAlpacaReconcilerReconcile_DedupesRepeatedAlpacaImports(t *testing.T) {
 	t.Parallel()
 
