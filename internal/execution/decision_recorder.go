@@ -236,16 +236,17 @@ func (r *tradeDecisionJournalRecorder) EnsureOrderDecisionAttachment(ctx context
 		return uuid.Nil, fmt.Errorf("decision recorder: recovered decision intent is required")
 	}
 	persisted, getErr := r.repo.Get(ctx, decision.ID)
-	if getErr == nil {
+	switch {
+	case getErr == nil:
 		if persisted == nil || !tradeDecisionMatchesScope(*persisted, scope) {
 			return uuid.Nil, fmt.Errorf("decision recorder: recovered decision intent scope is invalid")
 		}
 		decision = persisted
-	} else if errors.Is(getErr, repository.ErrNotFound) {
+	case errors.Is(getErr, repository.ErrNotFound):
 		if err := r.RecordDecisionScoped(ctx, scope, decision); err != nil {
 			return uuid.Nil, fmt.Errorf("decision recorder: recover persisted decision intent: %w", err)
 		}
-	} else {
+	default:
 		return uuid.Nil, fmt.Errorf("decision recorder: load recovered decision intent: %w", getErr)
 	}
 	if live {

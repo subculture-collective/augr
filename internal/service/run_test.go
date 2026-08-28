@@ -36,7 +36,7 @@ func (*runRepoStub) List(context.Context, repository.PipelineRunFilter, int, int
 	return nil, nil
 }
 func (*runRepoStub) Count(context.Context, repository.PipelineRunFilter) (int, error) { return 0, nil }
-func (r *runRepoStub) Finalize(ctx context.Context, ref domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *runRepoStub) Finalize(ctx context.Context, _ domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	r.finalizeErr = ctx.Err()
 	r.finalizeDeadline, r.hasDeadline = ctx.Deadline()
 	if r.applied {

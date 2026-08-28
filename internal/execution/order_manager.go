@@ -1028,11 +1028,6 @@ func (m *OrderManager) ensureAttachedOrderDecision(ctx context.Context, scope Ex
 	return decisionID, nil
 }
 
-func (m *OrderManager) openLongPositionQuantity(ctx context.Context, scope ExecutionScope, ticker string) (float64, error) {
-	total, _, err := m.openLongPositions(ctx, scope, ticker)
-	return total, err
-}
-
 func (m *OrderManager) openLongPositions(ctx context.Context, scope ExecutionScope, ticker string) (float64, []uuid.UUID, error) {
 	ticker = strings.TrimSpace(ticker)
 	if ticker == "" {
@@ -1056,11 +1051,6 @@ func (m *OrderManager) openLongPositions(ctx context.Context, scope ExecutionSco
 		}
 	}
 	return total, ids, nil
-}
-
-func (m *OrderManager) openPredictionPositionQuantity(ctx context.Context, scope ExecutionScope, marketType domain.MarketType, slug, side string) (float64, error) {
-	total, _, err := m.openPredictionPositions(ctx, scope, marketType, slug, side)
-	return total, err
 }
 
 func (m *OrderManager) openPredictionPositions(ctx context.Context, scope ExecutionScope, marketType domain.MarketType, slug, side string) (float64, []uuid.UUID, error) {
@@ -1193,13 +1183,6 @@ func NormalizePredictionOrderTicker(marketType domain.MarketType, ticker, predic
 		return "", "", fmt.Errorf("order_manager: prediction order requires valid side YES or NO")
 	}
 	return trimmedTicker, normalizedSide, nil
-}
-
-func realizedPnL(side domain.PositionSide, avgEntry, fillPrice, quantity float64) float64 {
-	if side == domain.PositionSideLong {
-		return (fillPrice - avgEntry) * quantity
-	}
-	return (avgEntry - fillPrice) * quantity
 }
 
 func SanitizedSubmittedOrder(order *domain.Order, externalID string, submittedAt time.Time) *domain.Order {

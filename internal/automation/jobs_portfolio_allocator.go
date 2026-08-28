@@ -201,24 +201,23 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 				o.logger.Warn("portfolio_allocator: quarantined malformed opportunity", "opportunity_id", opportunity.ID, "reason", "source_run_missing")
 			}
 			continue
-		} else {
-			run, err := o.deps.RunRepo.Get(ctx, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
-			switch {
-			case err == nil && run == nil:
-				reason = "source_run_missing"
-			case errors.Is(err, repository.ErrNotFound):
-				reason = "source_run_missing"
-			case err != nil:
-				return nil, nil, fmt.Errorf("portfolio_allocator: load source run: %w", err)
-			case run.Status != domain.PipelineStatusCompleted:
-				reason = "source_run_not_completed"
-			case run.AccountID != opportunity.AccountID || run.Environment != opportunity.Environment || run.OriginType != opportunity.OriginType || run.OriginID != opportunity.OriginID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate):
-				reason = "source_scope_mismatch"
-			case run.StrategyID != opportunity.StrategyID:
-				reason = "source_strategy_mismatch"
-			case run.Signal != opportunity.Signal || (run.Signal != domain.PipelineSignalBuy && run.Signal != domain.PipelineSignalSell):
-				reason = "source_signal_mismatch"
-			}
+		}
+		run, err := o.deps.RunRepo.Get(ctx, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
+		switch {
+		case err == nil && run == nil:
+			reason = "source_run_missing"
+		case errors.Is(err, repository.ErrNotFound):
+			reason = "source_run_missing"
+		case err != nil:
+			return nil, nil, fmt.Errorf("portfolio_allocator: load source run: %w", err)
+		case run.Status != domain.PipelineStatusCompleted:
+			reason = "source_run_not_completed"
+		case run.AccountID != opportunity.AccountID || run.Environment != opportunity.Environment || run.OriginType != opportunity.OriginType || run.OriginID != opportunity.OriginID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate):
+			reason = "source_scope_mismatch"
+		case run.StrategyID != opportunity.StrategyID:
+			reason = "source_strategy_mismatch"
+		case run.Signal != opportunity.Signal || (run.Signal != domain.PipelineSignalBuy && run.Signal != domain.PipelineSignalSell):
+			reason = "source_signal_mismatch"
 		}
 		if reason == "source_run_missing" {
 			if o.deps.OpportunityRepo == nil {
@@ -339,7 +338,8 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 }
 
 func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opportunity domain.Opportunity, decision *domain.AllocationDecision, order *domain.Order, claimID uuid.UUID) error {
-	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovery_order_pending"
+	var action domain.AllocationDecisionAction
+	var reason string
 	if !orderMatchesOpportunity(*order, opportunity) {
 		return fmt.Errorf("portfolio_allocator: recovered order lineage mismatch")
 	}
@@ -348,13 +348,14 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 	}); err != nil {
 		return err
 	}
-	if order.Status == domain.OrderStatusFilled {
+	switch order.Status {
+	case domain.OrderStatusFilled:
 		decision.CreatedOrderID = &order.ID
 		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
-	} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+	case domain.OrderStatusRejected, domain.OrderStatusCancelled:
 		decision.CreatedOrderID = &order.ID
 		action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
-	} else {
+	default:
 		return fmt.Errorf("portfolio_allocator: recovered paper order remained nonterminal: %s", order.Status)
 	}
 	decision.Action = action
@@ -419,9 +420,10 @@ func orderMatchesOpportunity(order domain.Order, opportunity domain.Opportunity)
 func recoveredAllocationDecision(opportunity domain.Opportunity, order domain.Order) domain.AllocationDecision {
 	opportunityID, strategyID, orderID := opportunity.ID, opportunity.StrategyID, order.ID
 	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovery_nonterminal_order:"+order.Status.String()
-	if order.Status == domain.OrderStatusFilled {
+	switch order.Status {
+	case domain.OrderStatusFilled:
 		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
-	} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+	case domain.OrderStatusRejected, domain.OrderStatusCancelled:
 		action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
 	}
 	return domain.AllocationDecision{AccountID: opportunity.AccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: opportunity.PipelineRunID, PipelineRunTradeDate: opportunity.PipelineRunTradeDate, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: action, Reasons: []string{reason}, CreatedOrderID: &orderID}

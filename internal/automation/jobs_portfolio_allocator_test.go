@@ -305,6 +305,7 @@ func (r *portfolioAllocatorStrategyRepo) CreateWithExecutionVersion(ctx context.
 	}
 	return uuid.New(), nil
 }
+
 func (*portfolioAllocatorStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
@@ -415,19 +416,6 @@ func (r *portfolioRecoveryOrderRepo) GetByRun(_ context.Context, ref domain.Pipe
 	return out, nil
 }
 
-type crashAfterEffectDecisionRepo struct {
-	portfolioAllocatorDecisionRepo
-	failCreate bool
-}
-
-func (r *crashAfterEffectDecisionRepo) Create(ctx context.Context, decision *domain.AllocationDecision) error {
-	if r.failCreate {
-		r.failCreate = false
-		return errors.New("simulated crash after completed effect")
-	}
-	return r.portfolioAllocatorDecisionRepo.Create(ctx, decision)
-}
-
 func (p *portfolioPaperProcessorStub) ProcessPaperOrder(_ context.Context, req portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
 	p.called++
 	p.signal = req.Signal
@@ -511,7 +499,7 @@ func (r *preclaimFailOpportunityRepo) TransitionStatus(_ context.Context, _ uuid
 	return true, nil
 }
 
-func (r *preclaimFailOpportunityRepo) ClaimQueuedForAllocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _, _ time.Time) (bool, error) {
+func (r *preclaimFailOpportunityRepo) ClaimQueuedForAllocation(_ context.Context, _, _ uuid.UUID, _, _ time.Time) (bool, error) {
 	return false, fmt.Errorf("preclaim failed")
 }
 

@@ -442,17 +442,17 @@ type spreadPreflightBroker interface {
 // OptionsOrderManager handles options order submission for both single-leg
 // and multi-leg strategies.
 type OptionsOrderManager struct {
-	broker         OptionsBroker
-	brokerName     string
-	orderRepo      repository.OrderRepository
-	positionRepo   repository.PositionRepository
-	tradeRepo      repository.TradeRepository
+	broker           OptionsBroker
+	brokerName       string
+	orderRepo        repository.OrderRepository
+	positionRepo     repository.PositionRepository
+	tradeRepo        repository.TradeRepository
 	optionFillWriter AcceptedOptionFillWriter
-	riskEngine     risk.RiskEngine
-	liveTrading    bool
-	liveGate       LiveGateConfig
-	logger         *slog.Logger
-	accountLocker  repository.ExecutionAccountLocker
+	riskEngine       risk.RiskEngine
+	liveTrading      bool
+	liveGate         LiveGateConfig
+	logger           *slog.Logger
+	accountLocker    repository.ExecutionAccountLocker
 }
 
 // WithAcceptedOptionFillWriter wires all-or-nothing canonical option fills.
@@ -1259,7 +1259,7 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 		return resumeErr
 	}
 	var reservation repository.AtomicOptionCloseRepository
-	var reservedPositionIDs, reservedOrderIDs []uuid.UUID
+	var reservedPositionIDs []uuid.UUID
 	if isClosing {
 		var ok bool
 		reservation, ok = m.orderRepo.(repository.AtomicOptionCloseRepository)
@@ -1268,7 +1268,6 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 		}
 		for _, order := range legOrders {
 			reservedPositionIDs = append(reservedPositionIDs, closePositions[order.Ticker].ID)
-			reservedOrderIDs = append(reservedOrderIDs, order.ID)
 		}
 		originType, originID := scope.Origin()
 		if err := reservation.CreateOptionCloseOrdersAndReserve(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, reservedPositionIDs, legOrders); err != nil {

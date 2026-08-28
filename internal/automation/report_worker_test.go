@@ -32,6 +32,7 @@ func (s *stubReportStrategyRepo) CreateWithExecutionVersion(ctx context.Context,
 	}
 	return uuid.New(), nil
 }
+
 func (*stubReportStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }

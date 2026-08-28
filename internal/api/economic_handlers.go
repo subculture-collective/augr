@@ -2,20 +2,6 @@ package api
 
 import "net/http"
 
-func (s *Server) handleListEconomicAccounts(w http.ResponseWriter, r *http.Request) {
-	if s.economicAccounts == nil {
-		respondError(w, http.StatusNotImplemented, "economic account reads are disabled", ErrCodeNotImplemented)
-		return
-	}
-	limit, offset := parsePagination(r)
-	accounts, err := s.economicAccounts.List(r.Context(), limit, offset)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to list economic accounts", ErrCodeInternal)
-		return
-	}
-	respondList(w, accounts, limit, offset)
-}
-
 func (s *Server) handleGetEconomicAccount(w http.ResponseWriter, r *http.Request) {
 	if s.economicAccounts == nil {
 		respondError(w, http.StatusNotImplemented, "economic account reads are disabled", ErrCodeNotImplemented)

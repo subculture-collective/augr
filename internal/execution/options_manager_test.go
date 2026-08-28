@@ -56,12 +56,15 @@ type malformedAsyncSpreadBroker struct{}
 func (malformedAsyncSpreadBroker) SubmitOptionOrder(context.Context, *domain.Order) (string, error) {
 	return "", nil
 }
+
 func (malformedAsyncSpreadBroker) SubmitSpreadOrder(context.Context, *domain.OptionSpread, float64, string) ([]string, error) {
 	return []string{"only-one"}, nil
 }
+
 func (malformedAsyncSpreadBroker) PreflightSpread(context.Context, *domain.OptionSpread, float64) error {
 	return nil
 }
+
 func (malformedAsyncSpreadBroker) GetAccountBalance(context.Context) (execution.Balance, error) {
 	return execution.Balance{Cash: 100000, BuyingPower: 100000, Equity: 100000}, nil
 }
@@ -121,7 +124,7 @@ func TestReconcileCancelledOptionAppliesPartialFillBeforeTerminalStatus(t *testi
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusCancelled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
 	}}
 	fillRepo := &recordingOptionFillRepo{}
-	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := order; return &copy, nil }}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { cloned := order; return &cloned, nil }}
 	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
 	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
 		t.Fatal(err)
@@ -442,10 +445,9 @@ func TestCloseOptionPositionPersistsLifecycle(t *testing.T) {
 }
 
 func TestCloseOptionPositionRejectsIncompletePersistence(t *testing.T) {
-	mgr := newTestOptionsManager(&mockOptionsBroker{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{})
 	strategyID, runID := uuid.New(), uuid.New()
 	position := &domain.Position{ID: uuid.New(), StrategyID: &strategyID, AssetClass: domain.AssetClassOption, Quantity: 1}
-	mgr = newTestOptionsManager(&mockOptionsBroker{}, &mockOrderRepo{}, &mockPositionRepo{getFn: func(context.Context, uuid.UUID) (*domain.Position, error) { return position, nil }}, &mockTradeRepo{}, &mockRiskEngine{})
+	mgr := newTestOptionsManager(&mockOptionsBroker{}, &mockOrderRepo{}, &mockPositionRepo{getFn: func(context.Context, uuid.UUID) (*domain.Position, error) { return position, nil }}, &mockTradeRepo{}, &mockRiskEngine{})
 	err := mgr.CloseOptionPosition(context.Background(), optionExecutionScope(strategyID, runID), position, 2, "")
 	if err == nil {
 		t.Fatal("expected incomplete persisted contract to fail closed")
@@ -655,7 +657,7 @@ func TestReconcilePendingOptionOrderUsesClientIDAndPersistsFill(t *testing.T) {
 	strategyID := uuid.New()
 	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: clientID, Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusPending}
 	bindOptionRecoveryScope(&order)
-	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := order; return &copy, nil }}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { cloned := order; return &cloned, nil }}
 	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
 	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
 		t.Fatal(err)
@@ -674,7 +676,7 @@ func TestReconcileOptionFillUsesDurableTradeQuantity(t *testing.T) {
 	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
 	}}
-	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := order; return &copy, nil }}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { cloned := order; return &cloned, nil }}
 	fillRepo := &recordingOptionFillRepo{}
 	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
 	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {

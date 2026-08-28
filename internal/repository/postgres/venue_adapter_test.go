@@ -29,9 +29,11 @@ func (scope venueAdapterExecutionScope) AccountID() uuid.UUID { return scope.int
 func (scope venueAdapterExecutionScope) Environment() domain.AccountEnvironment {
 	return scope.intent.Environment
 }
+
 func (scope venueAdapterExecutionScope) Origin() (ledger.ExecutionOriginType, string) {
 	return scope.intent.OriginType, scope.intent.OriginID
 }
+
 func (scope venueAdapterExecutionScope) CopyOriginRunID() uuid.UUID {
 	return scope.intent.CopyOriginRebalanceRunID
 }

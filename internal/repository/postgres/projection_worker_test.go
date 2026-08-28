@@ -29,20 +29,24 @@ func (stub *projectionWorkerStoreStub) Claim(context.Context, string, time.Time,
 	stub.processing = item != nil
 	return item, nil
 }
+
 func (stub *projectionWorkerStoreStub) Heartbeat(context.Context, uuid.UUID, string, time.Time, time.Duration) error {
 	stub.heartbeats++
 	return nil
 }
+
 func (stub *projectionWorkerStoreStub) Complete(context.Context, uuid.UUID, string, time.Time) error {
 	stub.completed++
 	stub.processing = false
 	return nil
 }
+
 func (stub *projectionWorkerStoreStub) Release(context.Context, uuid.UUID, string, time.Time, string) error {
 	stub.released++
 	stub.processing = false
 	return nil
 }
+
 func (stub *projectionWorkerStoreStub) RetryOrDegrade(_ context.Context, _ uuid.UUID, _ string, _ time.Time, _ int, code string) (string, error) {
 	stub.retried++
 	stub.processing = false

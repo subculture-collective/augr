@@ -57,6 +57,7 @@ func (m *mockStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strat
 	}
 	return uuid.New(), nil
 }
+
 func (*mockStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }

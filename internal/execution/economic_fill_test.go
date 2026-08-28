@@ -18,9 +18,11 @@ type economicPlannerStub struct{ input AcceptedFillInput }
 func (stub economicPlannerStub) PlanAcceptedOrderFill(context.Context, ExecutionScope, repository.OrderFillInput) (AcceptedFillInput, error) {
 	return stub.input, nil
 }
+
 func (stub economicPlannerStub) PlanAcceptedOptionFills(context.Context, ExecutionScope, []repository.OptionFillInput) ([]AcceptedFillInput, error) {
 	return []AcceptedFillInput{stub.input}, nil
 }
+
 func (economicPlannerStub) PlanAcceptedPredictionSettlement(context.Context, ExecutionScope, repository.PredictionDecisionSettlementInput) (AcceptedPredictionSettlementInput, error) {
 	return AcceptedPredictionSettlementInput{}, nil
 }
@@ -34,16 +36,17 @@ type rawEconomicStoreStub struct {
 func (stub *rawEconomicStoreStub) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
 	return fn()
 }
+
 func (stub *rawEconomicStoreStub) RecordEconomicSourceEvent(_ context.Context, event *ledger.EconomicSourceEvent) (*ledger.EconomicSourceEvent, error) {
 	*stub.log = append(*stub.log, "raw")
 	if stub.err != nil {
 		return nil, stub.err
 	}
-	copy := *event
+	cloned := *event
 	if stub.mismatch {
-		copy.SourceRevision += "-changed"
+		cloned.SourceRevision += "-changed"
 	}
-	return &copy, nil
+	return &cloned, nil
 }
 
 type economicCoordinatorStub struct {
@@ -61,9 +64,11 @@ func (stub *economicCoordinatorStub) ApplyAcceptedFill(_ context.Context, input 
 	}
 	return AcceptedFillResult{Mutation: repository.OrderFillResult{OrderID: input.Mutation.Order.ID, TradeID: input.Mutation.Trade.ID}}, nil
 }
+
 func (*economicCoordinatorStub) ApplyAcceptedOptionFills(context.Context, []AcceptedFillInput) ([]AcceptedFillResult, error) {
 	return nil, nil
 }
+
 func (*economicCoordinatorStub) SettlePredictionDecision(context.Context, AcceptedPredictionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
 	return repository.PredictionDecisionSettlementResult{}, nil
 }

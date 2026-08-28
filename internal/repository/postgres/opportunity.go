@@ -83,7 +83,7 @@ func (r *OpportunityRepo) ListQueuedForAllocation(ctx context.Context, asOf time
 }
 
 // ListSelectedForAllocation returns durable in-flight claims for restart reconciliation.
-func (r *OpportunityRepo) ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error) {
+func (r *OpportunityRepo) ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, _ time.Time) ([]domain.Opportunity, error) {
 	query := opportunitySelectSQL + ` WHERE status = $1 AND account_id=$2 AND (allocation_claim_id=$3 OR allocation_claim_expires_at <= clock_timestamp() OR (allocation_claim_id IS NULL AND allocation_claimed_at IS NULL AND allocation_claim_expires_at IS NULL)) ORDER BY allocation_claim_expires_at ASC NULLS FIRST, created_at ASC, id ASC`
 	return r.list(ctx, query, []any{domain.OpportunityStatusSelected, r.accountID, claimID}, "list recoverable selected opportunities for allocation")
 }

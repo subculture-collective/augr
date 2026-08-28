@@ -24,20 +24,20 @@ type PaperOrderManagerProcessor struct {
 }
 
 type PaperOrderManagerProcessorDeps struct {
-	EconomicWriter         execution.AcceptedOrderFillWriter
-	RiskEngine             risk.RiskEngine
-	PositionRepo           repository.PositionRepository
-	OrderRepo              repository.OrderRepository
-	TradeRepo              repository.TradeRepository
-	AuditLogRepo           repository.AuditLogRepository
-	AgentEventRepo         repository.AgentEventRepository
-	DecisionRecorder       execution.DecisionRecorder
-	OpportunityRepo        repository.OpportunityRepository
-	Metrics                execution.OrderMetricsRecorder
-	Logger                 *slog.Logger
-	InitialBalance         float64
-	FractionPct            float64
-	PaperBroker            *paper.PaperBroker
+	EconomicWriter   execution.AcceptedOrderFillWriter
+	RiskEngine       risk.RiskEngine
+	PositionRepo     repository.PositionRepository
+	OrderRepo        repository.OrderRepository
+	TradeRepo        repository.TradeRepository
+	AuditLogRepo     repository.AuditLogRepository
+	AgentEventRepo   repository.AgentEventRepository
+	DecisionRecorder execution.DecisionRecorder
+	OpportunityRepo  repository.OpportunityRepository
+	Metrics          execution.OrderMetricsRecorder
+	Logger           *slog.Logger
+	InitialBalance   float64
+	FractionPct      float64
+	PaperBroker      *paper.PaperBroker
 }
 
 type allocationOrderRepo struct {
@@ -185,8 +185,10 @@ func (p *PaperOrderManagerProcessor) claimFence(opportunityID, claimID uuid.UUID
 }
 
 // Compile-time assertion that the processor stays on the paper execution boundary.
-var _ PaperOrderProcessor = (*PaperOrderManagerProcessor)(nil)
-var _ PaperOrderReconciler = (*PaperOrderManagerProcessor)(nil)
+var (
+	_ PaperOrderProcessor  = (*PaperOrderManagerProcessor)(nil)
+	_ PaperOrderReconciler = (*PaperOrderManagerProcessor)(nil)
+)
 
 // Avoid an unused import regression when domain constants move; this also keeps
 // the file colocated with portfolio market semantics.

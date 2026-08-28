@@ -333,9 +333,11 @@ func (s *stubStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strat
 	}
 	return uuid.New(), nil
 }
+
 func (*stubStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
+
 func (s *stubStrategyRepo) Get(context.Context, uuid.UUID) (*domain.Strategy, error) {
 	if s.strategy == nil {
 		return nil, repository.ErrNotFound

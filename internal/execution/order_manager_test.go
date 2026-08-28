@@ -292,7 +292,7 @@ func (r *mockOrderRepo) GetByRun(ctx context.Context, ref domain.PipelineRunRef,
 	return nil, nil
 }
 
-func (r *mockOrderRepo) GetByCopyOriginRun(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _ uuid.UUID, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+func (r *mockOrderRepo) GetByCopyOriginRun(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
 	return r.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}, filter, limit, offset)
 }
 
@@ -1104,7 +1104,7 @@ func TestReconcilePersistedLiveOrderDoesNotCancelRestingOrder(t *testing.T) {
 		},
 		cancelOrderFn: func(context.Context, string) error { cancels++; return nil },
 	}
-	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := *order; return &copy, nil }}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { cloned := *order; return &cloned, nil }}
 	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithDecisionRecorder(&recoveryDecisionRecorder{decisionID: uuid.New()}).WithLiveTrading(true)
 	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
 	if err != nil || status != domain.OrderStatusSubmitted || cancels != 0 {
@@ -1219,7 +1219,7 @@ func TestReconcilePersistedCancelledOrderPersistsQuantityAdvanceBeforeTerminalSt
 	}}
 	positionID, tradeID := uuid.New(), uuid.New()
 	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}}}
-	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := *order; return &copy, nil }}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { cloned := *order; return &cloned, nil }}
 	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithAcceptedOrderFillWriter(financial).WithDecisionRecorder(&recoveryDecisionRecorder{decisionID: uuid.New()})
 	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
 	if err != nil {
@@ -1246,7 +1246,7 @@ func TestReconcilePersistedTerminalPartialRepairsAtomicAndReplayEvidenceWithoutB
 	}}
 	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}, Replayed: true}}
 	recorder := &recoveryDecisionRecorder{decisionID: uuid.New()}
-	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := *order; return &copy, nil }}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { cloned := *order; return &cloned, nil }}
 	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithAcceptedOrderFillWriter(financial).WithDecisionRecorder(recorder)
 	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
 	if err != nil || status != domain.OrderStatusCancelled || financial.called != 1 || !slices.Equal(recorder.events, []domain.ReplayEventType{domain.ReplayEventTypeFillObserved, domain.ReplayEventTypePositionUpdated}) {

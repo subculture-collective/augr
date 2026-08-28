@@ -14,11 +14,11 @@ import (
 )
 
 type optionRecoveryDependencies struct {
-	Orders    repository.OrderRepository
+	Orders       repository.OrderRepository
 	OptionWriter execution.AcceptedOptionFillWriter
 	OrderWriter  execution.AcceptedOrderFillWriter
-	Trades    repository.TradeRepository
-	Decisions execution.DecisionRecorder
+	Trades       repository.TradeRepository
+	Decisions    execution.DecisionRecorder
 }
 
 type durableOptionSettlementState struct {

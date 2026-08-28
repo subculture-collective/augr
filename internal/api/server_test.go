@@ -2904,6 +2904,7 @@ func (f fakeStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strate
 	}
 	return uuid.New(), nil
 }
+
 func (fakeStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
@@ -2914,6 +2915,7 @@ func (s *eventMarketSummaryStrategyRepoStub) CreateWithExecutionVersion(ctx cont
 	}
 	return uuid.New(), nil
 }
+
 func (*eventMarketSummaryStrategyRepoStub) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
@@ -2924,6 +2926,7 @@ func (s *portfolioDiagnosticsStrategyRepo) CreateWithExecutionVersion(ctx contex
 	}
 	return uuid.New(), nil
 }
+
 func (*portfolioDiagnosticsStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
@@ -2934,6 +2937,7 @@ func (s *kalshiSummaryStrategyRepoStub) CreateWithExecutionVersion(ctx context.C
 	}
 	return uuid.New(), nil
 }
+
 func (*kalshiSummaryStrategyRepoStub) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
@@ -2974,6 +2978,7 @@ func (stubOrderRepo) GetByStrategy(context.Context, uuid.UUID, repository.OrderF
 func (stubOrderRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.OrderFilter, int, int) ([]domain.Order, error) {
 	return nil, nil
 }
+
 func (stubOrderRepo) GetByCopyOriginRun(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
 	return nil, nil
 }

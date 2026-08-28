@@ -79,7 +79,6 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 }
 
 func applyOrderFillTx(ctx context.Context, tx pgx.Tx, input repository.OrderFillInput) (repository.OrderFillResult, error) {
-
 	var existingOrderID uuid.UUID
 	var existingPositionID *uuid.UUID
 	var existingTradeID uuid.UUID
@@ -272,7 +271,8 @@ func applyOrderFillTx(ctx context.Context, tx pgx.Tx, input repository.OrderFill
 		var linkedID uuid.UUID
 		var linkedQuantity, linkedAverage float64
 		linkedErr := tx.QueryRow(ctx, `SELECT p.id,p.quantity::double precision,p.avg_entry::double precision FROM positions p JOIN trades t ON t.position_id=p.id AND t.account_id=p.account_id AND t.environment=p.environment AND t.origin_type=p.origin_type AND t.origin_id=p.origin_id WHERE t.order_id=$1 AND t.account_id=$2 AND t.environment=$3 AND t.origin_type=$4 AND t.origin_id=$5 AND p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 ORDER BY t.created_at LIMIT 1 FOR UPDATE OF p`, order.ID, order.AccountID, order.Environment, order.OriginType, order.OriginID).Scan(&linkedID, &linkedQuantity, &linkedAverage)
-		if linkedErr == nil {
+		switch {
+		case linkedErr == nil:
 			newQuantity := linkedQuantity + deltaQuantity
 			newAverage := (linkedQuantity*linkedAverage + deltaQuantity*fillPrice) / newQuantity
 			if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,avg_entry=$2,current_price=$3 WHERE id=$4 AND account_id=$5 AND environment=$6 AND origin_type=$7 AND origin_id=$8`, newQuantity, newAverage, fillPrice, linkedID, order.AccountID, order.Environment, order.OriginType, order.OriginID); err != nil {
@@ -281,9 +281,9 @@ func applyOrderFillTx(ctx context.Context, tx pgx.Tx, input repository.OrderFill
 				return repository.OrderFillResult{}, fmt.Errorf("postgres: order-linked position ownership changed concurrently")
 			}
 			position = &domain.Position{ID: linkedID, AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: newQuantity, AvgEntry: newAverage, OpenedAt: now}
-		} else if !errors.Is(linkedErr, pgx.ErrNoRows) {
+		case !errors.Is(linkedErr, pgx.ErrNoRows):
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: load order-linked position: %w", linkedErr)
-		} else {
+		default:
 			position = &domain.Position{ID: uuid.New(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: deltaQuantity, AvgEntry: fillPrice, OpenedAt: now}
 			if input.StopLoss != nil {
 				position.StopLoss = input.StopLoss
@@ -726,7 +726,8 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 			positionSide = domain.PositionSideShort
 		}
 		err := tx.QueryRow(ctx, `SELECT p.id FROM positions p JOIN trades t ON t.position_id=p.id AND t.account_id=p.account_id AND t.environment=p.environment AND t.origin_type=p.origin_type AND t.origin_id=p.origin_id WHERE t.order_id=$1 AND t.account_id=$2 AND t.environment=$3 AND t.origin_type=$4 AND t.origin_id=$5 AND p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 ORDER BY t.created_at LIMIT 1 FOR UPDATE OF p`, order.ID, input.AccountID, input.Environment, input.OriginType, input.OriginID).Scan(&positionID)
-		if err == nil {
+		switch {
+		case err == nil:
 			var quantity, avgEntry float64
 			if err := tx.QueryRow(ctx, `SELECT quantity::double precision,avg_entry::double precision FROM positions WHERE id=$1 FOR UPDATE`, positionID).Scan(&quantity, &avgEntry); err != nil {
 				return repository.OptionFillResult{}, fmt.Errorf("postgres: reload option position: %w", err)
@@ -738,9 +739,9 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 			} else if tag.RowsAffected() != 1 {
 				return repository.OptionFillResult{}, fmt.Errorf("postgres: option position ownership changed concurrently")
 			}
-		} else if !errors.Is(err, pgx.ErrNoRows) {
+		case !errors.Is(err, pgx.ErrNoRows):
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: find prior option position: %w", err)
-		} else {
+		default:
 			positionID = uuid.New()
 			var delta, gamma, theta, vega *float64
 			if order.OptionGreeks != nil {

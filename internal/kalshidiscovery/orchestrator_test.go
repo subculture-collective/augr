@@ -318,6 +318,7 @@ func (r *fakeKalshiStrategyRepo) Create(_ context.Context, strategy *domain.Stra
 	r.created = append(r.created, *strategy)
 	return nil
 }
+
 func (r *fakeKalshiStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
 	if err := r.Create(ctx, strategy); err != nil {
 		return uuid.Nil, err
@@ -331,6 +332,7 @@ func (r *fakeKalshiStrategyRepo) CreateWithExecutionVersion(ctx context.Context,
 	}
 	return versionID, nil
 }
+
 func (r *fakeKalshiStrategyRepo) ResolveExecutionVersionID(_ context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
 	for i := range r.created {
 		if r.created[i].ID == strategyID && r.created[i].ExecutionStrategyVersionID != nil {

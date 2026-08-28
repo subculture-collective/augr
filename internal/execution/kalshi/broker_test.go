@@ -3,11 +3,12 @@ package kalshi
 import (
 	"context"
 	"errors"
-	"github.com/google/uuid"
 	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"

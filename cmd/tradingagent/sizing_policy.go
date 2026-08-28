@@ -89,7 +89,7 @@ func closedTradeStatsForStrategy(ctx context.Context, positionRepo repository.Po
 
 		for _, pos := range positions {
 			if pos.AccountID != scope.AccountID() || pos.Environment != scope.Environment() || pos.OriginType != string(originType) || pos.OriginID != originID || pos.StrategyID == nil || *pos.StrategyID != strategyID {
-				return position.HistoryStats{}, fmt.Errorf("Kelly history escaped execution scope")
+				return position.HistoryStats{}, fmt.Errorf("kelly history escaped execution scope")
 			}
 			if pos.ClosedAt == nil {
 				continue

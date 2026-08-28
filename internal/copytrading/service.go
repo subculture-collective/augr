@@ -733,17 +733,19 @@ func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.Cop
 	}
 	candidate.OrderID = executionResult.OrderID
 	terminalMapped := false
-	if executionResult.Status == domain.OrderStatusFilled {
+	switch executionResult.Status {
+	case domain.OrderStatusFilled:
 		candidate.Status, candidate.RiskStatus, terminalMapped = "filled", "approved", true
-	} else if executionResult.Status == domain.OrderStatusRejected || executionResult.Status == domain.OrderStatusCancelled {
+	case domain.OrderStatusRejected, domain.OrderStatusCancelled:
 		candidate.Status, candidate.RiskStatus, terminalMapped = "failed", "rejected", true
 	}
-	if err != nil && !terminalMapped {
+	switch {
+	case err != nil && !terminalMapped:
 		candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{err.Error()}
 		if candidate.OrderID != nil && (executionResult.Status == domain.OrderStatusPending || executionResult.Status == domain.OrderStatusSubmitted || executionResult.Status == domain.OrderStatusPartial) {
 			candidate.Status = "received"
 		}
-	} else if err == nil && !terminalMapped {
+	case err == nil && !terminalMapped:
 		candidate.RiskStatus = "approved"
 		switch executionResult.Status {
 		case domain.OrderStatusFilled:
@@ -755,7 +757,7 @@ func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.Cop
 		default:
 			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
 		}
-	} else if err != nil {
+	case err != nil:
 		candidate.RiskReasons = []string{err.Error()}
 	}
 	completed, updateErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
@@ -800,13 +802,6 @@ type effectFailure struct {
 	returnedOrderID *uuid.UUID
 	precedingStage  string
 	precedingError  error
-}
-
-func effectStage(err error, stage string) string {
-	if err == nil {
-		return ""
-	}
-	return stage
 }
 
 func (s *Service) recordEffectFailure(ctx context.Context, run domain.PipelineRun, intent domain.CopyTradeIntent, failure effectFailure) error {

@@ -382,11 +382,12 @@ func (b *PaperBroker) ApplyOptionSettlement(ctx context.Context, positionID uuid
 	position := b.optionLots[positionID]
 	if position != nil {
 		cash := settlementPrice * position.Quantity * position.ContractMultiplier
-		if position.Side == domain.PositionSideLong {
+		switch position.Side {
+		case domain.PositionSideLong:
 			b.balance.Cash += cash
-		} else if position.Side == domain.PositionSideShort {
+		case domain.PositionSideShort:
 			b.balance.Cash -= cash
-		} else {
+		default:
 			return errors.New("paper: option settlement position side is invalid")
 		}
 		delete(b.optionLots, positionID)

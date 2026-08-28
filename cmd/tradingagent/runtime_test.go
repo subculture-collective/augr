@@ -1278,12 +1278,15 @@ func (runtimeStopExitRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UU
 func (runtimeStopExitRepo) CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error {
 	return nil
 }
+
 func (runtimeStopExitRepo) ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
 func (runtimeStopExitRepo) MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error {
 	return nil
 }
+
 func (runtimeStopExitRepo) ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
 	return nil
 }
@@ -1875,6 +1878,7 @@ func (stubPositionRepo) Delete(context.Context, uuid.UUID) error        { return
 func (stubPositionRepo) GetOpen(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
 	return nil, nil
 }
+
 func (stubPositionRepo) GetOpenByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
 	return nil, nil
 }

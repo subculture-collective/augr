@@ -14,8 +14,10 @@ import (
 // PaperAccountRepo provides provenance-safe reads for paper-account restoration.
 type PaperAccountRepo struct{ pool *DB }
 
-var _ repository.PaperAccountRepository = (*PaperAccountRepo)(nil)
-var _ repository.ExecutionAccountLocker = (*PaperAccountRepo)(nil)
+var (
+	_ repository.PaperAccountRepository = (*PaperAccountRepo)(nil)
+	_ repository.ExecutionAccountLocker = (*PaperAccountRepo)(nil)
+)
 
 func NewPaperAccountRepo(db *DB) *PaperAccountRepo { return &PaperAccountRepo{pool: db} }
 

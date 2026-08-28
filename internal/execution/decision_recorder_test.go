@@ -134,8 +134,8 @@ func (s *decisionJournalStub) GetByOrderScoped(_ context.Context, orderID uuid.U
 			attached = decision.LiveOrderID
 		}
 		if attached != nil && *attached == orderID {
-			copy := decision
-			return &copy, nil
+			cloned := decision
+			return &cloned, nil
 		}
 	}
 	return nil, repository.ErrNotFound

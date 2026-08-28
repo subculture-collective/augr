@@ -17,9 +17,11 @@ func (r *decisionCaptureRepo) Create(_ context.Context, decision *domain.AgentDe
 	r.decision = decision
 	return nil
 }
+
 func (*decisionCaptureRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
 	return nil, nil
 }
+
 func (*decisionCaptureRepo) CountByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter) (int, error) {
 	return 0, nil
 }
@@ -57,6 +59,7 @@ func (p *phaseCapturePersister) PersistSnapshot(_ context.Context, snapshot *dom
 	p.snapshots = append(p.snapshots, *snapshot)
 	return nil
 }
+
 func (*phaseCapturePersister) PersistDecision(context.Context, domain.PipelineRunRef, Node, *int, string, *DecisionLLMResponse) error {
 	return nil
 }

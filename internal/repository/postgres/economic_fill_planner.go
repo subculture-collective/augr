@@ -29,9 +29,11 @@ const acceptedEconomicNormalizerVersion = "accepted-economic-planner-v1"
 // instrument, contract, account, or route from a legacy ticker.
 type AcceptedEconomicPlanner struct{ pool *pgxpool.Pool }
 
-var _ execution.AcceptedEconomicPlanner = (*AcceptedEconomicPlanner)(nil)
-var _ execution.PositionExecutionScopeResolver = (*AcceptedEconomicPlanner)(nil)
-var _ execution.AcceptedOrderPreparationChecker = (*AcceptedEconomicPlanner)(nil)
+var (
+	_ execution.AcceptedEconomicPlanner         = (*AcceptedEconomicPlanner)(nil)
+	_ execution.PositionExecutionScopeResolver  = (*AcceptedEconomicPlanner)(nil)
+	_ execution.AcceptedOrderPreparationChecker = (*AcceptedEconomicPlanner)(nil)
+)
 
 func NewAcceptedEconomicPlanner(pool *pgxpool.Pool) *AcceptedEconomicPlanner {
 	return &AcceptedEconomicPlanner{pool: pool}

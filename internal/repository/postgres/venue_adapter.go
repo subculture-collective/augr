@@ -21,8 +21,6 @@ import (
 // observations. It does not select a current policy or call a provider.
 type VenueAdapterRepo struct{ pool *pgxpool.Pool }
 
-var ()
-
 // NewVenueAdapterRepo returns a venue-adapter repository backed by pool.
 func NewVenueAdapterRepo(pool *pgxpool.Pool) *VenueAdapterRepo {
 	return &VenueAdapterRepo{pool: pool}

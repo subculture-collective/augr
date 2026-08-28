@@ -1568,9 +1568,11 @@ func (s *kalshiStrategyRepoStub) CreateWithExecutionVersion(ctx context.Context,
 	}
 	return uuid.New(), nil
 }
+
 func (*kalshiStrategyRepoStub) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
 	return uuid.New(), nil
 }
+
 func (s *kalshiStrategyRepoStub) Get(context.Context, uuid.UUID) (*domain.Strategy, error) {
 	return nil, repository.ErrNotFound
 }

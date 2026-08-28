@@ -106,8 +106,8 @@ func (r *sharedExitClaims) GetPredictionExitOrderByPosition(_ context.Context, _
 	if r.reservedOrder == nil {
 		return nil, repository.ErrNotFound
 	}
-	copy := *r.reservedOrder
-	return &copy, nil
+	cloned := *r.reservedOrder
+	return &cloned, nil
 }
 
 func (r *sharedExitClaims) CreatePredictionExitOrderAndReserve(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ string, positionID uuid.UUID, order *domain.Order) error {
@@ -120,23 +120,27 @@ func (r *sharedExitClaims) CreatePredictionExitOrderAndReserve(_ context.Context
 		return errors.New("already claimed")
 	}
 	r.claims[positionID] = order.ID
-	copy := *order
-	r.reservedOrder = &copy
+	cloned := *order
+	r.reservedOrder = &cloned
 	if r.createErrAfterCommit {
 		r.createErrAfterCommit = false
 		return errors.New("reservation commit acknowledgement lost")
 	}
 	return nil
 }
+
 func (*sharedExitClaims) ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
 	return nil
 }
+
 func (*sharedExitClaims) MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error {
 	return nil
 }
+
 func (*sharedExitClaims) ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
 	return nil
 }
+
 func (r *sharedExitClaims) FinalizePredictionExit(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, positionID, _ uuid.UUID, status domain.OrderStatus, _ string, _ time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -187,7 +191,7 @@ func (f *fakeBroker) ReleasePredictionExitPosition(context.Context, uuid.UUID, u
 	return nil
 }
 
-func (f *fakeBroker) MarkPredictionExitSubmitted(_ context.Context, _ uuid.UUID, _ uuid.UUID, externalID string, _ time.Time) error {
+func (f *fakeBroker) MarkPredictionExitSubmitted(_ context.Context, _, _ uuid.UUID, externalID string, _ time.Time) error {
 	f.persistedUnderLock.Store(f.lockDepth.Load() > 0)
 	f.submittedExternalID = externalID
 	return nil

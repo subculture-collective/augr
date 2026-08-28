@@ -24,12 +24,14 @@ type OrderRepo struct {
 }
 
 // Compile-time check that OrderRepo satisfies OrderRepository.
-var _ repository.OrderRepository = (*OrderRepo)(nil)
-var _ repository.ExecutionAccountLocker = (*OrderRepo)(nil)
-var _ repository.AtomicOptionCloseRepository = (*OrderRepo)(nil)
-var _ repository.AtomicOptionOrderRepository = (*OrderRepo)(nil)
-var _ repository.OptionDefinitiveRejectionRepository = (*OrderRepo)(nil)
-var _ repository.OptionCloseReservationLookup = (*OrderRepo)(nil)
+var (
+	_ repository.OrderRepository                     = (*OrderRepo)(nil)
+	_ repository.ExecutionAccountLocker              = (*OrderRepo)(nil)
+	_ repository.AtomicOptionCloseRepository         = (*OrderRepo)(nil)
+	_ repository.AtomicOptionOrderRepository         = (*OrderRepo)(nil)
+	_ repository.OptionDefinitiveRejectionRepository = (*OrderRepo)(nil)
+	_ repository.OptionCloseReservationLookup        = (*OrderRepo)(nil)
+)
 
 // NewOrderRepo returns an OrderRepo backed by the given connection pool.
 func NewOrderRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OrderRepo {
@@ -921,7 +923,8 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 		return fmt.Sprintf("$%d", argIdx)
 	}
 
-	if scopeColumn == "copy_origin" {
+	switch scopeColumn {
+	case "copy_origin":
 		scope := scopeValue.(copyOrderScope)
 		accountParameter := nextArg(scope.accountID)
 		environmentParameter := nextArg(scope.environment)
@@ -936,15 +939,16 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 			"copy_origin_rebalance_run_id = "+runParameter,
 			"EXISTS (SELECT 1 FROM copy_origin_rebalance_runs r WHERE r.id = "+runParameter+" AND r.account_id = "+accountParameter+" AND r.environment = "+environmentParameter+" AND r.subscription_id = "+subscriptionParameter+" AND r.origin_type = 'copy_subscription' AND r.origin_id = "+subscriptionParameter+")",
 		)
-	} else if scopeColumn == "pipeline_run" {
+	case "pipeline_run":
 		scope := scopeValue.(runOrderScope)
 		conditions = append(conditions, "account_id = "+nextArg(scope.accountID), "pipeline_run_id = "+nextArg(scope.ref.ID), "pipeline_run_trade_date = "+nextArg(scope.ref.TradeDate)+"::date")
-	} else if scopeColumn == "account" {
+	case "account":
 		conditions = append(conditions, "account_id = "+nextArg(scopeValue))
-	} else if scopeColumn == "account_strategy" {
+	case "account_strategy":
 		values := scopeValue.([]any)
 		conditions = append(conditions, "account_id = "+nextArg(values[0]), "strategy_id = "+nextArg(values[1]))
-	} else if scopeColumn != "" {
+	case "":
+	default:
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))
 	}
 

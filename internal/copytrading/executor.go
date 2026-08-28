@@ -19,18 +19,18 @@ import (
 )
 
 type OrderManagerExecutorDeps struct {
-	ExecutionAccount   domain.ExecutionAccountBinding
-	Broker             *paper.PaperBroker
-	Risk               risk.RiskEngine
-	Positions          repository.PositionRepository
-	Orders             repository.OrderRepository
-	Trades             repository.TradeRepository
-	EconomicWriter     execution.AcceptedOrderFillWriter
-	Audit              repository.AuditLogRepository
-	Events             repository.AgentEventRepository
-	DecisionRecorder   execution.DecisionRecorder
-	Metrics            execution.OrderMetricsRecorder
-	Logger             *slog.Logger
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           *paper.PaperBroker
+	Risk             risk.RiskEngine
+	Positions        repository.PositionRepository
+	Orders           repository.OrderRepository
+	Trades           repository.TradeRepository
+	EconomicWriter   execution.AcceptedOrderFillWriter
+	Audit            repository.AuditLogRepository
+	Events           repository.AgentEventRepository
+	DecisionRecorder execution.DecisionRecorder
+	Metrics          execution.OrderMetricsRecorder
+	Logger           *slog.Logger
 }
 
 // OrderManagerExecutor adapts copy intents to Augr's existing risk and paper

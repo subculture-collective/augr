@@ -194,7 +194,6 @@ func TestSettlerClosesWinningPaperContractAndIsIdempotent(t *testing.T) {
 	}
 	_ = trades
 	_ = replay
-
 }
 
 func TestSettlerPreviewAcceptsMultiFillPositionResidual(t *testing.T) {

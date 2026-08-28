@@ -124,22 +124,6 @@ func (repo *ProjectionRepo) ListCanonicalOpenLots(ctx context.Context, accountID
 	return result, nil
 }
 
-func (repo *ProjectionRepo) getMarkObservationByIdentity(
-	ctx context.Context,
-	instrumentID uuid.UUID,
-	currency, source, namespace, observationID string,
-) (*ledger.MarkObservation, error) {
-	mark, err := scanProjectionMark(repo.pool.QueryRow(ctx, projectionMarkSelectSQL+`
-		WHERE instrument_id=$1 AND price_currency=$2 AND source=$3
-		  AND source_namespace=$4 AND source_observation_id=$5`,
-		instrumentID, currency, source, namespace, observationID,
-	))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, repository.ErrNotFound
-	}
-	return mark, err
-}
-
 const projectionMarkSelectSQL = `SELECT
 	id, instrument_id, price::TEXT, price_currency, source, source_namespace,
 	source_observation_id, source_revision, effective_at, observed_at, metadata, created_at

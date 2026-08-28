@@ -364,14 +364,6 @@ func isFinitePolymarketQuantity(quantity float64) bool {
 	return !math.IsNaN(quantity) && !math.IsInf(quantity, 0)
 }
 
-func (g *StopGuard) arm(positionID string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if entry := g.byID[positionID]; entry != nil {
-		entry.state.Store(int32(guardArmed))
-	}
-}
-
 func (g *StopGuard) Cancel(positionID string) {
 	if g == nil {
 		return

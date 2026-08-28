@@ -603,18 +603,20 @@ func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filte
 		return fmt.Sprintf("$%d", argIdx)
 	}
 
-	if scopeColumn == "execution_scope" {
+	switch scopeColumn {
+	case "execution_scope":
 		values := scopeValue.([]any)
 		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.environment = "+nextArg(values[1]), "p.origin_type = "+nextArg(values[2]), "p.origin_id = "+nextArg(values[3]))
-	} else if scopeColumn == "account_scope" {
+	case "account_scope":
 		values := scopeValue.([]any)
 		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.environment = "+nextArg(values[1]))
-	} else if scopeColumn == "account_only" {
+	case "account_only":
 		conditions = append(conditions, "p.account_id = "+nextArg(scopeValue))
-	} else if scopeColumn == "account_strategy" {
+	case "account_strategy":
 		values := scopeValue.([]any)
 		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.strategy_id = "+nextArg(values[1]))
-	} else if scopeColumn != "" {
+	case "":
+	default:
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))
 	}
 

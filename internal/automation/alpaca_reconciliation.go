@@ -914,6 +914,7 @@ func cloneOptionTypePtr(value *domain.OptionType) *domain.OptionType {
 	v := *value
 	return &v
 }
+
 func optionTypePtrEqual(left, right *domain.OptionType) bool {
 	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
 }
@@ -1075,14 +1076,6 @@ func cloneTimePtr(value *time.Time) *time.Time {
 	return &v
 }
 
-func cloneUUIDPtr(value *uuid.UUID) *uuid.UUID {
-	if value == nil {
-		return nil
-	}
-	v := *value
-	return &v
-}
-
 func floatPtrEqual(left, right *float64) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
@@ -1095,13 +1088,6 @@ func timePtrEqual(left, right *time.Time) bool {
 		return left == nil && right == nil
 	}
 	return left.Equal(*right)
-}
-
-func uuidPtrEqual(left, right *uuid.UUID) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
 }
 
 func formatFloat(v float64) string {

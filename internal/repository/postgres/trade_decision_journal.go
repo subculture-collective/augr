@@ -24,10 +24,12 @@ type TradeDecisionJournalRepo struct {
 }
 
 // Compile-time check that TradeDecisionJournalRepo satisfies the repository interface.
-var _ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
-var _ repository.AtomicOrderReplayRepository = (*TradeDecisionJournalRepo)(nil)
-var _ repository.AtomicDecisionReplayRepository = (*TradeDecisionJournalRepo)(nil)
-var _ repository.AtomicOrderDecisionRepository = (*TradeDecisionJournalRepo)(nil)
+var (
+	_ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
+	_ repository.AtomicOrderReplayRepository    = (*TradeDecisionJournalRepo)(nil)
+	_ repository.AtomicDecisionReplayRepository = (*TradeDecisionJournalRepo)(nil)
+	_ repository.AtomicOrderDecisionRepository  = (*TradeDecisionJournalRepo)(nil)
+)
 
 // NewTradeDecisionJournalRepo returns a repository backed by the given pool.
 func NewTradeDecisionJournalRepo(pool *pgxpool.Pool, accountID uuid.UUID) *TradeDecisionJournalRepo {
@@ -75,8 +77,7 @@ func (r *TradeDecisionJournalRepo) create(ctx context.Context, db tradeDecisionQ
 		return err
 	}
 
-	query :=
-		`INSERT INTO trade_decisions (
+	query := `INSERT INTO trade_decisions (
 			id, account_id, environment, origin_type, origin_id, pipeline_run_trade_date, strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
 			side, outcome, fair_value, executable_price, spread, depth, gross_ev,
 			net_ev, kelly_fraction, proposed_size, approved_size, risk_status,
@@ -178,12 +179,12 @@ func (r *TradeDecisionJournalRepo) CreateWithInitialReplay(ctx context.Context, 
 		return fmt.Errorf("postgres: marshal risk replay: %w", err)
 	}
 	for _, event := range []struct {
-		type_   domain.ReplayEventType
-		source  string
-		payload []byte
-		at      time.Time
+		eventType domain.ReplayEventType
+		source    string
+		payload   []byte
+		at        time.Time
 	}{{domain.ReplayEventTypeDecisionCreated, "decision_journal", decisionPayload, decision.CreatedAt}, {domain.ReplayEventTypeRiskReviewed, "risk_engine", riskPayload, decision.UpdatedAt}} {
-		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.type_, event.source, event.payload, event.at); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.eventType, event.source, event.payload, event.at); err != nil {
 			return fmt.Errorf("postgres: insert initial decision replay: %w", err)
 		}
 	}

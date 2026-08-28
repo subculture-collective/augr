@@ -141,12 +141,12 @@ func (r *cancellationRaceCopyRepo) UpdateIntent(context.Context, *domain.CopyTra
 	return nil
 }
 
-func (r *cancellationRaceCopyRepo) ClaimIntentExecution(_ context.Context, intentID uuid.UUID, _ uuid.UUID, _ time.Time) (bool, error) {
+func (r *cancellationRaceCopyRepo) ClaimIntentExecution(_ context.Context, intentID, _ uuid.UUID, _ time.Time) (bool, error) {
 	r.claimedIntentID = intentID
 	return true, nil
 }
 
-func (r *cancellationRaceCopyRepo) GetClaimedIntentExecution(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*domain.CopyTradeIntent, *domain.CopySubscription, error) {
+func (r *cancellationRaceCopyRepo) GetClaimedIntentExecution(_ context.Context, _, _ uuid.UUID) (*domain.CopyTradeIntent, *domain.CopySubscription, error) {
 	if r.stopAfterClaim {
 		return nil, nil, repository.ErrNotFound
 	}

@@ -168,6 +168,8 @@ func newRepos(db *testDB) repos {
 }
 
 // applyDDL creates all enum types and tables needed for integration tests.
+//
+//nolint:unused // Retained as a complete legacy-schema fixture for focused integration debugging.
 func applyDDL(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx := context.Background()
