@@ -54,7 +54,7 @@ func TestCopyDriftRetainedQualification(t *testing.T) {
 	if err = subscription.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if err = NewCopyTradingRepo(pool).CreateSubscription(ctx, &subscription); err != nil {
+	if err = NewCopyTradingRepo(pool, uuid.New()).CreateSubscription(ctx, &subscription); err != nil {
 		t.Fatal(err)
 	}
 	targets := []copydrift.Value{{InstrumentKey: "MSFT", Amount: decimal.NewFromInt(3000)}, {InstrumentKey: "AAPL", Amount: decimal.NewFromInt(6000)}}

@@ -17,9 +17,10 @@ import (
 )
 
 type StopGuardConfig struct {
-	Broker  templateSender
-	Logger  *slog.Logger
-	Metrics StopGuardMetrics
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           templateSender
+	Logger           *slog.Logger
+	Metrics          StopGuardMetrics
 }
 
 type StopGuardMetrics interface {
@@ -30,6 +31,7 @@ type StopGuardMetrics interface {
 }
 
 type Position struct {
+	AccountID    uuid.UUID
 	ID           string
 	Slug         string
 	Side         string
@@ -66,9 +68,10 @@ type guardEntry struct {
 }
 
 type StopGuard struct {
-	broker  templateSender
-	logger  *slog.Logger
-	metrics StopGuardMetrics
+	executionAccount domain.ExecutionAccountBinding
+	broker           templateSender
+	logger           *slog.Logger
+	metrics          StopGuardMetrics
 
 	mu     sync.RWMutex
 	bySlug map[string][]*guardEntry
@@ -81,17 +84,21 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 		return nil, errors.New("polymarket: stop guard broker is required")
 	}
 	return &StopGuard{
-		broker:  cfg.Broker,
-		logger:  cfg.Logger,
-		metrics: cfg.Metrics,
-		bySlug:  make(map[string][]*guardEntry),
-		byID:    make(map[string]*guardEntry),
+		executionAccount: cfg.ExecutionAccount,
+		broker:           cfg.Broker,
+		logger:           cfg.Logger,
+		metrics:          cfg.Metrics,
+		bySlug:           make(map[string][]*guardEntry),
+		byID:             make(map[string]*guardEntry),
 	}, nil
 }
 
 func (g *StopGuard) RegisterEntry(pos Position) error {
 	if g == nil {
 		return errors.New("polymarket: stop guard is nil")
+	}
+	if err := g.executionAccount.Validate(); err == nil && pos.AccountID != g.executionAccount.AccountID() {
+		return errors.New("polymarket: stop guard position belongs to a foreign account")
 	}
 	positionID := strings.TrimSpace(pos.ID)
 	if positionID == "" {
@@ -170,7 +177,7 @@ func (g *StopGuard) RegisterPosition(pos domain.Position) error {
 	if err != nil {
 		return err
 	}
-	entry := Position{ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
+	entry := Position{AccountID: pos.AccountID, ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
 	switch pos.Side {
 	case domain.PositionSideLong:
 		entry.Side = "BUY"

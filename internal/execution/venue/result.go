@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 )
@@ -21,9 +22,16 @@ type ResultStep struct {
 	Transition          *lifecycle.Transition
 }
 
+type ExecutionScope interface {
+	AccountID() uuid.UUID
+	Environment() domain.AccountEnvironment
+	Origin() (ledger.ExecutionOriginType, string)
+}
+
 // Result is one ordered provider interpretation plan. Initial is the exact
 // aggregate used by the adapter; Aggregate is the result after every step.
 type Result struct {
+	Scope     ExecutionScope
 	Initial   *lifecycle.Aggregate
 	Aggregate *lifecycle.Aggregate
 	Steps     []ResultStep
@@ -137,6 +145,12 @@ func validateResult(accountID uuid.UUID, result *Result) error {
 		result.Initial.Order.ID != result.Aggregate.Order.ID || result.Initial.Order.PolicyKind != lifecycle.PolicyVenue ||
 		result.Initial.Order.PolicyVersion == "" || len(result.Steps) == 0 {
 		return fmt.Errorf("matching venue lifecycle, account, order, and nonempty steps are required")
+	}
+	if result.Scope != nil && result.Scope.AccountID() != uuid.Nil {
+		originType, originID := result.Scope.Origin()
+		if result.Scope.AccountID() != accountID || result.Scope.Environment() != result.Initial.Intent.Environment || originType != result.Initial.Intent.OriginType || originID != result.Initial.Intent.OriginID {
+			return fmt.Errorf("venue result execution scope does not match persisted intent ownership")
+		}
 	}
 
 	current := result.Initial

@@ -32,6 +32,7 @@ func (s *settlementDecisionStub) Get(_ context.Context, id uuid.UUID) (*domain.T
 	for i := range s.decisions {
 		if s.decisions[i].ID == id {
 			d := s.decisions[i]
+			stampSettlementDecision(&d)
 			return &d, nil
 		}
 	}
@@ -43,6 +44,7 @@ func (s *settlementDecisionStub) List(_ context.Context, f repository.TradeDecis
 	s.lastLimit = limit
 	var out []domain.TradeDecision
 	for _, d := range s.decisions {
+		stampSettlementDecision(&d)
 		if d.MarketType == f.MarketType && d.Status == f.Status {
 			if f.InstrumentKey != "" && d.InstrumentKey != f.InstrumentKey {
 				continue
@@ -51,6 +53,15 @@ func (s *settlementDecisionStub) List(_ context.Context, f repository.TradeDecis
 		}
 	}
 	return out, nil
+}
+
+func stampSettlementDecision(decision *domain.TradeDecision) {
+	decision.AccountID, decision.Environment = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment()
+	decision.OriginType = "strategy_version"
+	decision.OriginID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("settlement-version:"+decision.ID.String())).String()
+	runID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("settlement-run:"+decision.ID.String()))
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	decision.PipelineRunID, decision.PipelineRunTradeDate = &runID, &tradeDate
 }
 
 func (s *settlementDecisionStub) ResolvePredictionOutcome(_ context.Context, id uuid.UUID) error {

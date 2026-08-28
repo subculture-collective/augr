@@ -247,7 +247,7 @@ func TestProjectionRepoListsOnlyResolvableCanonicalKalshiOpenLots(t *testing.T) 
 	if _, err := ledgerRepo.ApplyEconomicNormalization(ctx, normalization); err != nil {
 		t.Fatal(err)
 	}
-	lots, err := NewProjectionRepo(pools.writer, pools.attestor).ListCanonicalOpenLots(ctx, now)
+	lots, err := NewProjectionRepo(pools.writer, pools.attestor).ListCanonicalOpenLots(ctx, account.ID, now)
 	if err != nil {
 		t.Fatalf("ListCanonicalOpenLots() error = %v", err)
 	}

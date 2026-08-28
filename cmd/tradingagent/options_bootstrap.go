@@ -11,13 +11,13 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository) error {
+func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository) error {
 	if broker == nil || paperRepo == nil {
 		return fmt.Errorf("paper options account dependencies are required")
 	}
 	var allTrades []domain.Trade
 	for offset := 0; ; offset += 250 {
-		trades, err := paperRepo.ListPaperTrades(ctx, 250, offset)
+		trades, err := paperRepo.ListPaperTrades(ctx, binding.AccountID(), binding.Environment(), 250, offset)
 		if err != nil {
 			return err
 		}
@@ -28,7 +28,7 @@ func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker
 	}
 	var allPositions []domain.Position
 	for offset := 0; ; offset += 250 {
-		positions, err := paperRepo.GetOpenPaperPositions(ctx, 250, offset)
+		positions, err := paperRepo.GetOpenPaperPositions(ctx, binding.AccountID(), binding.Environment(), 250, offset)
 		if err != nil {
 			return err
 		}
@@ -39,7 +39,7 @@ func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker
 	}
 	var allOrders []domain.Order
 	for offset := 0; ; offset += 250 {
-		orders, err := paperRepo.ListOpenPaperOrders(ctx, 250, offset)
+		orders, err := paperRepo.ListOpenPaperOrders(ctx, binding.AccountID(), binding.Environment(), 250, offset)
 		if err != nil {
 			return err
 		}
@@ -65,7 +65,7 @@ func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker
 	if err := broker.RestoreOrders(allOrders); err != nil {
 		return err
 	}
-	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx)
+	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx, binding.AccountID(), binding.Environment())
 	if err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/copyorigin"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/edgar"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/google/uuid"
 )
@@ -25,12 +26,14 @@ type PriceProvider interface {
 }
 
 type PaperOrderRequest struct {
+	Scope        execution.ExecutionScope
 	Subscription domain.CopySubscription
 	Intent       domain.CopyTradeIntent
 	OriginRunID  uuid.UUID
 }
 
 type PaperOrderResult struct {
+	Scope   execution.ExecutionScope
 	OrderID *uuid.UUID
 	Status  domain.OrderStatus
 }
@@ -469,6 +472,9 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	}
 	for _, plannedIntent := range registered {
 		candidate := plannedIntent.Intent
+		if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
+			return result, err
+		}
 		if candidate.PolicyStatus != "approved" || candidate.OrderID != nil || candidate.Status != "received" {
 			result.Intents = append(result.Intents, candidate)
 			continue
@@ -494,12 +500,16 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 				continue
 			}
 		}
-		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
+		scope, scopeErr := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, persistedOrigin.ID())
+		if scopeErr != nil {
+			return result, fmt.Errorf("copy execution scope: %w", scopeErr)
+		}
+		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
 		candidate.OrderID = executionResult.OrderID
 		if executeErr != nil {
 			candidate.Status, candidate.RiskStatus = "failed", "pending"
 			candidate.RiskReasons = []string{executeErr.Error()}
-		} else if err := validatePaperOrderResult(executionResult); err != nil {
+		} else if err := validatePaperOrderResult(executionResult, scope); err != nil {
 			candidate.Status, candidate.RiskStatus, candidate.OrderID = "failed", "pending", nil
 			candidate.RiskReasons = []string{err.Error()}
 		} else {
@@ -541,8 +551,17 @@ func (s *Service) validateSubscriptionBinding(subscription *domain.CopySubscript
 	return nil
 }
 
-func validatePaperOrderResult(result PaperOrderResult) error {
-	if result.OrderID == nil || *result.OrderID == uuid.Nil || !result.Status.IsValid() {
+func validateCopyIntentOwnership(intent domain.CopyTradeIntent, subscription domain.CopySubscription) error {
+	if intent.AccountID != subscription.AccountID || intent.Environment != subscription.Environment || intent.SubscriptionID != subscription.ID || intent.OriginType != "copy_subscription" || intent.OriginID != subscription.ID {
+		return fmt.Errorf("copy intent ownership does not match persisted subscription")
+	}
+	return nil
+}
+
+func validatePaperOrderResult(result PaperOrderResult, scope execution.ExecutionScope) error {
+	wantType, wantID := scope.Origin()
+	gotType, gotID := result.Scope.Origin()
+	if result.Scope.AccountID() != scope.AccountID() || result.Scope.Environment() != scope.Environment() || gotType != wantType || gotID != wantID || result.Scope.CopyOriginRunID() != scope.CopyOriginRunID() || result.OrderID == nil || *result.OrderID == uuid.Nil || !result.Status.IsValid() {
 		return fmt.Errorf("copy executor returned incomplete order result")
 	}
 	return nil

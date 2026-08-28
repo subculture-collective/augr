@@ -173,7 +173,7 @@ func (e *countingCopyExecutor) ExecuteCopyOrder(_ context.Context, request Paper
 	e.calls++
 	e.request = request
 	id := uuid.New()
-	return PaperOrderResult{OrderID: &id, Status: domain.OrderStatusSubmitted}, nil
+	return PaperOrderResult{Scope: request.Scope, OrderID: &id, Status: domain.OrderStatusSubmitted}, nil
 }
 
 type effectCopyRepo struct {
@@ -251,6 +251,7 @@ type plannedOriginStore struct {
 	calls    int
 	intents  []domain.CopyTradeIntent
 	replayed bool
+	foreign  bool
 }
 
 func (s *plannedOriginStore) RegisterRun(context.Context, *copyorigin.Run) (*copyorigin.Run, error) {
@@ -269,6 +270,9 @@ func (s *plannedOriginStore) RegisterPlannedRun(_ context.Context, run *copyorig
 	}
 	planned := make([]copyorigin.PlannedIntent, len(intents))
 	for i := range intents {
+		if s.foreign {
+			intents[i].AccountID = uuid.New()
+		}
 		planned[i] = copyorigin.PlannedIntent{Intent: intents[i], Created: !s.replayed}
 	}
 	return run, planned, nil
@@ -484,6 +488,18 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 		result, err := service.Rebalance(context.Background(), subscription.ID)
 		if err != nil || len(result.Intents) != 1 || executor.calls != 1 {
 			t.Fatalf("Rebalance() = (%+v, %v), executor calls=%d", result, err, executor.calls)
+		}
+	})
+
+	t.Run("foreign registered intent is rejected before execution", func(t *testing.T) {
+		repo.intentWrites, executor.calls = 0, 0
+		service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: &plannedOriginStore{foreign: true}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+		_, err := service.Rebalance(context.Background(), subscription.ID)
+		if err == nil || !strings.Contains(err.Error(), "intent ownership") {
+			t.Fatalf("Rebalance() error = %v, want intent ownership rejection", err)
+		}
+		if executor.calls != 0 {
+			t.Fatalf("executor calls=%d, want 0", executor.calls)
 		}
 	})
 

@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,10 +25,33 @@ type OrderRepo struct {
 
 // Compile-time check that OrderRepo satisfies OrderRepository.
 var _ repository.OrderRepository = (*OrderRepo)(nil)
+var _ repository.ExecutionAccountLocker = (*OrderRepo)(nil)
 
 // NewOrderRepo returns an OrderRepo backed by the given connection pool.
 func NewOrderRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OrderRepo {
 	return &OrderRepo{pool: pool, accountID: accountID}
+}
+
+func (r *OrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
+	if accountID == uuid.Nil || accountID != r.accountID || fn == nil {
+		return fmt.Errorf("postgres: execution account advisory lock: matching account and callback are required")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("postgres: execution account advisory lock begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	key := sha256.Sum256([]byte("execution-account|" + accountID.String()))
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(binary.BigEndian.Uint64(key[:8])&^uint64(1<<63))); err != nil {
+		return fmt.Errorf("postgres: execution account advisory lock acquire: %w", err)
+	}
+	if err := fn(); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: execution account advisory lock release: %w", err)
+	}
+	return nil
 }
 
 // Create inserts a new order and populates the generated ID and CreatedAt on

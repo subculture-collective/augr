@@ -141,6 +141,11 @@ func (r *Reconciler) fetchAllOpenPositions(ctx context.Context) ([]domain.Positi
 		if err != nil {
 			return nil, err
 		}
+		for i := range page {
+			if page[i].AccountID != r.executionAccount.AccountID() || page[i].Environment != r.executionAccount.Environment() {
+				return nil, fmt.Errorf("position %s belongs to a foreign account", page[i].ID)
+			}
+		}
 		all = append(all, page...)
 		if len(page) < reconcilePositionPageSize {
 			return all, nil

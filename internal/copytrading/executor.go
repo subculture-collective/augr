@@ -57,6 +57,9 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 		request.Intent.SubscriptionID != request.Subscription.ID || request.Intent.OriginType != "copy_subscription" || request.Intent.OriginID != request.Subscription.ID {
 		return PaperOrderResult{}, fmt.Errorf("copy execution attribution does not match configured account and origin")
 	}
+	if request.Scope.AccountID() != request.Subscription.AccountID || request.Scope.Environment() != request.Subscription.Environment || request.Scope.CopyOriginRunID() != request.OriginRunID {
+		return PaperOrderResult{}, fmt.Errorf("copy execution scope does not match persisted subscription and run")
+	}
 	existing, err := e.deps.Orders.GetByCopyOriginRun(ctx, e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 2, 0)
 	if err != nil {
 		return PaperOrderResult{}, err
@@ -81,13 +84,11 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 		signal = domain.PipelineSignalSell
 	}
 	price := *request.Intent.ExecutablePrice
-	scope, err := execution.NewCopyExecutionScope(e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID)
-	if err != nil {
-		return PaperOrderResult{}, fmt.Errorf("copy execution scope: %w", err)
-	}
+	scope := request.Scope
 	plan := execution.TradingPlan{Action: signal, MarketType: domain.MarketTypeStock, Ticker: request.Intent.Ticker, EntryType: "limit", EntryPrice: price, ReferencePrice: price, PositionSize: request.Intent.RequestedNotional / price, Confidence: 1, Rationale: "deterministic copy-subscription rebalance"}
 	if len(existing) > 0 {
 		result, matchErr := matchingCopyOrderResult(existing, request)
+		result.Scope = scope
 		if matchErr != nil || result.Status != domain.OrderStatusPending {
 			return result, matchErr
 		}
@@ -96,7 +97,7 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 		if submitErr != nil {
 			order.Status = domain.OrderStatusRejected
 			_ = e.deps.Orders.Update(ctx, &order)
-			return PaperOrderResult{OrderID: &order.ID, Status: order.Status}, fmt.Errorf("resume pending copy order: %w", submitErr)
+			return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, fmt.Errorf("resume pending copy order: %w", submitErr)
 		}
 		order.ExternalID = externalID
 		submittedAt := time.Now().UTC()
@@ -112,7 +113,7 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 				return PaperOrderResult{}, fmt.Errorf("persist resumed copy fill: %w", err)
 			}
 		}
-		return PaperOrderResult{OrderID: &order.ID, Status: order.Status}, nil
+		return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, nil
 	}
 	if err := manager.ProcessSignal(ctx, scope, execution.FinalSignal{Signal: signal, Confidence: 1}, plan); err != nil {
 		return PaperOrderResult{}, err
@@ -121,7 +122,9 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 	if err != nil {
 		return PaperOrderResult{}, err
 	}
-	return matchingCopyOrderResult(orders, request)
+	result, err := matchingCopyOrderResult(orders, request)
+	result.Scope = scope
+	return result, err
 }
 
 func matchingCopyOrderResult(orders []domain.Order, request PaperOrderRequest) (PaperOrderResult, error) {

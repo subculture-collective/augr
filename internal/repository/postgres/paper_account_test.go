@@ -23,7 +23,7 @@ func TestPaperAccountRepoExcludesNonLocalPaperRowsAndParsesSequence(t *testing.T
 
 	seedPaperAccountFixtures(t, ctx, pool)
 
-	trades, err := repo.ListPaperTrades(ctx, 100, 0)
+	trades, err := repo.ListPaperTrades(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
 	if err != nil {
 		t.Fatalf("ListPaperTrades() error = %v", err)
 	}
@@ -39,7 +39,7 @@ func TestPaperAccountRepoExcludesNonLocalPaperRowsAndParsesSequence(t *testing.T
 		t.Fatalf("latest paper trade exit reason = %q, want paper_restore_regression", trades[0].ExitReason)
 	}
 
-	positions, err := repo.GetOpenPaperPositions(ctx, 100, 0)
+	positions, err := repo.GetOpenPaperPositions(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
 	if err != nil {
 		t.Fatalf("GetOpenPaperPositions() error = %v", err)
 	}
@@ -52,14 +52,14 @@ func TestPaperAccountRepoExcludesNonLocalPaperRowsAndParsesSequence(t *testing.T
 		}
 	}
 
-	orders, err := repo.ListOpenPaperOrders(ctx, 100, 0)
+	orders, err := repo.ListOpenPaperOrders(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
 	if err != nil {
 		t.Fatalf("ListOpenPaperOrders() error = %v", err)
 	}
 	if len(orders) != 2 {
 		t.Fatalf("paper orders len = %d, want 2", len(orders))
 	}
-	seq, err := repo.GetMaxPaperExternalIDSequence(ctx)
+	seq, err := repo.GetMaxPaperExternalIDSequence(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("GetMaxPaperExternalIDSequence() error = %v", err)
 	}
@@ -75,10 +75,10 @@ func TestPaperAccountRestoreParityWithRealDB(t *testing.T) {
 	repo := NewPaperAccountRepo(&DB{Pool: pool})
 	seedPaperAccountFixtures(t, ctx, pool)
 
-	trades, _ := repo.ListPaperTrades(ctx, 100, 0)
-	positions, _ := repo.GetOpenPaperPositions(ctx, 100, 0)
-	orders, _ := repo.ListOpenPaperOrders(ctx, 100, 0)
-	seq, _ := repo.GetMaxPaperExternalIDSequence(ctx)
+	trades, _ := repo.ListPaperTrades(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
+	positions, _ := repo.GetOpenPaperPositions(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
+	orders, _ := repo.ListOpenPaperOrders(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
+	seq, _ := repo.GetMaxPaperExternalIDSequence(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 
 	broker := paper.NewPaperBroker(1000, 0, 0)
 	if err := broker.RestoreAccount(executionBalanceFromRows(trades, positions)); err != nil {

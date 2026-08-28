@@ -198,7 +198,7 @@ func newRealStrategyRunner(
 		runner.polymarketClient = client
 		runner.polymarketMarketData = client
 		if strings.TrimSpace(pm.SecretKey) != "" {
-			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client), Logger: logger, Metrics: appMetrics}); err == nil {
+			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), Logger: logger, Metrics: appMetrics}); err == nil {
 				runner.polymarketStopGuard = guard
 			} else {
 				logger.Warn("polymarket stop guard disabled", slog.String("error", err.Error()))
@@ -347,7 +347,11 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		DecisionMetadata: decisionMetadata,
 	}
 	if strategy.MarketType.Normalize() == domain.MarketTypeOptions {
-		if err := r.executeOptionsSignal(ctx, strategy, run.ID, finalSignal); err != nil {
+		scope, err := executionScopeFromPersistedRun(run, strategy)
+		if err != nil {
+			return canonical, err
+		}
+		if err := r.executeOptionsSignal(ctx, scope, strategy, finalSignal); err != nil {
 			return canonical, err
 		}
 	} else if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
@@ -404,7 +408,7 @@ func (r *realStrategyRunner) strategyRunGroup() *runcontrol.Group {
 	return r.runGroup
 }
 
-func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy domain.Strategy, runID uuid.UUID, signal execution.FinalSignal) error {
+func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, scope execution.ExecutionScope, strategy domain.Strategy, signal execution.FinalSignal) error {
 	if signal.Signal == domain.PipelineSignalHold {
 		return nil
 	}
@@ -446,13 +450,13 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy 
 			if err != nil {
 				return err
 			}
-			return manager.ProcessSpreadSignal(ctx, spread, quantity, strategy.ID, runID)
+			return manager.ProcessSpreadSignal(ctx, scope, spread, quantity)
 		}
 		closePrice, err := executableOptionClosePrice(position, chain)
 		if err != nil {
 			return err
 		}
-		return manager.CloseOptionPosition(ctx, position, closePrice, runID, "strategy sell signal")
+		return manager.CloseOptionPosition(ctx, scope, position, closePrice, "strategy sell signal")
 	}
 	if signal.Signal != domain.PipelineSignalBuy {
 		return fmt.Errorf("options runtime: unsupported signal %q", signal.Signal)
@@ -484,7 +488,7 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy 
 		if err := r.enforceOptionsGreekRisk(ctx, cfg.Underlying, legs); err != nil {
 			return err
 		}
-		return manager.ProcessSpreadSignal(ctx, spread, quantity, strategy.ID, runID)
+		return manager.ProcessSpreadSignal(ctx, scope, spread, quantity)
 	}
 	plan, err := buildPaperSingleLegPlan(cfg, chain, time.Now().UTC())
 	if err != nil {
@@ -493,7 +497,7 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy 
 	if err := r.enforceOptionsGreekRisk(ctx, cfg.Underlying, []risk.OptionLegExposure{{Greeks: *plan.OptionGreeks, Side: domain.OrderSideBuy, Quantity: plan.PositionSize, Multiplier: 100}}); err != nil {
 		return err
 	}
-	return manager.ProcessOptionSignal(ctx, signal, plan, strategy.ID, runID)
+	return manager.ProcessOptionSignal(ctx, scope, signal, plan)
 }
 
 func buildPaperSpreadClosePlan(positions []*domain.Position, chain []domain.OptionSnapshot) (*domain.OptionSpread, float64, error) {
@@ -746,7 +750,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	}
 
 	executor := polymarketexecution.NewDeterministicNativeExecutor()
-	decision, err := executor.Execute(ctx, strategy, snapshot)
+	decision, err := executor.Execute(ctx, strategy, snapshot, scope)
 	if err != nil {
 		return failRun(fmt.Errorf("polymarket native: execute strategy %s: %w", strategy.Name, err))
 	}
@@ -906,7 +910,9 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 
 	decision, exit := kalshiexecution.EvaluateExit(strategy, snapshot, openPositions, now)
 	if !exit {
-		decision, err = kalshiexecution.DeterministicNativeExecutor{}.Execute(ctx, strategy, snapshot)
+		decision, err = kalshiexecution.DeterministicNativeExecutor{}.Execute(ctx, strategy, snapshot, scope)
+	} else {
+		decision.Scope = scope
 	}
 	if err != nil {
 		return failRun(fmt.Errorf("kalshi native: execute strategy %s: %w", strategy.Name, err))

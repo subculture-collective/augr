@@ -177,7 +177,7 @@ func Build13FTarget(input TargetInput) Preview {
 		if delta < 0 {
 			side = domain.OrderSideSell
 		}
-		intent := domain.CopyTradeIntent{SubscriptionID: sub.ID, OriginType: "copy_subscription", OriginID: sub.ID, SourceObservationID: input.Observation.ID, InstrumentKey: ticker, Ticker: ticker, Side: side, TargetWeight: target.weight, TargetValue: roundMoney(targetValue), AttributedCurrentValue: roundMoney(current), RequestedNotional: roundMoney(math.Abs(delta)), CalculationVersion: CalculationVersion, QuoteGateVersion: 1, PolicyStatus: "approved", RiskStatus: "pending", Status: "received"}
+		intent := domain.CopyTradeIntent{AccountID: sub.AccountID, Environment: sub.Environment, SubscriptionID: sub.ID, OriginType: "copy_subscription", OriginID: sub.ID, SourceObservationID: input.Observation.ID, InstrumentKey: ticker, Ticker: ticker, Side: side, TargetWeight: target.weight, TargetValue: roundMoney(targetValue), AttributedCurrentValue: roundMoney(current), RequestedNotional: roundMoney(math.Abs(delta)), CalculationVersion: CalculationVersion, QuoteGateVersion: 1, PolicyStatus: "approved", RiskStatus: "pending", Status: "received"}
 		intent.ID = economicid.DeterministicUUID("copy-trade-intent", sub.ID.String(), input.Observation.ID.String(), ticker, fmt.Sprintf("%d", CalculationVersion))
 		price, ok := input.Prices[ticker]
 		reasons := make([]string, 0, 3)

@@ -290,6 +290,10 @@ func (r *mockOrderRepo) GetByCopyOriginRun(ctx context.Context, _ uuid.UUID, _ d
 	return r.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}, filter, limit, offset)
 }
 
+func (r *mockOrderRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 // mockPositionRepo implements repository.PositionRepository.
 type mockPositionRepo struct {
 	mu        sync.Mutex
@@ -905,7 +909,8 @@ func TestReconcilePersistedOrderRepairsReplayAfterCommittedFill(t *testing.T) {
 	}}
 	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker, Quantity: 1}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}, Replayed: true}}
 	recorder := &recoveryDecisionRecorder{decisionID: decisionID}
-	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { return order, nil }}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
 	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
 	if err != nil {
 		t.Fatalf("ReconcilePersistedOrder() error=%v", err)
@@ -935,7 +940,8 @@ func TestReconcilePersistedOrderResubmitsCrashBeforeSubmit(t *testing.T) {
 	recorder := &recoveryDecisionRecorder{decisionID: decisionID}
 	broker := paperbroker.NewPaperBroker(100_000, 0, 0)
 	fenceCalls := 0
-	mgr := execution.NewOrderManager(broker, "paper", &mockRiskEngine{}, &mockPositionRepo{}, &mockOrderRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}, nil, execution.SizingConfig{}, slog.Default()).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder).WithEffectFence(func(context.Context) error {
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { return order, nil }}
+	mgr := execution.NewOrderManager(broker, "paper", &mockRiskEngine{}, &mockPositionRepo{}, orderRepo, &mockTradeRepo{}, &mockAuditLogRepo{}, nil, execution.SizingConfig{}, slog.Default()).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder).WithEffectFence(func(context.Context) error {
 		fenceCalls++
 		return nil
 	})
@@ -978,7 +984,8 @@ func TestReconcilePersistedOrderRepairsAttachmentBeforeBrokerEffect(t *testing.T
 	positionID, tradeID := uuid.New(), uuid.New()
 	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}}}
 	recorder := &attachmentRepairRecorder{failRepair: true}
-	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { return order, nil }}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
 
 	if _, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order); err == nil || !strings.Contains(err.Error(), "attachment repair unavailable") {
 		t.Fatalf("failed repair error=%v", err)
@@ -1013,7 +1020,8 @@ func TestReconcilePersistedOrderRejectsZeroBrokerFillPrice(t *testing.T) {
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &zero, FilledAt: &filledAt}, nil
 	}}
 	financial := &fakeFinancialLifecycleRepo{}
-	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(&recoveryDecisionRecorder{decisionID: decisionID})
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { return order, nil }}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(&recoveryDecisionRecorder{decisionID: decisionID})
 
 	if _, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order); err == nil || !strings.Contains(err.Error(), "authoritative fill evidence") {
 		t.Fatalf("zero fill price error=%v", err)

@@ -30,6 +30,15 @@ func expiryPosition(symbol, underlying string, optionType domain.OptionType, str
 	return domain.Position{ID: uuid.New(), Ticker: symbol, Side: side, Quantity: quantity, AvgEntry: entry, AssetClass: domain.AssetClassOption, UnderlyingTicker: underlying, OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100}
 }
 
+func stampExpiryPositions(scope execution.ExecutionScope, positions []domain.Position) {
+	originType, originID := scope.Origin()
+	for i := range positions {
+		positions[i].AccountID, positions[i].Environment = scope.AccountID(), scope.Environment()
+		positions[i].OriginType, positions[i].OriginID = string(originType), originID
+		positions[i].StrategyID = scope.LegacyStrategyID()
+	}
+}
+
 func TestSettleExpiredOptionPositionsPersistsExerciseAndWorthlessExpiryWithoutFabricatingAssignment(t *testing.T) {
 	now := time.Date(2027, 12, 18, 22, 0, 0, 0, time.UTC)
 	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
@@ -37,8 +46,10 @@ func TestSettleExpiredOptionPositionsPersistsExerciseAndWorthlessExpiryWithoutFa
 		expiryPosition("AAPL271217C00150000", "AAPL", domain.OptionTypeCall, 150, 2, 1, domain.PositionSideLong, expiry),
 		expiryPosition("AAPL271217P00140000", "AAPL", domain.OptionTypePut, 140, 1, 2, domain.PositionSideLong, expiry),
 	}
+	scope := optionExecutionScope(uuid.New(), uuid.New())
+	stampExpiryPositions(scope, positions)
 	settlementRepo := &recordingOptionSettlementRepo{}
-	summary, err := execution.SettleExpiredOptionPositions(context.Background(), positions, map[string]float64{"AAPL": 155}, now, settlementRepo)
+	summary, err := execution.SettleExpiredOptionPositions(context.Background(), scope, positions, map[string]float64{"AAPL": 155}, now, settlementRepo)
 	if err != nil {
 		t.Fatalf("SettleExpiredOptionPositions() error = %v", err)
 	}
@@ -57,8 +68,10 @@ func TestSettleExpiredOptionPositionsValidatesBatchBeforeMutation(t *testing.T) 
 	now := time.Date(2027, 12, 18, 22, 0, 0, 0, time.UTC)
 	expiry := now.Add(-24 * time.Hour)
 	positions := []domain.Position{expiryPosition("AAPL271217C00150000", "AAPL", domain.OptionTypeCall, 150, 2, 1, domain.PositionSideLong, expiry), expiryPosition("MSFT271217C00300000", "MSFT", domain.OptionTypeCall, 300, 2, 1, domain.PositionSideLong, expiry)}
+	scope := optionExecutionScope(uuid.New(), uuid.New())
+	stampExpiryPositions(scope, positions)
 	settlementRepo := &recordingOptionSettlementRepo{}
-	_, err := execution.SettleExpiredOptionPositions(context.Background(), positions, map[string]float64{"AAPL": 155}, now, settlementRepo)
+	_, err := execution.SettleExpiredOptionPositions(context.Background(), scope, positions, map[string]float64{"AAPL": 155}, now, settlementRepo)
 	if err == nil || len(settlementRepo.inputs) != 0 {
 		t.Fatalf("invalid batch must fail before mutation: err=%v atomic_calls=%d", err, len(settlementRepo.inputs))
 	}

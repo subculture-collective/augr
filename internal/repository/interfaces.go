@@ -134,7 +134,7 @@ type VenueObservationRepository interface {
 type ProjectionRepository interface {
 	RecordMarkObservation(context.Context, *ledger.MarkObservation) (*ledger.MarkObservation, error)
 	GetMarkObservationByID(context.Context, uuid.UUID) (*ledger.MarkObservation, error)
-	ListCanonicalOpenLots(context.Context, time.Time) ([]CanonicalOpenLot, error)
+	ListCanonicalOpenLots(context.Context, uuid.UUID, time.Time) ([]CanonicalOpenLot, error)
 	RebuildPortfolioProjection(context.Context, ledger.ProjectionRequest) (*ledger.PortfolioProjection, error)
 	GetProjectionCheckpointByID(context.Context, uuid.UUID) (*ledger.ProjectionCheckpoint, error)
 }
@@ -665,10 +665,16 @@ type TradeRepository interface {
 
 // PaperAccountRepository provides provenance-safe paper-account reconstruction reads.
 type PaperAccountRepository interface {
-	ListPaperTrades(ctx context.Context, limit, offset int) ([]domain.Trade, error)
-	GetOpenPaperPositions(ctx context.Context, limit, offset int) ([]domain.Position, error)
-	ListOpenPaperOrders(ctx context.Context, limit, offset int) ([]domain.Order, error)
-	GetMaxPaperExternalIDSequence(ctx context.Context) (uint64, error)
+	ListPaperTrades(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Trade, error)
+	GetOpenPaperPositions(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error)
+	ListOpenPaperOrders(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Order, error)
+	GetMaxPaperExternalIDSequence(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (uint64, error)
+}
+
+// ExecutionAccountLocker serializes account-level risk snapshots and effects
+// across every runtime process using a PostgreSQL transaction advisory lock.
+type ExecutionAccountLocker interface {
+	WithExecutionAccountLock(context.Context, uuid.UUID, func() error) error
 }
 
 // OrderFillIntent describes the execution fill that should be persisted atomically.
@@ -703,6 +709,10 @@ type OrderFillResult struct {
 // PredictionDecisionSettlementInput carries settlement persistence details.
 type PredictionDecisionSettlementInput struct {
 	IdempotencyKey string
+	AccountID      uuid.UUID
+	Environment    domain.AccountEnvironment
+	OriginType     string
+	OriginID       string
 	Decision       *domain.TradeDecision
 	PositionTicker string
 	Payout         float64
@@ -722,6 +732,11 @@ type PredictionDecisionSettlementResult struct {
 // OptionPositionSettlementInput identifies one expired option position and
 // the intrinsic cash value that must be persisted with its closing trade.
 type OptionPositionSettlementInput struct {
+	IdempotencyKey  string
+	AccountID       uuid.UUID
+	Environment     domain.AccountEnvironment
+	OriginType      string
+	OriginID        string
 	PositionID      uuid.UUID
 	SettlementPrice float64
 	SettledAt       time.Time
@@ -745,14 +760,19 @@ type OptionSettlementRepository interface {
 // order-position-trade persistence. PositionID is required for closing fills
 // and must be nil for opening fills.
 type OptionFillInput struct {
-	Order        *domain.Order
-	PositionID   *uuid.UUID
-	FillPrice    float64
-	FillQuantity float64
-	Fee          float64
-	Premium      float64
-	FilledAt     time.Time
-	ExitReason   string
+	IdempotencyKey string
+	AccountID      uuid.UUID
+	Environment    domain.AccountEnvironment
+	OriginType     string
+	OriginID       string
+	Order          *domain.Order
+	PositionID     *uuid.UUID
+	FillPrice      float64
+	FillQuantity   float64
+	Fee            float64
+	Premium        float64
+	FilledAt       time.Time
+	ExitReason     string
 }
 
 // OptionFillResult returns the durable identities committed for one option fill.

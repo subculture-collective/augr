@@ -39,6 +39,10 @@ func BuildRiskPortfolioSnapshotFromBalance(ctx context.Context, balance Balance,
 		return risk.Portfolio{}, fmt.Errorf("get open positions: %w", err)
 	}
 
+	return BuildRiskPortfolioSnapshotFromPositions(balance, positions)
+}
+
+func BuildRiskPortfolioSnapshotFromPositions(balance Balance, positions []domain.Position) (risk.Portfolio, error) {
 	portfolio := risk.Portfolio{
 		ConcurrentPositions:      len(positions),
 		PositionExposureBySymbol: make(map[string]float64, len(positions)),

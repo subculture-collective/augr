@@ -148,7 +148,7 @@ func TestCanonicalAccountExpansionCopyExecutionFence(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE copy_trade_intents SET execution_claim_id=NULL,execution_claimed_at=NULL WHERE id=$1`, graph.intentID); err != nil {
 		t.Fatal(err)
 	}
-	repo := pgrepo.NewCopyTradingRepo(pool)
+	repo := pgrepo.NewCopyTradingRepo(pool, uuid.MustParse("00000000-0000-4000-8000-000000000064"))
 	claimedAt := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	firstClaim, takeoverClaim := uuid.New(), uuid.New()
 	if claimed, err := repo.ClaimIntentExecution(ctx, graph.intentID, firstClaim, claimedAt); err != nil || !claimed {

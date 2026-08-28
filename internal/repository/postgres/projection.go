@@ -114,8 +114,8 @@ func (repo *ProjectionRepo) GetMarkObservationByID(ctx context.Context, id uuid.
 
 // ListCanonicalOpenLots derives account-scoped inventory only from canonical
 // economic normalizations. It does not inspect the legacy positions table.
-func (repo *ProjectionRepo) ListCanonicalOpenLots(ctx context.Context, asOf time.Time) ([]repository.CanonicalOpenLot, error) {
-	if asOf.IsZero() {
+func (repo *ProjectionRepo) ListCanonicalOpenLots(ctx context.Context, accountID uuid.UUID, asOf time.Time) ([]repository.CanonicalOpenLot, error) {
+	if accountID == uuid.Nil || asOf.IsZero() {
 		return nil, fmt.Errorf("postgres: list canonical open lots: as-of time is required")
 	}
 	rows, err := repo.pool.Query(ctx, `WITH movements AS (
@@ -127,7 +127,7 @@ func (repo *ProjectionRepo) ListCanonicalOpenLots(ctx context.Context, asOf time
 		FROM economic_event_normalizations n
 		JOIN ledger_transactions lt ON lt.id=n.ledger_transaction_id
 		WHERE n.venue='kalshi' AND n.instrument_id IS NOT NULL AND n.venue_contract_id IS NOT NULL
-		  AND lt.effective_at <= $1 AND lt.observed_at <= $1
+		  AND lt.account_id=$2 AND lt.effective_at <= $1 AND lt.observed_at <= $1
 	), open_inventory AS (
 		SELECT account_id, instrument_id, venue_contract_id, SUM(quantity) AS quantity
 		FROM movements GROUP BY account_id, instrument_id, venue_contract_id HAVING SUM(quantity) <> 0
@@ -143,7 +143,7 @@ func (repo *ProjectionRepo) ListCanonicalOpenLots(ctx context.Context, asOf time
 	  AND vc.metadata = jsonb_build_object(
 		'kalshi_v2', jsonb_build_object('outcome', vc.metadata->'kalshi_v2'->>'outcome'))
 	  AND vc.metadata->'kalshi_v2'->>'outcome' IN ('yes','no')
-	ORDER BY oi.account_id, oi.instrument_id, oi.venue_contract_id`, asOf.UTC().Truncate(time.Microsecond))
+	ORDER BY oi.account_id, oi.instrument_id, oi.venue_contract_id`, asOf.UTC().Truncate(time.Microsecond), accountID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list canonical open lots: %w", err)
 	}

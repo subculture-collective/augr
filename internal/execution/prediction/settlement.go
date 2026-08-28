@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -202,6 +204,9 @@ func (s *Settler) validateMatches(ctx context.Context, matches []domain.TradeDec
 		if decision.ID == uuid.Nil {
 			return nil, fmt.Errorf("prediction settlement: invalid decision identifiers")
 		}
+		if decision.AccountID != s.executionAccount.AccountID() || decision.Environment != s.executionAccount.Environment() {
+			return nil, fmt.Errorf("prediction settlement: decision %s belongs to a foreign account", decision.ID)
+		}
 		if decision.StrategyID == nil || decision.PaperOrderID == nil {
 			return nil, fmt.Errorf("prediction settlement: decision %s lacks strategy or paper order", decision.ID)
 		}
@@ -297,8 +302,32 @@ func (s *Settler) settleDecisionAtomic(ctx context.Context, decision *domain.Tra
 	if math.IsNaN(payout) || math.IsInf(payout, 0) || payout < 0 || payout > 1 {
 		return fmt.Errorf("prediction settlement: invalid payout %.8f", payout)
 	}
-	_, err := s.financialLifecycle.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + decision.ID.String(), Decision: decision, PositionTicker: positionTicker, Payout: payout, ResolvedAt: resolvedAt})
+	scope, err := executionScopeFromDecision(decision)
+	if err != nil {
+		return err
+	}
+	originType, originID := scope.Origin()
+	_, err = s.financialLifecycle.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + scope.AccountID().String() + ":" + decision.ID.String(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Decision: decision, PositionTicker: positionTicker, Payout: payout, ResolvedAt: resolvedAt})
 	return err
+}
+
+func executionScopeFromDecision(decision *domain.TradeDecision) (execution.ExecutionScope, error) {
+	if decision == nil {
+		return execution.ExecutionScope{}, fmt.Errorf("prediction settlement: persisted decision is required")
+	}
+	originType, originID := decision.OriginType, decision.OriginID
+	if originType == "strategy_version" {
+		versionID, err := uuid.Parse(originID)
+		if err != nil || decision.PipelineRunID == nil || decision.PipelineRunTradeDate == nil {
+			return execution.ExecutionScope{}, fmt.Errorf("prediction settlement: decision %s lacks complete strategy run ownership", decision.ID)
+		}
+		legacy := []uuid.UUID{}
+		if decision.StrategyID != nil {
+			legacy = append(legacy, *decision.StrategyID)
+		}
+		return execution.NewStrategyExecutionScope(decision.AccountID, decision.Environment, versionID, domain.PipelineRunRef{ID: *decision.PipelineRunID, TradeDate: *decision.PipelineRunTradeDate}, legacy...)
+	}
+	return execution.NewNonRunExecutionScope(decision.AccountID, decision.Environment, ledger.ExecutionOriginType(originType), originID)
 }
 
 func (s *Settler) settleDecisionLegacy(ctx context.Context, decision *domain.TradeDecision, held, winner string, resolvedAt time.Time) error {

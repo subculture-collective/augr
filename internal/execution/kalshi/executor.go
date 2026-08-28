@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/prediction"
 )
 
@@ -36,7 +37,10 @@ type DeterministicNativeExecutor struct{}
 // Execute builds a buy/hold decision from strategy discovery metadata and the
 // current YES/NO quote. Malformed or unsupported metadata is converted to a
 // safe hold decision.
-func (DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot) (NativeDecision, error) {
+func (DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scopes ...execution.ExecutionScope) (result NativeDecision, err error) {
+	if len(scopes) > 0 {
+		defer func() { result.Scope = scopes[0] }()
+	}
 	if err := ctx.Err(); err != nil {
 		return NativeDecision{}, err
 	}

@@ -287,7 +287,7 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 	results := make([]repository.OptionFillResult, len(inputs))
 	replayed := 0
 	for index, input := range inputs {
-		key := "option_fill:v1:" + input.Order.ID.String()
+		key := input.IdempotencyKey
 		var existingOrderID uuid.UUID
 		var existingPositionID *uuid.UUID
 		var existingTradeID uuid.UUID
@@ -341,7 +341,7 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 
 func validateOptionFillInput(input repository.OptionFillInput) error {
 	order := input.Order
-	if order == nil || order.ID == uuid.Nil || order.StrategyID == nil || order.Ticker == "" || strings.TrimSpace(order.ExternalID) == "" || strings.TrimSpace(order.Broker) == "" || order.SubmittedAt == nil || order.MarketType.Normalize() != domain.MarketTypeOptions || order.AssetClass != domain.AssetClassOption || order.PositionIntent == nil {
+	if order == nil || input.IdempotencyKey == "" || input.AccountID == uuid.Nil || !input.Environment.IsValid() || strings.TrimSpace(input.OriginType) == "" || strings.TrimSpace(input.OriginID) == "" || order.ID == uuid.Nil || order.AccountID != input.AccountID || order.Environment != input.Environment || order.OriginType != input.OriginType || order.OriginID != input.OriginID || order.StrategyID == nil || order.Ticker == "" || strings.TrimSpace(order.ExternalID) == "" || strings.TrimSpace(order.Broker) == "" || order.SubmittedAt == nil || order.MarketType.Normalize() != domain.MarketTypeOptions || order.AssetClass != domain.AssetClassOption || order.PositionIntent == nil {
 		return fmt.Errorf("postgres: invalid option fill input")
 	}
 	if order.Status != domain.OrderStatusFilled || order.FilledAvgPrice == nil || order.FilledAt == nil || !numeric8Equal(order.Quantity, input.FillQuantity) || !numeric8Equal(order.FilledQuantity, input.FillQuantity) || !numeric8Equal(*order.FilledAvgPrice, input.FillPrice) || !order.FilledAt.UTC().Equal(input.FilledAt.UTC()) || order.SubmittedAt.After(*order.FilledAt) {
@@ -381,6 +381,10 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 	order := input.Order
 	var (
 		persistedStrategyID         *uuid.UUID
+		persistedAccountID          uuid.UUID
+		persistedEnvironment        domain.AccountEnvironment
+		persistedOriginType         string
+		persistedOriginID           string
 		persistedTicker             string
 		persistedMarketType         domain.MarketType
 		persistedSide               domain.OrderSide
@@ -395,11 +399,11 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 		persistedPositionIntent     *domain.PositionIntent
 		persistedLegGroupID         *uuid.UUID
 	)
-	if err := tx.QueryRow(ctx, `SELECT strategy_id,ticker,market_type,side,status,quantity::double precision,asset_class,
+	if err := tx.QueryRow(ctx, `SELECT strategy_id,account_id,environment,origin_type,origin_id,ticker,market_type,side,status,quantity::double precision,asset_class,
 		COALESCE(underlying_ticker,''),option_type,strike::double precision,expiry,
 		contract_multiplier::double precision,position_intent,leg_group_id
-		FROM orders WHERE id=$1 FOR UPDATE`, order.ID).Scan(
-		&persistedStrategyID, &persistedTicker, &persistedMarketType, &persistedSide, &persistedStatus,
+		FROM orders WHERE id=$1 AND account_id=$2 FOR UPDATE`, order.ID, input.AccountID).Scan(
+		&persistedStrategyID, &persistedAccountID, &persistedEnvironment, &persistedOriginType, &persistedOriginID, &persistedTicker, &persistedMarketType, &persistedSide, &persistedStatus,
 		&persistedQuantity, &persistedAssetClass, &persistedUnderlyingTicker, &persistedOptionType,
 		&persistedStrike, &persistedExpiry, &persistedContractMultiplier, &persistedPositionIntent, &persistedLegGroupID,
 	); err != nil {
@@ -410,7 +414,7 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 	default:
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: option order %s status %s not fill-compatible", order.ID, persistedStatus)
 	}
-	metadataMatches := persistedStrategyID != nil && *persistedStrategyID == *order.StrategyID &&
+	metadataMatches := persistedStrategyID != nil && *persistedStrategyID == *order.StrategyID && persistedAccountID == input.AccountID && persistedEnvironment == input.Environment && persistedOriginType == input.OriginType && persistedOriginID == input.OriginID &&
 		persistedTicker == order.Ticker && persistedMarketType.Normalize() == domain.MarketTypeOptions &&
 		persistedSide == order.Side && numeric8Equal(persistedQuantity, input.FillQuantity) &&
 		persistedAssetClass == domain.AssetClassOption && persistedUnderlyingTicker == order.UnderlyingTicker &&
@@ -425,9 +429,9 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 	}
 	filledAt := input.FilledAt.UTC()
 	if _, err := tx.Exec(ctx, `UPDATE orders SET external_id=$1, broker=$2, submitted_at=$3,
-		filled_quantity=$4, filled_avg_price=$5, status=$6, filled_at=$7 WHERE id=$8`,
+		filled_quantity=$4, filled_avg_price=$5, status=$6, filled_at=$7 WHERE id=$8 AND account_id=$9`,
 		nullString(order.ExternalID), nullString(order.Broker), order.SubmittedAt,
-		input.FillQuantity, input.FillPrice, domain.OrderStatusFilled, filledAt, order.ID,
+		input.FillQuantity, input.FillPrice, domain.OrderStatusFilled, filledAt, order.ID, input.AccountID,
 	); err != nil {
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: update filled option order: %w", err)
 	}
@@ -448,9 +452,9 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 			delta, gamma, theta, vega = &order.OptionGreeks.Delta, &order.OptionGreeks.Gamma, &order.OptionGreeks.Theta, &order.OptionGreeks.Vega
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO positions
-			(id,strategy_id,ticker,side,quantity,avg_entry,opened_at,asset_class,underlying_ticker,option_type,strike,expiry,contract_multiplier,leg_group_id,delta,gamma,theta,vega)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-			positionID, order.StrategyID, order.Ticker, positionSide, input.FillQuantity, input.FillPrice, filledAt,
+			(id,account_id,environment,origin_type,origin_id,strategy_id,ticker,side,quantity,avg_entry,opened_at,asset_class,underlying_ticker,option_type,strike,expiry,contract_multiplier,leg_group_id,delta,gamma,theta,vega)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+			positionID, input.AccountID, input.Environment, input.OriginType, input.OriginID, order.StrategyID, order.Ticker, positionSide, input.FillQuantity, input.FillPrice, filledAt,
 			domain.AssetClassOption, order.UnderlyingTicker, order.OptionType, order.Strike, order.Expiry,
 			order.ContractMultiplier, order.LegGroupID, delta, gamma, theta, vega,
 		); err != nil {
@@ -478,7 +482,7 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 		if err := tx.QueryRow(ctx, `SELECT strategy_id,ticker,side,quantity::double precision,avg_entry::double precision,
 			COALESCE(realized_pnl,0)::double precision,COALESCE(NULLIF(contract_multiplier,0),100)::double precision,asset_class,closed_at,
 			COALESCE(underlying_ticker,''),option_type,strike::double precision,expiry,leg_group_id
-			FROM positions WHERE id=$1 FOR UPDATE`, positionID).Scan(
+			FROM positions WHERE id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 FOR UPDATE`, positionID, input.AccountID, input.Environment, input.OriginType, input.OriginID).Scan(
 			&strategyID, &ticker, &side, &quantity, &avgEntry, &realizedPnL, &contractMultiplier, &assetClass, &closedAt,
 			&underlyingTicker, &optionType, &strike, &expiry, &legGroupID,
 		); err != nil {
@@ -502,22 +506,22 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: sell-to-close requires a long option position")
 		}
 		if _, err := tx.Exec(ctx, `UPDATE positions SET quantity=0,current_price=$1,realized_pnl=$2,
-			unrealized_pnl=NULL,closed_at=$3 WHERE id=$4`, input.FillPrice, realizedPnL+realizedDelta-input.Fee, filledAt, positionID); err != nil {
+			unrealized_pnl=NULL,closed_at=$3 WHERE id=$4 AND account_id=$5`, input.FillPrice, realizedPnL+realizedDelta-input.Fee, filledAt, positionID, input.AccountID); err != nil {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: close option position: %w", err)
 		}
 	}
 
 	tradeID := uuid.New()
 	if _, err := tx.Exec(ctx, `INSERT INTO trades
-		(id,external_id,order_id,position_id,ticker,side,quantity,price,fee,executed_at,created_at,asset_class,open_close,contract_multiplier,premium,exit_reason)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,$15)`,
-		tradeID, nullString(order.ExternalID), order.ID, positionID, order.Ticker, order.Side,
+		(id,account_id,environment,origin_type,origin_id,external_id,order_id,position_id,ticker,side,quantity,price,fee,executed_at,created_at,asset_class,open_close,contract_multiplier,premium,exit_reason)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,$17,$18,$19)`,
+		tradeID, input.AccountID, input.Environment, input.OriginType, input.OriginID, nullString(order.ExternalID), order.ID, positionID, order.Ticker, order.Side,
 		input.FillQuantity, input.FillPrice, input.Fee, filledAt, domain.AssetClassOption, openClose,
 		order.ContractMultiplier, input.Premium, nullString(strings.TrimSpace(input.ExitReason)),
 	); err != nil {
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: create option fill trade: %w", err)
 	}
-	key := "option_fill:v1:" + order.ID.String()
+	key := input.IdempotencyKey
 	if _, err := tx.Exec(ctx, `INSERT INTO financial_fill_idempotency
 		(idempotency_key,order_id,position_id,trade_id,fill_quantity,fill_price) VALUES ($1,$2,$3,$4,$5,$6)`,
 		key, order.ID, positionID, tradeID, input.FillQuantity, input.FillPrice,
@@ -531,7 +535,7 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 // creates its linked cash-settlement trade. The locked database row is the
 // source of truth for quantity, side, entry price, and contract multiplier.
 func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionPositionSettlementInput) (repository.OptionPositionSettlementResult, error) {
-	if input.PositionID == uuid.Nil || input.SettledAt.IsZero() || input.SettlementPrice < 0 || math.IsNaN(input.SettlementPrice) || math.IsInf(input.SettlementPrice, 0) {
+	if input.IdempotencyKey == "" || input.AccountID == uuid.Nil || !input.Environment.IsValid() || strings.TrimSpace(input.OriginType) == "" || strings.TrimSpace(input.OriginID) == "" || input.PositionID == uuid.Nil || input.SettledAt.IsZero() || input.SettlementPrice < 0 || math.IsNaN(input.SettlementPrice) || math.IsInf(input.SettlementPrice, 0) {
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: invalid option settlement input")
 	}
 	if (input.SettlementPrice == 0 && input.ExitReason != "expired_worthless") || (input.SettlementPrice > 0 && input.ExitReason != "exercise_cash_settled") {
@@ -554,16 +558,18 @@ func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionP
 		closedAt           *time.Time
 		assetClass         domain.AssetClass
 		expiry             *time.Time
+		accountID          uuid.UUID
+		environment        domain.AccountEnvironment
 	)
-	if err := tx.QueryRow(ctx, `SELECT ticker, side, quantity::double precision, avg_entry::double precision,
+	if err := tx.QueryRow(ctx, `SELECT account_id,environment,ticker, side, quantity::double precision, avg_entry::double precision,
 		COALESCE(realized_pnl, 0)::double precision, COALESCE(NULLIF(contract_multiplier, 0), 100)::double precision,
 		closed_at, asset_class, expiry
-		FROM positions WHERE id = $1 FOR UPDATE`, input.PositionID).Scan(
-		&ticker, &side, &quantity, &avgEntry, &realizedPnL, &contractMultiplier, &closedAt, &assetClass, &expiry,
+		FROM positions WHERE id = $1 AND account_id=$2 FOR UPDATE`, input.PositionID, input.AccountID).Scan(
+		&accountID, &environment, &ticker, &side, &quantity, &avgEntry, &realizedPnL, &contractMultiplier, &closedAt, &assetClass, &expiry,
 	); err != nil {
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: lock option settlement position: %w", err)
 	}
-	if assetClass != domain.AssetClassOption || closedAt != nil || quantity <= 0 || expiry == nil {
+	if accountID != input.AccountID || environment != input.Environment || assetClass != domain.AssetClassOption || closedAt != nil || quantity <= 0 || expiry == nil {
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: option settlement position is not eligible")
 	}
 	settledAt := input.SettledAt.UTC()
@@ -583,15 +589,15 @@ func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionP
 	}
 	if _, err := tx.Exec(ctx, `UPDATE positions
 		SET quantity = 0, current_price = $1, realized_pnl = $2, unrealized_pnl = NULL, closed_at = $3
-		WHERE id = $4`, input.SettlementPrice, realizedPnL+realizedDelta, settledAt, input.PositionID); err != nil {
+		WHERE id = $4 AND account_id=$5`, input.SettlementPrice, realizedPnL+realizedDelta, settledAt, input.PositionID, input.AccountID); err != nil {
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: close option settlement position: %w", err)
 	}
 
-	tradeID := uuid.New()
+	tradeID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(input.IdempotencyKey))
 	if _, err := tx.Exec(ctx, `INSERT INTO trades
-		(id, position_id, ticker, side, quantity, price, executed_at, created_at, asset_class, open_close, contract_multiplier, premium, exit_reason)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,'close',$9,$10,$11)`,
-		tradeID, input.PositionID, ticker, tradeSide, quantity, input.SettlementPrice, settledAt,
+		(id,account_id,environment,origin_type,origin_id,position_id,ticker,side,quantity,price,executed_at,created_at,asset_class,open_close,contract_multiplier,premium,exit_reason)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,'close',$13,$14,$15)`,
+		tradeID, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.PositionID, ticker, tradeSide, quantity, input.SettlementPrice, settledAt,
 		domain.AssetClassOption, contractMultiplier, input.SettlementPrice*quantity*contractMultiplier, input.ExitReason,
 	); err != nil {
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: create option settlement trade: %w", err)
@@ -603,7 +609,7 @@ func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionP
 }
 
 func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
-	if input.Decision == nil || input.Decision.ID == uuid.Nil || input.Decision.StrategyID == nil || input.Decision.PaperOrderID == nil || input.IdempotencyKey == "" || input.PositionTicker == "" || input.ResolvedAt.IsZero() || math.IsNaN(input.Payout) || math.IsInf(input.Payout, 0) || input.Payout < 0 || input.Payout > 1 {
+	if input.Decision == nil || input.AccountID == uuid.Nil || !input.Environment.IsValid() || input.OriginType == "" || input.OriginID == "" || input.Decision.AccountID != input.AccountID || input.Decision.Environment != input.Environment || input.Decision.OriginType != input.OriginType || input.Decision.OriginID != input.OriginID || input.Decision.ID == uuid.Nil || input.Decision.StrategyID == nil || input.Decision.PaperOrderID == nil || input.IdempotencyKey == "" || input.PositionTicker == "" || input.ResolvedAt.IsZero() || math.IsNaN(input.Payout) || math.IsInf(input.Payout, 0) || input.Payout < 0 || input.Payout > 1 {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: invalid settlement input")
 	}
 	tx, err := db.Pool.BeginTx(ctx, pgx.TxOptions{})
@@ -630,7 +636,7 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: select settlement idempotency: %w", err)
 	}
-	rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.quantity::double precision, p.avg_entry::double precision, p.realized_pnl::double precision FROM positions p INNER JOIN trades t ON t.position_id = p.id AND t.order_id = $1 WHERE p.closed_at IS NULL AND p.quantity > 0 FOR UPDATE OF p`, input.Decision.PaperOrderID)
+	rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.quantity::double precision, p.avg_entry::double precision, p.realized_pnl::double precision FROM positions p INNER JOIN trades t ON t.position_id = p.id AND t.order_id = $1 AND t.account_id=$2 WHERE p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.closed_at IS NULL AND p.quantity > 0 FOR UPDATE OF p`, input.Decision.PaperOrderID, input.AccountID, input.Environment, input.OriginType, input.OriginID)
 	if err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: lock settlement position: %w", err)
 	}
@@ -659,21 +665,21 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	position.UnrealizedPnL = nil
 	closedAt := input.ResolvedAt.UTC()
 	position.ClosedAt = &closedAt
-	if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = 0, current_price = $1, realized_pnl = $2, unrealized_pnl = NULL, closed_at = $3 WHERE id = $4`, input.Payout, position.RealizedPnL, closedAt, position.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = 0, current_price = $1, realized_pnl = $2, unrealized_pnl = NULL, closed_at = $3 WHERE id = $4 AND account_id=$5`, input.Payout, position.RealizedPnL, closedAt, position.ID, input.AccountID); err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: update position: %w", err)
 	}
 	tradeID = uuid.New()
-	if err := tx.QueryRow(ctx, `INSERT INTO trades (id, order_id, position_id, ticker, side, quantity, price, executed_at, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id`, tradeID, input.Decision.PaperOrderID, position.ID, input.PositionTicker, domain.OrderSideSell, quantity, input.Payout, closedAt).Scan(&tradeID); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO trades (id,account_id,environment,origin_type,origin_id,order_id,position_id,ticker,side,quantity,price,executed_at,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12) RETURNING id`, tradeID, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.Decision.PaperOrderID, position.ID, input.PositionTicker, domain.OrderSideSell, quantity, input.Payout, closedAt).Scan(&tradeID); err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: insert payout trade: %w", err)
 	}
-	if tag, err := tx.Exec(ctx, `UPDATE trade_decisions SET status = $2, updated_at = NOW() WHERE id = $1 AND status = $3`, input.Decision.ID, domain.TradeDecisionStatusClosed, domain.TradeDecisionStatusPaper); err != nil {
+	if tag, err := tx.Exec(ctx, `UPDATE trade_decisions SET status = $2, updated_at = NOW() WHERE id = $1 AND account_id=$4 AND status = $3`, input.Decision.ID, domain.TradeDecisionStatusClosed, domain.TradeDecisionStatusPaper, input.AccountID); err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: update decision: %w", err)
 	} else if tag.RowsAffected() != 1 {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: update decision: expected 1 row, got %d", tag.RowsAffected())
 	}
 	replayEventID = func() *uuid.UUID { id := uuid.New(); return &id }()
 	payload, _ := json.Marshal(map[string]any{"decision_id": input.Decision.ID, "position_id": position.ID, "trade_id": tradeID, "payout": input.Payout, "resolved_at": closedAt, "position_ticker": input.PositionTicker})
-	if err := tx.QueryRow(ctx, `INSERT INTO replay_events (id, trade_decision_id, event_type, source, payload, occurred_at) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, *replayEventID, input.Decision.ID, domain.ReplayEventTypeOutcomeResolved, "prediction_settler", payload, closedAt).Scan(replayEventID); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO replay_events (id,account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, *replayEventID, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.Decision.ID, domain.ReplayEventTypeOutcomeResolved, "prediction_settler", payload, closedAt).Scan(replayEventID); err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: insert replay event: %w", err)
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO prediction_settlement_idempotency (idempotency_key, decision_id, position_id, trade_id, replay_event_id, payout, resolved_at) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING created_at`, input.IdempotencyKey, input.Decision.ID, position.ID, tradeID, replayEventID, input.Payout, input.ResolvedAt.UTC()).Scan(&createdAt); err != nil {

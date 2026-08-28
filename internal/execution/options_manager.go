@@ -127,13 +127,21 @@ func (m *OptionsOrderManager) WithLiveGate(gate LiveGateConfig) *OptionsOrderMan
 // ProcessOptionSignal handles a single-leg options trade: validate → risk check → submit → track.
 func (m *OptionsOrderManager) ProcessOptionSignal(
 	ctx context.Context,
+	scope ExecutionScope,
 	signal FinalSignal,
 	plan TradingPlan,
-	strategyID, runID uuid.UUID,
 ) error {
 	if m == nil {
 		return fmt.Errorf("options_manager: manager is nil")
 	}
+	_, runID, _, err := scopeOriginIDs(scope)
+	if err != nil {
+		return fmt.Errorf("options_manager: execution scope: %w", err)
+	}
+	if scope.LegacyStrategyID() == nil {
+		return fmt.Errorf("options_manager: legacy strategy ownership is required")
+	}
+	strategyID := *scope.LegacyStrategyID()
 
 	// Ignore hold signals.
 	if signal.Signal == domain.PipelineSignalHold {
@@ -204,6 +212,8 @@ func (m *OptionsOrderManager) ProcessOptionSignal(
 
 	order := &domain.Order{
 		ID:                 uuid.New(),
+		AccountID:          scope.AccountID(),
+		Environment:        scope.Environment(),
 		StrategyID:         &strategyID,
 		PipelineRunID:      &runID,
 		Ticker:             plan.Ticker,
@@ -223,6 +233,7 @@ func (m *OptionsOrderManager) ProcessOptionSignal(
 		CreatedAt:          now,
 		Broker:             m.brokerName,
 	}
+	stampOptionOrderScope(order, scope)
 
 	if plan.EntryPrice > 0 {
 		order.LimitPrice = &plan.EntryPrice
@@ -241,7 +252,7 @@ func (m *OptionsOrderManager) ProcessOptionSignal(
 	if balance.Equity <= 0 {
 		return fmt.Errorf("options_manager: account equity must be positive")
 	}
-	portfolio, err := BuildRiskPortfolioSnapshotFromBalance(ctx, balance, m.positionRepo)
+	portfolio, err := m.buildRiskPortfolio(ctx, scope, balance)
 	if err != nil {
 		return fmt.Errorf("options_manager: build risk portfolio: %w", err)
 	}
@@ -331,9 +342,21 @@ func (m *OptionsOrderManager) persistImmediateFill(ctx context.Context, order *d
 
 // CloseOptionPosition closes an entire persisted option position at an explicit
 // executable price. Partial closes and rolls require a separate atomic plan.
-func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, position *domain.Position, executablePrice float64, runID uuid.UUID, reason string) error {
+func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, scope ExecutionScope, position *domain.Position, executablePrice float64, reason string) error {
 	if m == nil || position == nil {
 		return errors.New("options_manager: position is required")
+	}
+	persisted, err := m.positionRepo.Get(ctx, position.ID)
+	if err != nil {
+		return fmt.Errorf("options_manager: lock persisted option position ownership: %w", err)
+	}
+	if err := validatePositionScope(persisted, scope); err != nil {
+		return err
+	}
+	position = persisted
+	_, runID, _, err := scopeOriginIDs(scope)
+	if err != nil {
+		return fmt.Errorf("options_manager: close execution scope: %w", err)
 	}
 	if position.ClosedAt != nil || position.Quantity <= 0 {
 		return errors.New("options_manager: position is not open")
@@ -368,7 +391,7 @@ func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, position 
 		multiplier = 100
 	}
 	order := &domain.Order{
-		ID: uuid.New(), StrategyID: position.StrategyID, PipelineRunID: &runID,
+		ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), StrategyID: position.StrategyID, PipelineRunID: &runID,
 		Ticker: position.Ticker, MarketType: domain.MarketTypeOptions, Side: side,
 		OrderType: domain.OrderTypeLimit, Quantity: position.Quantity,
 		LimitPrice: &executablePrice, Status: domain.OrderStatusPending,
@@ -378,6 +401,7 @@ func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, position 
 		LegGroupID: position.LegGroupID, CreatedAt: now,
 		Broker: m.brokerName,
 	}
+	stampOptionOrderScope(order, scope)
 	if err := m.orderRepo.Create(ctx, order); err != nil {
 		return fmt.Errorf("options_manager: create close order: %w", err)
 	}
@@ -434,19 +458,28 @@ func (m *OptionsOrderManager) optionFillInput(ctx context.Context, order *domain
 	if positionID != nil && reason == "" {
 		reason = "strategy close"
 	}
-	return repository.OptionFillInput{Order: order, PositionID: positionID, FillPrice: *order.FilledAvgPrice, FillQuantity: order.FilledQuantity, Fee: report.Fee, Premium: report.Premium, FilledAt: *order.FilledAt, ExitReason: reason}, nil
+	originType, originID := order.OriginType, order.OriginID
+	return repository.OptionFillInput{IdempotencyKey: "option_fill:v1:" + order.AccountID.String() + ":" + order.ID.String(), AccountID: order.AccountID, Environment: order.Environment, OriginType: originType, OriginID: originID, Order: order, PositionID: positionID, FillPrice: *order.FilledAvgPrice, FillQuantity: order.FilledQuantity, Fee: report.Fee, Premium: report.Premium, FilledAt: *order.FilledAt, ExitReason: reason}, nil
 }
 
 // ProcessSpreadSignal handles a multi-leg spread trade: validate → risk check → submit → track.
 func (m *OptionsOrderManager) ProcessSpreadSignal(
 	ctx context.Context,
+	scope ExecutionScope,
 	spread *domain.OptionSpread,
 	quantity float64,
-	strategyID, runID uuid.UUID,
 ) error {
 	if m == nil {
 		return fmt.Errorf("options_manager: manager is nil")
 	}
+	_, runID, _, err := scopeOriginIDs(scope)
+	if err != nil {
+		return fmt.Errorf("options_manager: spread execution scope: %w", err)
+	}
+	if scope.LegacyStrategyID() == nil {
+		return fmt.Errorf("options_manager: legacy strategy ownership is required")
+	}
+	strategyID := *scope.LegacyStrategyID()
 	if spread == nil {
 		return fmt.Errorf("options_manager: spread is required")
 	}
@@ -483,7 +516,7 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 	closePositions := make(map[string]*domain.Position)
 	var existingGroupID *uuid.UUID
 	if isClosing {
-		positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{}, 100, 0)
+		positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{}, 100, 0)
 		if err != nil {
 			return fmt.Errorf("options_manager: load spread positions for close: %w", err)
 		}
@@ -520,7 +553,7 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 		if err != nil || balance.Equity <= 0 {
 			return fmt.Errorf("options_manager: valid account balance is required for spread risk: %w", err)
 		}
-		portfolio, err := BuildRiskPortfolioSnapshotFromBalance(ctx, balance, m.positionRepo)
+		portfolio, err := m.buildRiskPortfolio(ctx, scope, balance)
 		if err != nil {
 			return fmt.Errorf("options_manager: build spread risk portfolio: %w", err)
 		}
@@ -585,6 +618,8 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 		}
 		legOrder := &domain.Order{
 			ID:                 uuid.New(),
+			AccountID:          scope.AccountID(),
+			Environment:        scope.Environment(),
 			StrategyID:         &strategyID,
 			PipelineRunID:      &runID,
 			Ticker:             leg.Contract.OCCSymbol,
@@ -606,6 +641,7 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 			CreatedAt:          now,
 			Broker:             m.brokerName,
 		}
+		stampOptionOrderScope(legOrder, scope)
 
 		if err := m.orderRepo.Create(ctx, legOrder); err != nil {
 			return fmt.Errorf("options_manager: create leg order: %w", err)
@@ -742,6 +778,53 @@ func (m *OptionsOrderManager) finalizeOptionSpread(externalIDs []string) error {
 		return fmt.Errorf("options_manager: finalize option spread: %w", err)
 	}
 	return nil
+}
+
+func stampOptionOrderScope(order *domain.Order, scope ExecutionScope) {
+	originType, originID := scope.Origin()
+	order.AccountID, order.Environment = scope.AccountID(), scope.Environment()
+	order.OriginType, order.OriginID = string(originType), originID
+	order.StrategyID = scope.LegacyStrategyID()
+	if run, ok := scope.PipelineRun(); ok {
+		order.PipelineRunID = &run.ID
+		tradeDate := run.TradeDate
+		order.PipelineRunTradeDate = &tradeDate
+	}
+}
+
+func validatePositionScope(position *domain.Position, scope ExecutionScope) error {
+	if position == nil {
+		return errors.New("options_manager: persisted position is required")
+	}
+	originType, originID := scope.Origin()
+	if position.AccountID != scope.AccountID() || position.Environment != scope.Environment() || position.OriginType != string(originType) || position.OriginID != originID {
+		return errors.New("options_manager: persisted position ownership does not match execution scope")
+	}
+	if wanted := scope.LegacyStrategyID(); wanted == nil || position.StrategyID == nil || *wanted != *position.StrategyID {
+		return errors.New("options_manager: persisted position strategy ownership does not match execution scope")
+	}
+	return nil
+}
+
+func (m *OptionsOrderManager) positionsByScope(ctx context.Context, scope ExecutionScope, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	repo, ok := m.positionRepo.(repository.ExecutionScopedPositionRepository)
+	if !ok {
+		return nil, errors.New("options_manager: execution-scoped position repository is required")
+	}
+	originType, originID := scope.Origin()
+	return repo.GetByExecutionScope(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, filter, limit, offset)
+}
+
+func (m *OptionsOrderManager) buildRiskPortfolio(ctx context.Context, scope ExecutionScope, balance Balance) (risk.Portfolio, error) {
+	repo, ok := m.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return risk.Portfolio{}, errors.New("options_manager: account-scoped position repository is required")
+	}
+	positions, err := repo.GetByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, 0)
+	if err != nil {
+		return risk.Portfolio{}, err
+	}
+	return BuildRiskPortfolioSnapshotFromPositions(balance, positions)
 }
 
 // signalToSide maps a pipeline signal to an order side.

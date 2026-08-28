@@ -31,6 +31,7 @@ const (
 // CommonLifecycleContext pins the exact canonical state and reference facts
 // against which one provider response is interpreted.
 type CommonLifecycleContext struct {
+	Scope         venue.ExecutionScope
 	Policy        *venue.Policy
 	Aggregate     *lifecycle.Aggregate
 	Account       *domain.Account
@@ -260,7 +261,7 @@ func planOrderLikeResult(
 			return nil, fmt.Errorf("alpaca common lifecycle: apply planned order transition: %w", err)
 		}
 	}
-	return &venue.Result{Initial: current, Aggregate: final, Steps: []venue.ResultStep{step}}, nil
+	return &venue.Result{Scope: context.Scope, Initial: current, Aggregate: final, Steps: []venue.ResultStep{step}}, nil
 }
 
 func orderTransition(
@@ -341,6 +342,7 @@ func planMalformedProviderResult(
 		return nil, fmt.Errorf("alpaca common lifecycle: apply malformed failure: %w", err)
 	}
 	return &venue.Result{
+		Scope:   context.Scope,
 		Initial: context.Aggregate, Aggregate: final,
 		Steps: []venue.ResultStep{{Observation: observation, Transition: transition}},
 	}, nil
@@ -360,7 +362,7 @@ func PlanFillActivityResult(
 		return nil, fmt.Errorf("alpaca common lifecycle: at least one fill activity is required")
 	}
 	current := context.Aggregate
-	result := &venue.Result{Initial: context.Aggregate, Aggregate: context.Aggregate}
+	result := &venue.Result{Scope: context.Scope, Initial: context.Aggregate, Aggregate: context.Aggregate}
 	for index := range facts {
 		step, next, err := planFillActivity(context, current, facts[index])
 		if err != nil {

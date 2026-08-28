@@ -1837,23 +1837,23 @@ type failingPaperAccountRepo struct {
 	err error
 }
 
-func (r failingPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context) (uint64, error) {
+func (r failingPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context, uuid.UUID, domain.AccountEnvironment) (uint64, error) {
 	return 0, r.err
 }
 
-func (stubPaperAccountRepo) ListPaperTrades(context.Context, int, int) ([]domain.Trade, error) {
+func (stubPaperAccountRepo) ListPaperTrades(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Trade, error) {
 	return nil, nil
 }
 
-func (stubPaperAccountRepo) GetOpenPaperPositions(context.Context, int, int) ([]domain.Position, error) {
+func (stubPaperAccountRepo) GetOpenPaperPositions(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Position, error) {
 	return nil, nil
 }
 
-func (stubPaperAccountRepo) ListOpenPaperOrders(context.Context, int, int) ([]domain.Order, error) {
+func (stubPaperAccountRepo) ListOpenPaperOrders(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Order, error) {
 	return nil, nil
 }
 
-func (stubPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context) (uint64, error) {
+func (stubPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context, uuid.UUID, domain.AccountEnvironment) (uint64, error) {
 	return 0, nil
 }
 

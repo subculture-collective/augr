@@ -27,11 +27,6 @@ const (
 	OrderEventRejected  = "order_rejected"
 )
 
-// Kalshi strategies share one paper account. Serialize the complete
-// snapshot-to-fill lifecycle so concurrent strategy runs cannot all approve
-// against the same pre-trade aggregate exposure.
-var kalshiExposureMu sync.Mutex
-
 // FinalSignal stores the extracted pipeline signal and confidence.
 type FinalSignal struct {
 	Signal     domain.PipelineSignal `json:"signal,omitempty"`
@@ -111,6 +106,7 @@ type OrderManager struct {
 	nowFunc          func() time.Time
 	metrics          OrderMetricsRecorder
 	effectFence      func(context.Context) error
+	accountLocker    repository.ExecutionAccountLocker
 }
 
 // WithEffectFence requires an ownership check immediately before execution effects.
@@ -165,6 +161,7 @@ func NewOrderManager(
 		sizingConfig:   sizingConfig,
 		logger:         logger,
 		nowFunc:        time.Now,
+		accountLocker:  executionAccountLocker(orderRepo),
 	}
 }
 
@@ -249,6 +246,23 @@ func (m *OrderManager) ProcessSignal(
 	signal FinalSignal,
 	plan TradingPlan,
 ) error {
+	if planMarketType(plan).Normalize() == domain.MarketTypeKalshi {
+		if m.accountLocker == nil {
+			return fmt.Errorf("order_manager: PostgreSQL execution account locker is required for Kalshi")
+		}
+		return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+			return m.processSignal(ctx, scope, signal, plan)
+		})
+	}
+	return m.processSignal(ctx, scope, signal, plan)
+}
+
+func (m *OrderManager) processSignal(
+	ctx context.Context,
+	scope ExecutionScope,
+	signal FinalSignal,
+	plan TradingPlan,
+) error {
 	strategyID, runID, hasRun, err := scopeOriginIDs(scope)
 	if err != nil {
 		return fmt.Errorf("order_manager: execution scope: %w", err)
@@ -258,11 +272,6 @@ func (m *OrderManager) ProcessSignal(
 	predictionExitMaxQuantity := 0.0
 	stockExitMaxQuantity := 0.0
 	riskReducingExit := false
-
-	if marketType.Normalize() == domain.MarketTypeKalshi {
-		kalshiExposureMu.Lock()
-		defer kalshiExposureMu.Unlock()
-	}
 
 	// Ignore hold signals — nothing to execute.
 	if signal.Signal == domain.PipelineSignalHold {
@@ -735,6 +744,11 @@ func (m *OrderManager) ProcessSignal(
 	}
 }
 
+func executionAccountLocker(repo repository.OrderRepository) repository.ExecutionAccountLocker {
+	locker, _ := repo.(repository.ExecutionAccountLocker)
+	return locker
+}
+
 func quantizeKalshiContracts(quantity float64) float64 {
 	if quantity <= 0 {
 		return 0
@@ -1135,6 +1149,14 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 	if _, _, _, err := scopeOriginIDs(scope); err != nil {
 		return "", fmt.Errorf("order_manager: reconcile execution scope: %w", err)
 	}
+	persisted, err := m.orderRepo.Get(ctx, order.ID)
+	if err != nil {
+		return "", fmt.Errorf("order_manager: lock persisted order ownership: %w", err)
+	}
+	if err := validateOrderScope(persisted, scope); err != nil {
+		return "", err
+	}
+	order = persisted
 	decisionID, err := m.ensureAttachedOrderDecision(ctx, scope, order)
 	if err != nil {
 		return "", err
@@ -1234,6 +1256,27 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		return "", fmt.Errorf("order_manager: recovered paper order remained nonterminal: %s", status)
 	}
 	return status, nil
+}
+
+func validateOrderScope(order *domain.Order, scope ExecutionScope) error {
+	if order == nil {
+		return fmt.Errorf("order_manager: persisted order is required")
+	}
+	originType, originID := scope.Origin()
+	if order.AccountID != scope.AccountID() || order.Environment != scope.Environment() || order.OriginType != string(originType) || order.OriginID != originID {
+		return fmt.Errorf("order_manager: persisted order ownership does not match execution scope")
+	}
+	if run, ok := scope.PipelineRun(); ok {
+		if order.PipelineRunID == nil || order.PipelineRunTradeDate == nil || *order.PipelineRunID != run.ID || !order.PipelineRunTradeDate.Equal(run.TradeDate) {
+			return fmt.Errorf("order_manager: persisted order run ownership does not match execution scope")
+		}
+	} else if order.PipelineRunID != nil || order.PipelineRunTradeDate != nil {
+		return fmt.Errorf("order_manager: persisted order unexpectedly belongs to a pipeline run")
+	}
+	if order.CopyOriginRebalanceRunID != scope.CopyOriginRunID() {
+		return fmt.Errorf("order_manager: persisted order copy run ownership does not match execution scope")
+	}
+	return nil
 }
 
 func (m *OrderManager) recoveryBrokerOrderStatus(ctx context.Context, brokerOrderID string) (BrokerOrderStatus, error) {

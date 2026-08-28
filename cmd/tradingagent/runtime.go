@@ -588,7 +588,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	polymarketAccountRepo := pgrepo.NewPolymarketAccountRepo(db.Pool)
 	polymarketWatchedRepo := pgrepo.NewPolymarketWatchedMarketsRepo(db.Pool)
 	polymarketResolvedRepo := pgrepo.NewPolymarketResolvedMarketsRepo(db.Pool)
-	copyTradingRepo := pgrepo.NewCopyTradingRepo(db.Pool)
+	copyTradingRepo := pgrepo.NewCopyTradingRepo(db.Pool, runtimeDeps.executionAccount.AccountID())
 	accountRepo := pgrepo.NewAccountRepo(db.Pool)
 	instrumentRepo := pgrepo.NewInstrumentRepo(db.Pool)
 	quoteSnapshotRepo := pgrepo.NewQuoteSnapshotRepo(db.Pool)
@@ -968,7 +968,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		portfolioAllocatorMode := portfolioAllocatorModeFromEnv()
 		strategyRunner.opportunityRepo = opportunityRepo
 		strategyRunner.optionsProvider = deps.OptionsProvider
-		if err := bootstrapPaperOptionsAccount(ctx, strategyRunner.localPaperBroker, paperAccountRepo); err != nil {
+		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo); err != nil {
 			return nil, nil, nil, err
 		}
 		strategyRunner.portfolioAllocatorMode = portfolioAllocatorMode
@@ -1117,6 +1117,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 					orch = automation.NewJobOrchestrator(automation.OrchestratorDeps{
 						ExecutionAccount:            executionAccount,
+						CanonicalAccountID:          executionAccount.AccountID(),
 						DiscoveryReadiness:          discoveryReadiness,
 						Universe:                    deps.Universe,
 						Polygon:                     polygonClientForAuto,

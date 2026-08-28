@@ -9,6 +9,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
@@ -50,6 +51,10 @@ func (o *JobOrchestrator) optionsLifecycleReconcile(ctx context.Context) error {
 
 func (o *JobOrchestrator) optionsExpirySettlement(ctx context.Context) error {
 	now := time.Now().UTC()
+	scope, err := execution.NewScheduledNonRunExecutionScope(o.deps.ExecutionAccount.AccountID(), o.deps.ExecutionAccount.Environment(), ledger.ExecutionOriginSettlement, "options-expiry/"+now.Format("2006-01-02"))
+	if err != nil {
+		return fmt.Errorf("options_expiry_settlement: execution scope: %w", err)
+	}
 	positions, err := listAllOpenPositions(ctx, o.deps.PositionRepo)
 	if err != nil {
 		return fmt.Errorf("options_expiry_settlement: list positions: %w", err)
@@ -74,7 +79,7 @@ func (o *JobOrchestrator) optionsExpirySettlement(ctx context.Context) error {
 		}
 		prices[underlying] = bars[len(bars)-1].Close
 	}
-	summary, err := execution.SettleExpiredOptionPositions(ctx, positions, prices, now, o.deps.OptionSettlementRepo)
+	summary, err := execution.SettleExpiredOptionPositions(ctx, scope, positions, prices, now, o.deps.OptionSettlementRepo)
 	if err != nil {
 		return err
 	}

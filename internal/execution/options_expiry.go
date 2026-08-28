@@ -18,6 +18,7 @@ type OptionsExpirySummary struct {
 }
 
 type optionSettlement struct {
+	scope      ExecutionScope
 	positionID uuid.UUID
 	intrinsic  float64
 	reason     string
@@ -26,7 +27,7 @@ type optionSettlement struct {
 // SettleExpiredOptionPositions cash-settles expired paper options. It does not
 // fabricate underlying-share assignment. Every candidate is validated before
 // persistence begins so missing prices or contract metadata fail the batch.
-func SettleExpiredOptionPositions(ctx context.Context, positions []domain.Position, underlyingPrices map[string]float64, now time.Time, settlementRepo repository.OptionSettlementRepository) (OptionsExpirySummary, error) {
+func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[string]float64, now time.Time, settlementRepo repository.OptionSettlementRepository) (OptionsExpirySummary, error) {
 	if settlementRepo == nil {
 		return OptionsExpirySummary{}, errors.New("options expiry: atomic settlement repository is required")
 	}
@@ -36,6 +37,9 @@ func SettleExpiredOptionPositions(ctx context.Context, positions []domain.Positi
 		position := &positions[index]
 		if position.AssetClass != domain.AssetClassOption || position.ClosedAt != nil || position.Expiry == nil || position.Quantity <= 0 {
 			continue
+		}
+		if position.AccountID != scope.AccountID() || position.Environment != scope.Environment() {
+			return OptionsExpirySummary{}, fmt.Errorf("options expiry: position %s belongs to a foreign account", position.ID)
 		}
 		expiry := time.Date(position.Expiry.UTC().Year(), position.Expiry.UTC().Month(), position.Expiry.UTC().Day(), 0, 0, 0, 0, time.UTC)
 		if expiry.After(today) {
@@ -53,12 +57,14 @@ func SettleExpiredOptionPositions(ctx context.Context, positions []domain.Positi
 		if intrinsic > 0 {
 			reason = "exercise_cash_settled"
 		}
-		settlements = append(settlements, optionSettlement{positionID: position.ID, intrinsic: intrinsic, reason: reason})
+		settlements = append(settlements, optionSettlement{scope: scope, positionID: position.ID, intrinsic: intrinsic, reason: reason})
 	}
 
 	summary := OptionsExpirySummary{}
 	for _, settlement := range settlements {
+		originType, originID := settlement.scope.Origin()
 		if _, err := settlementRepo.SettleOptionPosition(ctx, repository.OptionPositionSettlementInput{
+			IdempotencyKey: "option_expiry:v1:" + settlement.scope.AccountID().String() + ":" + settlement.positionID.String(), AccountID: settlement.scope.AccountID(), Environment: settlement.scope.Environment(), OriginType: string(originType), OriginID: originID,
 			PositionID: settlement.positionID, SettlementPrice: settlement.intrinsic,
 			SettledAt: now.UTC(), ExitReason: settlement.reason,
 		}); err != nil {

@@ -5,6 +5,8 @@ import (
 	"math"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 )
@@ -51,26 +53,26 @@ type fakePaperAccountRepo struct {
 	max       uint64
 }
 
-func (f fakePaperAccountRepo) ListPaperTrades(context.Context, int, int) ([]domain.Trade, error) {
+func (f fakePaperAccountRepo) ListPaperTrades(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Trade, error) {
 	return f.trades, nil
 }
 
-func (f fakePaperAccountRepo) GetOpenPaperPositions(context.Context, int, int) ([]domain.Position, error) {
+func (f fakePaperAccountRepo) GetOpenPaperPositions(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Position, error) {
 	return f.positions, nil
 }
 
-func (f fakePaperAccountRepo) ListOpenPaperOrders(context.Context, int, int) ([]domain.Order, error) {
+func (f fakePaperAccountRepo) ListOpenPaperOrders(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Order, error) {
 	return f.orders, nil
 }
 
-func (f fakePaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context) (uint64, error) {
+func (f fakePaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context, uuid.UUID, domain.AccountEnvironment) (uint64, error) {
 	return f.max, nil
 }
 
 func TestBootstrapPaperOptionsAccountRestoresSharedBroker(t *testing.T) {
 	broker := paper.NewPaperBroker(1000, 0, 0)
 	repo := fakePaperAccountRepo{trades: []domain.Trade{{Side: domain.OrderSideBuy, Quantity: 1, Price: 2, Fee: 1}}, positions: []domain.Position{{Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 2, CurrentPrice: floatPtr(3)}}, orders: []domain.Order{{ExternalID: "paper-9", Status: domain.OrderStatusPartial, Ticker: "AAPL", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 1, FilledQuantity: 0.5, LimitPrice: floatPtr(2)}}, max: 9}
-	if err := bootstrapPaperOptionsAccount(context.Background(), broker, repo); err != nil {
+	if err := bootstrapPaperOptionsAccount(context.Background(), testExecutionAccountBinding, broker, repo); err != nil {
 		t.Fatalf("bootstrapPaperOptionsAccount() error = %v", err)
 	}
 	balance, _ := broker.GetAccountBalance(context.Background())
@@ -94,7 +96,7 @@ func TestBootstrapPaperOptionsAccountRestoresSharedBroker(t *testing.T) {
 func TestBootstrapPaperOptionsAccountStartsAtPaperOneOnEmptyDB(t *testing.T) {
 	broker := paper.NewPaperBroker(1000, 0, 0)
 	repo := fakePaperAccountRepo{}
-	if err := bootstrapPaperOptionsAccount(context.Background(), broker, repo); err != nil {
+	if err := bootstrapPaperOptionsAccount(context.Background(), testExecutionAccountBinding, broker, repo); err != nil {
 		t.Fatalf("bootstrapPaperOptionsAccount() error = %v", err)
 	}
 	id, err := broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "IBM", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, StopPrice: floatPtr(100)})
