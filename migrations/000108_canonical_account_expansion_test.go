@@ -593,7 +593,15 @@ func insertLegacyExecutionGraph(t *testing.T, ctx context.Context, pool *pgxpool
 	}
 	key := "expansion-" + uuid.NewString()
 	intentID := persistRiskApprovedMigrationLifecycle(t, ctx, pool, fixture, key)
-	if err := insertMigrationLifecycleOrder(t, ctx, pool, fixture, intentID, key, "simulation", "simulation-v1"); err != nil {
+	artifactID, schema, version, digest, canonical := simulationMigrationArtifact(t)
+	if _, err := pool.Exec(ctx, `INSERT INTO simulation_policy_artifacts (
+		id, schema_name, policy_version, sha256, canonical_bytes, canonical_json, created_at
+	) VALUES ($1,$2,$3,$4,$5,convert_from($5,'UTF8')::JSONB,$6)`, artifactID, schema,
+		version, digest, canonical, simulationMigrationTime(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertMigrationLifecycleOrder(t, ctx, pool, fixture, intentID, key, "simulation", version); err != nil {
 		t.Fatal(err)
 	}
 	var orderID uuid.UUID
@@ -637,14 +645,15 @@ type copyOriginFields struct {
 
 func insertLegacyPipelineCopyGraph(t *testing.T, ctx context.Context, pool *pgxpool.Pool, strategyID, leaderID, sourceID, observationID uuid.UUID) legacyCopyGraph {
 	t.Helper()
-	var runID, subscriptionID, intentID uuid.UUID
+	var runID, intentID uuid.UUID
 	if err := pool.QueryRow(ctx, `INSERT INTO pipeline_runs(strategy_id,ticker,trade_date,started_at) VALUES($1,'QQQ','2026-08-27',now()) RETURNING id`, strategyID).Scan(&runID); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `INSERT INTO copy_subscriptions(leader_id,source_id,legacy_strategy_id,capital_budget) VALUES($1,$2,$3,2000) RETURNING id`, leaderID, sourceID, strategyID).Scan(&subscriptionID); err != nil {
+	subscriptionID := uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO copy_subscriptions(id,leader_id,source_id,legacy_strategy_id,capital_budget,origin_id) VALUES($1,$2,$3,$4,2000,$1)`, subscriptionID, leaderID, sourceID, strategyID); err != nil {
 		t.Fatal(err)
 	}
-	if err := pool.QueryRow(ctx, `INSERT INTO copy_trade_intents(subscription_id,source_observation_id,pipeline_run_id,instrument_key,ticker,side,policy_status) VALUES($1,$2,$3,'QQQ','QQQ','buy','approved') RETURNING id`, subscriptionID, observationID, runID).Scan(&intentID); err != nil {
+	if err := pool.QueryRow(ctx, `INSERT INTO copy_trade_intents(subscription_id,source_observation_id,pipeline_run_id,instrument_key,ticker,side,policy_status,origin_id) VALUES($1,$2,$3,'QQQ','QQQ','buy','approved',$1) RETURNING id`, subscriptionID, observationID, runID).Scan(&intentID); err != nil {
 		t.Fatal(err)
 	}
 	rebalanceID := uuid.New()
@@ -948,7 +957,7 @@ func insertCanonicalExpansionStrategy(t *testing.T, ctx context.Context, pool *p
 	t.Helper()
 	var id uuid.UUID
 	if err := pool.QueryRow(ctx, `INSERT INTO strategies(name,description,ticker,market_type,schedule_cron,config,is_active,is_paper,status,skip_next_run,active_thesis)
-		VALUES($1,'legacy description','SPY','stock','0 9 * * *','{"legacy":true}',true,true,'active',false,'legacy thesis') RETURNING id`, "legacy-"+uuid.NewString()).Scan(&id); err != nil {
+		VALUES($1,'legacy description','SPY','stock','0 9 * * *','{"legacy":true}',true,true,'active',false,'{"summary":"legacy thesis"}') RETURNING id`, "legacy-"+uuid.NewString()).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id

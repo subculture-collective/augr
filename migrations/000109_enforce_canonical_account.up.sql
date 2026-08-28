@@ -38,14 +38,14 @@ BEGIN
     IF scoped_account_id IS NULL THEN
         RAISE EXCEPTION 'canonical operational row requires account_id';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM accounts WHERE id=scoped_account_id AND status='active') THEN
-        RAISE EXCEPTION 'canonical operational row requires an active account';
-    END IF;
     IF TG_OP='UPDATE' THEN
         old_data := to_jsonb(OLD);
         IF NULLIF(old_data->>'account_id','')::UUID IS DISTINCT FROM scoped_account_id THEN
             RAISE EXCEPTION 'canonical operational account_id is immutable';
         END IF;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM accounts WHERE id=scoped_account_id AND status='active') THEN
+        RAISE EXCEPTION 'canonical operational row requires an active account';
     END IF;
 
     IF row_data ? 'environment' THEN
