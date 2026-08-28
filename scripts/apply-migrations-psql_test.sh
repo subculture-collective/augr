@@ -142,4 +142,5 @@ expect_failure run_runner --database locked --from 0 --to 109
 flock -u 8
 
 grep -q '^SET ROLE augr_db_owner;$' "$test_root/state/migration_calls"
+grep -Fq "sed -e '/^BEGIN;\$/d' -e '/^COMMIT;\$/d'" "$runner"
 printf 'apply-migrations-psql tests passed\n'

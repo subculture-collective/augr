@@ -129,7 +129,7 @@ UPDATE schema_migrations SET dirty=true;
 COMMIT;
 SQL
 
-  if ! { printf 'SET ROLE augr_db_owner;\n'; sed -n '1,$p' "$migration_file"; } | run_sql --single-transaction; then
+  if ! { printf 'SET ROLE augr_db_owner;\n'; sed -e '/^BEGIN;$/d' -e '/^COMMIT;$/d' "$migration_file"; } | run_sql --single-transaction; then
     printf 'migration %s failed; database %s remains dirty at version %d\n' "$migration_file" "$database" "$current" >&2
     exit 1
   fi

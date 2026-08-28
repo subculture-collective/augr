@@ -64,6 +64,7 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
 		`apply_migrations 0 "$EXPECTED_VERSION"`,
 		`printf 'SET ROLE augr_db_owner;\n'`,
+		`sed -e '/^BEGIN;$/d' -e '/^COMMIT;$/d' "$migration_file"`,
 		`UPDATE schema_migrations SET dirty=true`,
 		`UPDATE schema_migrations SET version=${next},dirty=false`,
 		`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`,
@@ -251,6 +252,7 @@ func TestCanonicalCutoverAuditorsAreReadOnlyAndEvidenceBound(t *testing.T) {
 		`projection_checkpoints`,
 		`octet_length(c.attestation_hmac)=32`,
 		`DROP DATABASE IF EXISTS`,
+		`grep -qx "$expected|false"`,
 	} {
 		if !strings.Contains(verifier, want) {
 			t.Fatalf("verify-account-cutover.sh missing required content %q", want)

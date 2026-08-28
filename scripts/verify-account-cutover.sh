@@ -196,7 +196,7 @@ SQL
 
 assert_schema() {
   local database=$1 expected=$2
-  psql_db "$database" -At -c "SELECT version::text || '|' || dirty::text FROM schema_migrations" | grep -qx "$expected|f"
+  psql_db "$database" -At -c "SELECT version::text || '|' || dirty::text FROM schema_migrations" | grep -qx "$expected|false"
 }
 
 case $mode in

@@ -224,7 +224,7 @@ UPDATE schema_migrations SET dirty=true;
 COMMIT;
 SQL
 
-        if ! { printf 'SET ROLE augr_db_owner;\n'; sed -n '1,$p' "$migration_file"; } | \
+        if ! { printf 'SET ROLE augr_db_owner;\n'; sed -e '/^BEGIN;$/d' -e '/^COMMIT;$/d' "$migration_file"; } | \
             psql_db "$POSTGRES_DB" --single-transaction; then
             echo "migration ${migration_file} failed; isolated database remains dirty at version ${current}" >&2
             exit 1
