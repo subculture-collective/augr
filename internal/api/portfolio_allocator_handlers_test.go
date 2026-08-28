@@ -422,6 +422,10 @@ func (s *portfolioAllocatorOpportunityRepo) ListQueuedForAllocation(context.Cont
 	return append([]domain.Opportunity(nil), s.items...), nil
 }
 
+func (s *portfolioAllocatorOpportunityRepo) ListSelectedForAllocation(context.Context, time.Time) ([]domain.Opportunity, error) {
+	return nil, nil
+}
+
 func (s *portfolioAllocatorOpportunityRepo) UpdateStatus(context.Context, uuid.UUID, domain.OpportunityStatus, string) error {
 	return nil
 }

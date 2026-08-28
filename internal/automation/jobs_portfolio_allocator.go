@@ -52,6 +52,13 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("portfolio_allocator: snapshot opportunities: %w", err)
 	}
+	if mode == portfolio.AllocatorModePaper {
+		recoverable, err := o.recoverSelectedPaperOpportunities(ctx, asOf)
+		if err != nil {
+			return err
+		}
+		opportunities = append(recoverable, opportunities...)
+	}
 
 	state, warnings, err := o.buildPortfolioAllocatorState(ctx, mode)
 	if err != nil {
@@ -140,10 +147,7 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 		return nil, nil, nil
 	}
 	if o.deps.RunRepo == nil {
-		if mode == portfolio.AllocatorModePaper {
-			return nil, nil, fmt.Errorf("portfolio_allocator: paper mode requires pipeline run repository")
-		}
-		return opportunities, nil, nil
+		return nil, nil, fmt.Errorf("portfolio_allocator: %s mode requires pipeline run repository", mode)
 	}
 
 	valid := make([]domain.Opportunity, 0, len(opportunities))
@@ -192,6 +196,30 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 		})
 	}
 	return valid, rejected, nil
+}
+
+func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error) {
+	selected, err := o.deps.OpportunityRepo.ListSelectedForAllocation(ctx, asOf)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio_allocator: load selected opportunity claims: %w", err)
+	}
+	recoverable := make([]domain.Opportunity, 0, len(selected))
+	for i := range selected {
+		opportunity := selected[i]
+		decisions, err := o.deps.AllocationDecisionRepo.List(ctx, repository.AllocationDecisionFilter{OpportunityID: &opportunity.ID}, 1, 0)
+		if err != nil {
+			return nil, fmt.Errorf("portfolio_allocator: reconcile selected opportunity: %w", err)
+		}
+		if len(decisions) != 0 {
+			if err := o.updateOpportunityStatus(ctx, decisions[0]); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		opportunity.Status = domain.OpportunityStatusQueued
+		recoverable = append(recoverable, opportunity)
+	}
+	return recoverable, nil
 }
 
 func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision domain.AllocationDecision) error {

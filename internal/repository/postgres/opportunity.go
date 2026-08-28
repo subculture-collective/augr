@@ -82,6 +82,12 @@ func (r *OpportunityRepo) ListQueuedForAllocation(ctx context.Context, asOf time
 	return r.list(ctx, query, []any{domain.OpportunityStatusQueued, asOf.UTC(), r.accountID}, "list queued opportunities for allocation")
 }
 
+// ListSelectedForAllocation returns durable in-flight claims for restart reconciliation.
+func (r *OpportunityRepo) ListSelectedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error) {
+	query := opportunitySelectSQL + ` WHERE status = $1 AND expires_at > $2 AND account_id=$3 ORDER BY expires_at ASC, created_at ASC, id ASC`
+	return r.list(ctx, query, []any{domain.OpportunityStatusSelected, asOf.UTC(), r.accountID}, "list selected opportunities for allocation")
+}
+
 // Count returns the number of opportunities matching the filter.
 func (r *OpportunityRepo) Count(ctx context.Context, filter repository.OpportunityFilter) (int, error) {
 	query, args := buildOpportunityCountQuery(r.accountID, filter)
