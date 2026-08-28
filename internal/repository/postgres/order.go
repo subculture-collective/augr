@@ -122,18 +122,20 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 	row := r.pool.QueryRow(ctx,
 		`WITH locked AS (SELECT id FROM orders WHERE id=$33 FOR UPDATE)
 		 UPDATE orders o
-		 SET external_id = $9, ticker = $10, market_type = $11, side = $12,
-		     order_type = $13, quantity = $14, limit_price = $15, stop_price = $16,
-		     filled_quantity = $17, filled_avg_price = $18, status = $19, broker = $20,
-		     submitted_at = $21, filled_at = $22, asset_class = $23, underlying_ticker = $24,
-		     option_type = $25, strike = $26, expiry = $27, contract_multiplier = $28,
-		     position_intent = $29, leg_group_id = $30, prediction_side = $31, polymarket_intent = $32
+		 SET external_id = $9, filled_quantity = $17, filled_avg_price = $18, status = $19,
+		     broker = $20, submitted_at = $21, filled_at = $22
 		 FROM locked
 		 WHERE o.id = locked.id
 		   AND o.strategy_id IS NOT DISTINCT FROM $1 AND o.pipeline_run_id IS NOT DISTINCT FROM $2
 		   AND o.account_id IS NOT DISTINCT FROM $3 AND o.environment IS NOT DISTINCT FROM $4
 		   AND o.origin_type IS NOT DISTINCT FROM $5 AND o.origin_id IS NOT DISTINCT FROM $6
 		   AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $7 AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $8
+		   AND o.ticker=$10 AND o.market_type=$11 AND o.side=$12 AND o.order_type=$13 AND o.quantity=$14
+		   AND o.limit_price IS NOT DISTINCT FROM $15 AND o.stop_price IS NOT DISTINCT FROM $16
+		   AND o.asset_class IS NOT DISTINCT FROM $23 AND o.underlying_ticker IS NOT DISTINCT FROM $24
+		   AND o.option_type IS NOT DISTINCT FROM $25 AND o.strike IS NOT DISTINCT FROM $26 AND o.expiry IS NOT DISTINCT FROM $27
+		   AND o.contract_multiplier IS NOT DISTINCT FROM $28 AND o.position_intent IS NOT DISTINCT FROM $29
+		   AND o.leg_group_id IS NOT DISTINCT FROM $30 AND o.prediction_side IS NOT DISTINCT FROM $31 AND o.polymarket_intent IS NOT DISTINCT FROM $32
 		 RETURNING o.id`,
 		order.StrategyID,
 		order.PipelineRunID,

@@ -394,6 +394,13 @@ func (r *mockPositionRepo) GetByExecutionScope(ctx context.Context, accountID uu
 	return r.GetByStrategy(ctx, strategyID, filter, limit, offset)
 }
 
+func (r *mockPositionRepo) GetByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	if r.getOpenFn != nil {
+		return r.getOpenFn(ctx, filter, limit, offset)
+	}
+	return nil, nil
+}
+
 // mockTradeRepo implements repository.TradeRepository.
 type mockTradeRepo struct {
 	mu     sync.Mutex
@@ -641,7 +648,8 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	positionRepo := &mockPositionRepo{}
 	auditRepo := &mockAuditLogRepo{}
 	metrics := &mockMetricsRecorder{}
-	financialRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, TradeID: uuid.New(), Replayed: false, PositionID: nil}}
+	positionID := uuid.New()
+	financialRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, TradeID: uuid.New(), Replayed: false, PositionID: &positionID}}
 	mgr := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, auditRepo).WithFinancialLifecycleRepo(financialRepo).WithMetrics(metrics)
 	if err := mgr.HandleFillForTest(context.Background(), order, plan, strategyScope(strategyID, runID), decisionID); err != nil {
 		t.Fatalf("HandleFillForTest() error = %v", err)
@@ -658,8 +666,9 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	if len(orderRepo.updates) != 0 {
 		t.Fatalf("expected no order repo updates")
 	}
-	replayRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, TradeID: uuid.New(), Replayed: true}}
 	order2 := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, Ticker: "MSFT", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusSubmitted, Quantity: 5}
+	replayPositionID := uuid.New()
+	replayRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: order2.ID, PositionID: &replayPositionID, TradeID: uuid.New(), Replayed: true}}
 	auditRepo2 := &mockAuditLogRepo{}
 	tradeRepo2 := &mockTradeRepo{}
 	positionRepo2 := &mockPositionRepo{}

@@ -39,6 +39,10 @@ type PaperOrderExecutor interface {
 	ExecuteCopyOrder(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error)
 }
 
+type CopyOriginLifecycle interface {
+	ProposeCopyIntent(context.Context, domain.CopySubscription, domain.CopyTradeIntent, uuid.UUID) error
+}
+
 type ServiceDeps struct {
 	ExecutionAccount domain.ExecutionAccountBinding
 	Repo             repository.CopyTradingRepository
@@ -54,6 +58,7 @@ type ServiceDeps struct {
 	EDGAR     ThirteenFFetcher
 	Prices    PriceProvider
 	Executor  PaperOrderExecutor
+	Lifecycle CopyOriginLifecycle
 	Logger    *slog.Logger
 	Now       func() time.Time
 }
@@ -240,10 +245,14 @@ func (s *Service) UpdateSubscription(ctx context.Context, id uuid.UUID, replacem
 	if err != nil {
 		return nil, err
 	}
+	if err := s.validateSubscriptionBinding(current); err != nil {
+		return nil, err
+	}
 	if current.Status != domain.CopySubscriptionDraft && current.Status != domain.CopySubscriptionPreviewed && current.Status != domain.CopySubscriptionPaused {
 		return nil, fmt.Errorf("subscription can only be edited while draft, previewed, or paused")
 	}
 	replacement.ID, replacement.LeaderID, replacement.SourceID = current.ID, current.LeaderID, current.SourceID
+	replacement.AccountID, replacement.Environment = current.AccountID, current.Environment
 	replacement.LegacyStrategyID, replacement.OriginType, replacement.OriginID = current.LegacyStrategyID, current.OriginType, current.OriginID
 	replacement.Status, replacement.IsPaper, replacement.CreatedBy, replacement.CreatedAt = current.Status, true, current.CreatedBy, current.CreatedAt
 	if err := replacement.Validate(); err != nil {
@@ -258,6 +267,9 @@ func (s *Service) UpdateSubscription(ctx context.Context, id uuid.UUID, replacem
 func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Preview, error) {
 	subscription, err := s.deps.Repo.GetSubscription(ctx, subscriptionID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.validateSubscriptionBinding(subscription); err != nil {
 		return nil, err
 	}
 	observation, snapshot, err := s.deps.Repo.GetLatest13FSnapshot(ctx, subscription.SourceID)
@@ -304,6 +316,9 @@ func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Previ
 func (s *Service) SetStatus(ctx context.Context, id uuid.UUID, next domain.CopySubscriptionStatus) (*domain.CopySubscription, error) {
 	subscription, err := s.deps.Repo.GetSubscription(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.validateSubscriptionBinding(subscription); err != nil {
 		return nil, err
 	}
 	if err := validateStatusTransition(subscription.Status, next); err != nil {
@@ -426,6 +441,9 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	if err != nil {
 		return nil, err
 	}
+	if err := s.validateSubscriptionBinding(subscription); err != nil {
+		return nil, err
+	}
 	if subscription.Status != domain.CopySubscriptionPaperActive || !subscription.IsPaper {
 		return nil, fmt.Errorf("subscription must be paper_active")
 	}
@@ -455,13 +473,23 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
-		if claimer, ok := s.deps.Repo.(repository.CopyIntentExecutionClaimer); ok {
-			claimID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(persistedOrigin.ID().String()+":"+candidate.ID.String()))
-			claimed, claimErr := claimer.ClaimIntentExecution(ctx, candidate.ID, claimID, s.deps.Now().UTC())
-			if claimErr != nil {
-				return result, fmt.Errorf("claim copy intent %s: %w", candidate.ID, claimErr)
-			}
-			if !claimed {
+		claimID := uuid.New()
+		claimed, claimErr := s.deps.Repo.ClaimIntentExecution(ctx, candidate.ID, claimID, s.deps.Now().UTC())
+		if claimErr != nil {
+			return result, fmt.Errorf("claim copy intent %s: %w", candidate.ID, claimErr)
+		}
+		if !claimed {
+			result.Intents = append(result.Intents, candidate)
+			continue
+		}
+		if s.deps.Lifecycle != nil {
+			if lifecycleErr := s.deps.Lifecycle.ProposeCopyIntent(ctx, *subscription, candidate, persistedOrigin.ID()); lifecycleErr != nil {
+				candidate.Status, candidate.RiskStatus = "failed", "rejected"
+				candidate.RiskReasons = []string{fmt.Errorf("propose copy common lifecycle: %w", lifecycleErr).Error()}
+				completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+				if completeErr != nil || !completed {
+					return result, fmt.Errorf("complete copy intent %s after lifecycle failure: applied=%t: %w", candidate.ID, completed, completeErr)
+				}
 				result.Intents = append(result.Intents, candidate)
 				continue
 			}
@@ -471,18 +499,53 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 		if executeErr != nil {
 			candidate.Status, candidate.RiskStatus = "risk_rejected", "rejected"
 			candidate.RiskReasons = []string{executeErr.Error()}
+		} else if err := validatePaperOrderResult(executionResult); err != nil {
+			candidate.Status, candidate.RiskStatus, candidate.OrderID = "failed", "rejected", nil
+			candidate.RiskReasons = []string{err.Error()}
 		} else {
-			candidate.Status, candidate.RiskStatus = "ordered", "approved"
-			if executionResult.Status == domain.OrderStatusFilled {
+			candidate.RiskStatus = "approved"
+			switch executionResult.Status {
+			case domain.OrderStatusFilled:
 				candidate.Status = "filled"
+			case domain.OrderStatusSubmitted:
+				candidate.Status = "ordered"
+			case domain.OrderStatusPartial, domain.OrderStatusPending:
+				candidate.Status = "partial"
+			default:
+				candidate.Status, candidate.RiskStatus = "failed", "rejected"
+				candidate.RiskReasons = []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
 			}
 		}
-		if updateErr := s.deps.Repo.UpdateIntent(ctx, &candidate); updateErr != nil {
+		completed, updateErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+		if updateErr != nil {
 			return result, fmt.Errorf("update copy intent %s: %w", candidate.ID, updateErr)
+		}
+		if !completed {
+			return result, fmt.Errorf("update copy intent %s: execution claim lost", candidate.ID)
 		}
 		result.Intents = append(result.Intents, candidate)
 	}
 	return result, nil
+}
+
+func (s *Service) validateSubscriptionBinding(subscription *domain.CopySubscription) error {
+	if s == nil || subscription == nil {
+		return fmt.Errorf("copy subscription is required")
+	}
+	if err := s.deps.ExecutionAccount.Validate(); err != nil {
+		return fmt.Errorf("copy execution account: %w", err)
+	}
+	if subscription.AccountID != s.deps.ExecutionAccount.AccountID() || subscription.Environment != s.deps.ExecutionAccount.Environment() {
+		return fmt.Errorf("copy subscription account and environment do not match configured execution account")
+	}
+	return nil
+}
+
+func validatePaperOrderResult(result PaperOrderResult) error {
+	if result.OrderID == nil || *result.OrderID == uuid.Nil || !result.Status.IsValid() {
+		return fmt.Errorf("copy executor returned incomplete order result")
+	}
+	return nil
 }
 
 type effectFailure struct {

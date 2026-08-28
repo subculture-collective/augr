@@ -176,7 +176,7 @@ func TestRuntimeSchemaVersionRequiresExpansion(t *testing.T) {
 	for _, tt := range []struct {
 		version int
 		want    bool
-	}{{107, false}, {108, true}, {109, true}, {110, false}} {
+	}{{107, false}, {108, true}, {109, false}, {110, false}} {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
@@ -2222,22 +2222,23 @@ func TestRuntimeLiveGateForStrategyParsesAllowlists(t *testing.T) {
 	t.Parallel()
 
 	strategyID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	versionID := uuid.MustParse("22222222-2222-4222-8222-222222222222")
 	runner := &realStrategyRunner{
 		cfg: config.Config{
 			Features:                     config.FeatureFlags{EnableLiveTrading: true},
-			LiveTradingAllowedStrategies: []string{strategyID.String()},
+			LiveTradingAllowedStrategies: []string{versionID.String()},
 			LiveTradingAllowedBrokers:    []string{"Alpaca", "Binance"},
 		},
 	}
 
-	gate, err := runner.liveGateForStrategy(domain.Strategy{ID: strategyID, IsPaper: false})
+	gate, err := runner.liveGateForStrategy(domain.Strategy{ID: strategyID, ExecutionStrategyVersionID: &versionID, IsPaper: false})
 	if err != nil {
 		t.Fatalf("liveGateForStrategy() error = %v", err)
 	}
 	if !gate.EnableLiveTrading {
 		t.Fatal("gate.EnableLiveTrading = false, want true")
 	}
-	if !gate.AllowedStrategies[strategyID] {
+	if !gate.AllowedStrategies[versionID] {
 		t.Fatal("strategy ID not allowlisted")
 	}
 	if !gate.AllowedBrokers["alpaca"] || !gate.AllowedBrokers["binance"] {

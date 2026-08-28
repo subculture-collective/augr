@@ -142,6 +142,17 @@ func TestNewScheduledNonRunExecutionScopeDerivesDeterministicOriginID(t *testing
 	}
 }
 
+func TestScopeOriginIDsAcceptsStableStringForNonUUIDOrigin(t *testing.T) {
+	scope, err := NewNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, ledger.ExecutionOriginPortfolioRebalance, "portfolio/daily/core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originID, runID, hasRun, err := scopeOriginIDs(scope)
+	if err != nil || originID != uuid.Nil || runID != uuid.Nil || hasRun {
+		t.Fatalf("scope IDs = %s %s %t, %v", originID, runID, hasRun, err)
+	}
+}
+
 func TestNewNonRunExecutionScopeRejectsRunOrigins(t *testing.T) {
 	for _, originType := range []ledger.ExecutionOriginType{ledger.ExecutionOriginStrategyVersion, ledger.ExecutionOriginCopySubscription, "unknown"} {
 		if _, err := NewNonRunExecutionScope(testScopeAccountID, domain.AccountEnvironmentPaperScored, originType, "job"); err == nil {

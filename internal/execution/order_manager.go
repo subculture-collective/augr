@@ -712,10 +712,14 @@ func scopeOriginIDs(scope ExecutionScope) (uuid.UUID, uuid.UUID, bool, error) {
 	if scope.AccountID() == uuid.Nil || !scope.Environment().IsValid() {
 		return uuid.Nil, uuid.Nil, false, fmt.Errorf("account binding is required")
 	}
-	_, originID := scope.Origin()
-	originUUID, err := uuid.Parse(originID)
-	if err != nil {
-		return uuid.Nil, uuid.Nil, false, fmt.Errorf("UUID execution origin is required: %w", err)
+	originType, originID := scope.Origin()
+	originUUID := uuid.Nil
+	if originType == ledger.ExecutionOriginStrategyVersion || originType == ledger.ExecutionOriginCopySubscription {
+		var err error
+		originUUID, err = uuid.Parse(originID)
+		if err != nil {
+			return uuid.Nil, uuid.Nil, false, fmt.Errorf("UUID execution origin is required for %s: %w", originType, err)
+		}
 	}
 	run, hasRun := scope.PipelineRun()
 	return originUUID, run.ID, hasRun, nil
@@ -889,7 +893,11 @@ func (m *OrderManager) positionsByScope(ctx context.Context, scope ExecutionScop
 }
 
 func (m *OrderManager) buildRiskPortfolioSnapshot(ctx context.Context, balance Balance, scope ExecutionScope) (risk.Portfolio, error) {
-	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{})
+	repo, ok := m.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return risk.Portfolio{}, fmt.Errorf("canonical account-scoped position repository is required")
+	}
+	positions, err := repo.GetByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, 0)
 	if err != nil {
 		return risk.Portfolio{}, err
 	}
@@ -1031,6 +1039,9 @@ func (m *OrderManager) handleFill(
 		result, err := m.financialRepo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: "paper_fill:v1:" + order.ID.String() + ":full", Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade})
 		if err != nil {
 			return fmt.Errorf("order_manager: persist fill: %w", err)
+		}
+		if err := validateOrderFillResult(result, order, scope); err != nil {
+			return fmt.Errorf("order_manager: invalid persisted fill result: %w", err)
 		}
 		if !result.Replayed {
 			m.recordOrderMetric(order.Side, order.Status)
@@ -1177,6 +1188,34 @@ func (m *OrderManager) handleFill(
 	m.emitOrderEvent(ctx, OrderEventFilled, order, scope)
 
 	return nil
+}
+
+func validateOrderFillResult(result repository.OrderFillResult, order *domain.Order, scope ExecutionScope) error {
+	if order == nil || result.OrderID != order.ID || result.TradeID == uuid.Nil {
+		return fmt.Errorf("order and trade identities are incomplete or mismatched")
+	}
+	if order.Side == domain.OrderSideBuy && result.PositionID == nil {
+		return fmt.Errorf("opening fill has no position identity")
+	}
+	if result.Position == nil {
+		return nil
+	}
+	originType, originID := scope.Origin()
+	position := result.Position
+	if result.PositionID == nil || *result.PositionID != position.ID || position.ID == uuid.Nil ||
+		position.AccountID != scope.AccountID() || position.Environment != scope.Environment() ||
+		position.OriginType != string(originType) || position.OriginID != originID ||
+		position.Ticker != fillPositionTicker(order) {
+		return fmt.Errorf("position identity or canonical scope is inconsistent")
+	}
+	return nil
+}
+
+func fillPositionTicker(order *domain.Order) string {
+	if isPredictionMarket(order.MarketType) {
+		return polymarketPositionTicker(order.Ticker, order.PredictionSide)
+	}
+	return order.Ticker
 }
 
 // HandleFillForTest exposes handleFill for focused unit coverage.

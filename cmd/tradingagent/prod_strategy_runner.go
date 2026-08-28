@@ -379,10 +379,10 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
-	if err == nil {
-		err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
+	if err = validateResultOrders(orders, r.executionAccount, executionVersionID, run.ID, run.TradeDate); err != nil {
+		return canonical, err
 	}
+	positions, err := loadResultPositions(ctx, r.positionRepo, r.executionAccount, executionVersionID)
 	if err != nil {
 		return canonical, err
 	}
@@ -812,10 +812,10 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
-	if err == nil {
-		err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
+	if err = validateResultOrders(orders, r.executionAccount, executionVersionID, run.ID, run.TradeDate); err != nil {
+		return canonical, err
 	}
+	positions, err := loadResultPositions(ctx, r.positionRepo, r.executionAccount, executionVersionID)
 	if err != nil {
 		return canonical, err
 	}
@@ -965,13 +965,13 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 		if err != nil {
 			return canonical, err
 		}
+		if err = validateResultOrders(orders, r.executionAccount, executionVersionID, run.ID, run.TradeDate); err != nil {
+			return canonical, err
+		}
 	}
 	var positions []domain.Position
 	if r.positionRepo != nil {
-		positions, err = r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
-		if err == nil {
-			err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
-		}
+		positions, err = loadResultPositions(ctx, r.positionRepo, r.executionAccount, executionVersionID)
 		if err != nil {
 			return canonical, err
 		}
@@ -1309,7 +1309,11 @@ func (r *realStrategyRunner) effectivePolymarketExecutionStrategy(strategy domai
 		effective.IsPaper = true
 		return effective
 	}
-	if allowed, _ := gate.Allows(&strategy.ID, "polymarket"); !allowed {
+	if strategy.ExecutionStrategyVersionID == nil {
+		effective.IsPaper = true
+		return effective
+	}
+	if allowed, _ := gate.Allows(strategy.ExecutionStrategyVersionID, "polymarket"); !allowed {
 		effective.IsPaper = true
 	}
 	return effective
@@ -2263,6 +2267,9 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 	if r == nil || strategy.IsPaper || !r.cfg.Features.EnableLiveTrading {
 		return execution.LiveGateConfig{}, nil
 	}
+	if strategy.ExecutionStrategyVersionID == nil || *strategy.ExecutionStrategyVersionID == uuid.Nil {
+		return execution.LiveGateConfig{}, fmt.Errorf("live trading requires an immutable strategy-version binding")
+	}
 
 	allowedStrategies := make(map[uuid.UUID]bool, len(r.cfg.LiveTradingAllowedStrategies))
 	for _, raw := range r.cfg.LiveTradingAllowedStrategies {
@@ -2274,7 +2281,7 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 		if err != nil {
 			return execution.LiveGateConfig{}, fmt.Errorf("parse LIVE_TRADING_ALLOWED_STRATEGIES value %q: %w", raw, err)
 		}
-		if strategy.ExecutionStrategyVersionID != nil && strategyID == strategy.ID {
+		if strategyID == strategy.ID {
 			return execution.LiveGateConfig{}, fmt.Errorf("LIVE_TRADING_ALLOWED_STRATEGIES must contain immutable strategy-version UUIDs, not legacy strategy ID %s", strategyID)
 		}
 		allowedStrategies[strategyID] = true
@@ -2296,6 +2303,27 @@ func validatePositionOrigins(positions []domain.Position, binding domain.Executi
 	for _, position := range positions {
 		if position.AccountID != binding.AccountID() || position.Environment != binding.Environment() || position.OriginType != "strategy_version" || position.OriginID != versionID.String() {
 			return fmt.Errorf("position %s has mismatched execution origin", position.ID)
+		}
+	}
+	return nil
+}
+
+func loadResultPositions(ctx context.Context, repo repository.PositionRepository, binding domain.ExecutionAccountBinding, versionID uuid.UUID) ([]domain.Position, error) {
+	scoped, ok := repo.(repository.ExecutionScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("canonical execution-scoped position repository is required")
+	}
+	positions, err := scoped.GetByExecutionScope(ctx, binding.AccountID(), binding.Environment(), string(ledger.ExecutionOriginStrategyVersion), versionID.String(), repository.PositionFilter{}, 10, 0)
+	if err == nil {
+		err = validatePositionOrigins(positions, binding, versionID)
+	}
+	return positions, err
+}
+
+func validateResultOrders(orders []domain.Order, binding domain.ExecutionAccountBinding, versionID, runID uuid.UUID, tradeDate time.Time) error {
+	for _, order := range orders {
+		if order.AccountID != binding.AccountID() || order.Environment != binding.Environment() || order.OriginType != string(ledger.ExecutionOriginStrategyVersion) || order.OriginID != versionID.String() || order.PipelineRunID == nil || *order.PipelineRunID != runID || order.PipelineRunTradeDate == nil || !order.PipelineRunTradeDate.Equal(tradeDate) {
+			return fmt.Errorf("order %s has mismatched account, environment, origin, or pipeline identity", order.ID)
 		}
 	}
 	return nil

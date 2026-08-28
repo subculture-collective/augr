@@ -255,6 +255,11 @@ func (r *PositionRepo) GetByExecutionScope(ctx context.Context, accountID uuid.U
 	return r.list(ctx, query, args, "get positions by execution scope")
 }
 
+func (r *PositionRepo) GetByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	query, args := buildPositionQuery("account_scope", []any{accountID, environment}, false, filter, limit, offset)
+	return r.list(ctx, query, args, "get positions by account")
+}
+
 const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id AND t.position_id=p.id ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,
 		p.quantity::double precision, p.avg_entry::double precision,
 		p.current_price::double precision, p.unrealized_pnl::double precision,
@@ -559,6 +564,9 @@ func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filte
 	if scopeColumn == "execution_scope" {
 		values := scopeValue.([]any)
 		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.environment = "+nextArg(values[1]), "p.origin_type = "+nextArg(values[2]), "p.origin_id = "+nextArg(values[3]))
+	} else if scopeColumn == "account_scope" {
+		values := scopeValue.([]any)
+		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.environment = "+nextArg(values[1]))
 	} else if scopeColumn != "" {
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))
 	}

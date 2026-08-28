@@ -125,6 +125,14 @@ func (r *cancellationRaceCopyRepo) UpdateIntent(context.Context, *domain.CopyTra
 	return nil
 }
 
+func (r *cancellationRaceCopyRepo) ClaimIntentExecution(context.Context, uuid.UUID, uuid.UUID, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (r *cancellationRaceCopyRepo) CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, _ uuid.UUID) (bool, error) {
+	return true, r.UpdateIntent(ctx, intent)
+}
+
 type cancellationRacePrices struct {
 	snapshot PriceSnapshot
 }
@@ -161,7 +169,8 @@ type countingCopyExecutor struct {
 func (e *countingCopyExecutor) ExecuteCopyOrder(_ context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
 	e.calls++
 	e.request = request
-	return PaperOrderResult{}, nil
+	id := uuid.New()
+	return PaperOrderResult{OrderID: &id, Status: domain.OrderStatusSubmitted}, nil
 }
 
 type effectCopyRepo struct {
@@ -340,6 +349,11 @@ func TestRebalanceCancellationWinnerPreventsIntentsAndOrders(t *testing.T) {
 	subscription.SourceID = uuid.New()
 	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
 	subscription.Status = domain.CopySubscriptionPaperActive
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription.AccountID, subscription.Environment = binding.AccountID(), binding.Environment()
 	subscription.LegacyStrategyID = &strategyID
 	observation := domain.CopySourceObservation{ID: uuid.New()}
 	repo := &cancellationRaceCopyRepo{
@@ -413,6 +427,11 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 	subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
 	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
 	subscription.Status = domain.CopySubscriptionPaperActive
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription.AccountID, subscription.Environment = binding.AccountID(), binding.Environment()
 	subscription.MaxSpreadBPS = 200
 	repo := &cancellationRaceCopyRepo{
 		subscription: subscription,
@@ -426,7 +445,7 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		store := &plannedOriginStore{}
-		service := NewService(ServiceDeps{Repo: repo, OriginRuns: store, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+		service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: store, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
 		result, err := service.Rebalance(context.Background(), subscription.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -445,7 +464,7 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 	t.Run("failure", func(t *testing.T) {
 		repo.intentWrites, executor.calls = 0, 0
 		store := &plannedOriginStore{err: errors.New("transaction rolled back")}
-		service := NewService(ServiceDeps{Repo: repo, OriginRuns: store, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+		service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: store, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
 		result, err := service.Rebalance(context.Background(), subscription.ID)
 		if err == nil || result != nil {
 			t.Fatalf("Rebalance() = (%+v, %v), want atomic failure", result, err)
@@ -458,7 +477,7 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 	t.Run("registered received intent resumes", func(t *testing.T) {
 		repo.intentWrites, executor.calls = 0, 0
 		store := &plannedOriginStore{replayed: true}
-		service := NewService(ServiceDeps{Repo: repo, OriginRuns: store, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+		service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: store, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
 		result, err := service.Rebalance(context.Background(), subscription.ID)
 		if err != nil || len(result.Intents) != 1 || executor.calls != 1 {
 			t.Fatalf("Rebalance() = (%+v, %v), executor calls=%d", result, err, executor.calls)

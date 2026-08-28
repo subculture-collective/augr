@@ -887,10 +887,11 @@ func TestNewOrderManager_UsesFinancialLifecycleRepoForPaperOnly(t *testing.T) {
 	t.Parallel()
 
 	strategyID := uuid.New()
+	versionID := uuid.New()
 	runner := &realStrategyRunner{
 		cfg: config.Config{
 			Features:                     config.FeatureFlags{EnableLiveTrading: true},
-			LiveTradingAllowedStrategies: []string{strategyID.String()},
+			LiveTradingAllowedStrategies: []string{versionID.String()},
 			LiveTradingAllowedBrokers:    []string{"kalshi"},
 			Brokers:                      config.BrokerConfigs{Kalshi: config.KalshiConfig{APIKeyID: "kalshi-key-id", PrivateKeyPEMB64: "base64-private-key"}},
 		},
@@ -903,7 +904,7 @@ func TestNewOrderManager_UsesFinancialLifecycleRepoForPaperOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOrderManager(paper) error = %v", err)
 	}
-	liveMgr, err := runner.newOrderManager(context.Background(), domain.Strategy{ID: strategyID, IsPaper: false, MarketType: domain.MarketTypeKalshi, Ticker: "KXTEST-YESNO"}, agent.ResolvedConfig{}, &agent.StrategyConfig{})
+	liveMgr, err := runner.newOrderManager(context.Background(), domain.Strategy{ID: strategyID, ExecutionStrategyVersionID: &versionID, IsPaper: false, MarketType: domain.MarketTypeKalshi, Ticker: "KXTEST-YESNO"}, agent.ResolvedConfig{}, &agent.StrategyConfig{})
 	if err != nil {
 		t.Fatalf("newOrderManager(live) error = %v", err)
 	}
@@ -1034,7 +1035,8 @@ func TestEffectivePolymarketExecutionStrategy_DefaultsToPaperUnlessLiveAllowlist
 	t.Parallel()
 
 	strategyID := uuid.New()
-	strategy := domain.Strategy{ID: strategyID, MarketType: domain.MarketTypePolymarket, IsPaper: false}
+	versionID := uuid.New()
+	strategy := domain.Strategy{ID: strategyID, ExecutionStrategyVersionID: &versionID, MarketType: domain.MarketTypePolymarket, IsPaper: false}
 
 	runner := &realStrategyRunner{}
 	if got := runner.effectivePolymarketExecutionStrategy(strategy); !got.IsPaper {
@@ -1046,7 +1048,7 @@ func TestEffectivePolymarketExecutionStrategy_DefaultsToPaperUnlessLiveAllowlist
 		t.Fatal("expected paper when strategy/broker are not allowlisted")
 	}
 
-	runner.cfg.LiveTradingAllowedStrategies = []string{strategyID.String()}
+	runner.cfg.LiveTradingAllowedStrategies = []string{versionID.String()}
 	runner.cfg.LiveTradingAllowedBrokers = []string{"polymarket"}
 	if got := runner.effectivePolymarketExecutionStrategy(strategy); got.IsPaper {
 		t.Fatal("expected live only after explicit strategy and broker allowlist")

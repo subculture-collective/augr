@@ -589,6 +589,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	polymarketWatchedRepo := pgrepo.NewPolymarketWatchedMarketsRepo(db.Pool)
 	polymarketResolvedRepo := pgrepo.NewPolymarketResolvedMarketsRepo(db.Pool)
 	copyTradingRepo := pgrepo.NewCopyTradingRepo(db.Pool)
+	accountRepo := pgrepo.NewAccountRepo(db.Pool)
 	instrumentRepo := pgrepo.NewInstrumentRepo(db.Pool)
 	quoteSnapshotRepo := pgrepo.NewQuoteSnapshotRepo(db.Pool)
 	riskBreakerRepo := pgrepo.NewRiskBreakerRepo(db.Pool)
@@ -1006,7 +1007,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					Orders: orderRepo, Trades: tradeRepo, FinancialLifecycle: db, Audit: auditLogRepo,
 					Events: eventRepo, DecisionRecorder: tradeDecisionRecorder, Metrics: appMetrics, Logger: logger,
 				}),
-				Logger: logger,
+				Lifecycle: copytrading.NewOriginLifecycleResolver(pgrepo.NewExecutionLifecycleRepo(db.Pool), accountRepo, instrumentRepo, quoteSnapshotRepo, "legacy_augr_stock"),
+				Logger:    logger,
 			})
 			return nil
 		}); err != nil {
@@ -1755,10 +1757,10 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
-	if err == nil {
-		err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
+	if err = validateResultOrders(orders, r.executionAccount, executionVersionID, run.ID, run.TradeDate); err != nil {
+		return canonical, err
 	}
+	positions, err := loadResultPositions(ctx, r.positionRepo, r.executionAccount, executionVersionID)
 	if err != nil {
 		return canonical, err
 	}

@@ -646,6 +646,10 @@ type ExecutionScopedPositionRepository interface {
 	GetByExecutionScope(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter PositionFilter, limit, offset int) ([]domain.Position, error)
 }
 
+type AccountScopedPositionRepository interface {
+	GetByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter PositionFilter, limit, offset int) ([]domain.Position, error)
+}
+
 // TradeRepository provides access to executed trades.
 type TradeRepository interface {
 	Create(ctx context.Context, trade *domain.Trade) error
@@ -958,8 +962,6 @@ type CopyTradingRepository interface {
 	CreateIntent(ctx context.Context, intent *domain.CopyTradeIntent) (bool, error)
 	ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error)
 	UpdateIntent(ctx context.Context, intent *domain.CopyTradeIntent) error
-}
-
-type CopyIntentExecutionClaimer interface {
 	ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error)
+	CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, claimID uuid.UUID) (bool, error)
 }
