@@ -17,6 +17,7 @@ type optionRecoveryDependencies struct {
 	Orders    repository.OrderRepository
 	Fills     repository.OptionFillRepository
 	Financial repository.FinancialLifecycleRepository
+	Trades    repository.TradeRepository
 	Decisions execution.DecisionRecorder
 }
 
@@ -114,7 +115,7 @@ func bootstrapPaperOptionsAccountLocked(ctx context.Context, binding domain.Exec
 		return err
 	}
 	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].Fills != nil {
-		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, nil, nil, nil).WithOptionFillRepo(recovery[0].Fills)
+		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, recovery[0].Trades, nil, nil).WithOptionFillRepo(recovery[0].Fills)
 		if err := manager.ReconcilePendingOptionOrdersWithAccountLockHeld(ctx, binding, allOrders, allPositions); err != nil {
 			return fmt.Errorf("reconcile pending option orders: %w", err)
 		}

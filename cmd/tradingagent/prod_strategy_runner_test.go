@@ -1128,11 +1128,11 @@ func TestNewOrderManager_UsesFinancialLifecycleRepoForPaperOnly(t *testing.T) {
 		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{Ticker: "KXTEST-YESNO", Status: "active", CloseTime: time.Now().UTC().Add(time.Hour), FetchedAt: time.Now().UTC()}},
 		logger:           slogDiscardLogger(),
 	}
-	paperMgr, err := runner.newOrderManager(context.Background(), domain.Strategy{ID: strategyID, IsPaper: true, MarketType: domain.MarketTypeKalshi, Ticker: "KXTEST-YESNO"}, agent.ResolvedConfig{}, &agent.StrategyConfig{})
+	paperMgr, err := runner.newOrderManager(context.Background(), domain.Strategy{ID: strategyID, IsPaper: true, MarketType: domain.MarketTypeKalshi, Ticker: "KXTEST-YESNO"}, agent.ResolvedConfig{}, &agent.StrategyConfig{}, testStrategyScope(t, strategyID))
 	if err != nil {
 		t.Fatalf("newOrderManager(paper) error = %v", err)
 	}
-	liveMgr, err := runner.newOrderManager(context.Background(), domain.Strategy{ID: strategyID, ExecutionStrategyVersionID: &versionID, IsPaper: false, MarketType: domain.MarketTypeKalshi, Ticker: "KXTEST-YESNO"}, agent.ResolvedConfig{}, &agent.StrategyConfig{})
+	liveMgr, err := runner.newOrderManager(context.Background(), domain.Strategy{ID: strategyID, ExecutionStrategyVersionID: &versionID, IsPaper: false, MarketType: domain.MarketTypeKalshi, Ticker: "KXTEST-YESNO"}, agent.ResolvedConfig{}, &agent.StrategyConfig{}, testStrategyScope(t, versionID))
 	if err != nil {
 		t.Fatalf("newOrderManager(live) error = %v", err)
 	}

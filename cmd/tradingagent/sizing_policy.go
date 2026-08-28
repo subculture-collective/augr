@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 
@@ -23,12 +24,13 @@ func sizingConfigForStrategy(
 	resolved agent.ResolvedConfig,
 	positionRepo repository.PositionRepository,
 	logger *slog.Logger,
+	scope execution.ExecutionScope,
 ) execution.SizingConfig {
 	useKelly := strategyConfig != nil && strategyConfig.RiskConfig != nil && strategyConfig.RiskConfig.UseKellySizing != nil && *strategyConfig.RiskConfig.UseKellySizing
 	stats := position.HistoryStats{}
 	if useKelly && positionRepo != nil {
 		var err error
-		stats, err = closedTradeStatsForStrategy(ctx, positionRepo, strategy.ID)
+		stats, err = closedTradeStatsForStrategy(ctx, positionRepo, strategy.ID, scope)
 		if err != nil && logger != nil {
 			logger.WarnContext(ctx, "unable to load Kelly sizing history; falling back to market default", "strategy_id", strategy.ID, "error", err)
 		}
@@ -61,7 +63,7 @@ func applyPolymarketSizingCap(market domain.MarketType, cfg execution.SizingConf
 	return cfg
 }
 
-func closedTradeStatsForStrategy(ctx context.Context, positionRepo repository.PositionRepository, strategyID uuid.UUID) (position.HistoryStats, error) {
+func closedTradeStatsForStrategy(ctx context.Context, positionRepo repository.PositionRepository, strategyID uuid.UUID, scope execution.ExecutionScope) (position.HistoryStats, error) {
 	var (
 		closedTrades int
 		wins         int
@@ -71,8 +73,13 @@ func closedTradeStatsForStrategy(ctx context.Context, positionRepo repository.Po
 	)
 	var offset int
 
+	scoped, ok := positionRepo.(repository.ExecutionScopedPositionRepository)
+	if !ok {
+		return position.HistoryStats{}, fmt.Errorf("execution-scoped position repository is required")
+	}
+	originType, originID := scope.Origin()
 	for {
-		positions, err := positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{}, kellyHistoryPageSize, offset)
+		positions, err := scoped.GetByExecutionScope(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, repository.PositionFilter{}, kellyHistoryPageSize, offset)
 		if err != nil {
 			return position.HistoryStats{}, err
 		}
@@ -81,6 +88,9 @@ func closedTradeStatsForStrategy(ctx context.Context, positionRepo repository.Po
 		}
 
 		for _, pos := range positions {
+			if pos.AccountID != scope.AccountID() || pos.Environment != scope.Environment() || pos.OriginType != string(originType) || pos.OriginID != originID || pos.StrategyID == nil || *pos.StrategyID != strategyID {
+				return position.HistoryStats{}, fmt.Errorf("Kelly history escaped execution scope")
+			}
 			if pos.ClosedAt == nil {
 				continue
 			}

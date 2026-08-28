@@ -247,12 +247,12 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 			positionID = nil
 		}
 		if _, err := tx.Exec(ctx, `UPDATE trade_decisions SET status = $1, updated_at = $2
-			WHERE status = $3 AND (
+			WHERE status = $3 AND account_id=$6 AND environment=$7 AND origin_type=$8 AND origin_id=$9 AND (
 				paper_order_id = $4 OR
 				(cardinality($5::uuid[]) > 0 AND paper_order_id IN (
-					SELECT DISTINCT t.order_id FROM trades t WHERE t.position_id = ANY($5::uuid[])
+					SELECT DISTINCT t.order_id FROM trades t WHERE t.position_id = ANY($5::uuid[]) AND t.account_id=$6 AND t.environment=$7 AND t.origin_type=$8 AND t.origin_id=$9
 				))
-			)`, domain.TradeDecisionStatusClosed, now, domain.TradeDecisionStatusPaper, order.ID, closedIDs); err != nil {
+			)`, domain.TradeDecisionStatusClosed, now, domain.TradeDecisionStatusPaper, order.ID, closedIDs, order.AccountID, order.Environment, order.OriginType, order.OriginID); err != nil {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: close prediction exit decisions: %w", err)
 		}
 	} else {
@@ -497,12 +497,13 @@ func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.O
 			var status domain.OrderStatus
 			var quantity float64
 			var externalID string
-			if err := db.Pool.QueryRow(ctx, `SELECT order_id,status,filled_quantity::double precision,COALESCE(external_id,'') FROM option_status_idempotency WHERE idempotency_key=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID).Scan(&orderID, &status, &quantity, &externalID); errors.Is(err, pgx.ErrNoRows) {
+			var submittedAt *time.Time
+			if err := db.Pool.QueryRow(ctx, `SELECT order_id,status,filled_quantity::double precision,COALESCE(external_id,''),submitted_at FROM option_status_idempotency WHERE idempotency_key=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID).Scan(&orderID, &status, &quantity, &externalID, &submittedAt); errors.Is(err, pgx.ErrNoRows) {
 				return nil, false, nil
 			} else if err != nil {
 				return nil, false, fmt.Errorf("postgres: resolve option recovery status: %w", err)
 			}
-			if orderID != input.Order.ID || status != input.Order.Status || !numeric8Equal(quantity, input.FillQuantity) || externalID != strings.TrimSpace(input.Order.ExternalID) {
+			if orderID != input.Order.ID || status != input.Order.Status || !numeric8Equal(quantity, input.FillQuantity) || externalID != strings.TrimSpace(input.Order.ExternalID) || !sameTimePointer(submittedAt, input.Order.SubmittedAt) {
 				return nil, false, fmt.Errorf("postgres: resolved option status payload mismatch for order %s", input.Order.ID)
 			}
 			results[index].OrderID = input.Order.ID
@@ -514,12 +515,13 @@ func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.O
 		var quantity, price, fee, premium float64
 		var status domain.OrderStatus
 		var filledAt time.Time
+		var exitReason string
 		err := db.Pool.QueryRow(ctx, `SELECT f.order_id,f.position_id,f.trade_id,f.account_id,f.environment,f.origin_type,f.origin_id,f.fill_quantity::double precision,f.fill_price::double precision,
 			COALESCE(f.cumulative_fee,(SELECT SUM(t.fee) FROM trades t WHERE t.order_id=f.order_id AND t.account_id=f.account_id),0)::double precision,
 			COALESCE(f.cumulative_premium,(SELECT SUM(t.premium) FROM trades t WHERE t.order_id=f.order_id AND t.account_id=f.account_id),0)::double precision,
-			COALESCE(f.cumulative_status,o.status),COALESCE(f.cumulative_filled_at,o.filled_at)
+			COALESCE(f.cumulative_status,o.status),COALESCE(f.cumulative_filled_at,o.filled_at),COALESCE(f.cumulative_exit_reason,'')
 			FROM financial_fill_idempotency f JOIN orders o ON o.id=f.order_id AND o.account_id=f.account_id WHERE f.idempotency_key=$1`, input.IdempotencyKey).Scan(
-			&results[index].OrderID, &results[index].PositionID, &results[index].TradeID, &accountID, &environment, &originType, &originID, &quantity, &price, &fee, &premium, &status, &filledAt,
+			&results[index].OrderID, &results[index].PositionID, &results[index].TradeID, &accountID, &environment, &originType, &originID, &quantity, &price, &fee, &premium, &status, &filledAt, &exitReason,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, false, nil
@@ -527,7 +529,7 @@ func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.O
 		if err != nil {
 			return nil, false, fmt.Errorf("postgres: resolve option fill commit: %w", err)
 		}
-		if results[index].OrderID != input.Order.ID || accountID != input.AccountID || environment != input.Environment || originType != input.OriginType || originID != input.OriginID || !numeric8Equal(quantity, input.FillQuantity) || !numeric8Equal(price, input.FillPrice) || !numeric8Equal(fee, input.Fee) || !numeric8Equal(premium, input.Premium) || status != input.Order.Status || !filledAt.Equal(input.FilledAt.UTC()) {
+		if results[index].OrderID != input.Order.ID || input.PositionID != nil && results[index].PositionID != *input.PositionID || accountID != input.AccountID || environment != input.Environment || originType != input.OriginType || originID != input.OriginID || !numeric8Equal(quantity, input.FillQuantity) || !numeric8Equal(price, input.FillPrice) || !numeric8Equal(fee, input.Fee) || !numeric8Equal(premium, input.Premium) || status != input.Order.Status || !filledAt.Equal(input.FilledAt.UTC()) || strings.TrimSpace(exitReason) != strings.TrimSpace(input.ExitReason) {
 			return nil, false, fmt.Errorf("postgres: resolved option fill payload mismatch for order %s", input.Order.ID)
 		}
 	}
@@ -960,7 +962,7 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	var existingEnvironment domain.AccountEnvironment
 	var existingOriginType, existingOriginID string
 	if err := tx.QueryRow(ctx, `SELECT idempotency_key,decision_id,position_id,trade_id,replay_event_id,payout,resolved_at,created_at,account_id,environment,origin_type,origin_id FROM prediction_settlement_idempotency WHERE idempotency_key=$1 OR decision_id=$2 FOR UPDATE`, input.IdempotencyKey, input.Decision.ID).Scan(&idempotencyKey, &decisionID, &positionID, &tradeID, &replayEventID, &payout, &resolvedAt, &createdAt, &existingAccountID, &existingEnvironment, &existingOriginType, &existingOriginID); err == nil {
-		if idempotencyKey != input.IdempotencyKey || decisionID != input.Decision.ID || existingAccountID != input.AccountID || existingEnvironment != input.Environment || existingOriginType != input.OriginType || existingOriginID != input.OriginID || math.IsNaN(payout) || math.IsInf(payout, 0) || !numeric8Equal(payout, input.Payout) {
+		if idempotencyKey != input.IdempotencyKey || decisionID != input.Decision.ID || existingAccountID != input.AccountID || existingEnvironment != input.Environment || existingOriginType != input.OriginType || existingOriginID != input.OriginID || math.IsNaN(payout) || math.IsInf(payout, 0) || !numeric8Equal(payout, input.Payout) || !resolvedAt.UTC().Equal(input.ResolvedAt.UTC()) {
 			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: idempotency mismatch for decision %s", input.Decision.ID)
 		}
 		if err := tx.Commit(ctx); err != nil {

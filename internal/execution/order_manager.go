@@ -611,7 +611,8 @@ func (m *OrderManager) processSignal(
 			}
 			switch existing[0].Status {
 			case domain.OrderStatusFilled:
-				return nil
+				_, resumeErr := m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
+				return resumeErr
 			case domain.OrderStatusRejected, domain.OrderStatusCancelled:
 				return fmt.Errorf("order_manager: durable effect is terminal with status %s", existing[0].Status)
 			default:
@@ -1302,6 +1303,9 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 	}
 	switch status {
 	case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
+		if m.liveTrading {
+			break
+		}
 		if err := m.fenceEffect(ctx); err != nil {
 			return "", err
 		}
@@ -1322,6 +1326,10 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		return "", err
 	}
 	switch status {
+	case domain.OrderStatusPending, domain.OrderStatusSubmitted:
+		if err := m.orderRepo.Update(ctx, order); err != nil {
+			return "", fmt.Errorf("order_manager: persist reconciled live order: %w", err)
+		}
 	case domain.OrderStatusFilled, domain.OrderStatusPartial:
 		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
 		if err := validateRecoveredFillEvidence(order); err != nil {

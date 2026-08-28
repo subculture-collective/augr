@@ -163,7 +163,10 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 				return fmt.Errorf("options_manager: recovered option provider identity mismatch")
 			}
 		}
-		persistedFilled := order.FilledQuantity
+		durableFilled, err := m.durableOptionFillQuantity(ctx, order)
+		if err != nil {
+			return err
+		}
 		order.ExternalID, order.Status = lookupID, result.Status
 		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = result.FilledQuantity, cloneFloatPtr(result.FilledAvgPrice), cloneTimePtr(result.FilledAt)
 		if order.SubmittedAt == nil {
@@ -173,7 +176,7 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 			}
 			order.SubmittedAt = &submittedAt
 		}
-		if result.FilledQuantity <= persistedFilled {
+		if result.FilledQuantity <= durableFilled {
 			if terminalOrderStatus(order.Status) {
 				statusInput := repository.OptionFillInput{IdempotencyKey: "option_status:v1:" + order.ID.String(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: order, FillQuantity: order.FilledQuantity, StatusOnly: true}
 				if _, err := m.applyOptionFills(ctx, []repository.OptionFillInput{statusInput}); err != nil {
@@ -291,6 +294,28 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 		}
 	}
 	return nil
+}
+
+func (m *OptionsOrderManager) durableOptionFillQuantity(ctx context.Context, order *domain.Order) (float64, error) {
+	if m.tradeRepo == nil {
+		return 0, fmt.Errorf("options_manager: trade repository is required for recovery")
+	}
+	var total float64
+	for offset := 0; ; offset += 250 {
+		trades, err := m.tradeRepo.GetByOrder(ctx, order.ID, repository.TradeFilter{Environment: order.Environment}, 250, offset)
+		if err != nil {
+			return 0, fmt.Errorf("options_manager: load durable fills for %s: %w", order.ID, err)
+		}
+		for _, trade := range trades {
+			if trade.AccountID != order.AccountID || trade.Environment != order.Environment || trade.OriginType != order.OriginType || trade.OriginID != order.OriginID {
+				return 0, fmt.Errorf("options_manager: durable fill for %s escaped execution scope", order.ID)
+			}
+			total += trade.Quantity
+		}
+		if len(trades) < 250 {
+			return total, nil
+		}
+	}
 }
 
 func recoveredSpread(orders []*domain.Order) (*domain.OptionSpread, float64, error) {

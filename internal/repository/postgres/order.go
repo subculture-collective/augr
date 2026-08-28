@@ -594,7 +594,9 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 		return fmt.Errorf("postgres: update order: %w", err)
 	}
 	if terminalOrderStatusPostgres(order.Status) {
-		if _, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE account_id=$1 AND environment=$2 AND close_reservation_order_id=$3`, r.accountID, order.Environment, order.ID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL
+			WHERE account_id=$1 AND environment=$2 AND close_reservation_order_id=$3
+			AND (SELECT COALESCE(SUM(t.quantity),0) FROM trades t WHERE t.order_id=$3 AND t.account_id=$1 AND t.environment=$2) >= $4`, r.accountID, order.Environment, order.ID, order.FilledQuantity); err != nil {
 			return fmt.Errorf("postgres: release terminal order close reservations: %w", err)
 		}
 	}
@@ -823,6 +825,9 @@ func buildOrderCountQuery(accountID uuid.UUID, filter repository.OrderFilter) (s
 	if filter.Broker != "" {
 		conditions = append(conditions, "broker = "+nextArg(filter.Broker))
 	}
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
+	}
 	if filter.MarketType != "" {
 		conditions = append(conditions, "market_type = "+nextArg(filter.MarketType.Normalize()))
 	}
@@ -904,6 +909,9 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 
 	if filter.Broker != "" {
 		conditions = append(conditions, "broker = "+nextArg(filter.Broker))
+	}
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
 	}
 
 	if filter.MarketType != "" {

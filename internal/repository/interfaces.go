@@ -319,6 +319,7 @@ type AgentEventFilter struct {
 
 // OrderFilter defines supported filters when listing or querying orders.
 type OrderFilter struct {
+	Environment     domain.AccountEnvironment
 	Ticker          string
 	Broker          string
 	MarketType      domain.MarketType
@@ -339,12 +340,13 @@ type PositionFilter struct {
 
 // TradeFilter defines supported filters when retrieving trades.
 type TradeFilter struct {
-	OrderID    *uuid.UUID
-	PositionID *uuid.UUID
-	Ticker     *string
-	Side       *domain.OrderSide
-	StartDate  *time.Time
-	EndDate    *time.Time
+	Environment domain.AccountEnvironment
+	OrderID     *uuid.UUID
+	PositionID  *uuid.UUID
+	Ticker      *string
+	Side        *domain.OrderSide
+	StartDate   *time.Time
+	EndDate     *time.Time
 }
 
 // TradeDecisionFilter defines supported filters when listing trade decisions.

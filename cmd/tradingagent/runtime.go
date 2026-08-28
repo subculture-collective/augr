@@ -976,7 +976,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("read paper starting balance: %w", err)
 		}
-		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, Fills: db, Financial: db, Decisions: tradeDecisionRecorder}); err != nil {
+		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, Fills: db, Financial: db, Trades: tradeRepo, Decisions: tradeDecisionRecorder}); err != nil {
 			return nil, nil, nil, err
 		}
 		strategyRunner.portfolioAllocatorMode = portfolioAllocatorMode
@@ -1733,12 +1733,11 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	run = &receipt.Run
 	canonical = &api.StrategyRunResult{Run: *run, Signal: run.Signal}
 
-	orderManager, err := r.newOrderManager(ctx, strategy, strategyConfig, resolved)
+	scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
 	if err != nil {
 		return canonical, err
 	}
-
-	scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
+	orderManager, err := r.newOrderManager(ctx, strategy, strategyConfig, resolved, scope)
 	if err != nil {
 		return canonical, err
 	}
@@ -1793,7 +1792,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	}, nil
 }
 
-func (r *smokeStrategyRunner) newOrderManager(ctx context.Context, strategy domain.Strategy, strategyConfig *agent.StrategyConfig, resolved agent.ResolvedConfig) (*execution.OrderManager, error) {
+func (r *smokeStrategyRunner) newOrderManager(ctx context.Context, strategy domain.Strategy, strategyConfig *agent.StrategyConfig, resolved agent.ResolvedConfig, scope execution.ExecutionScope) (*execution.OrderManager, error) {
 	return execution.NewOrderManager(
 		r.broker,
 		"paper",
@@ -1803,7 +1802,7 @@ func (r *smokeStrategyRunner) newOrderManager(ctx context.Context, strategy doma
 		r.tradeRepo,
 		r.auditLogRepo,
 		r.agentEventRepo,
-		sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger),
+		sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope),
 		r.logger,
 	).WithFinancialLifecycleRepo(r.financialRepo).WithDecisionRecorder(r.tradeDecisionRecorder), nil
 }

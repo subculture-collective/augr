@@ -658,6 +658,25 @@ func TestReconcilePendingOptionOrderUsesClientIDAndPersistsFill(t *testing.T) {
 	}
 }
 
+func TestReconcileOptionFillUsesDurableTradeQuantity(t *testing.T) {
+	price, filledAt := 2.5, time.Now().UTC()
+	strategyID := uuid.New()
+	intent := domain.PositionIntentBuyToOpen
+	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "option-recovery", ExternalID: "alpaca-option", Broker: "alpaca", Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt, SubmittedAt: &filledAt, Status: domain.OrderStatusPartial, PositionIntent: &intent}
+	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
+		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
+	}}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := order; return &copy, nil }}
+	fillRepo := &recordingOptionFillRepo{}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
+	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fillRepo.batches) != 1 || fillRepo.batches[0][0].StatusOnly {
+		t.Fatalf("provider fill delta was not economically persisted: %+v", fillRepo.batches)
+	}
+}
+
 func TestReconcileOptionSpreadReloadsEveryNonterminalLegAndPersistsOneBatch(t *testing.T) {
 	price, filledAt, groupID := 1.25, time.Now().UTC(), uuid.New()
 	strategyID := uuid.New()

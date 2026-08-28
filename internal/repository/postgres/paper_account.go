@@ -105,6 +105,14 @@ const listOpenPaperOrdersSQL = `SELECT o.id, o.strategy_id, o.pipeline_run_id, o
 		FROM orders o
 		WHERE o.account_id=$1 AND o.environment=$2 AND o.broker = 'paper' AND (
 			o.status IN ('pending', 'submitted', 'partial') OR
+			(o.status='filled' AND o.market_type<>'options' AND (
+				o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id AND t.environment=o.environment),0) OR
+				NOT EXISTS (SELECT 1 FROM trade_decisions d WHERE d.paper_order_id=o.id AND d.account_id=o.account_id AND d.environment=o.environment) OR
+				EXISTS (SELECT 1 FROM trade_decisions d WHERE d.paper_order_id=o.id AND d.account_id=o.account_id AND d.environment=o.environment AND (
+					NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.event_type='fill_observed' AND re.payload->>'order_id'=o.id::text) OR
+					(EXISTS (SELECT 1 FROM financial_fill_idempotency f WHERE f.order_id=o.id AND f.position_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.event_type='position_updated'))
+				))
+			)) OR
 			(o.market_type='options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0)) OR
 			(o.market_type='options' AND o.leg_group_id IS NOT NULL AND EXISTS (
 				SELECT 1 FROM orders sibling WHERE sibling.account_id=o.account_id AND sibling.environment=o.environment

@@ -156,6 +156,7 @@ CREATE TABLE option_status_idempotency (
     status TEXT NOT NULL CHECK (status IN ('filled','cancelled','rejected')),
     filled_quantity NUMERIC(20,8) NOT NULL CHECK (filled_quantity>=0),
     external_id TEXT,
+    submitted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

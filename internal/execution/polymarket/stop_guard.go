@@ -613,6 +613,9 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 			g.Cancel(entry.positionID)
 			return true
 		}
+		entry.order.ExternalID, entry.order.Status = strings.TrimSpace(externalID), domain.OrderStatusPartial
+		entry.state.Store(int32(guardArmed))
+		return true
 	}
 	submittedAt := time.Now().UTC()
 	if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(externalID), submittedAt); err != nil {

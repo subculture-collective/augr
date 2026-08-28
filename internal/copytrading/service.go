@@ -273,6 +273,7 @@ func (s *Service) updateSubscriptionLocked(ctx context.Context, id uuid.UUID, re
 	replacement.AccountID, replacement.Environment = current.AccountID, current.Environment
 	replacement.LegacyStrategyID, replacement.OriginType, replacement.OriginID = current.LegacyStrategyID, current.OriginType, current.OriginID
 	replacement.Status, replacement.IsPaper, replacement.CreatedBy, replacement.CreatedAt = current.Status, true, current.CreatedBy, current.CreatedAt
+	replacement.UpdatedAt = current.UpdatedAt
 	if err := replacement.Validate(); err != nil {
 		return nil, err
 	}

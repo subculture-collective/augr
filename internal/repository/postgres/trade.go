@@ -194,6 +194,9 @@ func buildTradeCountQuery(accountID uuid.UUID, filter repository.TradeFilter) (s
 	if filter.OrderID != nil {
 		conditions = append(conditions, "order_id = "+nextArg(*filter.OrderID))
 	}
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
+	}
 	if filter.PositionID != nil {
 		conditions = append(conditions, "position_id = "+nextArg(*filter.PositionID))
 	}
@@ -232,6 +235,9 @@ func buildTradeListQuery(accountID uuid.UUID, filter repository.TradeFilter, lim
 
 	if filter.OrderID != nil {
 		conditions = append(conditions, "order_id = "+nextArg(*filter.OrderID))
+	}
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
 	}
 
 	if filter.PositionID != nil {

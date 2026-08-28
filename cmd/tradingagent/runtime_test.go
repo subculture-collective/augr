@@ -1897,6 +1897,15 @@ type historyPositionRepo struct {
 	positions []domain.Position
 }
 
+func (r historyPositionRepo) GetByExecutionScope(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, _ repository.PositionFilter, _, _ int) ([]domain.Position, error) {
+	positions := append([]domain.Position(nil), r.positions...)
+	for i := range positions {
+		positions[i].AccountID, positions[i].Environment = accountID, environment
+		positions[i].OriginType, positions[i].OriginID = originType, originID
+	}
+	return positions, nil
+}
+
 func (r historyPositionRepo) GetByStrategy(context.Context, uuid.UUID, repository.PositionFilter, int, int) ([]domain.Position, error) {
 	return r.positions, nil
 }
@@ -2161,6 +2170,7 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 		domain.Strategy{ID: uuid.New(), Ticker: "AAPL", MarketType: domain.MarketTypeStock, IsPaper: true},
 		agent.ResolvedConfig{RiskConfig: agent.ResolvedRiskConfig{PositionSizePct: 10}},
 		nil,
+		testStrategyScope(t, uuid.New()),
 	)
 	if err != nil {
 		t.Fatalf("newOrderManager() error = %v", err)
@@ -2196,7 +2206,8 @@ func TestSizingConfigForStrategy_UsesMarketDefaults(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: uuid.New(), MarketType: tc.market}, nil, resolved, stubPositionRepo{}, slogDiscardLogger())
+			strategyID := uuid.New()
+			got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: strategyID, MarketType: tc.market}, nil, resolved, stubPositionRepo{}, slogDiscardLogger(), testStrategyScope(t, strategyID))
 			if got != tc.want {
 				t.Fatalf("sizingConfigForStrategy() = %+v, want %+v", got, tc.want)
 			}
@@ -2211,11 +2222,11 @@ func TestSizingConfigForStrategy_UsesHalfKellyWhenExplicitlyOptedInAndEligible(t
 	positions := make([]domain.Position, 0, 100)
 	for i := 0; i < 60; i++ {
 		closedAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
-		positions = append(positions, domain.Position{ID: uuid.New(), Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: 2, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
+		positions = append(positions, domain.Position{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: 2, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
 	}
 	for i := 0; i < 40; i++ {
 		closedAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
-		positions = append(positions, domain.Position{ID: uuid.New(), Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: -1, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
+		positions = append(positions, domain.Position{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: -1, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
 	}
 
 	runner := &realStrategyRunner{
@@ -2226,13 +2237,23 @@ func TestSizingConfigForStrategy_UsesHalfKellyWhenExplicitlyOptedInAndEligible(t
 	strategyConfig := &agent.StrategyConfig{RiskConfig: &agent.StrategyRiskConfig{UseKellySizing: &useKelly}}
 	resolved := agent.ResolvedConfig{RiskConfig: agent.ResolvedRiskConfig{PositionSizePct: 8, StopLossMultiplier: 1.75}}
 
-	got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock}, strategyConfig, resolved, runner.positionRepo, slogDiscardLogger())
+	got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock}, strategyConfig, resolved, runner.positionRepo, slogDiscardLogger(), testStrategyScope(t, strategyID))
 	if got.Method != execution.PositionSizingMethodKelly || !got.HalfKelly {
 		t.Fatalf("sizingConfigForStrategy() = %+v, want half-Kelly", got)
 	}
 	if got.WinRate != 0.6 || got.WinLossRatio != 2 {
 		t.Fatalf("Kelly stats = %+v, want win rate 0.6 and win/loss ratio 2", got)
 	}
+}
+
+func testStrategyScope(t *testing.T, strategyID uuid.UUID) execution.ExecutionScope {
+	t.Helper()
+	run := domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)}
+	scope, err := execution.NewStrategyExecutionScope(testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), strategyID, run, strategyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
 }
 
 func TestApplyPolymarketSizingCapOnlyAppliesToPolymarket(t *testing.T) {

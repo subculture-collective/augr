@@ -371,11 +371,11 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 			return canonical, err
 		}
 	} else if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		orderManager, err := r.newOrderManager(ctx, strategy, prepared.Config, strategyConfig)
+		scope, err := executionScopeFromPersistedRun(run, strategy)
 		if err != nil {
 			return canonical, err
 		}
-		scope, err := executionScopeFromPersistedRun(run, strategy)
+		orderManager, err := r.newOrderManager(ctx, strategy, prepared.Config, strategyConfig, scope)
 		if err != nil {
 			return canonical, err
 		}
@@ -791,7 +791,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		signal = domain.PipelineSignalHold
 	}
 	if signal == domain.PipelineSignalBuy {
-		sizingConfig := applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger), r.cfg.Risk.Polymarket.MaxPositionUSDC)
+		sizingConfig := applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope), r.cfg.Risk.Polymarket.MaxPositionUSDC)
 		plannedNotional, err := r.plannedPolymarketNotional(ctx, executionStrategy, sizingConfig, decision)
 		if err != nil {
 			return failRun(err)
@@ -801,7 +801,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		}
 	}
 
-	orderManager, err := r.newOrderManager(ctx, executionStrategy, resolved, strategyConfig)
+	orderManager, err := r.newOrderManager(ctx, executionStrategy, resolved, strategyConfig, scope)
 	if err != nil {
 		return failRun(err)
 	}
@@ -972,7 +972,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 		return failRun(fmt.Errorf("kalshi native: parse strategy config: %w", err))
 	}
 	resolved := agent.ResolveConfig(strategyConfig, r.globals)
-	orderManager, err := r.newOrderManager(ctx, strategy, resolved, strategyConfig)
+	orderManager, err := r.newOrderManager(ctx, strategy, resolved, strategyConfig, scope)
 	if err != nil {
 		return failRun(err)
 	}
@@ -2371,7 +2371,7 @@ func globalSettingsFromConfig(cfg config.Config) agent.GlobalSettings {
 	}
 }
 
-func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig, strategyConfig *agent.StrategyConfig) (*execution.OrderManager, error) {
+func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig, strategyConfig *agent.StrategyConfig, scope execution.ExecutionScope) (*execution.OrderManager, error) {
 	gate, err := r.liveGateForStrategy(strategy)
 	if err != nil {
 		return nil, err
@@ -2391,7 +2391,7 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 		r.tradeRepo,
 		r.auditLogRepo,
 		r.eventRepo,
-		applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger), r.cfg.Risk.Polymarket.MaxPositionUSDC),
+		applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope), r.cfg.Risk.Polymarket.MaxPositionUSDC),
 		r.logger,
 	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper).WithFinancialLifecycleRepo(func() repository.FinancialLifecycleRepository {
 		if strategy.IsPaper {

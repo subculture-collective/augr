@@ -283,7 +283,7 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 	}
 
 	existingOrders, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Order, error) {
-		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca"}, limit, offset)
+		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca", Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: list local orders: %w", err)
@@ -325,7 +325,7 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 	}
 
 	existingTrades, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Trade, error) {
-		return r.tradeRepo.List(ctx, repository.TradeFilter{}, limit, offset)
+		return r.tradeRepo.List(ctx, repository.TradeFilter{Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: list local trades: %w", err)
@@ -527,7 +527,7 @@ func (r *AlpacaReconciler) Verify(ctx context.Context) (AlpacaVerificationReport
 	}
 
 	localOrders, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Order, error) {
-		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca"}, limit, offset)
+		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca", Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaVerificationReport{}, fmt.Errorf("alpaca_reconcile: list local orders: %w", err)
@@ -539,7 +539,7 @@ func (r *AlpacaReconciler) Verify(ctx context.Context) (AlpacaVerificationReport
 		return AlpacaVerificationReport{}, fmt.Errorf("alpaca_reconcile: list local positions: %w", err)
 	}
 	localTrades, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Trade, error) {
-		return r.tradeRepo.List(ctx, repository.TradeFilter{}, limit, offset)
+		return r.tradeRepo.List(ctx, repository.TradeFilter{Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaVerificationReport{}, fmt.Errorf("alpaca_reconcile: list local trades: %w", err)

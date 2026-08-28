@@ -28,6 +28,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create table account_projection_outbox",
 		"create table option_settlement_idempotency",
 		"create table option_status_idempotency",
+		"submitted_at timestamptz",
 		"create table option_broker_sync_retries",
 		"mark_generation uuid not null",
 		"mark_source text",

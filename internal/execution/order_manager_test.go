@@ -1009,6 +1009,26 @@ func TestReconcilePersistedOrderRepairsReplayAfterCommittedFill(t *testing.T) {
 	}
 }
 
+func TestReconcilePersistedLiveOrderDoesNotCancelRestingOrder(t *testing.T) {
+	scope := strategyScope(uuid.New(), uuid.New())
+	originType, originID := scope.Origin()
+	run, _ := scope.PipelineRun()
+	order := &domain.Order{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, ExternalID: "alpaca-resting", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 1, Status: domain.OrderStatusSubmitted}
+	cancels := 0
+	broker := &mockBroker{
+		getOrderResultFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
+			return execution.BrokerOrderStatus{Status: domain.OrderStatusSubmitted}, nil
+		},
+		cancelOrderFn: func(context.Context, string) error { cancels++; return nil },
+	}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := *order; return &copy, nil }}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithDecisionRecorder(&recoveryDecisionRecorder{decisionID: uuid.New()}).WithLiveTrading(true)
+	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
+	if err != nil || status != domain.OrderStatusSubmitted || cancels != 0 {
+		t.Fatalf("live recovery status=%s cancels=%d err=%v", status, cancels, err)
+	}
+}
+
 func TestReconcilePersistedOrderResubmitsCrashBeforeSubmit(t *testing.T) {
 	strategyVersionID, runID, decisionID := uuid.New(), uuid.New(), uuid.New()
 	scope := strategyScope(strategyVersionID, runID)
