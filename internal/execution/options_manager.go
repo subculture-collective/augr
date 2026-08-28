@@ -402,17 +402,12 @@ func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, scope Exe
 		Broker: m.brokerName,
 	}
 	stampOptionOrderScope(order, scope)
-	if err := m.orderRepo.Create(ctx, order); err != nil {
-		return fmt.Errorf("options_manager: create close order: %w", err)
-	}
-	reservation, ok := m.positionRepo.(repository.OptionCloseReservationRepository)
+	reservation, ok := m.orderRepo.(repository.AtomicOptionCloseRepository)
 	if !ok {
-		return errors.New("options_manager: atomic option close reservation repository is required")
+		return errors.New("options_manager: atomic option close repository is required")
 	}
-	if err := reservation.ReserveOptionClosePositions(ctx, scope.AccountID(), scope.Environment(), position.OriginType, position.OriginID, []uuid.UUID{position.ID}, []uuid.UUID{order.ID}); err != nil {
-		order.Status = domain.OrderStatusRejected
-		_ = m.orderRepo.Update(ctx, order)
-		return fmt.Errorf("options_manager: reserve close position: %w", err)
+	if err := reservation.CreateOptionCloseOrdersAndReserve(ctx, scope.AccountID(), scope.Environment(), position.OriginType, position.OriginID, []uuid.UUID{position.ID}, []*domain.Order{order}); err != nil {
+		return fmt.Errorf("options_manager: create and reserve close order: %w", err)
 	}
 	externalID, err := m.broker.SubmitOptionOrder(ctx, order)
 	if err != nil {
@@ -533,6 +528,12 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 		}
 		for index := range positions {
 			if positions[index].AssetClass == domain.AssetClassOption && positions[index].ClosedAt == nil {
+				if err := validatePositionScope(&positions[index], scope); err != nil {
+					return err
+				}
+				if _, duplicate := closePositions[positions[index].Ticker]; duplicate {
+					return fmt.Errorf("options_manager: multiple open positions match close contract %s", positions[index].Ticker)
+				}
 				closePositions[positions[index].Ticker] = &positions[index]
 			}
 		}
@@ -654,30 +655,29 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 		}
 		stampOptionOrderScope(legOrder, scope)
 
-		if err := m.orderRepo.Create(ctx, legOrder); err != nil {
-			return fmt.Errorf("options_manager: create leg order: %w", err)
-		}
 		legOrders = append(legOrders, legOrder)
 	}
-	var reservation repository.OptionCloseReservationRepository
+	var reservation repository.AtomicOptionCloseRepository
 	var reservedPositionIDs, reservedOrderIDs []uuid.UUID
 	if isClosing {
 		var ok bool
-		reservation, ok = m.positionRepo.(repository.OptionCloseReservationRepository)
+		reservation, ok = m.orderRepo.(repository.AtomicOptionCloseRepository)
 		if !ok {
-			return errors.New("options_manager: atomic option spread close reservation repository is required")
+			return errors.New("options_manager: atomic option spread close repository is required")
 		}
 		for _, order := range legOrders {
 			reservedPositionIDs = append(reservedPositionIDs, closePositions[order.Ticker].ID)
 			reservedOrderIDs = append(reservedOrderIDs, order.ID)
 		}
 		originType, originID := scope.Origin()
-		if err := reservation.ReserveOptionClosePositions(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, reservedPositionIDs, reservedOrderIDs); err != nil {
-			for _, order := range legOrders {
-				order.Status = domain.OrderStatusRejected
-				_ = m.orderRepo.Update(ctx, order)
+		if err := reservation.CreateOptionCloseOrdersAndReserve(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, reservedPositionIDs, legOrders); err != nil {
+			return fmt.Errorf("options_manager: create and reserve spread close positions: %w", err)
+		}
+	} else {
+		for _, order := range legOrders {
+			if err := m.orderRepo.Create(ctx, order); err != nil {
+				return fmt.Errorf("options_manager: create leg order: %w", err)
 			}
-			return fmt.Errorf("options_manager: reserve spread close positions: %w", err)
 		}
 	}
 	releaseReservation := func() {
@@ -699,13 +699,30 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 	_, synchronous := m.broker.(OptionFillReporter)
 	if len(ids) != len(legOrders) && len(ids) != len(legOrders)+1 {
 		persistErr := fmt.Errorf("options_manager: spread broker returned %d ids for %d legs", len(ids), len(legOrders))
+		releaseReservation()
 		if synchronous {
-			releaseReservation()
 			return m.abortOptionSpread(ctx, legOrders, ids, persistErr)
+		}
+		for _, order := range legOrders {
+			order.Status = domain.OrderStatusRejected
+			if err := m.orderRepo.Update(ctx, order); err != nil {
+				persistErr = errors.Join(persistErr, fmt.Errorf("options_manager: terminalize malformed spread order %s: %w", order.ID, err))
+			}
 		}
 		return persistErr
 	}
 	fillInputs := make([]repository.OptionFillInput, 0, len(legOrders))
+	abortAsync := func(cause error) error {
+		releaseReservation()
+		errs := []error{cause}
+		for _, candidate := range legOrders {
+			candidate.Status, candidate.FilledQuantity, candidate.FilledAvgPrice, candidate.FilledAt = domain.OrderStatusRejected, 0, nil, nil
+			if err := m.orderRepo.Update(ctx, candidate); err != nil {
+				errs = append(errs, fmt.Errorf("options_manager: terminalize malformed spread order %s: %w", candidate.ID, err))
+			}
+		}
+		return errors.Join(errs...)
+	}
 	for index, order := range legOrders {
 		idIndex := index
 		if len(ids) == len(legOrders)+1 {
@@ -744,7 +761,7 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 			}
 			fillInputs = append(fillInputs, input)
 		} else if err := m.orderRepo.Update(ctx, order); err != nil {
-			return fmt.Errorf("options_manager: update spread leg order: %w", err)
+			return abortAsync(fmt.Errorf("options_manager: update spread leg order: %w", err))
 		}
 	}
 	if synchronous {

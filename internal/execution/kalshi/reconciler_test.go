@@ -44,6 +44,14 @@ type reconcilerPositionRepoStub struct {
 	err       error
 }
 
+var reconcilerTestBinding = func() domain.ExecutionAccountBinding {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		panic(err)
+	}
+	return binding
+}()
+
 func (r *reconcilerPositionRepoStub) Create(context.Context, *domain.Position) error {
 	panic("unexpected Create call")
 }
@@ -84,6 +92,10 @@ func (r *reconcilerPositionRepoStub) GetOpen(_ context.Context, _ repository.Pos
 		end = len(r.positions)
 	}
 	return append([]domain.Position(nil), r.positions[offset:end]...), nil
+}
+
+func (r *reconcilerPositionRepoStub) GetByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	return r.GetOpen(ctx, filter, limit, offset)
 }
 
 func (r *reconcilerPositionRepoStub) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {
@@ -188,7 +200,7 @@ func TestReconcilerPropagatesBrokerAndRepoErrors(t *testing.T) {
 	}
 
 	repoErr := errors.New("repo boom")
-	reconciler = &Reconciler{broker: &reconcilerBrokerStub{}, positionRepo: &reconcilerPositionRepoStub{err: repoErr}}
+	reconciler = &Reconciler{executionAccount: reconcilerTestBinding, broker: &reconcilerBrokerStub{}, positionRepo: &reconcilerPositionRepoStub{err: repoErr}}
 	if _, err := reconciler.Check(context.Background()); !errors.Is(err, repoErr) {
 		t.Fatalf("Check() repo error = %v, want %v", err, repoErr)
 	}
@@ -196,8 +208,9 @@ func TestReconcilerPropagatesBrokerAndRepoErrors(t *testing.T) {
 
 func newReconcilerTestHarness(brokerPositions, localPositions []domain.Position) *Reconciler {
 	return NewReconciler(ReconcilerDeps{
-		Broker:       &reconcilerBrokerStub{positions: brokerPositions},
-		PositionRepo: &reconcilerPositionRepoStub{positions: localPositions},
+		ExecutionAccount: reconcilerTestBinding,
+		Broker:           &reconcilerBrokerStub{positions: brokerPositions},
+		PositionRepo:     &reconcilerPositionRepoStub{positions: localPositions},
 	})
 }
 

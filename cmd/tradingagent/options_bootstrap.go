@@ -11,9 +11,14 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository) error {
+func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos ...repository.AtomicOptionCloseRepository) error {
 	if broker == nil || paperRepo == nil {
 		return fmt.Errorf("paper options account dependencies are required")
+	}
+	if len(closeRepos) > 0 && closeRepos[0] != nil {
+		if err := closeRepos[0].ReconcileOptionCloseReservations(ctx, binding.AccountID(), binding.Environment()); err != nil {
+			return fmt.Errorf("reconcile option close reservations: %w", err)
+		}
 	}
 	var allTrades []domain.Trade
 	for offset := 0; ; offset += 250 {

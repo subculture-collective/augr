@@ -22,17 +22,20 @@ func TestNewSettlerRetainsExecutionAccount(t *testing.T) {
 }
 
 type settlementDecisionStub struct {
-	decisions  []domain.TradeDecision
-	resolved   []uuid.UUID
-	lastFilter repository.TradeDecisionFilter
-	lastLimit  int
+	decisions     []domain.TradeDecision
+	resolved      []uuid.UUID
+	lastFilter    repository.TradeDecisionFilter
+	lastLimit     int
+	preserveScope bool
 }
 
 func (s *settlementDecisionStub) Get(_ context.Context, id uuid.UUID) (*domain.TradeDecision, error) {
 	for i := range s.decisions {
 		if s.decisions[i].ID == id {
 			d := s.decisions[i]
-			stampSettlementDecision(&d)
+			if !s.preserveScope {
+				stampSettlementDecision(&d)
+			}
 			return &d, nil
 		}
 	}
@@ -44,7 +47,9 @@ func (s *settlementDecisionStub) List(_ context.Context, f repository.TradeDecis
 	s.lastLimit = limit
 	var out []domain.TradeDecision
 	for _, d := range s.decisions {
-		stampSettlementDecision(&d)
+		if !s.preserveScope {
+			stampSettlementDecision(&d)
+		}
 		if d.MarketType == f.MarketType && d.Status == f.Status {
 			if f.InstrumentKey != "" && d.InstrumentKey != f.InstrumentKey {
 				continue
@@ -353,5 +358,14 @@ func TestSettlerExactSettlementRejectsChangedDecision(t *testing.T) {
 	decisions.decisions[0].Status = domain.TradeDecisionStatusClosed
 	if _, err := settler.SettleDecisions(context.Background(), domain.MarketTypeKalshi, "KX-A", "YES", time.Unix(0, 0), preview.DecisionIDs); err == nil {
 		t.Fatal("expected rejection")
+	}
+}
+
+func TestSettlerRejectsForeignEnvironmentBeforeSettlement(t *testing.T) {
+	strategyID, orderID := uuid.New(), uuid.New()
+	decision := domain.TradeDecision{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: domain.AccountEnvironmentShadow, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-FOREIGN", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}
+	settler := NewSettler(testExecutionAccountBinding, nil, &settlementDecisionStub{decisions: []domain.TradeDecision{decision}, preserveScope: true}, nil, nil, nil)
+	if _, err := settler.SettleDecisions(context.Background(), decision.MarketType, decision.InstrumentKey, "YES", time.Now(), []uuid.UUID{decision.ID}); err == nil {
+		t.Fatal("foreign environment decision settled")
 	}
 }

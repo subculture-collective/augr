@@ -97,6 +97,12 @@ func (s *Settler) SettleDecisions(ctx context.Context, marketType domain.MarketT
 	if len(decisionIDs) == 0 {
 		return 0, nil
 	}
+	if s == nil || s.decisions == nil {
+		return 0, fmt.Errorf("prediction settlement: repositories are required")
+	}
+	if err := s.executionAccount.Validate(); err != nil {
+		return 0, fmt.Errorf("prediction settlement: execution account: %w", err)
+	}
 	marketType = marketType.Normalize()
 	instrument = strings.TrimSpace(instrument)
 	winner := NormalizeOutcomeSide(winningOutcome)
@@ -115,7 +121,7 @@ func (s *Settler) SettleDecisions(ctx context.Context, marketType domain.MarketT
 		if err != nil {
 			return settled, fmt.Errorf("prediction settlement: get decision %s: %w", id, err)
 		}
-		if decision == nil || decision.Status != domain.TradeDecisionStatusPaper || decision.MarketType.Normalize() != marketType || strings.TrimSpace(decision.InstrumentKey) != instrument {
+		if decision == nil || decision.AccountID != s.executionAccount.AccountID() || decision.Environment != s.executionAccount.Environment() || decision.Status != domain.TradeDecisionStatusPaper || decision.MarketType.Normalize() != marketType || strings.TrimSpace(decision.InstrumentKey) != instrument {
 			return settled, fmt.Errorf("prediction settlement: decision %s changed before settlement", id)
 		}
 		if err := s.settleDecision(ctx, decision, winner, resolvedAt); err != nil {
@@ -129,6 +135,9 @@ func (s *Settler) SettleDecisions(ctx context.Context, marketType domain.MarketT
 func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketType) ([]string, error) {
 	if s == nil || s.decisions == nil {
 		return nil, fmt.Errorf("prediction settlement: repositories are required")
+	}
+	if err := s.executionAccount.Validate(); err != nil {
+		return nil, fmt.Errorf("prediction settlement: execution account: %w", err)
 	}
 	marketType = marketType.Normalize()
 	if marketType != domain.MarketTypeKalshi && marketType != domain.MarketTypePolymarket {
@@ -144,6 +153,9 @@ func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketTy
 	seen := make(map[string]struct{}, len(decisions))
 	out := make([]string, 0, len(decisions))
 	for i := range decisions {
+		if decisions[i].AccountID != s.executionAccount.AccountID() || decisions[i].Environment != s.executionAccount.Environment() {
+			return nil, fmt.Errorf("prediction settlement: decision %s belongs to a foreign execution account", decisions[i].ID)
+		}
 		instrument := strings.ToUpper(strings.TrimSpace(decisions[i].InstrumentKey))
 		if instrument == "" {
 			continue
@@ -161,6 +173,9 @@ func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketTy
 func (s *Settler) settleMarket(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, mutate bool) (int, error) {
 	if s == nil || s.decisions == nil || (mutate && s.financialLifecycle == nil && (s.positions == nil || s.trades == nil || s.replay == nil)) {
 		return 0, fmt.Errorf("prediction settlement: repositories are required")
+	}
+	if err := s.executionAccount.Validate(); err != nil {
+		return 0, fmt.Errorf("prediction settlement: execution account: %w", err)
 	}
 	marketType = marketType.Normalize()
 	if marketType != domain.MarketTypePolymarket && marketType != domain.MarketTypeKalshi {
@@ -205,7 +220,7 @@ func (s *Settler) validateMatches(ctx context.Context, matches []domain.TradeDec
 			return nil, fmt.Errorf("prediction settlement: invalid decision identifiers")
 		}
 		if decision.AccountID != s.executionAccount.AccountID() || decision.Environment != s.executionAccount.Environment() {
-			return nil, fmt.Errorf("prediction settlement: decision %s belongs to a foreign account", decision.ID)
+			return nil, fmt.Errorf("prediction settlement: decision %s belongs to a foreign execution account", decision.ID)
 		}
 		if decision.StrategyID == nil || decision.PaperOrderID == nil {
 			return nil, fmt.Errorf("prediction settlement: decision %s lacks strategy or paper order", decision.ID)
@@ -249,6 +264,12 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 	}
 	if position == nil || position.ClosedAt != nil || position.Quantity <= 0 {
 		return fmt.Errorf("prediction settlement: open position %s not found", opening.PositionID.String())
+	}
+	accountMismatch := position.AccountID != uuid.Nil && position.AccountID != decision.AccountID
+	environmentMismatch := position.Environment != "" && position.Environment != decision.Environment
+	originMismatch := (position.OriginType != "" || position.OriginID != "") && (position.OriginType != decision.OriginType || position.OriginID != decision.OriginID)
+	if accountMismatch || environmentMismatch || originMismatch || position.StrategyID == nil || decision.StrategyID == nil || *position.StrategyID != *decision.StrategyID {
+		return fmt.Errorf("prediction settlement: position %s ownership does not match decision %s", position.ID, decision.ID)
 	}
 	if !strings.EqualFold(strings.TrimSpace(position.Ticker), strings.TrimSpace(decision.InstrumentKey)+":"+held) {
 		return fmt.Errorf("prediction settlement: position %s does not match decision %s", position.ID, decision.ID)

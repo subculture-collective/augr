@@ -2,10 +2,13 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -283,6 +286,16 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 		return nil, fmt.Errorf("postgres: begin option fill tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	lockKeys := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		lockKeys = append(lockKeys, input.IdempotencyKey)
+	}
+	sort.Strings(lockKeys)
+	for _, key := range lockKeys {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, financialLifecycleLockKey("option-fill", key)); err != nil {
+			return nil, fmt.Errorf("postgres: lock option fill idempotency: %w", err)
+		}
+	}
 
 	results := make([]repository.OptionFillResult, len(inputs))
 	replayed := 0
@@ -510,9 +523,11 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 		} else if side != domain.PositionSideLong {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: sell-to-close requires a long option position")
 		}
-		if _, err := tx.Exec(ctx, `UPDATE positions SET quantity=0,current_price=$1,realized_pnl=$2,
-			unrealized_pnl=NULL,closed_at=$3 WHERE id=$4 AND account_id=$5`, input.FillPrice, realizedPnL+realizedDelta-input.Fee, filledAt, positionID, input.AccountID); err != nil {
+		if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity=0,current_price=$1,realized_pnl=$2,
+			unrealized_pnl=NULL,closed_at=$3,close_reservation_order_id=NULL WHERE id=$4 AND account_id=$5 AND close_reservation_order_id=$6`, input.FillPrice, realizedPnL+realizedDelta-input.Fee, filledAt, positionID, input.AccountID, order.ID); err != nil {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: close option position: %w", err)
+		} else if tag.RowsAffected() != 1 {
+			return repository.OptionFillResult{}, fmt.Errorf("postgres: option close reservation is missing or belongs to another order")
 		}
 	}
 
@@ -552,6 +567,9 @@ func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionP
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: begin option settlement tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, financialLifecycleLockKey("option-settlement", input.PositionID.String())); err != nil {
+		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: lock option settlement idempotency: %w", err)
+	}
 	var replayPositionID, replayTradeID, replayAccountID uuid.UUID
 	var replayEnvironment domain.AccountEnvironment
 	var replayOriginType, replayOriginID, replayReason string
@@ -635,7 +653,7 @@ func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionP
 }
 
 func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
-	if input.Decision == nil || input.AccountID == uuid.Nil || !input.Environment.IsValid() || input.OriginType == "" || input.OriginID == "" || input.Decision.AccountID != input.AccountID || input.Decision.Environment != input.Environment || input.Decision.OriginType != input.OriginType || input.Decision.OriginID != input.OriginID || input.Decision.ID == uuid.Nil || input.Decision.StrategyID == nil || input.Decision.PaperOrderID == nil || input.IdempotencyKey == "" || input.PositionTicker == "" || input.ResolvedAt.IsZero() || math.IsNaN(input.Payout) || math.IsInf(input.Payout, 0) || input.Payout < 0 || input.Payout > 1 {
+	if input.Decision == nil || input.Decision.ID == uuid.Nil || input.IdempotencyKey == "" || input.ResolvedAt.IsZero() || math.IsNaN(input.Payout) || math.IsInf(input.Payout, 0) || input.Payout < 0 || input.Payout > 1 {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: invalid settlement input")
 	}
 	tx, err := db.Pool.BeginTx(ctx, pgx.TxOptions{})
@@ -643,6 +661,26 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: begin settlement tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	requestedAccount, requestedEnvironment := input.AccountID, input.Environment
+	persisted := &domain.TradeDecision{ID: input.Decision.ID}
+	if err := tx.QueryRow(ctx, `SELECT strategy_id,paper_order_id,account_id,environment,origin_type,origin_id,market_type,instrument_key,outcome,status FROM trade_decisions WHERE id=$1 FOR UPDATE`, persisted.ID).Scan(
+		&persisted.StrategyID, &persisted.PaperOrderID, &persisted.AccountID, &persisted.Environment, &persisted.OriginType, &persisted.OriginID, &persisted.MarketType, &persisted.InstrumentKey, &persisted.Outcome, &persisted.Status,
+	); err != nil {
+		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: lock settlement decision: %w", err)
+	}
+	if requestedAccount != uuid.Nil && requestedAccount != persisted.AccountID || requestedEnvironment != "" && requestedEnvironment != persisted.Environment {
+		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: settlement decision scope mismatch")
+	}
+	if persisted.AccountID == uuid.Nil || !persisted.Environment.IsValid() || persisted.StrategyID == nil || persisted.PaperOrderID == nil || strings.TrimSpace(persisted.OriginType) == "" || strings.TrimSpace(persisted.OriginID) == "" {
+		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: persisted settlement decision lacks ownership")
+	}
+	held := strings.ToUpper(strings.TrimSpace(persisted.Outcome))
+	if held != "YES" && held != "NO" || strings.TrimSpace(persisted.InstrumentKey) == "" {
+		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: persisted settlement decision lacks linkage")
+	}
+	input.Decision = persisted
+	input.AccountID, input.Environment, input.OriginType, input.OriginID = persisted.AccountID, persisted.Environment, persisted.OriginType, persisted.OriginID
+	input.PositionTicker = strings.TrimSpace(persisted.InstrumentKey) + ":" + held
 	var decisionID uuid.UUID
 	var idempotencyKey string
 	var positionID *uuid.UUID
@@ -664,6 +702,9 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 		return repository.PredictionDecisionSettlementResult{DecisionID: decisionID, PositionID: positionID, TradeID: tradeID, ReplayEventID: replayEventID, CreatedAt: createdAt, Replayed: true}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: select settlement idempotency: %w", err)
+	}
+	if persisted.Status != domain.TradeDecisionStatusPaper {
+		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: settlement decision %s is not open", persisted.ID)
 	}
 	rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.quantity::double precision, p.avg_entry::double precision, p.realized_pnl::double precision FROM positions p INNER JOIN trades t ON t.position_id = p.id AND t.order_id = $1 AND t.account_id=$2 WHERE p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.closed_at IS NULL AND p.quantity > 0 FOR UPDATE OF p`, input.Decision.PaperOrderID, input.AccountID, input.Environment, input.OriginType, input.OriginID)
 	if err != nil {
@@ -722,4 +763,9 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 
 func numeric8Equal(left, right float64) bool {
 	return math.Round(left*1e8) == math.Round(right*1e8)
+}
+
+func financialLifecycleLockKey(namespace, identity string) int64 {
+	hash := sha256.Sum256([]byte(namespace + "|" + identity))
+	return int64(binary.BigEndian.Uint64(hash[:8]) &^ uint64(1<<63))
 }

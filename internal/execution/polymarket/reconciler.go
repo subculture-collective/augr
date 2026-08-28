@@ -135,16 +135,18 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileSummary, error) {
 }
 
 func (r *Reconciler) fetchAllOpenPositions(ctx context.Context) ([]domain.Position, error) {
+	scoped, ok := r.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("account-scoped position repository is required")
+	}
+	if err := r.executionAccount.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid execution account: %w", err)
+	}
 	var all []domain.Position
 	for offset := 0; ; offset += reconcilePositionPageSize {
-		page, err := r.positionRepo.GetOpen(ctx, repository.PositionFilter{}, reconcilePositionPageSize, offset)
+		page, err := scoped.GetByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{}, reconcilePositionPageSize, offset)
 		if err != nil {
 			return nil, err
-		}
-		for i := range page {
-			if page[i].AccountID != r.executionAccount.AccountID() || page[i].Environment != r.executionAccount.Environment() {
-				return nil, fmt.Errorf("position %s belongs to a foreign account", page[i].ID)
-			}
 		}
 		all = append(all, page...)
 		if len(page) < reconcilePositionPageSize {

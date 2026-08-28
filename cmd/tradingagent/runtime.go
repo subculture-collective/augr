@@ -968,7 +968,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		portfolioAllocatorMode := portfolioAllocatorModeFromEnv()
 		strategyRunner.opportunityRepo = opportunityRepo
 		strategyRunner.optionsProvider = deps.OptionsProvider
-		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo); err != nil {
+		var optionCloseRepos []repository.AtomicOptionCloseRepository
+		if _, persistent := paperAccountRepo.(*pgrepo.PaperAccountRepo); persistent {
+			optionCloseRepos = append(optionCloseRepos, orderRepo)
+		}
+		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos...); err != nil {
 			return nil, nil, nil, err
 		}
 		strategyRunner.portfolioAllocatorMode = portfolioAllocatorMode

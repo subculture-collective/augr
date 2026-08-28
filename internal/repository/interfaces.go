@@ -653,9 +653,12 @@ type AccountScopedPositionRepository interface {
 	GetByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter PositionFilter, limit, offset int) ([]domain.Position, error)
 }
 
-type OptionCloseReservationRepository interface {
-	ReserveOptionClosePositions(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []uuid.UUID, []uuid.UUID) error
+// AtomicOptionCloseRepository creates close orders and reserves their exact
+// positions in one transaction, then repairs interrupted reservations at startup.
+type AtomicOptionCloseRepository interface {
+	CreateOptionCloseOrdersAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []uuid.UUID, []*domain.Order) error
 	ReleaseOptionClosePositions(context.Context, uuid.UUID, []uuid.UUID, []uuid.UUID) error
+	ReconcileOptionCloseReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error
 }
 
 // TradeRepository provides access to executed trades.

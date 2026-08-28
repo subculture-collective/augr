@@ -424,13 +424,18 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, scope exe
 		manager.WithOptionFillRepo(optionFillRepo)
 	}
 	if signal.Signal == domain.PipelineSignalSell {
-		positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 100, 0)
+		scoped, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
+		if !ok {
+			return errors.New("options runtime: execution-scoped position repository is required")
+		}
+		originType, originID := scope.Origin()
+		positions, err := scoped.GetByExecutionScope(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, repository.PositionFilter{}, 100, 0)
 		if err != nil {
 			return fmt.Errorf("options runtime: load positions for close: %w", err)
 		}
 		var open []*domain.Position
 		for index := range positions {
-			if positions[index].AssetClass == domain.AssetClassOption && positions[index].ClosedAt == nil && positions[index].Quantity > 0 {
+			if positions[index].StrategyID != nil && *positions[index].StrategyID == strategy.ID && positions[index].AssetClass == domain.AssetClassOption && positions[index].ClosedAt == nil && positions[index].Quantity > 0 {
 				open = append(open, &positions[index])
 			}
 		}
@@ -485,7 +490,7 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, scope exe
 		for _, leg := range spread.Legs {
 			legs = append(legs, risk.OptionLegExposure{Greeks: leg.Greeks, Side: leg.Side, Quantity: quantity * float64(leg.Ratio), Multiplier: leg.Contract.Multiplier})
 		}
-		if err := r.enforceOptionsGreekRisk(ctx, cfg.Underlying, legs); err != nil {
+		if err := r.enforceOptionsGreekRisk(ctx, scope, cfg.Underlying, legs); err != nil {
 			return err
 		}
 		return manager.ProcessSpreadSignal(ctx, scope, spread, quantity)
@@ -494,7 +499,7 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, scope exe
 	if err != nil {
 		return err
 	}
-	if err := r.enforceOptionsGreekRisk(ctx, cfg.Underlying, []risk.OptionLegExposure{{Greeks: *plan.OptionGreeks, Side: domain.OrderSideBuy, Quantity: plan.PositionSize, Multiplier: 100}}); err != nil {
+	if err := r.enforceOptionsGreekRisk(ctx, scope, cfg.Underlying, []risk.OptionLegExposure{{Greeks: *plan.OptionGreeks, Side: domain.OrderSideBuy, Quantity: plan.PositionSize, Multiplier: 100}}); err != nil {
 		return err
 	}
 	return manager.ProcessOptionSignal(ctx, scope, signal, plan)
@@ -545,7 +550,7 @@ func buildPaperSpreadClosePlan(positions []*domain.Position, chain []domain.Opti
 	return spread, quantity, nil
 }
 
-func (r *realStrategyRunner) enforceOptionsGreekRisk(ctx context.Context, underlying string, proposed []risk.OptionLegExposure) error {
+func (r *realStrategyRunner) enforceOptionsGreekRisk(ctx context.Context, scope execution.ExecutionScope, underlying string, proposed []risk.OptionLegExposure) error {
 	to := time.Now().UTC()
 	bars, err := r.dataService.GetOHLCV(ctx, domain.MarketTypeStock, underlying, data.Timeframe1d, to.Add(-7*24*time.Hour), to)
 	if err != nil || len(bars) == 0 || bars[len(bars)-1].Close <= 0 {
@@ -555,7 +560,11 @@ func (r *realStrategyRunner) enforceOptionsGreekRisk(ctx context.Context, underl
 	if err != nil {
 		return fmt.Errorf("options runtime: paper balance for Greek risk: %w", err)
 	}
-	positions, err := r.positionRepo.GetOpen(ctx, repository.PositionFilter{}, 1000, 0)
+	scoped, ok := r.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return errors.New("options runtime: account-scoped position repository is required for Greek risk")
+	}
+	positions, err := scoped.GetByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, 1000, 0)
 	if err != nil {
 		return fmt.Errorf("options runtime: open positions for Greek risk: %w", err)
 	}

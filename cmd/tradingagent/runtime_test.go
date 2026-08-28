@@ -1232,19 +1232,19 @@ func TestBootstrapPolymarketStopGuardsFiltersAndPaginates(t *testing.T) {
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client)})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client)})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}
-	runner := &realStrategyRunner{polymarketStopGuard: guard, logger: slogDiscardLogger()}
+	runner := &realStrategyRunner{executionAccount: testExecutionAccountBinding, polymarketStopGuard: guard, logger: slogDiscardLogger()}
 	firstPage := make([]domain.Position, 0, polymarketBootstrapPageSize)
 	for i := 0; i < polymarketBootstrapPageSize-1; i++ {
 		firstPage = append(firstPage, domain.Position{MarketType: domain.MarketTypePolymarket, Ticker: fmt.Sprintf("ignore-%d", i), Quantity: 1})
 	}
-	firstPage = append(firstPage, domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)})
+	firstPage = append(firstPage, domain.Position{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)})
 	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{
 		firstPage,
-		{{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-three:NO", Side: domain.PositionSideShort, Quantity: 7, TakeProfit: floatPtr(0.6)}},
+		{{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), MarketType: domain.MarketTypePolymarket, Ticker: "market-three:NO", Side: domain.PositionSideShort, Quantity: 7, TakeProfit: floatPtr(0.6)}},
 	}}
 
 	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
@@ -1263,12 +1263,13 @@ func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client)})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client)})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}
 	workerCtx, stopWorkers := context.WithCancel(context.Background())
 	runner := &realStrategyRunner{
+		executionAccount:     testExecutionAccountBinding,
 		polymarketStopGuard:  guard,
 		polymarketWorkerCtx:  workerCtx,
 		polymarketWorkerStop: stopWorkers,
@@ -1276,7 +1277,7 @@ func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
 	}
 	defer runner.stopPolymarketTickWorkers()
 
-	position := domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)}
+	position := domain.Position{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)}
 	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{{position}}}
 	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
 		t.Fatalf("initial bootstrapPolymarketStopGuards() error = %v", err)
@@ -1945,6 +1946,10 @@ func (r *bootstrapPolymarketPositionRepoStub) GetOpen(context.Context, repositor
 		return nil, nil
 	}
 	return append([]domain.Position(nil), r.pages[idx]...), nil
+}
+
+func (r *bootstrapPolymarketPositionRepoStub) GetByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	return r.GetOpen(ctx, filter, limit, offset)
 }
 
 func (r *bootstrapPolymarketPositionRepoStub) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {

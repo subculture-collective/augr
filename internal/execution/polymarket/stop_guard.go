@@ -32,6 +32,7 @@ type StopGuardMetrics interface {
 
 type Position struct {
 	AccountID    uuid.UUID
+	Environment  domain.AccountEnvironment
 	ID           string
 	Slug         string
 	Side         string
@@ -83,6 +84,9 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 	if cfg.Broker == nil {
 		return nil, errors.New("polymarket: stop guard broker is required")
 	}
+	if err := cfg.ExecutionAccount.Validate(); err != nil {
+		return nil, fmt.Errorf("polymarket: stop guard execution account: %w", err)
+	}
 	return &StopGuard{
 		executionAccount: cfg.ExecutionAccount,
 		broker:           cfg.Broker,
@@ -97,8 +101,11 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 	if g == nil {
 		return errors.New("polymarket: stop guard is nil")
 	}
-	if err := g.executionAccount.Validate(); err == nil && pos.AccountID != g.executionAccount.AccountID() {
-		return errors.New("polymarket: stop guard position belongs to a foreign account")
+	if err := g.executionAccount.Validate(); err != nil {
+		return fmt.Errorf("polymarket: stop guard execution account: %w", err)
+	}
+	if pos.AccountID != g.executionAccount.AccountID() || pos.Environment != g.executionAccount.Environment() {
+		return errors.New("polymarket: stop guard position belongs to a foreign execution account")
 	}
 	positionID := strings.TrimSpace(pos.ID)
 	if positionID == "" {
@@ -139,7 +146,7 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 	if long {
 		side = "SELL"
 	}
-	order := &domain.Order{Ticker: slug, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, PredictionSide: outcome, PolymarketIntent: intent}
+	order := &domain.Order{AccountID: pos.AccountID, Environment: pos.Environment, Ticker: slug, MarketType: domain.MarketTypePolymarket, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, PredictionSide: outcome, PolymarketIntent: intent}
 	g.mu.RLock()
 	if _, exists := g.byID[positionID]; exists {
 		g.mu.RUnlock()
@@ -177,7 +184,7 @@ func (g *StopGuard) RegisterPosition(pos domain.Position) error {
 	if err != nil {
 		return err
 	}
-	entry := Position{AccountID: pos.AccountID, ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
+	entry := Position{AccountID: pos.AccountID, Environment: pos.Environment, ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
 	switch pos.Side {
 	case domain.PositionSideLong:
 		entry.Side = "BUY"

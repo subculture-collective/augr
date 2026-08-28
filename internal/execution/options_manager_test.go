@@ -23,6 +23,21 @@ type mockOptionsBroker struct {
 	optionFillReportFn  func(ctx context.Context, order *domain.Order) (execution.OptionFillReport, error)
 }
 
+type malformedAsyncSpreadBroker struct{}
+
+func (malformedAsyncSpreadBroker) SubmitOptionOrder(context.Context, *domain.Order) (string, error) {
+	return "", nil
+}
+func (malformedAsyncSpreadBroker) SubmitSpreadOrder(context.Context, *domain.OptionSpread, float64) ([]string, error) {
+	return []string{"only-one"}, nil
+}
+func (malformedAsyncSpreadBroker) PreflightSpread(context.Context, *domain.OptionSpread, float64) error {
+	return nil
+}
+func (malformedAsyncSpreadBroker) GetAccountBalance(context.Context) (execution.Balance, error) {
+	return execution.Balance{Cash: 100000, BuyingPower: 100000, Equity: 100000}, nil
+}
+
 type recordingOptionFillRepo struct {
 	batches [][]repository.OptionFillInput
 	err     error
@@ -381,6 +396,12 @@ func TestProcessSpreadSignalAtomicallyClosesPersistedLegGroup(t *testing.T) {
 		{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL271217C00150000", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 2.5, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &longStrike, Expiry: &expiry, ContractMultiplier: 100, LegGroupID: &groupID},
 		{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL271217C00155000", Side: domain.PositionSideShort, Quantity: 1, AvgEntry: 1, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &shortStrike, Expiry: &expiry, ContractMultiplier: 100, LegGroupID: &groupID},
 	}
+	scope := optionExecutionScope(strategyID, uuid.New())
+	originType, originID := scope.Origin()
+	for i := range positions {
+		positions[i].AccountID, positions[i].Environment = scope.AccountID(), scope.Environment()
+		positions[i].OriginType, positions[i].OriginID = string(originType), originID
+	}
 	positionRepo.getByStrategyFn = func(context.Context, uuid.UUID, repository.PositionFilter, int, int) ([]domain.Position, error) {
 		return positions, nil
 	}
@@ -397,7 +418,7 @@ func TestProcessSpreadSignalAtomicallyClosesPersistedLegGroup(t *testing.T) {
 	fillRepo := &recordingOptionFillRepo{}
 	riskEng := &mockRiskEngine{isKillSwitchActiveFn: func(context.Context) (bool, error) { return true, nil }}
 	mgr := newTestOptionsManagerWithFillRepo(paper.NewPaperBroker(100000, 0, 0), orderRepo, positionRepo, tradeRepo, riskEng, fillRepo).WithBrokerName("paper")
-	if err := mgr.ProcessSpreadSignal(context.Background(), optionExecutionScope(strategyID, uuid.New()), spread, 1); err != nil {
+	if err := mgr.ProcessSpreadSignal(context.Background(), scope, spread, 1); err != nil {
 		t.Fatalf("ProcessSpreadSignal(close) error = %v", err)
 	}
 	if len(fillRepo.batches) != 1 || len(fillRepo.batches[0]) != 2 {
@@ -407,5 +428,21 @@ func TestProcessSpreadSignalAtomicallyClosesPersistedLegGroup(t *testing.T) {
 		if fillRepo.batches[0][index].PositionID == nil || fillRepo.batches[0][index].ExitReason != "strategy spread close" {
 			t.Fatalf("spread close leg %d incomplete: %+v", index, fillRepo.batches[0][index])
 		}
+	}
+}
+
+func TestProcessSpreadSignalTerminalizesMalformedAsyncResponse(t *testing.T) {
+	orderRepo, positionRepo, tradeRepo := &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}
+	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
+	spread := &domain.OptionSpread{StrategyType: domain.StrategyBullCallSpread, Underlying: "AAPL", MaxRisk: 100, Legs: []domain.SpreadLeg{
+		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00150000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 150, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, ExecutablePrice: 2},
+		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00155000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 155, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, ExecutablePrice: 1},
+	}}
+	mgr := newTestOptionsManagerWithFillRepo(malformedAsyncSpreadBroker{}, orderRepo, positionRepo, tradeRepo, &mockRiskEngine{}, &recordingOptionFillRepo{})
+	if err := mgr.ProcessSpreadSignal(context.Background(), optionExecutionScope(uuid.New(), uuid.New()), spread, 1); err == nil {
+		t.Fatal("malformed async spread response accepted")
+	}
+	if len(orderRepo.updates) != 2 || orderRepo.updates[0].Status != domain.OrderStatusRejected || orderRepo.updates[1].Status != domain.OrderStatusRejected {
+		t.Fatalf("malformed async reservations not terminalized: %+v", orderRepo.updates)
 	}
 }

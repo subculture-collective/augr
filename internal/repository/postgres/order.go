@@ -26,6 +26,7 @@ type OrderRepo struct {
 // Compile-time check that OrderRepo satisfies OrderRepository.
 var _ repository.OrderRepository = (*OrderRepo)(nil)
 var _ repository.ExecutionAccountLocker = (*OrderRepo)(nil)
+var _ repository.AtomicOptionCloseRepository = (*OrderRepo)(nil)
 
 // NewOrderRepo returns an OrderRepo backed by the given connection pool.
 func NewOrderRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OrderRepo {
@@ -36,7 +37,14 @@ func (r *OrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid
 	if accountID == uuid.Nil || accountID != r.accountID || fn == nil {
 		return fmt.Errorf("postgres: execution account advisory lock: matching account and callback are required")
 	}
-	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	// The lock lives on an isolated connection. A waiter must never consume a
+	// pooled connection while the lock owner needs that pool to run its callback.
+	conn, err := pgx.ConnectConfig(ctx, r.pool.Config().ConnConfig.Copy())
+	if err != nil {
+		return fmt.Errorf("postgres: execution account advisory lock connect: %w", err)
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("postgres: execution account advisory lock begin: %w", err)
 	}
@@ -57,6 +65,14 @@ func (r *OrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid
 // Create inserts a new order and populates the generated ID and CreatedAt on
 // the provided struct.
 func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	return r.create(ctx, r.pool, order)
+}
+
+type orderRowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *domain.Order) error {
 	if (order.AllocationOpportunityID == nil) != (order.AllocationClaimID == nil) {
 		return fmt.Errorf("postgres: create order: allocation opportunity and claim must be provided together")
 	}
@@ -73,7 +89,7 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 	}
 	order.MarketType = marketType
 
-	row := r.pool.QueryRow(ctx,
+	row := queryer.QueryRow(ctx,
 		`WITH authorized AS (
 			SELECT 1 WHERE ($33::uuid IS NULL AND $34::uuid IS NULL) OR EXISTS (
 				SELECT 1 FROM portfolio_opportunities
@@ -140,6 +156,66 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 	}
 
 	return nil
+}
+
+func (r *OrderRepo) CreateOptionCloseOrdersAndReserve(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, positionIDs []uuid.UUID, orders []*domain.Order) error {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || strings.TrimSpace(originType) == "" || strings.TrimSpace(originID) == "" || len(positionIDs) == 0 || len(positionIDs) != len(orders) {
+		return fmt.Errorf("postgres: atomic option close: complete account-bound pairs are required")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("postgres: atomic option close begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for i, order := range orders {
+		if order == nil || order.AccountID != accountID || order.Environment != environment || order.OriginType != originType || order.OriginID != originID || order.MarketType.Normalize() != domain.MarketTypeOptions || order.Status != domain.OrderStatusPending || order.PositionIntent == nil || (*order.PositionIntent != domain.PositionIntentBuyToClose && *order.PositionIntent != domain.PositionIntentSellToClose) {
+			return fmt.Errorf("postgres: atomic option close: invalid close order")
+		}
+		if err := r.create(ctx, tx, order); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=$1 WHERE id=$2 AND account_id=$3 AND environment=$4 AND origin_type=$5 AND origin_id=$6 AND asset_class='option' AND closed_at IS NULL AND quantity>0 AND close_reservation_order_id IS NULL`, order.ID, positionIDs[i], accountID, environment, originType, originID)
+		if err != nil {
+			return fmt.Errorf("postgres: atomic option close reserve: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("postgres: option close position %s is already reserved or ownership changed", positionIDs[i])
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: atomic option close commit: %w", err)
+	}
+	return nil
+}
+
+func (r *OrderRepo) ReleaseOptionClosePositions(ctx context.Context, accountID uuid.UUID, positionIDs, orderIDs []uuid.UUID) error {
+	if accountID == uuid.Nil || accountID != r.accountID || len(positionIDs) != len(orderIDs) {
+		return fmt.Errorf("postgres: release option close reservation: invalid pairs")
+	}
+	for i := range positionIDs {
+		if _, err := r.pool.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE id=$1 AND account_id=$2 AND close_reservation_order_id=$3`, positionIDs[i], accountID, orderIDs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *OrderRepo) ReconcileOptionCloseReservations(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) error {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() {
+		return fmt.Errorf("postgres: reconcile option close reservations: invalid execution account")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `UPDATE orders o SET status='rejected' FROM positions p WHERE p.close_reservation_order_id=o.id AND o.account_id=$1 AND o.environment=$2 AND o.status='pending' AND COALESCE(o.external_id,'')=''`, accountID, environment); err != nil {
+		return fmt.Errorf("postgres: terminalize interrupted option closes: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.close_reservation_order_id=o.id AND p.account_id=$1 AND p.environment=$2 AND o.status IN ('filled','rejected','cancelled')`, accountID, environment); err != nil {
+		return fmt.Errorf("postgres: release interrupted option closes: %w", err)
+	}
+	return tx.Commit(ctx)
 }
 
 // Get retrieves an order by ID. It returns ErrNotFound when no row matches.

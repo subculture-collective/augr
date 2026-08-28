@@ -294,6 +294,23 @@ func (r *mockOrderRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID,
 	return fn()
 }
 
+func (r *mockOrderRepo) CreateOptionCloseOrdersAndReserve(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ string, _ []uuid.UUID, orders []*domain.Order) error {
+	for _, order := range orders {
+		if err := r.Create(ctx, order); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *mockOrderRepo) ReleaseOptionClosePositions(context.Context, uuid.UUID, []uuid.UUID, []uuid.UUID) error {
+	return nil
+}
+
+func (r *mockOrderRepo) ReconcileOptionCloseReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	return nil
+}
+
 // mockPositionRepo implements repository.PositionRepository.
 type mockPositionRepo struct {
 	mu        sync.Mutex
@@ -308,13 +325,6 @@ type mockPositionRepo struct {
 	getOpenFn        func(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
 	getByStrategyFn  func(ctx context.Context, strategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
 	executionScopeFn func(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, repository.PositionFilter, int, int) ([]domain.Position, error)
-}
-
-func (r *mockPositionRepo) ReserveOptionClosePositions(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []uuid.UUID, []uuid.UUID) error {
-	return nil
-}
-func (r *mockPositionRepo) ReleaseOptionClosePositions(context.Context, uuid.UUID, []uuid.UUID, []uuid.UUID) error {
-	return nil
 }
 
 func (r *mockPositionRepo) Create(ctx context.Context, position *domain.Position) error {

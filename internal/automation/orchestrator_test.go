@@ -1203,7 +1203,8 @@ func TestJobOrchestratorRegisterAllAddsPolymarketReconcile(t *testing.T) {
 	t.Parallel()
 
 	reconciler := polymarketexecution.NewReconciler(polymarketexecution.ReconcilerDeps{
-		Broker: &polymarketBrokerStub{positions: []domain.Position{{Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 10}}},
+		ExecutionAccount: testExecutionAccountBinding,
+		Broker:           &polymarketBrokerStub{positions: []domain.Position{{Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 10}}},
 		PositionRepo: &polymarketPositionRepoStub{positions: []domain.Position{{
 			MarketType: domain.MarketTypePolymarket,
 			Ticker:     "market-one",
@@ -1676,6 +1677,10 @@ func (s *polymarketPositionRepoStub) Count(context.Context, repository.PositionF
 func (s *polymarketPositionRepoStub) Update(context.Context, *domain.Position) error { return nil }
 func (s *polymarketPositionRepoStub) Delete(context.Context, uuid.UUID) error        { return nil }
 func (s *polymarketPositionRepoStub) GetOpen(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return append([]domain.Position(nil), s.positions...), nil
+}
+
+func (s *polymarketPositionRepoStub) GetByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
 	return append([]domain.Position(nil), s.positions...), nil
 }
 

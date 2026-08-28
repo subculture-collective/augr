@@ -25,8 +25,16 @@ func bootstrapPolymarketStopGuards(ctx context.Context, runner *realStrategyRunn
 		firstErr        error
 	)
 
+	scoped, ok := positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return fmt.Errorf("bootstrap polymarket stop guards: account-scoped position repository is required")
+	}
+	binding := runner.executionAccount
+	if err := binding.Validate(); err != nil {
+		return fmt.Errorf("bootstrap polymarket stop guards: execution account: %w", err)
+	}
 	for offset := 0; ; offset += polymarketBootstrapPageSize {
-		positions, err := positionRepo.GetOpen(ctx, repository.PositionFilter{}, polymarketBootstrapPageSize, offset)
+		positions, err := scoped.GetByAccount(ctx, binding.AccountID(), binding.Environment(), repository.PositionFilter{}, polymarketBootstrapPageSize, offset)
 		if err != nil {
 			return fmt.Errorf("bootstrap polymarket stop guards: fetch open positions: %w", err)
 		}

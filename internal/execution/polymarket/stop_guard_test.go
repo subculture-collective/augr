@@ -24,6 +24,20 @@ type fakeBroker struct {
 	mu          sync.Mutex
 }
 
+var testStopGuardBinding = func() domain.ExecutionAccountBinding {
+	binding, err := domain.NewExecutionAccountBinding(uuid.MustParse("00000000-0000-4000-8000-000000000064"), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		panic(err)
+	}
+	return binding
+}()
+
+func scopedGuardPosition(position Position) Position {
+	position.AccountID = testStopGuardBinding.AccountID()
+	position.Environment = testStopGuardBinding.Environment()
+	return position
+}
+
 func (f *fakeBroker) PrepareTemplate(order *domain.Order) (*OrderTemplate, error) {
 	f.mu.Lock()
 	copyOrder := *order
@@ -48,11 +62,11 @@ func (f *fakeBroker) SendTemplate(_ context.Context, tmpl *OrderTemplate) (*crea
 
 func TestStopGuard_LongStopBelowFires(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.RegisterEntry(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45}); err != nil {
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45})); err != nil {
 		t.Fatal(err)
 	}
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.46, ReceivedAt: time.Now()})
@@ -67,11 +81,11 @@ func TestStopGuard_LongStopBelowFires(t *testing.T) {
 
 func TestStopGuard_LongTakeProfitFires(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.RegisterEntry(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, TakeProfitPx: 0.55}); err != nil {
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, TakeProfitPx: 0.55})); err != nil {
 		t.Fatal(err)
 	}
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.54, ReceivedAt: time.Now()})
@@ -86,11 +100,11 @@ func TestStopGuard_LongTakeProfitFires(t *testing.T) {
 
 func TestStopGuard_DuplicateTickCrossingThresholdFiresOnce(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.RegisterEntry(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45}); err != nil {
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45})); err != nil {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
@@ -109,11 +123,11 @@ func TestStopGuard_DuplicateTickCrossingThresholdFiresOnce(t *testing.T) {
 
 func TestStopGuard_DuplicateRegistrationIsIdempotent(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
-	pos := Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45, TakeProfitPx: 0.55}
+	pos := scopedGuardPosition(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45, TakeProfitPx: 0.55})
 	if err := g.RegisterEntry(pos); err != nil {
 		t.Fatal(err)
 	}
@@ -131,11 +145,11 @@ func TestStopGuard_DuplicateRegistrationIsIdempotent(t *testing.T) {
 
 func TestStopGuard_CancelPreventsFire(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.RegisterEntry(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45}); err != nil {
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45})); err != nil {
 		t.Fatal(err)
 	}
 	g.Cancel("1")
@@ -147,11 +161,11 @@ func TestStopGuard_CancelPreventsFire(t *testing.T) {
 
 func TestStopGuard_OtherSlugIgnored(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.RegisterEntry(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45}); err != nil {
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "1", Slug: "slug-a", Side: "BUY", EntryPx: 0.50, Size: 1, StopPx: 0.45})); err != nil {
 		t.Fatal(err)
 	}
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-b", Side: "YES", Price: 0.44, ReceivedAt: time.Now()})
@@ -162,12 +176,12 @@ func TestStopGuard_OtherSlugIgnored(t *testing.T) {
 
 func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
 	stop := 0.40
-	pos := domain.Position{ID: uuidFromString(t, "00000000-0000-0000-0000-000000000001"), Ticker: "slug-a:NO", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
+	pos := domain.Position{ID: uuidFromString(t, "00000000-0000-0000-0000-000000000001"), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), Ticker: "slug-a:NO", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
 	if err := g.RegisterPosition(pos); err != nil {
 		t.Fatal(err)
 	}
@@ -189,11 +203,11 @@ func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 
 func TestStopGuard_SendFailureRearmsGuard(t *testing.T) {
 	broker := &fakeBroker{sendErr: errors.New("temporary")}
-	g, err := NewStopGuard(StopGuardConfig{Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := g.RegisterEntry(Position{ID: "1", Slug: "slug-a", Side: "BUY", OutcomeSide: "YES", EntryPx: 0.50, Size: 1, StopPx: 0.45}); err != nil {
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "1", Slug: "slug-a", Side: "BUY", OutcomeSide: "YES", EntryPx: 0.50, Size: 1, StopPx: 0.45})); err != nil {
 		t.Fatal(err)
 	}
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.44, ReceivedAt: time.Now()})
@@ -210,6 +224,29 @@ func TestStopGuard_SendFailureRearmsGuard(t *testing.T) {
 	}
 	if got := g.Active(); got != 0 {
 		t.Fatalf("active guards = %d, want removed after successful retry", got)
+	}
+}
+
+func TestStopGuardRejectsInvalidAndForeignEnvironmentBindings(t *testing.T) {
+	broker := &fakeBroker{}
+	if _, err := NewStopGuard(StopGuardConfig{Broker: broker}); err == nil {
+		t.Fatal("invalid execution binding accepted")
+	}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := scopedGuardPosition(Position{ID: "foreign", Slug: "slug", Side: "BUY", Size: 1, StopPx: .4})
+	foreign.Environment = domain.AccountEnvironmentShadow
+	if err := g.RegisterEntry(foreign); err == nil {
+		t.Fatal("foreign environment position accepted")
+	}
+	local := scopedGuardPosition(Position{ID: "local", Slug: "slug", Side: "BUY", Size: 1, StopPx: .4})
+	if err := g.RegisterEntry(local); err != nil {
+		t.Fatal(err)
+	}
+	if broker.lastOrder.AccountID != testStopGuardBinding.AccountID() || broker.lastOrder.Environment != testStopGuardBinding.Environment() {
+		t.Fatalf("prepared order lost execution binding: %+v", broker.lastOrder)
 	}
 }
 
