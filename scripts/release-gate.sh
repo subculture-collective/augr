@@ -24,7 +24,12 @@ do
 done
 bash -n scripts/verify-prod-build.sh
 bash scripts/update-db-targets_test.sh
-shellcheck scripts/update-db-targets.sh scripts/update-db-targets_test.sh
+bash scripts/apply-migrations-psql_test.sh
+shellcheck scripts/apply-migrations-psql.sh scripts/apply-migrations-psql_test.sh scripts/update-db-targets.sh scripts/update-db-targets_test.sh scripts/verify-account-cutover.sh
+shellcheck scripts/capture-old-db-baseline.sh scripts/verify-old-db-after-drain.sh
+./scripts/verify-account-cutover.sh --schema-matrix
+./scripts/verify-account-cutover.sh --writer-fixtures
+./scripts/verify-account-cutover.sh --api-matrix
 go test -count=1 ./cmd/... ./internal/... ./migrations/...
 go vet ./cmd/... ./internal/... ./migrations/...
 golangci-lint run ./cmd/... ./internal/... ./migrations/...
