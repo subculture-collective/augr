@@ -161,7 +161,7 @@ func (r *Reconciler) fetchOpenKalshiPositions(ctx context.Context) ([]domain.Pos
 	}
 	var all []domain.Position
 	for offset := 0; ; offset += kalshiReconcilePageSize {
-		page, err := scoped.GetByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{}, kalshiReconcilePageSize, offset)
+		page, err := scoped.GetOpenByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{}, kalshiReconcilePageSize, offset)
 		if err != nil {
 			return nil, err
 		}

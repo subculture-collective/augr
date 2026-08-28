@@ -233,6 +233,7 @@ func (m *OptionsOrderManager) ProcessOptionSignal(
 		CreatedAt:          now,
 		Broker:             m.brokerName,
 	}
+	order.ClientOrderID = "augr-option-" + order.ID.String()
 	stampOptionOrderScope(order, scope)
 
 	if plan.EntryPrice > 0 {
@@ -293,11 +294,7 @@ func (m *OptionsOrderManager) ProcessOptionSignal(
 	// 4. Submit to broker.
 	externalID, err := m.broker.SubmitOptionOrder(ctx, order)
 	if err != nil {
-		order.Status = domain.OrderStatusRejected
-		if updateErr := m.orderRepo.Update(ctx, order); updateErr != nil {
-			m.logger.ErrorContext(ctx, "options: failed to update rejected order", "error", updateErr)
-		}
-		return fmt.Errorf("options_manager: submit option order: %w", err)
+		return fmt.Errorf("options_manager: submit option order outcome is ambiguous; reservation retained for reconciliation: %w", err)
 	}
 
 	// 5. Update order status.
@@ -401,6 +398,7 @@ func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, scope Exe
 		LegGroupID: position.LegGroupID, CreatedAt: now,
 		Broker: m.brokerName,
 	}
+	order.ClientOrderID = "augr-option-close-" + order.ID.String()
 	stampOptionOrderScope(order, scope)
 	reservation, ok := m.orderRepo.(repository.AtomicOptionCloseRepository)
 	if !ok {
@@ -411,10 +409,7 @@ func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, scope Exe
 	}
 	externalID, err := m.broker.SubmitOptionOrder(ctx, order)
 	if err != nil {
-		_ = reservation.ReleaseOptionClosePositions(ctx, scope.AccountID(), []uuid.UUID{position.ID}, []uuid.UUID{order.ID})
-		order.Status = domain.OrderStatusRejected
-		_ = m.orderRepo.Update(ctx, order)
-		return fmt.Errorf("options_manager: submit close order: %w", err)
+		return fmt.Errorf("options_manager: submit close order outcome is ambiguous; reservation retained for reconciliation: %w", err)
 	}
 	order.ExternalID = externalID
 	if order.Status == domain.OrderStatusPending {
@@ -430,7 +425,6 @@ func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, scope Exe
 		return nil
 	}
 	if err := m.persistClosingFill(ctx, position, order, reason); err != nil {
-		_ = reservation.ReleaseOptionClosePositions(ctx, scope.AccountID(), []uuid.UUID{position.ID}, []uuid.UUID{order.ID})
 		return m.abortOptionOrder(ctx, order, externalID, err)
 	}
 	return nil
@@ -653,6 +647,7 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 			CreatedAt:          now,
 			Broker:             m.brokerName,
 		}
+		legOrder.ClientOrderID = "augr-option-leg-" + legOrder.ID.String()
 		stampOptionOrderScope(legOrder, scope)
 
 		legOrders = append(legOrders, legOrder)
@@ -680,48 +675,22 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 			}
 		}
 	}
-	releaseReservation := func() {
-		if reservation != nil {
-			_ = reservation.ReleaseOptionClosePositions(ctx, scope.AccountID(), reservedPositionIDs, reservedOrderIDs)
-		}
-	}
-
 	// 3. Submit spread to broker.
 	ids, err := m.broker.SubmitSpreadOrder(ctx, spread, quantity)
 	if err != nil {
-		releaseReservation()
-		for _, order := range legOrders {
-			order.Status = domain.OrderStatusRejected
-			_ = m.orderRepo.Update(ctx, order)
-		}
-		return fmt.Errorf("options_manager: submit spread order: %w", err)
+		return fmt.Errorf("options_manager: submit spread outcome is ambiguous; orders and reservations retained for reconciliation: %w", err)
 	}
 	_, synchronous := m.broker.(OptionFillReporter)
 	if len(ids) != len(legOrders) && len(ids) != len(legOrders)+1 {
 		persistErr := fmt.Errorf("options_manager: spread broker returned %d ids for %d legs", len(ids), len(legOrders))
-		releaseReservation()
 		if synchronous {
 			return m.abortOptionSpread(ctx, legOrders, ids, persistErr)
 		}
-		for _, order := range legOrders {
-			order.Status = domain.OrderStatusRejected
-			if err := m.orderRepo.Update(ctx, order); err != nil {
-				persistErr = errors.Join(persistErr, fmt.Errorf("options_manager: terminalize malformed spread order %s: %w", order.ID, err))
-			}
-		}
-		return persistErr
+		return fmt.Errorf("%w; orders and reservations retained for reconciliation", persistErr)
 	}
 	fillInputs := make([]repository.OptionFillInput, 0, len(legOrders))
 	abortAsync := func(cause error) error {
-		releaseReservation()
-		errs := []error{cause}
-		for _, candidate := range legOrders {
-			candidate.Status, candidate.FilledQuantity, candidate.FilledAvgPrice, candidate.FilledAt = domain.OrderStatusRejected, 0, nil, nil
-			if err := m.orderRepo.Update(ctx, candidate); err != nil {
-				errs = append(errs, fmt.Errorf("options_manager: terminalize malformed spread order %s: %w", candidate.ID, err))
-			}
-		}
-		return errors.Join(errs...)
+		return fmt.Errorf("%w; post-submit state is ambiguous and retained for reconciliation", cause)
 	}
 	for index, order := range legOrders {
 		idIndex := index
@@ -738,7 +707,6 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 		order.Status = domain.OrderStatusSubmitted
 		if synchronous {
 			if order.LimitPrice == nil {
-				releaseReservation()
 				return m.abortOptionSpread(ctx, legOrders, ids, errors.New("options_manager: synchronous spread fill requires executable leg prices"))
 			}
 			order.Status, order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = domain.OrderStatusFilled, order.Quantity, order.LimitPrice, &now
@@ -756,7 +724,6 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 				return ""
 			}())
 			if err != nil {
-				releaseReservation()
 				return m.abortOptionSpread(ctx, legOrders, ids, fmt.Errorf("options_manager: build spread leg fill: %w", err))
 			}
 			fillInputs = append(fillInputs, input)
@@ -767,7 +734,6 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 	if synchronous {
 		if _, err := m.optionFillRepo.ApplyOptionFills(ctx, fillInputs); err != nil {
 			persistErr := fmt.Errorf("options_manager: persist atomic spread fills: %w", err)
-			releaseReservation()
 			return m.abortOptionSpread(ctx, legOrders, ids, persistErr)
 		}
 		if err := m.finalizeOptionSpread(ids); err != nil {
@@ -798,6 +764,9 @@ func (m *OptionsOrderManager) compensateOptionOrder(ctx context.Context, externa
 
 func (m *OptionsOrderManager) abortOptionOrder(ctx context.Context, order *domain.Order, externalID string, cause error) error {
 	rollbackErr := m.compensateOptionOrder(ctx, externalID)
+	if rollbackErr != nil {
+		return errors.Join(cause, rollbackErr)
+	}
 	order.Status, order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = domain.OrderStatusRejected, 0, nil, nil
 	persistErr := m.orderRepo.Update(ctx, order)
 	if persistErr != nil {
@@ -818,7 +787,11 @@ func (m *OptionsOrderManager) compensateOptionSpread(ctx context.Context, extern
 }
 
 func (m *OptionsOrderManager) abortOptionSpread(ctx context.Context, orders []*domain.Order, externalIDs []string, cause error) error {
-	errs := []error{cause, m.compensateOptionSpread(ctx, externalIDs)}
+	rollbackErr := m.compensateOptionSpread(ctx, externalIDs)
+	if rollbackErr != nil {
+		return errors.Join(cause, rollbackErr)
+	}
+	errs := []error{cause}
 	for _, order := range orders {
 		order.Status, order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = domain.OrderStatusRejected, 0, nil, nil
 		if err := m.orderRepo.Update(ctx, order); err != nil {
@@ -879,9 +852,16 @@ func (m *OptionsOrderManager) buildRiskPortfolio(ctx context.Context, scope Exec
 	if !ok {
 		return risk.Portfolio{}, errors.New("options_manager: account-scoped position repository is required")
 	}
-	positions, err := repo.GetByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, 0)
-	if err != nil {
-		return risk.Portfolio{}, err
+	var positions []domain.Position
+	for offset := 0; ; offset += riskSnapshotPositionLimit {
+		page, err := repo.GetOpenByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, offset)
+		if err != nil {
+			return risk.Portfolio{}, err
+		}
+		positions = append(positions, page...)
+		if len(page) < riskSnapshotPositionLimit {
+			break
+		}
 	}
 	return BuildRiskPortfolioSnapshotFromPositions(balance, positions)
 }

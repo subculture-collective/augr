@@ -327,6 +327,46 @@ type mockPositionRepo struct {
 	executionScopeFn func(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, repository.PositionFilter, int, int) ([]domain.Position, error)
 }
 
+func TestBuildRiskPortfolioSnapshotPaginatesAllOpenPositions(t *testing.T) {
+	repo := &mockPositionRepo{}
+	var offsets []int
+	repo.getOpenFn = func(_ context.Context, _ repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+		offsets = append(offsets, offset)
+		count := limit
+		if offset > 0 {
+			count = 1
+		}
+		positions := make([]domain.Position, count)
+		for i := range positions {
+			positions[i] = domain.Position{Ticker: fmt.Sprintf("P-%d-%d", offset, i), Quantity: 1, AvgEntry: 1}
+		}
+		return positions, nil
+	}
+	portfolio, err := execution.BuildRiskPortfolioSnapshotFromBalance(context.Background(), execution.Balance{Equity: 10_000}, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if portfolio.ConcurrentPositions != 1001 || !slices.Equal(offsets, []int{0, 1000}) {
+		t.Fatalf("portfolio positions=%d offsets=%v, want 1001 across two pages", portfolio.ConcurrentPositions, offsets)
+	}
+}
+
+func TestBuildRiskPortfolioSnapshotUsesOptionContractMultiplier(t *testing.T) {
+	repo := &mockPositionRepo{getOpenFn: func(_ context.Context, _ repository.PositionFilter, _, offset int) ([]domain.Position, error) {
+		if offset > 0 {
+			return nil, nil
+		}
+		return []domain.Position{{Ticker: "AAPL271217C00150000", AssetClass: domain.AssetClassOption, Quantity: 2, AvgEntry: 5, ContractMultiplier: 100}}, nil
+	}}
+	portfolio, err := execution.BuildRiskPortfolioSnapshotFromBalance(context.Background(), execution.Balance{Equity: 10_000}, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(portfolio.TotalExposurePct-0.1) > 1e-9 {
+		t.Fatalf("option exposure = %v, want 0.1", portfolio.TotalExposurePct)
+	}
+}
+
 func (r *mockPositionRepo) Create(ctx context.Context, position *domain.Position) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -425,7 +465,7 @@ func (r *mockPositionRepo) GetByExecutionScope(ctx context.Context, accountID uu
 	return r.GetByStrategy(ctx, strategyID, filter, limit, offset)
 }
 
-func (r *mockPositionRepo) GetByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+func (r *mockPositionRepo) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
 	if r.getOpenFn != nil {
 		return r.getOpenFn(ctx, filter, limit, offset)
 	}

@@ -20,7 +20,7 @@ func TestReconstructPaperBalance(t *testing.T) {
 		wantEq    float64
 	}{
 		{
-			name: "stock and paper prediction share unmultiplied reconstruction",
+			name: "options trades use contract multiplier",
 			trades: []domain.Trade{
 				{Side: domain.OrderSideBuy, Quantity: 10, Price: 10, Fee: 1},
 				{AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 2, Price: 5, Fee: 1.3, ContractMultiplier: 100},
@@ -29,8 +29,8 @@ func TestReconstructPaperBalance(t *testing.T) {
 				{Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 10, AvgEntry: 10, CurrentPrice: floatPtr(11)},
 				{Ticker: "YES", MarketType: domain.MarketTypeStock, Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 5, CurrentPrice: floatPtr(6), ContractMultiplier: 100},
 			},
-			wantCash: 100000 - 101 - 11.3,
-			wantEq:   (100000 - 101 - 11.3) + 110 + 12,
+			wantCash: 100000 - 101 - 1001.3,
+			wantEq:   (100000 - 101 - 1001.3) + 110 + 12,
 		},
 	}
 	for _, tt := range tests {

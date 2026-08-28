@@ -1040,9 +1040,16 @@ func (m *OrderManager) buildRiskPortfolioSnapshot(ctx context.Context, balance B
 	if !ok {
 		return risk.Portfolio{}, fmt.Errorf("canonical account-scoped position repository is required")
 	}
-	positions, err := repo.GetByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, 0)
-	if err != nil {
-		return risk.Portfolio{}, err
+	var positions []domain.Position
+	for offset := 0; ; offset += riskSnapshotPositionLimit {
+		page, err := repo.GetOpenByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, offset)
+		if err != nil {
+			return risk.Portfolio{}, err
+		}
+		positions = append(positions, page...)
+		if len(page) < riskSnapshotPositionLimit {
+			break
+		}
 	}
 	portfolio := risk.Portfolio{ConcurrentPositions: len(positions), PositionExposureBySymbol: make(map[string]float64, len(positions)), MarketExposurePct: make(map[domain.MarketType]float64, len(positions))}
 	if len(positions) == 0 {

@@ -24,6 +24,33 @@ type fakeBroker struct {
 	mu          sync.Mutex
 }
 
+type sharedExitClaims struct {
+	mu     sync.Mutex
+	claims map[uuid.UUID]uuid.UUID
+}
+
+func (r *sharedExitClaims) CreatePredictionExitOrderAndReserve(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ string, positionID uuid.UUID, order *domain.Order) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.claims == nil {
+		r.claims = make(map[uuid.UUID]uuid.UUID)
+	}
+	if _, exists := r.claims[positionID]; exists {
+		return errors.New("already claimed")
+	}
+	r.claims[positionID] = order.ID
+	return nil
+}
+func (*sharedExitClaims) ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (*sharedExitClaims) MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error {
+	return nil
+}
+func (*sharedExitClaims) ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	return nil
+}
+
 var testStopGuardBinding = func() domain.ExecutionAccountBinding {
 	binding, err := domain.NewExecutionAccountBinding(uuid.MustParse("00000000-0000-4000-8000-000000000064"), domain.AccountEnvironmentPaperScored)
 	if err != nil {
@@ -35,7 +62,25 @@ var testStopGuardBinding = func() domain.ExecutionAccountBinding {
 func scopedGuardPosition(position Position) Position {
 	position.AccountID = testStopGuardBinding.AccountID()
 	position.Environment = testStopGuardBinding.Environment()
+	position.OriginType = "strategy_version"
+	position.OriginID = uuid.MustParse("10000000-0000-4000-8000-000000000001").String()
 	return position
+}
+
+func (f *fakeBroker) CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error {
+	return nil
+}
+
+func (f *fakeBroker) ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (f *fakeBroker) MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error {
+	return nil
+}
+
+func (f *fakeBroker) ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	return nil
 }
 
 func (f *fakeBroker) PrepareTemplate(order *domain.Order) (*OrderTemplate, error) {
@@ -121,6 +166,35 @@ func TestStopGuard_DuplicateTickCrossingThresholdFiresOnce(t *testing.T) {
 	}
 }
 
+func TestStopGuard_DurableClaimAllowsOneSendAcrossInstances(t *testing.T) {
+	broker := &fakeBroker{}
+	claims := &sharedExitClaims{}
+	first, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := scopedGuardPosition(Position{ID: uuid.New().String(), Slug: "slug-a", Side: "BUY", Size: 1, StopPx: 0.45})
+	if err := first.RegisterEntry(position); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.RegisterEntry(position); err != nil {
+		t.Fatal(err)
+	}
+	tick := marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.44, ReceivedAt: time.Now()}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); first.OnTick(context.Background(), tick) }()
+	go func() { defer wg.Done(); second.OnTick(context.Background(), tick) }()
+	wg.Wait()
+	if got := broker.sendCalls.Load(); got != 1 {
+		t.Fatalf("broker sends = %d, want one durable owner", got)
+	}
+}
+
 func TestStopGuard_DuplicateRegistrationIsIdempotent(t *testing.T) {
 	broker := &fakeBroker{}
 	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
@@ -181,7 +255,7 @@ func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	stop := 0.40
-	pos := domain.Position{ID: uuidFromString(t, "00000000-0000-0000-0000-000000000001"), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), Ticker: "slug-a:NO", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
+	pos := domain.Position{ID: uuidFromString(t, "00000000-0000-0000-0000-000000000001"), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.New().String(), Ticker: "slug-a:NO", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
 	if err := g.RegisterPosition(pos); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +275,7 @@ func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 	}
 }
 
-func TestStopGuard_SendFailureRearmsGuard(t *testing.T) {
+func TestStopGuard_SendFailureRetainsDurableClaimWithoutResubmit(t *testing.T) {
 	broker := &fakeBroker{sendErr: errors.New("temporary")}
 	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
@@ -219,11 +293,11 @@ func TestStopGuard_SendFailureRearmsGuard(t *testing.T) {
 	}
 	broker.sendErr = nil
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.43, ReceivedAt: time.Now()})
-	if got := broker.sendCalls.Load(); got != 2 {
-		t.Fatalf("send calls = %d, want retry", got)
+	if got := broker.sendCalls.Load(); got != 1 {
+		t.Fatalf("send calls = %d, want no ambiguous resubmit", got)
 	}
-	if got := g.Active(); got != 0 {
-		t.Fatalf("active guards = %d, want removed after successful retry", got)
+	if got := g.Active(); got != 1 {
+		t.Fatalf("active guards = %d, want durable claim retained", got)
 	}
 }
 

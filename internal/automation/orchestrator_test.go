@@ -1680,7 +1680,7 @@ func (s *polymarketPositionRepoStub) GetOpen(context.Context, repository.Positio
 	return append([]domain.Position(nil), s.positions...), nil
 }
 
-func (s *polymarketPositionRepoStub) GetByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
+func (s *polymarketPositionRepoStub) GetOpenByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
 	return append([]domain.Position(nil), s.positions...), nil
 }
 

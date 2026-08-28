@@ -209,13 +209,65 @@ func (r *OrderRepo) ReconcileOptionCloseReservations(ctx context.Context, accoun
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `UPDATE orders o SET status='rejected' FROM positions p WHERE p.close_reservation_order_id=o.id AND o.account_id=$1 AND o.environment=$2 AND o.status='pending' AND COALESCE(o.external_id,'')=''`, accountID, environment); err != nil {
-		return fmt.Errorf("postgres: terminalize interrupted option closes: %w", err)
-	}
 	if _, err := tx.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.close_reservation_order_id=o.id AND p.account_id=$1 AND p.environment=$2 AND o.status IN ('filled','rejected','cancelled')`, accountID, environment); err != nil {
 		return fmt.Errorf("postgres: release interrupted option closes: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+func (r *OrderRepo) CreatePredictionExitOrderAndReserve(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, positionID uuid.UUID, order *domain.Order) error {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || strings.TrimSpace(originType) == "" || strings.TrimSpace(originID) == "" || positionID == uuid.Nil || order == nil || order.AccountID != accountID || order.Environment != environment || order.OriginType != originType || order.OriginID != originID || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.Status != domain.OrderStatusPending || order.Side != domain.OrderSideSell {
+		return fmt.Errorf("postgres: atomic prediction exit: complete scoped order is required")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("postgres: atomic prediction exit begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := r.create(ctx, tx, order); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=$1 WHERE id=$2 AND account_id=$3 AND environment=$4 AND origin_type=$5 AND origin_id=$6 AND closed_at IS NULL AND quantity>0 AND close_reservation_order_id IS NULL`, order.ID, positionID, accountID, environment, originType, originID)
+	if err != nil {
+		return fmt.Errorf("postgres: atomic prediction exit reserve: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("postgres: prediction position %s is already reserved or ownership changed", positionID)
+	}
+	return tx.Commit(ctx)
+}
+
+func (r *OrderRepo) ReleasePredictionExitPosition(ctx context.Context, accountID, positionID, orderID uuid.UUID) error {
+	if accountID == uuid.Nil || accountID != r.accountID || positionID == uuid.Nil || orderID == uuid.Nil {
+		return fmt.Errorf("postgres: release prediction exit reservation: invalid identity")
+	}
+	_, err := r.pool.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.id=$1 AND p.account_id=$2 AND p.close_reservation_order_id=$3 AND o.id=$3 AND o.account_id=$2 AND o.status IN ('filled','rejected','cancelled')`, positionID, accountID, orderID)
+	return err
+}
+
+func (r *OrderRepo) MarkPredictionExitSubmitted(ctx context.Context, accountID, orderID uuid.UUID, externalID string, submittedAt time.Time) error {
+	if accountID == uuid.Nil || accountID != r.accountID || orderID == uuid.Nil || strings.TrimSpace(externalID) == "" || submittedAt.IsZero() {
+		return fmt.Errorf("postgres: mark prediction exit submitted: complete broker evidence is required")
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE orders SET external_id=$1,status='submitted',submitted_at=$2 WHERE id=$3 AND account_id=$4 AND status='pending'`, strings.TrimSpace(externalID), submittedAt.UTC(), orderID, accountID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("postgres: mark prediction exit submitted: pending order not found")
+	}
+	return nil
+}
+
+func (r *OrderRepo) ReconcilePredictionExitReservations(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) error {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() {
+		return fmt.Errorf("postgres: reconcile prediction exit reservations: invalid execution account")
+	}
+	_, err := r.pool.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.close_reservation_order_id=o.id AND p.account_id=$1 AND p.environment=$2 AND o.account_id=$1 AND o.environment=$2 AND o.market_type='polymarket' AND o.status IN ('filled','rejected','cancelled')`, accountID, environment)
+	if err != nil {
+		return fmt.Errorf("postgres: reconcile prediction exit reservations: %w", err)
+	}
+	return nil
 }
 
 // Get retrieves an order by ID. It returns ErrNotFound when no row matches.

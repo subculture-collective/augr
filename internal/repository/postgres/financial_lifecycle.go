@@ -188,7 +188,7 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 				matchedPosition.ClosedAt = &closedAt
 				closedIDs = append(closedIDs, matchedPosition.ID)
 			}
-			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = $1, current_price = $2, realized_pnl = $3, closed_at = $4 WHERE id = $5`, matchedPosition.Quantity, matchedPosition.CurrentPrice, matchedPosition.RealizedPnL, matchedPosition.ClosedAt, matchedPosition.ID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = $1, current_price = $2, realized_pnl = $3, closed_at = $4, close_reservation_order_id=CASE WHEN close_reservation_order_id=$6 THEN NULL ELSE close_reservation_order_id END WHERE id = $5`, matchedPosition.Quantity, matchedPosition.CurrentPrice, matchedPosition.RealizedPnL, matchedPosition.ClosedAt, matchedPosition.ID, order.ID); err != nil {
 				return repository.OrderFillResult{}, fmt.Errorf("postgres: update polymarket position: %w", err)
 			}
 			updatedIDs = append(updatedIDs, matchedPosition.ID)
@@ -599,19 +599,23 @@ func (db *DB) SettleOptionPosition(ctx context.Context, input repository.OptionP
 		closedAt           *time.Time
 		assetClass         domain.AssetClass
 		expiry             *time.Time
+		closeReservationID *uuid.UUID
 		accountID          uuid.UUID
 		environment        domain.AccountEnvironment
 	)
 	if err := tx.QueryRow(ctx, `SELECT account_id,environment,ticker, side, quantity::double precision, avg_entry::double precision,
 		COALESCE(realized_pnl, 0)::double precision, COALESCE(NULLIF(contract_multiplier, 0), 100)::double precision,
-		closed_at, asset_class, expiry
+		closed_at, asset_class, expiry, close_reservation_order_id
 		FROM positions WHERE id = $1 AND account_id=$2 FOR UPDATE`, input.PositionID, input.AccountID).Scan(
-		&accountID, &environment, &ticker, &side, &quantity, &avgEntry, &realizedPnL, &contractMultiplier, &closedAt, &assetClass, &expiry,
+		&accountID, &environment, &ticker, &side, &quantity, &avgEntry, &realizedPnL, &contractMultiplier, &closedAt, &assetClass, &expiry, &closeReservationID,
 	); err != nil {
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: lock option settlement position: %w", err)
 	}
 	if accountID != input.AccountID || environment != input.Environment || assetClass != domain.AssetClassOption || closedAt != nil || quantity <= 0 || expiry == nil {
 		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: option settlement position is not eligible")
+	}
+	if closeReservationID != nil {
+		return repository.OptionPositionSettlementResult{}, fmt.Errorf("postgres: option settlement position has an active close reservation")
 	}
 	settledAt := input.SettledAt.UTC()
 	settlementDay := time.Date(settledAt.Year(), settledAt.Month(), settledAt.Day(), 0, 0, 0, 0, time.UTC)

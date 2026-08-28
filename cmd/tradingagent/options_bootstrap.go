@@ -115,7 +115,14 @@ func reconstructPaperBalance(initialCash float64, trades []domain.Trade, positio
 }
 
 func tradeNotional(trade domain.Trade) float64 {
-	return trade.Price * trade.Quantity
+	multiplier := 1.0
+	if trade.AssetClass == domain.AssetClassOption {
+		multiplier = trade.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 100
+		}
+	}
+	return trade.Price * trade.Quantity * multiplier
 }
 
 func positionMarketValue(position domain.Position) float64 {
@@ -123,5 +130,12 @@ func positionMarketValue(position domain.Position) float64 {
 	if position.CurrentPrice != nil && *position.CurrentPrice > 0 {
 		price = *position.CurrentPrice
 	}
-	return price * position.Quantity
+	multiplier := 1.0
+	if position.AssetClass == domain.AssetClassOption {
+		multiplier = position.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 100
+		}
+	}
+	return price * position.Quantity * multiplier
 }

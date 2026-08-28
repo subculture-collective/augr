@@ -144,7 +144,7 @@ func (r *Reconciler) fetchAllOpenPositions(ctx context.Context) ([]domain.Positi
 	}
 	var all []domain.Position
 	for offset := 0; ; offset += reconcilePositionPageSize {
-		page, err := scoped.GetByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{}, reconcilePositionPageSize, offset)
+		page, err := scoped.GetOpenByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{}, reconcilePositionPageSize, offset)
 		if err != nil {
 			return nil, err
 		}

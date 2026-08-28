@@ -198,7 +198,8 @@ func newRealStrategyRunner(
 		runner.polymarketClient = client
 		runner.polymarketMarketData = client
 		if strings.TrimSpace(pm.SecretKey) != "" {
-			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), Logger: logger, Metrics: appMetrics}); err == nil {
+			exitRepo, _ := orderRepo.(repository.AtomicPredictionExitRepository)
+			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), ExitRepo: exitRepo, Logger: logger, Metrics: appMetrics}); err == nil {
 				runner.polymarketStopGuard = guard
 			} else {
 				logger.Warn("polymarket stop guard disabled", slog.String("error", err.Error()))
@@ -564,9 +565,16 @@ func (r *realStrategyRunner) enforceOptionsGreekRisk(ctx context.Context, scope 
 	if !ok {
 		return errors.New("options runtime: account-scoped position repository is required for Greek risk")
 	}
-	positions, err := scoped.GetByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, 1000, 0)
-	if err != nil {
-		return fmt.Errorf("options runtime: open positions for Greek risk: %w", err)
+	var positions []domain.Position
+	for offset := 0; ; offset += 1000 {
+		page, err := scoped.GetOpenByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, 1000, offset)
+		if err != nil {
+			return fmt.Errorf("options runtime: open positions for Greek risk: %w", err)
+		}
+		positions = append(positions, page...)
+		if len(page) < 1000 {
+			break
+		}
 	}
 	_, allowed, reason := risk.CheckOptionsExposure(risk.DefaultOptionsLimits(), balance.Equity, bars[len(bars)-1].Close, positions, proposed)
 	if !allowed {

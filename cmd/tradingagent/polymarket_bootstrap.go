@@ -33,8 +33,11 @@ func bootstrapPolymarketStopGuards(ctx context.Context, runner *realStrategyRunn
 	if err := binding.Validate(); err != nil {
 		return fmt.Errorf("bootstrap polymarket stop guards: execution account: %w", err)
 	}
+	if err := runner.polymarketStopGuard.Reconcile(ctx); err != nil {
+		return fmt.Errorf("bootstrap polymarket stop guards: reconcile durable exits: %w", err)
+	}
 	for offset := 0; ; offset += polymarketBootstrapPageSize {
-		positions, err := scoped.GetByAccount(ctx, binding.AccountID(), binding.Environment(), repository.PositionFilter{}, polymarketBootstrapPageSize, offset)
+		positions, err := scoped.GetOpenByAccount(ctx, binding.AccountID(), binding.Environment(), repository.PositionFilter{}, polymarketBootstrapPageSize, offset)
 		if err != nil {
 			return fmt.Errorf("bootstrap polymarket stop guards: fetch open positions: %w", err)
 		}

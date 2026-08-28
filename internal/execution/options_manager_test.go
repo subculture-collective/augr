@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -431,7 +432,7 @@ func TestProcessSpreadSignalAtomicallyClosesPersistedLegGroup(t *testing.T) {
 	}
 }
 
-func TestProcessSpreadSignalTerminalizesMalformedAsyncResponse(t *testing.T) {
+func TestProcessSpreadSignalRetainsMalformedAsyncResponseForReconciliation(t *testing.T) {
 	orderRepo, positionRepo, tradeRepo := &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}
 	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
 	spread := &domain.OptionSpread{StrategyType: domain.StrategyBullCallSpread, Underlying: "AAPL", MaxRisk: 100, Legs: []domain.SpreadLeg{
@@ -442,7 +443,27 @@ func TestProcessSpreadSignalTerminalizesMalformedAsyncResponse(t *testing.T) {
 	if err := mgr.ProcessSpreadSignal(context.Background(), optionExecutionScope(uuid.New(), uuid.New()), spread, 1); err == nil {
 		t.Fatal("malformed async spread response accepted")
 	}
-	if len(orderRepo.updates) != 2 || orderRepo.updates[0].Status != domain.OrderStatusRejected || orderRepo.updates[1].Status != domain.OrderStatusRejected {
-		t.Fatalf("malformed async reservations not terminalized: %+v", orderRepo.updates)
+	if len(orderRepo.updates) != 0 || len(orderRepo.orders) != 2 {
+		t.Fatalf("malformed async orders were not retained pending: creates=%d updates=%+v", len(orderRepo.orders), orderRepo.updates)
+	}
+}
+
+func TestProcessOptionSignalRetainsAmbiguousSubmitForRestartReconciliation(t *testing.T) {
+	broker := &mockOptionsBroker{submitOptionOrderFn: func(context.Context, *domain.Order) (string, error) {
+		return "", errors.New("timeout after send")
+	}}
+	orderRepo, positionRepo, tradeRepo := &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}
+	mgr := newTestOptionsManager(broker, orderRepo, positionRepo, tradeRepo, &mockRiskEngine{})
+	plan := execution.TradingPlan{Ticker: "AAPL271217C00150000", EntryPrice: 2, PositionSize: 1}
+	err := mgr.ProcessOptionSignal(context.Background(), optionExecutionScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalBuy}, plan)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ProcessOptionSignal() error = %v, want ambiguous outcome", err)
+	}
+	if len(orderRepo.orders) != 1 || len(orderRepo.updates) != 0 {
+		t.Fatalf("ambiguous submit did not retain pending order: creates=%d updates=%d", len(orderRepo.orders), len(orderRepo.updates))
+	}
+	order := orderRepo.orders[0]
+	if order.Status != domain.OrderStatusPending || order.ClientOrderID == "" {
+		t.Fatalf("retained order lacks durable recovery identity: %+v", order)
 	}
 }

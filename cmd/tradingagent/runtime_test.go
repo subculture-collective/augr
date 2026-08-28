@@ -1227,12 +1227,35 @@ func TestNewRuntimeKalshiClientsPublicCatalogWithoutLiveCredentials(t *testing.T
 	}
 }
 
+type runtimeStopExitRepo struct{}
+
+func (runtimeStopExitRepo) CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error {
+	return nil
+}
+func (runtimeStopExitRepo) ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+func (runtimeStopExitRepo) MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error {
+	return nil
+}
+func (runtimeStopExitRepo) ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	return nil
+}
+
+func scopedRuntimeStopPosition(position domain.Position) domain.Position {
+	position.AccountID = testExecutionAccountBinding.AccountID()
+	position.Environment = testExecutionAccountBinding.Environment()
+	position.OriginType = "strategy_version"
+	position.OriginID = uuid.MustParse("10000000-0000-4000-8000-000000000001").String()
+	return position
+}
+
 func TestBootstrapPolymarketStopGuardsFiltersAndPaginates(t *testing.T) {
 	t.Parallel()
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client)})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}
@@ -1241,10 +1264,10 @@ func TestBootstrapPolymarketStopGuardsFiltersAndPaginates(t *testing.T) {
 	for i := 0; i < polymarketBootstrapPageSize-1; i++ {
 		firstPage = append(firstPage, domain.Position{MarketType: domain.MarketTypePolymarket, Ticker: fmt.Sprintf("ignore-%d", i), Quantity: 1})
 	}
-	firstPage = append(firstPage, domain.Position{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)})
+	firstPage = append(firstPage, scopedRuntimeStopPosition(domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)}))
 	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{
 		firstPage,
-		{{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), MarketType: domain.MarketTypePolymarket, Ticker: "market-three:NO", Side: domain.PositionSideShort, Quantity: 7, TakeProfit: floatPtr(0.6)}},
+		{scopedRuntimeStopPosition(domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-three:NO", Side: domain.PositionSideShort, Quantity: 7, TakeProfit: floatPtr(0.6)})},
 	}}
 
 	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
@@ -1263,7 +1286,7 @@ func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client)})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}
@@ -1277,7 +1300,7 @@ func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
 	}
 	defer runner.stopPolymarketTickWorkers()
 
-	position := domain.Position{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)}
+	position := scopedRuntimeStopPosition(domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)})
 	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{{position}}}
 	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
 		t.Fatalf("initial bootstrapPolymarketStopGuards() error = %v", err)
@@ -1948,7 +1971,7 @@ func (r *bootstrapPolymarketPositionRepoStub) GetOpen(context.Context, repositor
 	return append([]domain.Position(nil), r.pages[idx]...), nil
 }
 
-func (r *bootstrapPolymarketPositionRepoStub) GetByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+func (r *bootstrapPolymarketPositionRepoStub) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
 	return r.GetOpen(ctx, filter, limit, offset)
 }
 

@@ -266,12 +266,12 @@ func (r *PositionRepo) GetByExecutionScope(ctx context.Context, accountID uuid.U
 	return r.list(ctx, query, args, "get positions by execution scope")
 }
 
-func (r *PositionRepo) GetByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+func (r *PositionRepo) GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
 	if accountID != r.accountID {
 		return []domain.Position{}, nil
 	}
-	query, args := buildPositionQuery("account_scope", []any{r.accountID, environment}, false, filter, limit, offset)
-	return r.list(ctx, query, args, "get positions by account")
+	query, args := buildPositionQuery("account_scope", []any{r.accountID, environment}, true, filter, limit, offset)
+	return r.list(ctx, query, args, "get open positions by account")
 }
 
 const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id WHERE t.position_id=p.id AND t.account_id=p.account_id AND o.account_id=p.account_id ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,

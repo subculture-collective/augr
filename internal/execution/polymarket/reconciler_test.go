@@ -81,7 +81,7 @@ func (r *reconcilerPositionRepoStub) GetOpen(_ context.Context, _ repository.Pos
 	return append([]domain.Position(nil), r.positions[offset:end]...), nil
 }
 
-func (r *reconcilerPositionRepoStub) GetByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+func (r *reconcilerPositionRepoStub) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
 	return r.GetOpen(ctx, filter, limit, offset)
 }
 

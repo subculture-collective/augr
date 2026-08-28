@@ -338,48 +338,55 @@ func (b *Broker) GetPositions(ctx context.Context) ([]domain.Position, error) {
 	if strings.TrimSpace(b.client.address) == "" {
 		return nil, errors.New("polymarket: address is required for positions")
 	}
-	requestURL, err := url.Parse(strings.TrimRight(dataAPIBaseURL, "/") + "/positions")
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: parse positions url: %w", err)
-	}
-	query := requestURL.Query()
-	query.Set("user", strings.TrimSpace(b.client.address))
-	query.Set("limit", "500")
-	query.Set("sizeThreshold", "0")
-	requestURL.RawQuery = query.Encode()
+	const pageSize = 500
+	var positions []domain.Position
+	for offset := 0; ; offset += pageSize {
+		requestURL, err := url.Parse(strings.TrimRight(dataAPIBaseURL, "/") + "/positions")
+		if err != nil {
+			return nil, fmt.Errorf("polymarket: parse positions url: %w", err)
+		}
+		query := requestURL.Query()
+		query.Set("user", strings.TrimSpace(b.client.address))
+		query.Set("limit", strconv.Itoa(pageSize))
+		query.Set("offset", strconv.Itoa(offset))
+		query.Set("sizeThreshold", "0")
+		requestURL.RawQuery = query.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: create positions request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := b.client.getHTTPClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: get positions: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: read positions response: %w", err)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("polymarket: get positions: %w", parseErrorResponse(resp.StatusCode, responseBody))
-	}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("polymarket: create positions request: %w", err)
+		}
+		req.Header.Set("Accept", "application/json")
+		resp, err := b.client.getHTTPClient().Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("polymarket: get positions: %w", err)
+		}
+		responseBody, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("polymarket: read positions response: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("polymarket: close positions response: %w", closeErr)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return nil, fmt.Errorf("polymarket: get positions: %w", parseErrorResponse(resp.StatusCode, responseBody))
+		}
 
-	var response []dataAPIPosition
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return nil, fmt.Errorf("polymarket: decode positions response: %w", err)
-	}
-
-	positions := make([]domain.Position, 0, len(response))
-	for _, apiPosition := range response {
-		position := mapDataAPIPosition(apiPosition)
-		if strings.TrimSpace(position.Ticker) != "" && position.Quantity > 0 {
-			positions = append(positions, position)
+		var response []dataAPIPosition
+		if err := json.Unmarshal(responseBody, &response); err != nil {
+			return nil, fmt.Errorf("polymarket: decode positions response: %w", err)
+		}
+		for _, apiPosition := range response {
+			position := mapDataAPIPosition(apiPosition)
+			if strings.TrimSpace(position.Ticker) != "" && position.Quantity > 0 {
+				positions = append(positions, position)
+			}
+		}
+		if len(response) < pageSize {
+			return positions, nil
 		}
 	}
-
-	return positions, nil
 }
 
 func mapDataAPIPosition(position dataAPIPosition) domain.Position {

@@ -10,7 +10,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
 
-const riskSnapshotPositionLimit = 10_000
+const riskSnapshotPositionLimit = 1000
 
 // BuildRiskPortfolioSnapshot captures the current portfolio exposure needed for
 // truthful pre-trade risk checks and status reporting.
@@ -34,9 +34,16 @@ func BuildRiskPortfolioSnapshotFromBalance(ctx context.Context, balance Balance,
 		return risk.Portfolio{}, fmt.Errorf("position repository is required")
 	}
 
-	positions, err := positionRepo.GetOpen(ctx, repository.PositionFilter{}, riskSnapshotPositionLimit, 0)
-	if err != nil {
-		return risk.Portfolio{}, fmt.Errorf("get open positions: %w", err)
+	var positions []domain.Position
+	for offset := 0; ; offset += riskSnapshotPositionLimit {
+		page, err := positionRepo.GetOpen(ctx, repository.PositionFilter{}, riskSnapshotPositionLimit, offset)
+		if err != nil {
+			return risk.Portfolio{}, fmt.Errorf("get open positions: %w", err)
+		}
+		positions = append(positions, page...)
+		if len(page) < riskSnapshotPositionLimit {
+			break
+		}
 	}
 
 	return BuildRiskPortfolioSnapshotFromPositions(balance, positions)
@@ -92,5 +99,12 @@ func positionNotional(position domain.Position) (float64, error) {
 		return 0, fmt.Errorf("position %s has invalid quantity", position.Ticker)
 	}
 
-	return quantity * price, nil
+	multiplier := 1.0
+	if position.AssetClass == domain.AssetClassOption {
+		multiplier = position.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 100
+		}
+	}
+	return quantity * price * multiplier, nil
 }

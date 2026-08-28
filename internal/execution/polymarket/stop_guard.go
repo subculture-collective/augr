@@ -14,11 +14,13 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	marketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
 type StopGuardConfig struct {
 	ExecutionAccount domain.ExecutionAccountBinding
 	Broker           templateSender
+	ExitRepo         repository.AtomicPredictionExitRepository
 	Logger           *slog.Logger
 	Metrics          StopGuardMetrics
 }
@@ -33,6 +35,8 @@ type StopGuardMetrics interface {
 type Position struct {
 	AccountID    uuid.UUID
 	Environment  domain.AccountEnvironment
+	OriginType   string
+	OriginID     string
 	ID           string
 	Slug         string
 	Side         string
@@ -64,6 +68,7 @@ type guardEntry struct {
 	takePx     float64
 	long       bool
 	template   *OrderTemplate
+	order      *domain.Order
 	state      atomic.Int32
 	receivedAt time.Time
 }
@@ -71,6 +76,7 @@ type guardEntry struct {
 type StopGuard struct {
 	executionAccount domain.ExecutionAccountBinding
 	broker           templateSender
+	exitRepo         repository.AtomicPredictionExitRepository
 	logger           *slog.Logger
 	metrics          StopGuardMetrics
 
@@ -87,9 +93,16 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 	if err := cfg.ExecutionAccount.Validate(); err != nil {
 		return nil, fmt.Errorf("polymarket: stop guard execution account: %w", err)
 	}
+	if cfg.ExitRepo == nil {
+		cfg.ExitRepo, _ = cfg.Broker.(repository.AtomicPredictionExitRepository)
+	}
+	if cfg.ExitRepo == nil {
+		return nil, errors.New("polymarket: durable stop exit repository is required")
+	}
 	return &StopGuard{
 		executionAccount: cfg.ExecutionAccount,
 		broker:           cfg.Broker,
+		exitRepo:         cfg.ExitRepo,
 		logger:           cfg.Logger,
 		metrics:          cfg.Metrics,
 		bySlug:           make(map[string][]*guardEntry),
@@ -106,6 +119,9 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 	}
 	if pos.AccountID != g.executionAccount.AccountID() || pos.Environment != g.executionAccount.Environment() {
 		return errors.New("polymarket: stop guard position belongs to a foreign execution account")
+	}
+	if strings.TrimSpace(pos.OriginType) == "" || strings.TrimSpace(pos.OriginID) == "" {
+		return errors.New("polymarket: stop guard position origin is required")
 	}
 	positionID := strings.TrimSpace(pos.ID)
 	if positionID == "" {
@@ -146,7 +162,8 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 	if long {
 		side = "SELL"
 	}
-	order := &domain.Order{AccountID: pos.AccountID, Environment: pos.Environment, Ticker: slug, MarketType: domain.MarketTypePolymarket, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, PredictionSide: outcome, PolymarketIntent: intent}
+	order := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: slug, MarketType: domain.MarketTypePolymarket, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, Status: domain.OrderStatusPending, Broker: "polymarket", PredictionSide: outcome, PolymarketIntent: intent, CreatedAt: time.Now().UTC()}
+	order.ClientOrderID = "augr-polymarket-stop-" + order.ID.String()
 	g.mu.RLock()
 	if _, exists := g.byID[positionID]; exists {
 		g.mu.RUnlock()
@@ -157,7 +174,7 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 	if err != nil {
 		return err
 	}
-	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, receivedAt: time.Now()}
+	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, order: order, receivedAt: time.Now()}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if _, exists := g.byID[positionID]; exists {
@@ -184,7 +201,7 @@ func (g *StopGuard) RegisterPosition(pos domain.Position) error {
 	if err != nil {
 		return err
 	}
-	entry := Position{AccountID: pos.AccountID, Environment: pos.Environment, ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
+	entry := Position{AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
 	switch pos.Side {
 	case domain.PositionSideLong:
 		entry.Side = "BUY"
@@ -244,6 +261,13 @@ func (g *StopGuard) Active() int {
 	return int(g.count.Load())
 }
 
+func (g *StopGuard) Reconcile(ctx context.Context) error {
+	if g == nil || g.exitRepo == nil {
+		return errors.New("polymarket: durable stop exit repository is required")
+	}
+	return g.exitRepo.ReconcilePredictionExitReservations(ctx, g.executionAccount.AccountID(), g.executionAccount.Environment())
+}
+
 func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 	if g == nil {
 		return
@@ -270,7 +294,18 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 		if g.metrics != nil {
 			g.metrics.ObserveTickToFireSeconds(entry.slug, time.Since(t.ReceivedAt).Seconds())
 		}
-		_, err := g.broker.SendTemplate(ctx, entry.template)
+		positionID, parseErr := uuid.Parse(entry.positionID)
+		if parseErr != nil {
+			positionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(entry.positionID))
+		}
+		if err := g.exitRepo.CreatePredictionExitOrderAndReserve(ctx, entry.order.AccountID, entry.order.Environment, entry.order.OriginType, entry.order.OriginID, positionID, entry.order); err != nil {
+			if g.logger != nil {
+				g.logger.Error("polymarket stop guard durable claim failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
+			}
+			entry.state.Store(int32(guardArmed))
+			continue
+		}
+		response, err := g.broker.SendTemplate(ctx, entry.template)
 		if err != nil {
 			if g.metrics != nil {
 				g.metrics.IncSendError(entry.slug)
@@ -278,7 +313,20 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			if g.logger != nil {
 				g.logger.Error("polymarket stop guard send failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
 			}
-			entry.state.Store(int32(guardArmed))
+			entry.state.Store(int32(guardFired))
+			continue
+		}
+		if response == nil || strings.TrimSpace(response.ID) == "" {
+			entry.state.Store(int32(guardFired))
+			continue
+		}
+		submittedAt := time.Now().UTC()
+		entry.order.ExternalID, entry.order.Status, entry.order.SubmittedAt = strings.TrimSpace(response.ID), domain.OrderStatusSubmitted, &submittedAt
+		if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, entry.order.ExternalID, submittedAt); err != nil {
+			if g.logger != nil {
+				g.logger.Error("polymarket stop guard submission persistence failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
+			}
+			entry.state.Store(int32(guardFired))
 			continue
 		}
 		entry.state.Store(int32(guardFired))

@@ -650,7 +650,7 @@ type ExecutionScopedPositionRepository interface {
 }
 
 type AccountScopedPositionRepository interface {
-	GetByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter PositionFilter, limit, offset int) ([]domain.Position, error)
+	GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter PositionFilter, limit, offset int) ([]domain.Position, error)
 }
 
 // AtomicOptionCloseRepository creates close orders and reserves their exact
@@ -659,6 +659,13 @@ type AtomicOptionCloseRepository interface {
 	CreateOptionCloseOrdersAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []uuid.UUID, []*domain.Order) error
 	ReleaseOptionClosePositions(context.Context, uuid.UUID, []uuid.UUID, []uuid.UUID) error
 	ReconcileOptionCloseReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error
+}
+
+type AtomicPredictionExitRepository interface {
+	CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error
+	ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
+	ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error
 }
 
 // TradeRepository provides access to executed trades.
