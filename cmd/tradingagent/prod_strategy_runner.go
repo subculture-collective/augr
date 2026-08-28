@@ -737,7 +737,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		return failRun(fmt.Errorf("polymarket native: fetch market data for %s: %w", strategy.Ticker, err))
 	}
 	snapshot := polymarketexecution.SnapshotFromPredictionMarketData(marketData, time.Now().UTC())
-	if err := r.persistPolymarketNativeSnapshot(ctx, run.ID, snapshot); err != nil {
+	if err := r.persistPolymarketNativeSnapshot(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, snapshot); err != nil {
 		return failRun(err)
 	}
 
@@ -884,7 +884,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	if err != nil {
 		return failRun(fmt.Errorf("kalshi native: fetch snapshot for %s: %w", strategy.Ticker, err))
 	}
-	if err := r.persistKalshiNativeSnapshot(ctx, run.ID, snapshot); err != nil {
+	if err := r.persistKalshiNativeSnapshot(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, snapshot); err != nil {
 		return failRun(err)
 	}
 
@@ -1019,13 +1019,14 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 		return fmt.Errorf("%s native: marshal start event: %w", source, err)
 	}
 	event := &domain.AgentEvent{
-		PipelineRunID: &run.ID,
-		StrategyID:    &run.StrategyID,
-		EventKind:     agent.AgentEventKindPipelineStarted.String(),
-		Title:         "Pipeline started",
-		Summary:       "Native deterministic pipeline admitted for evaluation.",
-		Tags:          []string{"pipeline", "native", source},
-		Metadata:      metadata,
+		PipelineRunID:        &run.ID,
+		PipelineRunTradeDate: &run.TradeDate,
+		StrategyID:           &run.StrategyID,
+		EventKind:            agent.AgentEventKindPipelineStarted.String(),
+		Title:                "Pipeline started",
+		Summary:              "Native deterministic pipeline admitted for evaluation.",
+		Tags:                 []string{"pipeline", "native", source},
+		Metadata:             metadata,
 	}
 	eventCtx, eventCancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	eventErr := r.eventRepo.Create(eventCtx, event)
@@ -1151,13 +1152,14 @@ func nativeTerminalEvent(
 		return nil, fmt.Errorf("%s native: marshal terminal event: %w", source, err)
 	}
 	event := &domain.AgentEvent{
-		PipelineRunID: &run.ID,
-		StrategyID:    &run.StrategyID,
-		EventKind:     eventKind,
-		Title:         title,
-		Summary:       "Native deterministic pipeline reached a terminal state.",
-		Tags:          tags,
-		Metadata:      metadata,
+		PipelineRunID:        &run.ID,
+		PipelineRunTradeDate: &run.TradeDate,
+		StrategyID:           &run.StrategyID,
+		EventKind:            eventKind,
+		Title:                title,
+		Summary:              "Native deterministic pipeline reached a terminal state.",
+		Tags:                 tags,
+		Metadata:             metadata,
 	}
 	return event, nil
 }
@@ -1210,7 +1212,7 @@ func predictionNativeFeatures(decision any) json.RawMessage {
 	return raw
 }
 
-func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context, runID uuid.UUID, snapshot polymarketexecution.Snapshot) error {
+func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context, ref domain.PipelineRunRef, snapshot polymarketexecution.Snapshot) error {
 	if r.snapshotRepo == nil {
 		return errors.New("polymarket native: snapshot repository is required")
 	}
@@ -1220,13 +1222,13 @@ func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context
 	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	defer cancel()
-	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: runID, DataType: "polymarket_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
+	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: ref.ID, PipelineRunTradeDate: ref.TradeDate, DataType: "polymarket_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
 		return fmt.Errorf("polymarket native: persist snapshot: %w", err)
 	}
 	return nil
 }
 
-func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, runID uuid.UUID, snapshot kalshiexecution.Snapshot) error {
+func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, ref domain.PipelineRunRef, snapshot kalshiexecution.Snapshot) error {
 	if r.snapshotRepo == nil {
 		return errors.New("kalshi native: snapshot repository is required")
 	}
@@ -1236,7 +1238,7 @@ func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, ru
 	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	defer cancel()
-	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: runID, DataType: "kalshi_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
+	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: ref.ID, PipelineRunTradeDate: ref.TradeDate, DataType: "kalshi_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
 		return fmt.Errorf("kalshi native: persist snapshot: %w", err)
 	}
 	return nil
@@ -1602,8 +1604,8 @@ func (p *strategyVersionPersister) PersistSnapshot(ctx context.Context, snapshot
 	snapshot.OriginID = p.versionID.String()
 	return p.delegate.PersistSnapshot(ctx, snapshot)
 }
-func (p *strategyVersionPersister) PersistDecision(ctx context.Context, runID uuid.UUID, node agent.Node, roundNumber *int, output string, response *agent.DecisionLLMResponse) error {
-	return p.delegate.PersistDecision(ctx, runID, node, roundNumber, output, response)
+func (p *strategyVersionPersister) PersistDecision(ctx context.Context, ref domain.PipelineRunRef, node agent.Node, roundNumber *int, output string, response *agent.DecisionLLMResponse) error {
+	return p.delegate.PersistDecision(ctx, ref, node, roundNumber, output, response)
 }
 func (p *strategyVersionPersister) PersistEvent(ctx context.Context, event *domain.AgentEvent) error {
 	event.AccountID = p.executionAccount.AccountID()

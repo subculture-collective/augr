@@ -181,13 +181,14 @@ func TestReflect_GeneratesFiveMemories(t *testing.T) {
 	pos := newTestPosition()
 	runID := uuid.New()
 	run := domain.PipelineRun{
-		ID:         runID,
-		StrategyID: *pos.StrategyID,
-		Ticker:     pos.Ticker,
-		TradeDate:  time.Now(),
-		Status:     domain.PipelineStatusCompleted,
-		Signal:     domain.PipelineSignalBuy,
-		StartedAt:  time.Now().Add(-1 * time.Hour),
+		ID:          runID,
+		Environment: domain.AccountEnvironmentPaperScored,
+		StrategyID:  *pos.StrategyID,
+		Ticker:      pos.Ticker,
+		TradeDate:   time.Now(),
+		Status:      domain.PipelineStatusCompleted,
+		Signal:      domain.PipelineSignalBuy,
+		StartedAt:   time.Now().Add(-1 * time.Hour),
 	}
 
 	memRepo := &mockMemoryRepo{}
@@ -224,6 +225,12 @@ func TestReflect_GeneratesFiveMemories(t *testing.T) {
 		}
 		if m.PipelineRunID == nil || *m.PipelineRunID != runID {
 			t.Errorf("memory pipeline_run_id = %v, want %s", m.PipelineRunID, runID)
+		}
+		if m.PipelineRunTradeDate == nil || !m.PipelineRunTradeDate.Equal(run.TradeDate) {
+			t.Errorf("memory pipeline_run_trade_date = %v, want %s", m.PipelineRunTradeDate, run.TradeDate)
+		}
+		if m.Environment != run.Environment {
+			t.Errorf("memory environment = %q, want %q", m.Environment, run.Environment)
 		}
 		if m.Situation == "" {
 			t.Error("memory situation is empty")

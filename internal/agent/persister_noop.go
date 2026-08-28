@@ -29,7 +29,7 @@ func (NoopPersister) SupportsSnapshots() bool { return false }
 
 func (NoopPersister) PersistSnapshot(context.Context, *domain.PipelineRunSnapshot) error { return nil }
 
-func (NoopPersister) PersistDecision(context.Context, uuid.UUID, Node, *int, string, *DecisionLLMResponse) error {
+func (NoopPersister) PersistDecision(context.Context, domain.PipelineRunRef, Node, *int, string, *DecisionLLMResponse) error {
 	return nil
 }
 

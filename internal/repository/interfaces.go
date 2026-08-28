@@ -308,13 +308,13 @@ type ConversationFilter struct {
 
 // AgentEventFilter defines supported filters when listing agent events.
 type AgentEventFilter struct {
-	PipelineRunID *uuid.UUID
-	StrategyID    *uuid.UUID
-	AgentRole     domain.AgentRole
-	EventKind     string
-	Tags          []string
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
+	PipelineRunRef *domain.PipelineRunRef
+	StrategyID     *uuid.UUID
+	AgentRole      domain.AgentRole
+	EventKind      string
+	Tags           []string
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
 }
 
 // OrderFilter defines supported filters when listing or querying orders.

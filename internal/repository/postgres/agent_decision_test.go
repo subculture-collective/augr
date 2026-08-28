@@ -18,6 +18,15 @@ import (
 // Unit tests – query builder
 // ---------------------------------------------------------------------------
 
+func TestAgentDecisionInsertSQLHasPlaceholderForEveryColumn(t *testing.T) {
+	if !strings.Contains(agentDecisionInsertSQL, "$18,$19 FROM pipeline_runs") {
+		t.Fatalf("insert SQL does not bind all 19 columns: %s", agentDecisionInsertSQL)
+	}
+	if strings.Contains(agentDecisionInsertSQL, "$20") {
+		t.Fatalf("insert SQL has more placeholders than columns: %s", agentDecisionInsertSQL)
+	}
+}
+
 func TestBuildGetByRunQuery_NoFilters(t *testing.T) {
 	runID := uuid.New()
 	query, args := buildGetByRunQuery(canonicalRepositoryTestAccountID, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 10, 0)

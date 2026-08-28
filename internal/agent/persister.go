@@ -21,7 +21,7 @@ type DecisionPersister interface {
 	// PersistSnapshot persists a single pipeline input snapshot.
 	PersistSnapshot(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error
 	// PersistDecision persists a single agent decision with optional LLM metadata.
-	PersistDecision(ctx context.Context, runID uuid.UUID, node Node, roundNumber *int, output string, llmResponse *DecisionLLMResponse) error
+	PersistDecision(ctx context.Context, ref domain.PipelineRunRef, node Node, roundNumber *int, output string, llmResponse *DecisionLLMResponse) error
 	// PersistEvent persists a structured pipeline or agent event.
 	PersistEvent(ctx context.Context, event *domain.AgentEvent) error
 }

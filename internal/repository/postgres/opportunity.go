@@ -132,13 +132,6 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`
 	if upsert {
 		query += ` ON CONFLICT (dedupe_key) DO UPDATE SET
-			account_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.account_id ELSE portfolio_opportunities.account_id END,
-			environment = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.environment ELSE portfolio_opportunities.environment END,
-			origin_type = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.origin_type ELSE portfolio_opportunities.origin_type END,
-			origin_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.origin_id ELSE portfolio_opportunities.origin_id END,
-			strategy_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.strategy_id ELSE portfolio_opportunities.strategy_id END,
-			pipeline_run_id = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.pipeline_run_id ELSE portfolio_opportunities.pipeline_run_id END,
-			pipeline_run_trade_date = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.pipeline_run_trade_date ELSE portfolio_opportunities.pipeline_run_trade_date END,
 			market_type = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.market_type ELSE portfolio_opportunities.market_type END,
 			ticker = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.ticker ELSE portfolio_opportunities.ticker END,
 			side = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.side ELSE portfolio_opportunities.side END,
@@ -160,7 +153,8 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 			reject_reason = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.reject_reason ELSE portfolio_opportunities.reject_reason END,
 			evidence = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.evidence ELSE portfolio_opportunities.evidence END,
 			expires_at = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.expires_at ELSE portfolio_opportunities.expires_at END,
-			updated_at = CASE WHEN portfolio_opportunities.status = 'queued' THEN NOW() ELSE portfolio_opportunities.updated_at END`
+			updated_at = CASE WHEN portfolio_opportunities.status = 'queued' THEN NOW() ELSE portfolio_opportunities.updated_at END
+			WHERE portfolio_opportunities.account_id = EXCLUDED.account_id`
 	}
 	query += ` RETURNING id, created_at, updated_at`
 

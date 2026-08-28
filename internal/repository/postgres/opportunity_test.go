@@ -264,6 +264,53 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 	}
 }
 
+func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+
+	strategyID := createTestStrategy(t, ctx, pool)
+	ownerRepo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	foreignRepo := NewOpportunityRepo(pool, uuid.New())
+	owned := &domain.Opportunity{
+		StrategyID: strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL",
+		Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued,
+		Confidence: 0.4, ExpiresAt: time.Now().UTC().Add(time.Hour), DedupeKey: "account-fenced-dedupe",
+	}
+	if err := ownerRepo.Create(ctx, owned); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	incoming := &domain.Opportunity{
+		StrategyID: strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL",
+		Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued,
+		Confidence: 0.9, ExpiresAt: time.Now().UTC().Add(2 * time.Hour), DedupeKey: owned.DedupeKey,
+	}
+	if err := foreignRepo.UpsertQueuedByDedupeKey(ctx, incoming); err == nil {
+		t.Fatal("foreign UpsertQueuedByDedupeKey() error = nil, want ownership conflict")
+	}
+	got, err := ownerRepo.Get(ctx, owned.ID)
+	if err != nil || got.AccountID != canonicalRepositoryTestAccountID || got.Confidence != 0.4 {
+		t.Fatalf("foreign upsert changed owned row: got=%+v err=%v", got, err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE portfolio_opportunities SET account_id = NULL WHERE id = $1`, owned.ID); err != nil {
+		t.Fatalf("make legacy row: %v", err)
+	}
+	incoming.AccountID = uuid.Nil
+	if err := ownerRepo.UpsertQueuedByDedupeKey(ctx, incoming); err == nil {
+		t.Fatal("legacy UpsertQueuedByDedupeKey() error = nil, want ownership conflict")
+	}
+	var accountID *uuid.UUID
+	var confidence float64
+	if err := pool.QueryRow(ctx, `SELECT account_id, confidence::double precision FROM portfolio_opportunities WHERE id = $1`, owned.ID).Scan(&accountID, &confidence); err != nil {
+		t.Fatalf("read legacy row: %v", err)
+	}
+	if accountID != nil || confidence != 0.4 {
+		t.Fatalf("legacy row was claimed or changed: account_id=%v confidence=%v", accountID, confidence)
+	}
+}
+
 func TestOpportunityRepo_ExpireQueuedBefore(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
@@ -394,8 +441,13 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		`CREATE TABLE orders (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
 		`CREATE TABLE portfolio_opportunities (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
 			strategy_id UUID NOT NULL REFERENCES strategies (id),
 			pipeline_run_id UUID,
+			pipeline_run_trade_date DATE,
 			market_type market_type NOT NULL,
 			ticker TEXT NOT NULL,
 			side order_side NOT NULL,

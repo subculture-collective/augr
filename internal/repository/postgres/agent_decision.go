@@ -22,6 +22,15 @@ type AgentDecisionRepo struct {
 // Compile-time check that AgentDecisionRepo satisfies AgentDecisionRepository.
 var _ repository.AgentDecisionRepository = (*AgentDecisionRepo)(nil)
 
+const agentDecisionInsertSQL = `INSERT INTO agent_decisions (
+			account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, agent_role, phase, round_number, input_summary,
+			output_text, output_structured, llm_provider, llm_model,
+			prompt_text, prompt_tokens, completion_tokens, latency_ms, cost_usd
+		)
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19 FROM pipeline_runs run
+		 WHERE run.id=$5 AND run.trade_date=$6::date AND run.account_id=$1
+		 RETURNING id, created_at`
+
 // NewAgentDecisionRepo returns an AgentDecisionRepo backed by the given connection
 // pool.
 func NewAgentDecisionRepo(pool *pgxpool.Pool, accountID uuid.UUID) *AgentDecisionRepo {
@@ -41,14 +50,7 @@ func (r *AgentDecisionRepo) Create(ctx context.Context, decision *domain.AgentDe
 	}
 
 	row := r.pool.QueryRow(ctx,
-		`INSERT INTO agent_decisions (
-			account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, agent_role, phase, round_number, input_summary,
-			output_text, output_structured, llm_provider, llm_model,
-			prompt_text, prompt_tokens, completion_tokens, latency_ms, cost_usd
-		)
-		 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18 FROM pipeline_runs run
-		 WHERE run.id=$5 AND run.trade_date=$6::date AND run.account_id=$1
-		 RETURNING id, created_at`,
+		agentDecisionInsertSQL,
 		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.PipelineRunID, decision.PipelineRunTradeDate,
 		decision.AgentRole,
 		decision.Phase,

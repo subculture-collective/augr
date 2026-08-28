@@ -145,6 +145,19 @@ func (s *Server) handleGetRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
 	}
+	run, err := s.runs.Get(r.Context(), ref)
+	if err != nil {
+		if isNotFound(err) {
+			respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to get run", ErrCodeInternal)
+		return
+	}
+	if run == nil {
+		respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
+		return
+	}
 
 	snapshots, err := s.snapshots.GetByRun(r.Context(), ref)
 	if err != nil {

@@ -528,6 +528,24 @@ func decodeEventMetadata(t *testing.T, event domain.AgentEvent) map[string]any {
 	return metadata
 }
 
+func TestRecordEffectFailureStoresFullRunRef(t *testing.T) {
+	events := &effectEventRepo{}
+	service := NewService(ServiceDeps{Events: events})
+	run := domain.PipelineRun{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), StrategyID: uuid.New()}
+	intent := domain.CopyTradeIntent{ID: uuid.New()}
+
+	if err := service.recordEffectFailure(context.Background(), run, intent, effectFailure{stage: "execute_order", err: errors.New("failed")}); err != nil {
+		t.Fatalf("recordEffectFailure() error = %v", err)
+	}
+	if len(events.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events.events))
+	}
+	event := events.events[0]
+	if event.PipelineRunID == nil || *event.PipelineRunID != run.ID || event.PipelineRunTradeDate == nil || !event.PipelineRunTradeDate.Equal(run.TradeDate) {
+		t.Fatalf("event run ref = (%v, %v), want (%s, %s)", event.PipelineRunID, event.PipelineRunTradeDate, run.ID, run.TradeDate)
+	}
+}
+
 func TestRebalanceCompletedAuthorityCreateIntentFailure(t *testing.T) {
 	t.Skip("legacy post-finalization intent creation removed")
 	createErr := errors.New("intent insert failed")

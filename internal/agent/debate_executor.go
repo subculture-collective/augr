@@ -75,7 +75,7 @@ func (d *DebateExecutor) Execute(ctx context.Context, state *PipelineState) erro
 		// Execute each debater sequentially.
 		for _, debater := range d.config.Debaters {
 			d.ctx.Helper.persistStructuredEvent(phaseCtx, d.ctx.Helper.newStructuredEvent(
-				state.PipelineRunID,
+				state.RunRef(),
 				state.StrategyID,
 				AgentEventKindAgentStarted,
 				debater.Role(),
@@ -109,11 +109,11 @@ func (d *DebateExecutor) Execute(ctx context.Context, state *PipelineState) erro
 			if err != nil {
 				return err
 			}
-			if err := d.ctx.Persister.PersistDecision(phaseCtx, state.PipelineRunID, debater, &roundNumber, output, llmResponse); err != nil {
+			if err := d.ctx.Persister.PersistDecision(phaseCtx, state.RunRef(), debater, &roundNumber, output, llmResponse); err != nil {
 				return err
 			}
 			d.ctx.Helper.persistStructuredEvent(phaseCtx, d.ctx.Helper.newStructuredEvent(
-				state.PipelineRunID,
+				state.RunRef(),
 				state.StrategyID,
 				AgentEventKindAgentCompleted,
 				debater.Role(),
@@ -128,7 +128,7 @@ func (d *DebateExecutor) Execute(ctx context.Context, state *PipelineState) erro
 			))
 		}
 		d.ctx.Helper.persistStructuredEvent(phaseCtx, d.ctx.Helper.newStructuredEvent(
-			state.PipelineRunID,
+			state.RunRef(),
 			state.StrategyID,
 			AgentEventKindDebateRoundCompleted,
 			"",
@@ -168,7 +168,7 @@ func (d *DebateExecutor) Execute(ctx context.Context, state *PipelineState) erro
 
 	// Execute the judge node.
 	d.ctx.Helper.persistStructuredEvent(phaseCtx, d.ctx.Helper.newStructuredEvent(
-		state.PipelineRunID,
+		state.RunRef(),
 		state.StrategyID,
 		AgentEventKindAgentStarted,
 		d.config.Judge.Role(),
@@ -201,11 +201,11 @@ func (d *DebateExecutor) Execute(ctx context.Context, state *PipelineState) erro
 	if err != nil {
 		return err
 	}
-	if err := d.ctx.Persister.PersistDecision(phaseCtx, state.PipelineRunID, d.config.Judge, nil, output, llmResponse); err != nil {
+	if err := d.ctx.Persister.PersistDecision(phaseCtx, state.RunRef(), d.config.Judge, nil, output, llmResponse); err != nil {
 		return err
 	}
 	d.ctx.Helper.persistStructuredEvent(phaseCtx, d.ctx.Helper.newStructuredEvent(
-		state.PipelineRunID,
+		state.RunRef(),
 		state.StrategyID,
 		AgentEventKindAgentCompleted,
 		d.config.Judge.Role(),
@@ -219,7 +219,7 @@ func (d *DebateExecutor) Execute(ctx context.Context, state *PipelineState) erro
 	))
 	if d.config.Phase == PhaseRiskDebate && state.RiskDebate.FinalSignal != "" {
 		d.ctx.Helper.persistStructuredEvent(phaseCtx, d.ctx.Helper.newStructuredEvent(
-			state.PipelineRunID,
+			state.RunRef(),
 			state.StrategyID,
 			AgentEventKindSignalProduced,
 			d.config.Judge.Role(),

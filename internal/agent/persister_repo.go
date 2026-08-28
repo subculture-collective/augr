@@ -80,7 +80,7 @@ func (p *RepoPersister) PersistSnapshot(ctx context.Context, snapshot *domain.Pi
 
 func (p *RepoPersister) PersistDecision(
 	ctx context.Context,
-	runID uuid.UUID,
+	ref domain.PipelineRunRef,
 	node Node,
 	roundNumber *int,
 	output string,
@@ -91,11 +91,12 @@ func (p *RepoPersister) PersistDecision(
 	}
 
 	decision := &domain.AgentDecision{
-		PipelineRunID: runID,
-		AgentRole:     node.Role(),
-		Phase:         node.Phase(),
-		RoundNumber:   cloneRoundNumber(roundNumber),
-		OutputText:    output,
+		PipelineRunID:        ref.ID,
+		PipelineRunTradeDate: ref.TradeDate,
+		AgentRole:            node.Role(),
+		Phase:                node.Phase(),
+		RoundNumber:          cloneRoundNumber(roundNumber),
+		OutputText:           output,
 	}
 	if llmResponse != nil {
 		decision.LLMProvider = llmResponse.Provider

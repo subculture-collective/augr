@@ -158,12 +158,15 @@ func (r *Reflector) Reflect(ctx context.Context, positionID uuid.UUID) error {
 		}
 
 		runID := run.ID
+		tradeDate := run.TradeDate
 		mem := &domain.AgentMemory{
-			AgentRole:      role,
-			Situation:      situation,
-			Recommendation: resp.Content,
-			Outcome:        outcome,
-			PipelineRunID:  &runID,
+			Environment:          run.Environment,
+			AgentRole:            role,
+			Situation:            situation,
+			Recommendation:       resp.Content,
+			Outcome:              outcome,
+			PipelineRunID:        &runID,
+			PipelineRunTradeDate: &tradeDate,
 		}
 
 		if err := r.memoryRepo.Create(ctx, mem); err != nil {

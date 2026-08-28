@@ -188,7 +188,7 @@ func TestPipelineExecute_TerminalEventFailureFailsClosed(t *testing.T) {
 
 func (*capturePersister) SupportsSnapshots() bool { return false }
 
-func (p *capturePersister) PersistDecision(_ context.Context, _ uuid.UUID, _ Node, _ *int, output string, llmResponse *DecisionLLMResponse) error {
+func (p *capturePersister) PersistDecision(_ context.Context, _ domain.PipelineRunRef, _ Node, _ *int, output string, llmResponse *DecisionLLMResponse) error {
 	p.decisions = append(p.decisions, persistedPipelineDecision{output: output, llmResponse: llmResponse})
 	return nil
 }
@@ -1524,7 +1524,7 @@ func (p *blockingSnapshotPersister) PersistSnapshot(ctx context.Context, _ *doma
 	return ctx.Err()
 }
 
-func (*blockingSnapshotPersister) PersistDecision(context.Context, uuid.UUID, Node, *int, string, *DecisionLLMResponse) error {
+func (*blockingSnapshotPersister) PersistDecision(context.Context, domain.PipelineRunRef, Node, *int, string, *DecisionLLMResponse) error {
 	return nil
 }
 

@@ -3386,6 +3386,36 @@ func TestListConversationsRejectsBadAgentRole(t *testing.T) {
 	}
 }
 
+func TestGetConversationMessages_SyntheticDecisionUsesConversationAccount(t *testing.T) {
+	t.Parallel()
+
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	tradeDate := time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC)
+	convRepo := newStubConversationRepo()
+	conv := &domain.Conversation{AccountID: accountID, PipelineRunID: uuid.New(), PipelineRunTradeDate: tradeDate, AgentRole: domain.AgentRoleTrader}
+	if err := convRepo.CreateConversation(context.Background(), conv); err != nil {
+		t.Fatalf("CreateConversation() error = %v", err)
+	}
+	deps := testDeps()
+	deps.Conversations = convRepo
+	deps.Decisions = &stubDecisionRepo{decisions: []domain.AgentDecision{{ID: uuid.New(), AgentRole: domain.AgentRoleTrader, OutputText: "buy"}}}
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/"+accountID.String()+"/conversations/"+conv.ID.String()+"/messages", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	var body struct {
+		Data []domain.ConversationMessage `json:"data"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Data) != 1 || body.Data[0].AccountID != accountID {
+		t.Fatalf("synthetic messages = %+v, want account %s", body.Data, accountID)
+	}
+}
+
 func TestCreateConversationEndpoint(t *testing.T) {
 	t.Parallel()
 	deps := testDeps()
@@ -3579,6 +3609,7 @@ func TestGetRunSnapshot(t *testing.T) {
 
 	runID := uuid.New()
 	deps := testDeps()
+	deps.Runs = &stubRunRepo{runs: []domain.PipelineRun{{ID: runID, TradeDate: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC)}}}
 	deps.Snapshots = &stubSnapshotRepo{
 		snapshots: []domain.PipelineRunSnapshot{
 			{
@@ -3628,6 +3659,19 @@ func TestGetRunSnapshot_NotConfigured(t *testing.T) {
 	body := decodeJSON[ErrorResponse](t, rr)
 	if body.Code != ErrCodeNotImplemented {
 		t.Fatalf("code = %q, want %q", body.Code, ErrCodeNotImplemented)
+	}
+}
+
+func TestGetRunSnapshot_MissingParentReturnsNotFound(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Snapshots = &stubSnapshotRepo{}
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String()+"/snapshot?trade_date=2026-03-14", nil)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
 	}
 }
 

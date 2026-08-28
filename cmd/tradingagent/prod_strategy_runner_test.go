@@ -143,7 +143,7 @@ func (*countingDecisionPersister) SupportsSnapshots() bool { return false }
 func (*countingDecisionPersister) PersistSnapshot(context.Context, *domain.PipelineRunSnapshot) error {
 	return nil
 }
-func (*countingDecisionPersister) PersistDecision(context.Context, uuid.UUID, agent.Node, *int, string, *agent.DecisionLLMResponse) error {
+func (*countingDecisionPersister) PersistDecision(context.Context, domain.PipelineRunRef, agent.Node, *int, string, *agent.DecisionLLMResponse) error {
 	return nil
 }
 func (*countingDecisionPersister) PersistEvent(context.Context, *domain.AgentEvent) error { return nil }
@@ -430,8 +430,14 @@ func TestRunStrategy_KalshiSafeHoldPath(t *testing.T) {
 	if len(snapshotRepo.snapshots) != 1 || snapshotRepo.snapshots[0].DataType != "kalshi_native_snapshot" {
 		t.Fatalf("snapshots = %+v, want one kalshi_native_snapshot", snapshotRepo.snapshots)
 	}
+	if snapshotRepo.snapshots[0].PipelineRunID != result.Run.ID || !snapshotRepo.snapshots[0].PipelineRunTradeDate.Equal(result.Run.TradeDate) {
+		t.Fatalf("snapshot run ref = (%s, %s), want (%s, %s)", snapshotRepo.snapshots[0].PipelineRunID, snapshotRepo.snapshots[0].PipelineRunTradeDate, result.Run.ID, result.Run.TradeDate)
+	}
 	if len(eventRepo.events) != 1 || eventRepo.events[0].EventKind != agent.AgentEventKindPipelineStarted.String() || len(runRepo.updates) != 1 || runRepo.updates[0].Event.EventKind != agent.AgentEventKindPipelineCompleted.String() {
 		t.Fatalf("start events = %+v finalizations = %+v", eventRepo.events, runRepo.updates)
+	}
+	if eventRepo.events[0].PipelineRunTradeDate == nil || !eventRepo.events[0].PipelineRunTradeDate.Equal(result.Run.TradeDate) {
+		t.Fatalf("start event trade date = %v, want %s", eventRepo.events[0].PipelineRunTradeDate, result.Run.TradeDate)
 	}
 }
 

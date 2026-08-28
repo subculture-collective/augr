@@ -579,13 +579,14 @@ func (s *Service) recordEffectFailure(ctx context.Context, run domain.PipelineRu
 	}
 	encoded, _ := json.Marshal(metadata)
 	event := &domain.AgentEvent{
-		PipelineRunID: &run.ID,
-		StrategyID:    &run.StrategyID,
-		EventKind:     "copy_rebalance_effects_failed",
-		Title:         "Copy rebalance effects failed",
-		Summary:       fmt.Sprintf("Copy intent %s failed during %s", intent.ID, failure.stage),
-		Tags:          []string{"pipeline", "copy_trading", "effects_failed"},
-		Metadata:      encoded,
+		PipelineRunID:        &run.ID,
+		PipelineRunTradeDate: &run.TradeDate,
+		StrategyID:           &run.StrategyID,
+		EventKind:            "copy_rebalance_effects_failed",
+		Title:                "Copy rebalance effects failed",
+		Summary:              fmt.Sprintf("Copy intent %s failed during %s", intent.ID, failure.stage),
+		Tags:                 []string{"pipeline", "copy_trading", "effects_failed"},
+		Metadata:             encoded,
 	}
 	var err error
 	if s.deps.Events == nil {

@@ -93,6 +93,7 @@ func (s *Server) handleGetConversationMessages(w http.ResponseWriter, r *http.Re
 				}
 				synthetic = append(synthetic, domain.ConversationMessage{
 					ID:             dec.ID,
+					AccountID:      conv.AccountID,
 					ConversationID: id,
 					Role:           domain.ConversationMessageRoleAssistant,
 					Content:        content,

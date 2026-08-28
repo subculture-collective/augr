@@ -260,10 +260,10 @@ func TestRunnerRun_FinalPhaseCancellationCannotComplete(t *testing.T) {
 	}
 }
 
-func (p *runnerSpyPersister) PersistDecision(_ context.Context, runID uuid.UUID, node Node, roundNumber *int, output string, _ *DecisionLLMResponse) error {
+func (p *runnerSpyPersister) PersistDecision(_ context.Context, ref domain.PipelineRunRef, node Node, roundNumber *int, output string, _ *DecisionLLMResponse) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.decisions[runID] = append(p.decisions[runID], persistedDecision{role: node.Role(), phase: node.Phase(), round: cloneRoundNumber(roundNumber), text: output})
+	p.decisions[ref.ID] = append(p.decisions[ref.ID], persistedDecision{role: node.Role(), phase: node.Phase(), round: cloneRoundNumber(roundNumber), text: output})
 	return nil
 }
 

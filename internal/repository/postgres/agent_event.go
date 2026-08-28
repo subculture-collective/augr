@@ -113,8 +113,8 @@ func buildAgentEventCountQuery(accountID uuid.UUID, filter repository.AgentEvent
 		return fmt.Sprintf("$%d", argIdx)
 	}
 	conditions = append(conditions, "account_id = "+nextArg(accountID))
-	if filter.PipelineRunID != nil {
-		conditions = append(conditions, "pipeline_run_id = "+nextArg(*filter.PipelineRunID))
+	if filter.PipelineRunRef != nil {
+		conditions = append(conditions, "pipeline_run_id = "+nextArg(filter.PipelineRunRef.ID), "pipeline_run_trade_date = "+nextArg(filter.PipelineRunRef.TradeDate)+"::date")
 	}
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))
@@ -155,8 +155,8 @@ func buildAgentEventListQuery(accountID uuid.UUID, filter repository.AgentEventF
 	}
 	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
-	if filter.PipelineRunID != nil {
-		conditions = append(conditions, "pipeline_run_id = "+nextArg(*filter.PipelineRunID))
+	if filter.PipelineRunRef != nil {
+		conditions = append(conditions, "pipeline_run_id = "+nextArg(filter.PipelineRunRef.ID), "pipeline_run_trade_date = "+nextArg(filter.PipelineRunRef.TradeDate)+"::date")
 	}
 
 	if filter.StrategyID != nil {
