@@ -83,10 +83,39 @@ func (r *OpportunityRepo) ListQueuedForAllocation(ctx context.Context, asOf time
 }
 
 // ListSelectedForAllocation returns durable in-flight claims for restart reconciliation.
-func (r *OpportunityRepo) ListSelectedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error) {
-	_ = asOf
-	query := opportunitySelectSQL + ` WHERE status = $1 AND account_id=$2 ORDER BY expires_at ASC, created_at ASC, id ASC`
-	return r.list(ctx, query, []any{domain.OpportunityStatusSelected, r.accountID}, "list selected opportunities for allocation")
+func (r *OpportunityRepo) ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error) {
+	query := opportunitySelectSQL + ` WHERE status = $1 AND account_id=$2 AND (allocation_claim_id=$3 OR allocation_claim_expires_at <= $4) ORDER BY allocation_claim_expires_at ASC, created_at ASC, id ASC`
+	return r.list(ctx, query, []any{domain.OpportunityStatusSelected, r.accountID, claimID, asOf.UTC()}, "list recoverable selected opportunities for allocation")
+}
+
+func (r *OpportunityRepo) ClaimQueuedForAllocation(ctx context.Context, id, claimID uuid.UUID, claimedAt, claimExpiresAt time.Time) (bool, error) {
+	if claimID == uuid.Nil || !claimExpiresAt.After(claimedAt) {
+		return false, fmt.Errorf("postgres: claim queued opportunity: valid claim and lease are required")
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE portfolio_opportunities SET status=$1, allocation_claim_id=$2, allocation_claimed_at=$3, allocation_claim_expires_at=$4, reject_reason='', updated_at=NOW() WHERE id=$5 AND account_id=$6 AND status=$7`, domain.OpportunityStatusSelected, claimID, claimedAt.UTC(), claimExpiresAt.UTC(), id, r.accountID, domain.OpportunityStatusQueued)
+	if err != nil {
+		return false, fmt.Errorf("postgres: claim queued opportunity: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (r *OpportunityRepo) TakeOverExpiredAllocationClaim(ctx context.Context, id, claimID uuid.UUID, asOf, claimExpiresAt time.Time) (bool, error) {
+	if claimID == uuid.Nil || !claimExpiresAt.After(asOf) {
+		return false, fmt.Errorf("postgres: take over allocation claim: valid claim and lease are required")
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE portfolio_opportunities SET allocation_claim_id=$1, allocation_claimed_at=$2, allocation_claim_expires_at=$3, updated_at=NOW() WHERE id=$4 AND account_id=$5 AND status=$6 AND (allocation_claim_id=$1 OR allocation_claim_expires_at <= $2)`, claimID, asOf.UTC(), claimExpiresAt.UTC(), id, r.accountID, domain.OpportunityStatusSelected)
+	if err != nil {
+		return false, fmt.Errorf("postgres: take over allocation claim: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (r *OpportunityRepo) TransitionClaimedStatus(ctx context.Context, id, claimID uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `UPDATE portfolio_opportunities SET status=$1, reject_reason=$2, allocation_claim_id=NULL, allocation_claimed_at=NULL, allocation_claim_expires_at=NULL, updated_at=NOW() WHERE id=$3 AND account_id=$4 AND status=$5 AND allocation_claim_id=$6`, to, rejectReason, id, r.accountID, from, claimID)
+	if err != nil {
+		return false, fmt.Errorf("postgres: transition claimed opportunity: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // TransitionStatus performs a compare-and-swap lifecycle transition.

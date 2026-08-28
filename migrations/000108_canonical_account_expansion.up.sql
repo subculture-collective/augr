@@ -89,7 +89,14 @@ ALTER TABLE portfolio_opportunities
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
     ADD COLUMN origin_id TEXT,
-    ADD COLUMN pipeline_run_trade_date DATE;
+    ADD COLUMN pipeline_run_trade_date DATE,
+    ADD COLUMN allocation_claim_id UUID,
+    ADD COLUMN allocation_claimed_at TIMESTAMPTZ,
+    ADD COLUMN allocation_claim_expires_at TIMESTAMPTZ,
+    ADD CONSTRAINT portfolio_opportunities_allocation_claim_tuple CHECK (
+        (allocation_claim_id IS NULL AND allocation_claimed_at IS NULL AND allocation_claim_expires_at IS NULL)
+        OR (allocation_claim_id IS NOT NULL AND allocation_claimed_at IS NOT NULL AND allocation_claim_expires_at IS NOT NULL AND allocation_claim_expires_at > allocation_claimed_at)
+    );
 ALTER TABLE allocation_decisions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
@@ -164,8 +171,11 @@ CREATE UNIQUE INDEX orders_copy_origin_effect_once ON orders(account_id,environm
 CREATE INDEX idx_positions_account_opened ON positions(account_id,opened_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_trades_account_executed ON trades(account_id,executed_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_portfolio_opportunities_account_created ON portfolio_opportunities(account_id,created_at,id) WHERE account_id IS NOT NULL;
+CREATE INDEX idx_portfolio_opportunities_allocation_claim ON portfolio_opportunities(account_id,status,allocation_claim_expires_at,id) WHERE status='selected';
 CREATE INDEX idx_allocation_decisions_account_created ON allocation_decisions(account_id,created_at,id) WHERE account_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_allocation_decisions_opportunity ON allocation_decisions(opportunity_id) WHERE opportunity_id IS NOT NULL;
 CREATE INDEX idx_replay_events_account_occurred ON replay_events(account_id,occurred_at,id) WHERE account_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed');
 CREATE INDEX idx_financial_fill_idempotency_account ON financial_fill_idempotency(account_id,created_at,idempotency_key) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_prediction_settlement_idempotency_account ON prediction_settlement_idempotency(account_id,created_at,idempotency_key) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_copy_subscriptions_account_status ON copy_subscriptions(account_id,status,created_at,id) WHERE account_id IS NOT NULL;

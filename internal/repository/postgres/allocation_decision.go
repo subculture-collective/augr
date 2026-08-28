@@ -36,6 +36,7 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 			account_id, environment, origin_type, origin_id, opportunity_id, strategy_id, mode, action, score, notional_usd, quantity, reasons, created_order_id
 		)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		 ON CONFLICT (opportunity_id) WHERE opportunity_id IS NOT NULL DO UPDATE SET opportunity_id=EXCLUDED.opportunity_id
 		 RETURNING id, created_at`,
 		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.OpportunityID,
 		decision.StrategyID,

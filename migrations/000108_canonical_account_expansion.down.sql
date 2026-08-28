@@ -64,7 +64,7 @@ BEGIN
        OR EXISTS(SELECT 1 FROM orders WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR copy_origin_rebalance_run_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM positions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trades WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR allocation_claim_id IS NOT NULL OR allocation_claimed_at IS NOT NULL OR allocation_claim_expires_at IS NOT NULL)
        OR EXISTS(SELECT 1 FROM allocation_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM replay_events WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM financial_fill_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
@@ -260,8 +260,11 @@ DROP INDEX orders_copy_origin_effect_once;
 DROP INDEX idx_positions_account_opened;
 DROP INDEX idx_trades_account_executed;
 DROP INDEX idx_portfolio_opportunities_account_created;
+DROP INDEX idx_portfolio_opportunities_allocation_claim;
 DROP INDEX idx_allocation_decisions_account_created;
+DROP INDEX uq_allocation_decisions_opportunity;
 DROP INDEX idx_replay_events_account_occurred;
+DROP INDEX uq_replay_events_initial;
 DROP INDEX idx_financial_fill_idempotency_account;
 DROP INDEX idx_prediction_settlement_idempotency_account;
 DROP INDEX idx_copy_subscriptions_account_status;
@@ -290,7 +293,7 @@ ALTER TABLE prediction_settlement_idempotency DROP COLUMN origin_id,DROP COLUMN 
 ALTER TABLE financial_fill_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE replay_events DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE allocation_decisions DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE portfolio_opportunities DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trades DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE positions DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE orders DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

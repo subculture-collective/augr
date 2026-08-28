@@ -43,6 +43,8 @@ type portfolioAllocatorOpportunityRepo struct {
 	lastStatus        domain.OpportunityStatus
 	lastRejectReason  string
 	statusHistory     []domain.OpportunityStatus
+	claims            map[uuid.UUID]uuid.UUID
+	claimExpires      map[uuid.UUID]time.Time
 }
 
 func (r *portfolioAllocatorOpportunityRepo) Create(context.Context, *domain.Opportunity) error {
@@ -98,15 +100,67 @@ func (r *portfolioAllocatorOpportunityRepo) ListQueuedForAllocation(_ context.Co
 	return out, nil
 }
 
-func (r *portfolioAllocatorOpportunityRepo) ListSelectedForAllocation(_ context.Context, asOf time.Time) ([]domain.Opportunity, error) {
+func (r *portfolioAllocatorOpportunityRepo) ListSelectedForAllocation(_ context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error) {
 	r.lastAsOf = asOf
 	out := make([]domain.Opportunity, 0)
 	for _, item := range r.items {
-		if item.Status == domain.OpportunityStatusSelected && item.ExpiresAt.After(asOf) {
+		claimExpiry := r.claimExpires[item.ID]
+		if item.Status == domain.OpportunityStatusSelected && (r.claims[item.ID] == claimID || claimExpiry.IsZero() || !claimExpiry.After(asOf)) {
 			out = append(out, item)
 		}
 	}
 	return out, nil
+}
+
+func (r *portfolioAllocatorOpportunityRepo) ClaimQueuedForAllocation(_ context.Context, id, claimID uuid.UUID, _, expires time.Time) (bool, error) {
+	for i := range r.items {
+		if r.items[i].ID != id || r.items[i].Status != domain.OpportunityStatusQueued {
+			continue
+		}
+		r.items[i].Status = domain.OpportunityStatusSelected
+		r.statusHistory = append(r.statusHistory, domain.OpportunityStatusSelected)
+		r.updateStatusCalls++
+		if r.claims == nil {
+			r.claims = map[uuid.UUID]uuid.UUID{}
+		}
+		if r.claimExpires == nil {
+			r.claimExpires = map[uuid.UUID]time.Time{}
+		}
+		r.claims[id], r.claimExpires[id] = claimID, expires
+		return true, nil
+	}
+	return false, nil
+}
+
+func (r *portfolioAllocatorOpportunityRepo) TakeOverExpiredAllocationClaim(_ context.Context, id, claimID uuid.UUID, asOf, expires time.Time) (bool, error) {
+	for i := range r.items {
+		if r.items[i].ID != id || r.items[i].Status != domain.OpportunityStatusSelected || (r.claims[id] != claimID && r.claimExpires[id].After(asOf)) {
+			continue
+		}
+		if r.claims == nil {
+			r.claims = map[uuid.UUID]uuid.UUID{}
+		}
+		if r.claimExpires == nil {
+			r.claimExpires = map[uuid.UUID]time.Time{}
+		}
+		r.claims[id], r.claimExpires[id] = claimID, expires
+		return true, nil
+	}
+	return false, nil
+}
+
+func (r *portfolioAllocatorOpportunityRepo) TransitionClaimedStatus(ctx context.Context, id, claimID uuid.UUID, from, to domain.OpportunityStatus, reason string) (bool, error) {
+	if r.claims[id] != claimID {
+		return false, nil
+	}
+	for i := range r.items {
+		if r.items[i].ID == id && r.items[i].Status == from {
+			delete(r.claims, id)
+			delete(r.claimExpires, id)
+			return true, r.UpdateStatus(ctx, id, to, reason)
+		}
+	}
+	return false, nil
 }
 
 func (r *portfolioAllocatorOpportunityRepo) Count(_ context.Context, filter repository.OpportunityFilter) (int, error) {
@@ -343,6 +397,16 @@ type preclaimFailOpportunityRepo struct {
 	portfolioAllocatorOpportunityRepo
 }
 
+type recoverySnapshotProbeRepo struct {
+	portfolioAllocatorOpportunityRepo
+	sawReleased bool
+}
+
+func (r *recoverySnapshotProbeRepo) ListQueuedForAllocation(_ context.Context, _ time.Time) ([]domain.Opportunity, error) {
+	r.sawReleased = len(r.items) == 1 && r.items[0].Status == domain.OpportunityStatusQueued
+	return nil, errors.New("snapshot probe")
+}
+
 type concurrentClaimOpportunityRepo struct {
 	portfolioAllocatorOpportunityRepo
 	mu sync.Mutex
@@ -358,6 +422,30 @@ func (r *concurrentClaimOpportunityRepo) TransitionStatus(_ context.Context, id 
 	return true, nil
 }
 
+func (r *concurrentClaimOpportunityRepo) ClaimQueuedForAllocation(ctx context.Context, id, claimID uuid.UUID, claimedAt, expires time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.portfolioAllocatorOpportunityRepo.ClaimQueuedForAllocation(ctx, id, claimID, claimedAt, expires)
+}
+
+func (r *concurrentClaimOpportunityRepo) TakeOverExpiredAllocationClaim(ctx context.Context, id, claimID uuid.UUID, asOf, expires time.Time) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.portfolioAllocatorOpportunityRepo.TakeOverExpiredAllocationClaim(ctx, id, claimID, asOf, expires)
+}
+
+func (r *concurrentClaimOpportunityRepo) ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.portfolioAllocatorOpportunityRepo.ListSelectedForAllocation(ctx, claimID, asOf)
+}
+
+func (r *concurrentClaimOpportunityRepo) TransitionClaimedStatus(ctx context.Context, id, claimID uuid.UUID, from, to domain.OpportunityStatus, reason string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.portfolioAllocatorOpportunityRepo.TransitionClaimedStatus(ctx, id, claimID, from, to, reason)
+}
+
 func (r *preclaimFailOpportunityRepo) TransitionStatus(_ context.Context, _ uuid.UUID, _, status domain.OpportunityStatus, rejectReason string) (bool, error) {
 	r.updateStatusCalls++
 	r.lastStatus = status
@@ -367,6 +455,10 @@ func (r *preclaimFailOpportunityRepo) TransitionStatus(_ context.Context, _ uuid
 		return false, fmt.Errorf("preclaim failed")
 	}
 	return true, nil
+}
+
+func (r *preclaimFailOpportunityRepo) ClaimQueuedForAllocation(_ context.Context, _ uuid.UUID, _ uuid.UUID, _, _ time.Time) (bool, error) {
+	return false, fmt.Errorf("preclaim failed")
 }
 
 func TestPortfolioAllocatorJobRegistrationWithNilDeps(t *testing.T) {
@@ -757,6 +849,7 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	if opportunityRepo.items[0].Status != domain.OpportunityStatusSelected || processor.completedEffects != 1 {
 		t.Fatalf("durable claim/effect = %s/%d, want selected/1", opportunityRepo.items[0].Status, processor.completedEffects)
 	}
+	opportunityRepo.claimExpires[opportunityRepo.items[0].ID] = time.Now().Add(-time.Second)
 
 	restarted := NewJobOrchestrator(deps)
 	restarted.registerPortfolioAllocatorJobs()
@@ -779,7 +872,7 @@ func TestPortfolioAllocatorRestartTerminallyReconcilesPendingIntent(t *testing.T
 	decisionRepo := &portfolioAllocatorDecisionRepo{created: []*domain.AllocationDecision{{ID: uuid.New(), AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, CreatedOrderID: &orderID}}}
 	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OrderStatusSubmitted})}
 	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, OrderRepo: orders})
-	if err := orch.recoverSelectedPaperOpportunities(context.Background(), now); err != nil {
+	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
 		t.Fatal(err)
 	}
 	if opportunityRepo.items[0].Status != domain.OpportunityStatusRejected {
@@ -787,6 +880,66 @@ func TestPortfolioAllocatorRestartTerminallyReconcilesPendingIntent(t *testing.T
 	}
 	if decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "submitted") {
 		t.Fatalf("pending decision not terminally reconciled: %+v", decisionRepo.created[0])
+	}
+}
+
+func TestPortfolioAllocatorRecoveryLeavesActiveClaimUntouched(t *testing.T) {
+	now := time.Now().UTC()
+	opportunityID, activeOwner := uuid.New(), uuid.New()
+	repo := &portfolioAllocatorOpportunityRepo{
+		items:        []domain.Opportunity{{ID: opportunityID, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}},
+		claims:       map[uuid.UUID]uuid.UUID{opportunityID: activeOwner},
+		claimExpires: map[uuid.UUID]time.Time{opportunityID: now.Add(time.Minute)},
+	}
+	decisions := &portfolioAllocatorDecisionRepo{}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: decisions})
+	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
+		t.Fatal(err)
+	}
+	if repo.items[0].Status != domain.OpportunityStatusSelected || repo.claims[opportunityID] != activeOwner || len(decisions.created) != 0 {
+		t.Fatalf("active claim changed: opportunity=%+v owner=%s decisions=%d", repo.items[0], repo.claims[opportunityID], len(decisions.created))
+	}
+}
+
+func TestPortfolioAllocatorRecoveryReleasesBeforeRestartSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	opportunityID, oldOwner := uuid.New(), uuid.New()
+	repo := &recoverySnapshotProbeRepo{portfolioAllocatorOpportunityRepo: portfolioAllocatorOpportunityRepo{
+		items:        []domain.Opportunity{{ID: opportunityID, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}},
+		claims:       map[uuid.UUID]uuid.UUID{opportunityID: oldOwner},
+		claimExpires: map[uuid.UUID]time.Time{opportunityID: now.Add(-time.Minute)},
+	}}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: &portfolioAllocatorDecisionRepo{}, PortfolioAllocatorMode: portfolio.AllocatorModePaper})
+	err := orch.runPortfolioAllocator(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "snapshot probe") {
+		t.Fatalf("run error = %v, want snapshot probe", err)
+	}
+	if !repo.sawReleased {
+		t.Fatal("queued snapshot ran before expired claim recovery")
+	}
+}
+
+func TestPortfolioAllocatorConcurrentRecoverersCreateOneDecision(t *testing.T) {
+	now := time.Now().UTC()
+	runID, accountID, versionID, strategyID, opportunityID, orderID, oldOwner := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
+	repo := &concurrentClaimOpportunityRepo{portfolioAllocatorOpportunityRepo: portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}, claims: map[uuid.UUID]uuid.UUID{opportunityID: oldOwner}, claimExpires: map[uuid.UUID]time.Time{opportunityID: now.Add(-time.Minute)}}}
+	decisions := &portfolioAllocatorDecisionRepo{}
+	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OrderStatusFilled})}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: decisions, OrderRepo: orders})
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
+				t.Errorf("recover: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if len(decisions.created) != 1 || repo.items[0].Status != domain.OpportunityStatusExecuted {
+		t.Fatalf("recovery decisions/status = %d/%s, want 1/executed", len(decisions.created), repo.items[0].Status)
 	}
 }
 
@@ -889,7 +1042,8 @@ func TestPortfolioAllocatorPaperPreclaimHasOneConcurrentWinner(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			claimed, err := orch.preclaimPaperOpportunity(context.Background(), decision)
+			now := time.Now().UTC()
+			claimed, err := orch.preclaimPaperOpportunity(context.Background(), decision, uuid.New(), now)
 			if err != nil {
 				t.Errorf("preclaim: %v", err)
 			}

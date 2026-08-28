@@ -13,10 +13,36 @@ import (
 )
 
 type decisionJournalStub struct {
-	created    *domain.TradeDecision
-	stored     map[uuid.UUID]domain.TradeDecision
-	replay     *replayEventStub
-	failAtomic bool
+	created     *domain.TradeDecision
+	stored      map[uuid.UUID]domain.TradeDecision
+	replay      *replayEventStub
+	failAtomic  bool
+	failInitial bool
+}
+
+func (s *decisionJournalStub) CreateWithInitialReplay(ctx context.Context, decision *domain.TradeDecision) error {
+	if s.failInitial {
+		s.failInitial = false
+		return fmt.Errorf("injected initial replay failure")
+	}
+	if err := s.Create(ctx, decision); err != nil {
+		return err
+	}
+	if s.replay == nil {
+		return nil
+	}
+	for _, eventType := range []domain.ReplayEventType{domain.ReplayEventTypeDecisionCreated, domain.ReplayEventTypeRiskReviewed} {
+		found := false
+		for _, event := range s.replay.events {
+			if event.TradeDecisionID == decision.ID && event.EventType == eventType {
+				found = true
+			}
+		}
+		if !found {
+			s.replay.events = append(s.replay.events, domain.ReplayEvent{TradeDecisionID: decision.ID, AccountID: decision.AccountID, Environment: decision.Environment, OriginType: decision.OriginType, OriginID: decision.OriginID, EventType: eventType})
+		}
+	}
+	return nil
 }
 
 func (s *decisionJournalStub) AttachOrderWithReplay(_ context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error {
@@ -251,5 +277,24 @@ func TestTradeDecisionJournalRecorderAtomicFailureCannotOmitReplay(t *testing.T)
 	}
 	if ordered != 1 {
 		t.Fatalf("paper ordered events = %d, want 1", ordered)
+	}
+}
+
+func TestTradeDecisionJournalRecorderInitialReplayFailureStopsAndRetryRepairs(t *testing.T) {
+	replay := &replayEventStub{}
+	journal := &decisionJournalStub{replay: replay, failInitial: true}
+	recorder := NewTradeDecisionJournalRecorder(journal, replay)
+	decision := &domain.TradeDecision{ID: uuid.New(), Status: domain.TradeDecisionStatusCandidate}
+	if err := recorder.RecordDecision(context.Background(), decision); err == nil {
+		t.Fatal("injected initial replay failure succeeded")
+	}
+	if _, ok := journal.stored[decision.ID]; ok || len(replay.events) != 0 {
+		t.Fatal("failed initial transaction left partial state")
+	}
+	if err := recorder.RecordDecision(context.Background(), decision); err != nil {
+		t.Fatalf("restart retry: %v", err)
+	}
+	if len(replay.events) != 2 {
+		t.Fatalf("initial replay events = %d, want 2", len(replay.events))
 	}
 }

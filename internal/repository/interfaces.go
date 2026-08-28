@@ -795,11 +795,20 @@ type OpportunityRepository interface {
 	List(ctx context.Context, filter OpportunityFilter, limit, offset int) ([]domain.Opportunity, error)
 	ExpireQueuedBefore(ctx context.Context, before time.Time) (int64, error)
 	ListQueuedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error)
-	ListSelectedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error)
+	ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error)
+	ClaimQueuedForAllocation(ctx context.Context, id, claimID uuid.UUID, claimedAt, claimExpiresAt time.Time) (bool, error)
+	TakeOverExpiredAllocationClaim(ctx context.Context, id, claimID uuid.UUID, asOf, claimExpiresAt time.Time) (bool, error)
+	TransitionClaimedStatus(ctx context.Context, id, claimID uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error)
 	TransitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error)
 	// Count returns the total number of opportunities matching the filter.
 	Count(ctx context.Context, filter OpportunityFilter) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OpportunityStatus, rejectReason string) error
+}
+
+// AtomicDecisionReplayRepository persists a decision and its required initial
+// replay events in one transaction.
+type AtomicDecisionReplayRepository interface {
+	CreateWithInitialReplay(ctx context.Context, decision *domain.TradeDecision) error
 }
 
 // AllocationDecisionRepository provides access to allocator decision records.

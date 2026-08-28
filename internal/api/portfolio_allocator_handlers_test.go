@@ -422,8 +422,20 @@ func (s *portfolioAllocatorOpportunityRepo) ListQueuedForAllocation(context.Cont
 	return append([]domain.Opportunity(nil), s.items...), nil
 }
 
-func (s *portfolioAllocatorOpportunityRepo) ListSelectedForAllocation(context.Context, time.Time) ([]domain.Opportunity, error) {
+func (s *portfolioAllocatorOpportunityRepo) ListSelectedForAllocation(context.Context, uuid.UUID, time.Time) ([]domain.Opportunity, error) {
 	return nil, nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) ClaimQueuedForAllocation(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) TakeOverExpiredAllocationClaim(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) TransitionClaimedStatus(context.Context, uuid.UUID, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
+	return true, nil
 }
 
 func (s *portfolioAllocatorOpportunityRepo) UpdateStatus(context.Context, uuid.UUID, domain.OpportunityStatus, string) error {

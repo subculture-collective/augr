@@ -23,6 +23,8 @@ var portfolioAllocatorSpec = scheduler.ScheduleSpec{
 	SkipHolidays: true,
 }
 
+const portfolioAllocationClaimLease = 5 * time.Minute
+
 // PortfolioAccountBalanceSource supplies the restored paper account state used
 // to size paper allocator decisions.
 type PortfolioAccountBalanceSource interface {
@@ -44,18 +46,19 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 	}
 	mode := o.portfolioAllocatorMode()
 	asOf := time.Now().UTC()
+	claimID := uuid.New()
 	expired, err := o.deps.OpportunityRepo.ExpireQueuedBefore(ctx, asOf)
 	if err != nil {
 		return fmt.Errorf("portfolio_allocator: expire opportunities: %w", err)
 	}
+	if mode == portfolio.AllocatorModePaper {
+		if err := o.recoverSelectedPaperOpportunities(ctx, claimID, asOf); err != nil {
+			return err
+		}
+	}
 	opportunities, err := o.deps.OpportunityRepo.ListQueuedForAllocation(ctx, asOf)
 	if err != nil {
 		return fmt.Errorf("portfolio_allocator: snapshot opportunities: %w", err)
-	}
-	if mode == portfolio.AllocatorModePaper {
-		if err := o.recoverSelectedPaperOpportunities(ctx, asOf); err != nil {
-			return err
-		}
 	}
 
 	state, warnings, err := o.buildPortfolioAllocatorState(ctx, mode)
@@ -90,7 +93,7 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 		}
 
 		if mode == portfolio.AllocatorModePaper && decision.Action == domain.AllocationDecisionActionShadowSelected {
-			claimed, err := o.preclaimPaperOpportunity(ctx, decision)
+			claimed, err := o.preclaimPaperOpportunity(ctx, decision, claimID, asOf)
 			if err != nil {
 				return err
 			}
@@ -104,7 +107,11 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 		if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
 			return fmt.Errorf("portfolio_allocator: persist decision: %w", err)
 		}
-		if err := o.updateOpportunityStatus(ctx, decision); err != nil {
+		var owner *uuid.UUID
+		if mode == portfolio.AllocatorModePaper && decision.Action != domain.AllocationDecisionActionShadowRejected {
+			owner = &claimID
+		}
+		if err := o.updateOpportunityStatus(ctx, decision, owner); err != nil {
 			return err
 		}
 	}
@@ -200,13 +207,20 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 	return valid, rejected, nil
 }
 
-func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context, asOf time.Time) error {
-	selected, err := o.deps.OpportunityRepo.ListSelectedForAllocation(ctx, asOf)
+func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context, claimID uuid.UUID, asOf time.Time) error {
+	selected, err := o.deps.OpportunityRepo.ListSelectedForAllocation(ctx, claimID, asOf)
 	if err != nil {
 		return fmt.Errorf("portfolio_allocator: load selected opportunity claims: %w", err)
 	}
 	for i := range selected {
 		opportunity := selected[i]
+		claimed, err := o.deps.OpportunityRepo.TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, asOf, asOf.Add(portfolioAllocationClaimLease))
+		if err != nil {
+			return fmt.Errorf("portfolio_allocator: take over expired claim: %w", err)
+		}
+		if !claimed {
+			continue
+		}
 		decisions, err := o.deps.AllocationDecisionRepo.List(ctx, repository.AllocationDecisionFilter{OpportunityID: &opportunity.ID}, 1, 0)
 		if err != nil {
 			return fmt.Errorf("portfolio_allocator: reconcile selected opportunity: %w", err)
@@ -218,7 +232,7 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 					return err
 				}
 			}
-			if err := o.updateOpportunityStatus(ctx, decision); err != nil {
+			if err := o.updateOpportunityStatus(ctx, decision, &claimID); err != nil {
 				return err
 			}
 			continue
@@ -229,7 +243,7 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 			return err
 		}
 		if order == nil {
-			applied, err := o.deps.OpportunityRepo.TransitionStatus(ctx, opportunity.ID, domain.OpportunityStatusSelected, domain.OpportunityStatusQueued, "")
+			applied, err := o.deps.OpportunityRepo.TransitionClaimedStatus(ctx, opportunity.ID, claimID, domain.OpportunityStatusSelected, domain.OpportunityStatusQueued, "")
 			if err != nil {
 				return fmt.Errorf("portfolio_allocator: release empty selected claim: %w", err)
 			}
@@ -242,7 +256,7 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 		if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
 			return fmt.Errorf("portfolio_allocator: persist recovered decision: %w", err)
 		}
-		if err := o.updateOpportunityStatus(ctx, decision); err != nil {
+		if err := o.updateOpportunityStatus(ctx, decision, &claimID); err != nil {
 			return err
 		}
 	}
@@ -315,7 +329,7 @@ func recoveredAllocationDecision(opportunity domain.Opportunity, order domain.Or
 	return domain.AllocationDecision{AccountID: opportunity.AccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: action, Reasons: []string{reason}, CreatedOrderID: &orderID}
 }
 
-func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision domain.AllocationDecision) error {
+func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision domain.AllocationDecision, claimID *uuid.UUID) error {
 	if o.deps.OpportunityRepo == nil || decision.OpportunityID == nil {
 		return nil
 	}
@@ -325,10 +339,16 @@ func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision 
 			return fmt.Errorf("portfolio_allocator: mark opportunity selected: %w", err)
 		}
 	case domain.AllocationDecisionActionExecuted:
+		if claimID != nil {
+			return o.transitionClaimedOpportunity(ctx, *decision.OpportunityID, *claimID, domain.OpportunityStatusExecuted, "")
+		}
 		if err := o.deps.OpportunityRepo.UpdateStatus(ctx, *decision.OpportunityID, domain.OpportunityStatusExecuted, ""); err != nil {
 			return fmt.Errorf("portfolio_allocator: mark opportunity executed: %w", err)
 		}
 	case domain.AllocationDecisionActionShadowRejected, domain.AllocationDecisionActionExecutionRejected:
+		if claimID != nil {
+			return o.transitionClaimedOpportunity(ctx, *decision.OpportunityID, *claimID, domain.OpportunityStatusRejected, strings.Join(decision.Reasons, "; "))
+		}
 		if err := o.deps.OpportunityRepo.UpdateStatus(ctx, *decision.OpportunityID, domain.OpportunityStatusRejected, strings.Join(decision.Reasons, "; ")); err != nil {
 			return fmt.Errorf("portfolio_allocator: mark opportunity rejected: %w", err)
 		}
@@ -336,11 +356,22 @@ func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision 
 	return nil
 }
 
-func (o *JobOrchestrator) preclaimPaperOpportunity(ctx context.Context, decision domain.AllocationDecision) (bool, error) {
+func (o *JobOrchestrator) transitionClaimedOpportunity(ctx context.Context, id, claimID uuid.UUID, status domain.OpportunityStatus, reason string) error {
+	applied, err := o.deps.OpportunityRepo.TransitionClaimedStatus(ctx, id, claimID, domain.OpportunityStatusSelected, status, reason)
+	if err != nil {
+		return fmt.Errorf("portfolio_allocator: complete claimed opportunity: %w", err)
+	}
+	if !applied {
+		return fmt.Errorf("portfolio_allocator: complete claimed opportunity: claim ownership lost")
+	}
+	return nil
+}
+
+func (o *JobOrchestrator) preclaimPaperOpportunity(ctx context.Context, decision domain.AllocationDecision, claimID uuid.UUID, asOf time.Time) (bool, error) {
 	if o.deps.OpportunityRepo == nil || decision.OpportunityID == nil {
 		return false, fmt.Errorf("portfolio_allocator: preclaim opportunity selected: missing opportunity repo or opportunity id")
 	}
-	claimed, err := o.deps.OpportunityRepo.TransitionStatus(ctx, *decision.OpportunityID, domain.OpportunityStatusQueued, domain.OpportunityStatusSelected, "")
+	claimed, err := o.deps.OpportunityRepo.ClaimQueuedForAllocation(ctx, *decision.OpportunityID, claimID, asOf, asOf.Add(portfolioAllocationClaimLease))
 	if err != nil {
 		return false, fmt.Errorf("portfolio_allocator: preclaim opportunity selected: %w", err)
 	}

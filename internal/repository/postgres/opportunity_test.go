@@ -404,7 +404,8 @@ func TestOpportunityRepo_TransitionStatusConcurrentClaimHasOneWinner(t *testing.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			claimed, err := repo.TransitionStatus(ctx, op.ID, domain.OpportunityStatusQueued, domain.OpportunityStatusSelected, "")
+			now := time.Now().UTC()
+			claimed, err := repo.ClaimQueuedForAllocation(ctx, op.ID, uuid.New(), now, now.Add(time.Minute))
 			if err != nil {
 				t.Errorf("TransitionStatus: %v", err)
 			}
@@ -486,6 +487,9 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			strategy_id UUID NOT NULL REFERENCES strategies (id),
 			pipeline_run_id UUID,
 			pipeline_run_trade_date DATE,
+			allocation_claim_id UUID,
+			allocation_claimed_at TIMESTAMPTZ,
+			allocation_claim_expires_at TIMESTAMPTZ,
 			market_type market_type NOT NULL,
 			ticker TEXT NOT NULL,
 			side order_side NOT NULL,
@@ -527,6 +531,7 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			created_order_id UUID REFERENCES orders (id),
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE UNIQUE INDEX uq_allocation_decisions_opportunity ON allocation_decisions(opportunity_id) WHERE opportunity_id IS NOT NULL`,
 	}
 
 	for _, stmt := range ddl {

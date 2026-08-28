@@ -696,8 +696,20 @@ func (*recordingOpportunityRepo) ListQueuedForAllocation(context.Context, time.T
 	return nil, nil
 }
 
-func (*recordingOpportunityRepo) ListSelectedForAllocation(context.Context, time.Time) ([]domain.Opportunity, error) {
+func (*recordingOpportunityRepo) ListSelectedForAllocation(context.Context, uuid.UUID, time.Time) ([]domain.Opportunity, error) {
 	return nil, nil
+}
+
+func (*recordingOpportunityRepo) ClaimQueuedForAllocation(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (*recordingOpportunityRepo) TakeOverExpiredAllocationClaim(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (*recordingOpportunityRepo) TransitionClaimedStatus(context.Context, uuid.UUID, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
+	return true, nil
 }
 
 func (*recordingOpportunityRepo) Count(context.Context, repository.OpportunityFilter) (int, error) {

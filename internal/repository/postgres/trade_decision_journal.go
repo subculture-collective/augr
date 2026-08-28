@@ -25,6 +25,7 @@ type TradeDecisionJournalRepo struct {
 // Compile-time check that TradeDecisionJournalRepo satisfies the repository interface.
 var _ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
 var _ repository.AtomicOrderReplayRepository = (*TradeDecisionJournalRepo)(nil)
+var _ repository.AtomicDecisionReplayRepository = (*TradeDecisionJournalRepo)(nil)
 
 // NewTradeDecisionJournalRepo returns a repository backed by the given pool.
 func NewTradeDecisionJournalRepo(pool *pgxpool.Pool, accountID uuid.UUID) *TradeDecisionJournalRepo {
@@ -45,6 +46,14 @@ const tradeDecisionSelectSQL = `SELECT id, account_id, environment, origin_type,
 
 // Create inserts a new trade decision and populates the generated ID and timestamps.
 func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.TradeDecision) error {
+	return r.create(ctx, r.pool, decision, false)
+}
+
+type tradeDecisionQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (r *TradeDecisionJournalRepo) create(ctx context.Context, db tradeDecisionQueryRower, decision *domain.TradeDecision, idempotent bool) error {
 	if err := validateOptionalPipelineRunRef(decision.PipelineRunID, decision.PipelineRunTradeDate); err != nil {
 		return fmt.Errorf("postgres: create trade decision: %w", err)
 	}
@@ -52,6 +61,9 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 		return fmt.Errorf("postgres: create trade decision: account mismatch")
 	}
 	decision.AccountID = r.accountID
+	if decision.ID == uuid.Nil {
+		decision.ID = uuid.New()
+	}
 	evidence, err := marshalTradeDecisionJSON(decision.Evidence)
 	if err != nil {
 		return err
@@ -61,18 +73,22 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 		return err
 	}
 
-	row := r.pool.QueryRow(ctx,
+	query :=
 		`INSERT INTO trade_decisions (
-			account_id, environment, origin_type, origin_id, pipeline_run_trade_date, strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
+			id, account_id, environment, origin_type, origin_id, pipeline_run_trade_date, strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
 			side, outcome, fair_value, executable_price, spread, depth, gross_ev,
 			net_ev, kelly_fraction, proposed_size, approved_size, risk_status,
 			risk_reasons, evidence, features, regime_tags, prompt_text, llm_provider,
 			llm_model, prompt_tokens, completion_tokens, latency_ms, cost_usd,
 			paper_order_id, live_order_id, status
 		)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
-		 RETURNING id, created_at, updated_at`,
-		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.PipelineRunTradeDate, decision.StrategyID,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)`
+	if idempotent {
+		query += ` ON CONFLICT (id) DO UPDATE SET id=EXCLUDED.id WHERE trade_decisions.account_id=EXCLUDED.account_id AND trade_decisions.environment=EXCLUDED.environment AND trade_decisions.origin_type=EXCLUDED.origin_type AND trade_decisions.origin_id=EXCLUDED.origin_id AND trade_decisions.pipeline_run_id IS NOT DISTINCT FROM EXCLUDED.pipeline_run_id AND trade_decisions.pipeline_run_trade_date IS NOT DISTINCT FROM EXCLUDED.pipeline_run_trade_date`
+	}
+	query += ` RETURNING id, created_at, updated_at`
+	row := db.QueryRow(ctx, query,
+		decision.ID, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.PipelineRunTradeDate, decision.StrategyID,
 		decision.PipelineRunID,
 		decision.MarketType,
 		decision.InstrumentKey,
@@ -109,6 +125,41 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 		return fmt.Errorf("postgres: create trade decision: %w", err)
 	}
 
+	return nil
+}
+
+// CreateWithInitialReplay commits the decision and mandatory pre-execution
+// replay evidence together. A same-ID retry repairs missing initial events.
+func (r *TradeDecisionJournalRepo) CreateWithInitialReplay(ctx context.Context, decision *domain.TradeDecision) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin decision replay: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := r.create(ctx, tx, decision, true); err != nil {
+		return err
+	}
+	decisionPayload, err := json.Marshal(decision)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal decision replay: %w", err)
+	}
+	riskPayload, err := json.Marshal(map[string]any{"status": decision.RiskStatus, "reasons": decision.RiskReasons, "proposed_size": decision.ProposedSize, "approved_size": decision.ApprovedSize})
+	if err != nil {
+		return fmt.Errorf("postgres: marshal risk replay: %w", err)
+	}
+	for _, event := range []struct {
+		type_   domain.ReplayEventType
+		source  string
+		payload []byte
+		at      time.Time
+	}{{domain.ReplayEventTypeDecisionCreated, "decision_journal", decisionPayload, decision.CreatedAt}, {domain.ReplayEventTypeRiskReviewed, "risk_engine", riskPayload, decision.UpdatedAt}} {
+		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.type_, event.source, event.payload, event.at); err != nil {
+			return fmt.Errorf("postgres: insert initial decision replay: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit decision replay: %w", err)
+	}
 	return nil
 }
 

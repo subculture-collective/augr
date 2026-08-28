@@ -281,6 +281,59 @@ func TestTradeDecisionJournalRepo_CountByNoActionReason_EmptyTableEmptyFilterRet
 	}
 }
 
+func TestTradeDecisionJournalRepo_InitialReplayRollbackAndRestartRepair(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
+	defer cleanup()
+	_, err := pool.Exec(ctx, `ALTER TABLE trade_decisions
+		ADD COLUMN account_id UUID, ADD COLUMN environment TEXT, ADD COLUMN origin_type TEXT, ADD COLUMN origin_id TEXT,
+		ADD COLUMN pipeline_run_trade_date DATE, ADD COLUMN strategy_id UUID, ADD COLUMN pipeline_run_id UUID,
+		ADD COLUMN market_type TEXT NOT NULL DEFAULT 'stock', ADD COLUMN instrument_key TEXT NOT NULL DEFAULT '', ADD COLUMN external_market_id TEXT,
+		ADD COLUMN side TEXT NOT NULL DEFAULT 'buy', ADD COLUMN outcome TEXT, ADD COLUMN fair_value NUMERIC NOT NULL DEFAULT 0,
+		ADD COLUMN executable_price NUMERIC NOT NULL DEFAULT 0, ADD COLUMN spread NUMERIC NOT NULL DEFAULT 0, ADD COLUMN depth NUMERIC NOT NULL DEFAULT 0,
+		ADD COLUMN gross_ev NUMERIC NOT NULL DEFAULT 0, ADD COLUMN net_ev NUMERIC NOT NULL DEFAULT 0, ADD COLUMN kelly_fraction NUMERIC NOT NULL DEFAULT 0,
+		ADD COLUMN proposed_size NUMERIC NOT NULL DEFAULT 0, ADD COLUMN approved_size NUMERIC NOT NULL DEFAULT 0, ADD COLUMN risk_status TEXT NOT NULL DEFAULT 'approved',
+		ADD COLUMN risk_reasons TEXT[] NOT NULL DEFAULT '{}', ADD COLUMN evidence JSONB NOT NULL DEFAULT '{}', ADD COLUMN features JSONB NOT NULL DEFAULT '{}',
+		ADD COLUMN regime_tags TEXT[] NOT NULL DEFAULT '{}', ADD COLUMN prompt_text TEXT, ADD COLUMN llm_provider TEXT, ADD COLUMN llm_model TEXT,
+		ADD COLUMN prompt_tokens INTEGER, ADD COLUMN completion_tokens INTEGER, ADD COLUMN latency_ms INTEGER, ADD COLUMN cost_usd NUMERIC,
+		ADD COLUMN paper_order_id UUID, ADD COLUMN live_order_id UUID, ADD COLUMN status TEXT NOT NULL DEFAULT 'candidate',
+		ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+		ALTER TABLE replay_events ADD COLUMN account_id UUID, ADD COLUMN environment TEXT, ADD COLUMN origin_type TEXT, ADD COLUMN origin_id TEXT;
+		CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed');
+		CREATE FUNCTION fail_risk_replay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='risk_reviewed' THEN RAISE EXCEPTION 'injected replay failure'; END IF; RETURN NEW; END $$;
+		CREATE TRIGGER fail_risk_replay BEFORE INSERT ON replay_events FOR EACH ROW EXECUTE FUNCTION fail_risk_replay()`)
+	if err != nil {
+		t.Fatalf("prepare atomic replay schema: %v", err)
+	}
+	repo := NewTradeDecisionJournalRepo(pool, canonicalRepositoryTestAccountID)
+	decision := &domain.TradeDecision{ID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: uuid.NewString(), MarketType: domain.MarketTypeStock, InstrumentKey: "AAPL", Side: domain.OrderSideBuy, RiskStatus: domain.RiskDecisionApproved, Status: domain.TradeDecisionStatusCandidate}
+	if err := repo.CreateWithInitialReplay(ctx, decision); err == nil {
+		t.Fatal("injected replay failure succeeded")
+	}
+	var decisions, events int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM trade_decisions),(SELECT count(*) FROM replay_events)`).Scan(&decisions, &events); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 0 || events != 0 {
+		t.Fatalf("failed transaction retained decision/events = %d/%d", decisions, events)
+	}
+	if _, err := pool.Exec(ctx, `DROP TRIGGER fail_risk_replay ON replay_events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateWithInitialReplay(ctx, decision); err != nil {
+		t.Fatalf("restart repair: %v", err)
+	}
+	if err := repo.CreateWithInitialReplay(ctx, decision); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM trade_decisions),(SELECT count(*) FROM replay_events)`).Scan(&decisions, &events); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 1 || events != 2 {
+		t.Fatalf("repaired decision/events = %d/%d, want 1/2", decisions, events)
+	}
+}
+
 func newTradeDecisionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
 	t.Helper()
 	if testing.Short() {

@@ -58,19 +58,14 @@ func (r *tradeDecisionJournalRecorder) RecordDecision(ctx context.Context, decis
 	if r == nil || r.repo == nil || decision == nil {
 		return nil
 	}
-	if err := r.repo.Create(ctx, decision); err != nil {
-		return err
-	}
 	if r.replayRepo == nil {
-		return nil
+		return r.repo.Create(ctx, decision)
 	}
-	if err := r.RecordReplayEvent(ctx, decision.ID, domain.ReplayEventTypeDecisionCreated, "decision_journal", decision, decision.CreatedAt); err != nil {
-		return err
+	atomic, ok := r.repo.(repository.AtomicDecisionReplayRepository)
+	if !ok {
+		return fmt.Errorf("decision recorder: atomic initial replay repository is required")
 	}
-	return r.RecordReplayEvent(ctx, decision.ID, domain.ReplayEventTypeRiskReviewed, "risk_engine", map[string]any{
-		"status": decision.RiskStatus, "reasons": decision.RiskReasons,
-		"proposed_size": decision.ProposedSize, "approved_size": decision.ApprovedSize,
-	}, decision.UpdatedAt)
+	return atomic.CreateWithInitialReplay(ctx, decision)
 }
 
 func (r *tradeDecisionJournalRecorder) RecordDecisionScoped(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision) error {
