@@ -17,6 +17,16 @@ type OptionsExpirySummary struct {
 	CashSettled      int
 }
 
+type OptionExpiryPriceKey struct {
+	Underlying string
+	ExpiryDate time.Time
+}
+
+func NewOptionExpiryPriceKey(underlying string, expiry time.Time) OptionExpiryPriceKey {
+	date := expiry.UTC()
+	return OptionExpiryPriceKey{Underlying: underlying, ExpiryDate: time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)}
+}
+
 type optionSettlement struct {
 	scope      ExecutionScope
 	positionID uuid.UUID
@@ -43,7 +53,7 @@ type optionSettlementSyncFailureRepository interface {
 // SettleExpiredOptionPositions cash-settles expired paper options. It does not
 // fabricate underlying-share assignment. Every candidate is validated before
 // persistence begins so missing prices or contract metadata fail the batch.
-func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[string]float64, now time.Time, settlementRepo repository.OptionSettlementRepository, states ...OptionSettlementState) (OptionsExpirySummary, error) {
+func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[OptionExpiryPriceKey]float64, now time.Time, settlementRepo repository.OptionSettlementRepository, states ...OptionSettlementState) (OptionsExpirySummary, error) {
 	if settlementRepo == nil {
 		return OptionsExpirySummary{}, errors.New("options expiry: atomic settlement repository is required")
 	}
@@ -60,7 +70,7 @@ func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, pos
 	return summary, err
 }
 
-func settleExpiredOptionPositionsLocked(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[string]float64, now time.Time, settlementRepo repository.OptionSettlementRepository, states ...OptionSettlementState) (OptionsExpirySummary, error) {
+func settleExpiredOptionPositionsLocked(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[OptionExpiryPriceKey]float64, now time.Time, settlementRepo repository.OptionSettlementRepository, states ...OptionSettlementState) (OptionsExpirySummary, error) {
 	if retries, ok := settlementRepo.(repository.OptionSettlementSyncRetryRepository); ok {
 		pending, err := retries.HasOptionSettlementSyncRetries(ctx, scope.AccountID(), scope.Environment())
 		if err != nil {
@@ -105,7 +115,7 @@ func settleExpiredOptionPositionsLocked(ctx context.Context, scope ExecutionScop
 		if position.OptionType == nil || position.Strike == nil || position.UnderlyingTicker == "" {
 			return OptionsExpirySummary{}, fmt.Errorf("options expiry: position %s lacks contract metadata", position.ID)
 		}
-		underlyingPrice, ok := underlyingPrices[position.UnderlyingTicker]
+		underlyingPrice, ok := underlyingPrices[NewOptionExpiryPriceKey(position.UnderlyingTicker, expiry)]
 		if !ok || underlyingPrice <= 0 {
 			return OptionsExpirySummary{}, fmt.Errorf("options expiry: missing underlying price for %s", position.UnderlyingTicker)
 		}

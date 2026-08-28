@@ -152,6 +152,26 @@ func (r *PositionRepo) List(ctx context.Context, filter repository.PositionFilte
 	return r.list(ctx, query, args, "list positions")
 }
 
+func (r *PositionRepo) ListOptionsLifecyclePositions(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error) {
+	if accountID != r.accountID || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: options lifecycle position scope is invalid")
+	}
+	rows, err := r.pool.Query(ctx, positionSelectSQL+` WHERE p.account_id=$1 AND p.environment=$2 AND p.asset_class='option' ORDER BY p.opened_at,p.id LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var positions []domain.Position
+	for rows.Next() {
+		position, scanErr := scanPosition(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		positions = append(positions, *position)
+	}
+	return positions, rows.Err()
+}
+
 // Update persists changes to an existing position. It returns ErrNotFound when
 // no row matches the position ID.
 func (r *PositionRepo) Update(ctx context.Context, position *domain.Position) error {

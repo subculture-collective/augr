@@ -495,6 +495,26 @@ func (r *OrderRepo) List(ctx context.Context, filter repository.OrderFilter, lim
 	return r.list(ctx, query, args, "list orders")
 }
 
+func (r *OrderRepo) ListOptionsLifecycleOrders(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Order, error) {
+	if accountID != r.accountID || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: options lifecycle order scope is invalid")
+	}
+	rows, err := r.pool.Query(ctx, orderSelectSQL+` WHERE account_id=$1 AND environment=$2 AND (market_type='options' OR asset_class='option') ORDER BY created_at,id LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var orders []domain.Order
+	for rows.Next() {
+		order, scanErr := scanOrder(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		orders = append(orders, *order)
+	}
+	return orders, rows.Err()
+}
+
 // Update persists changes to an existing order. It returns ErrNotFound when no
 // row matches the order ID.
 func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {

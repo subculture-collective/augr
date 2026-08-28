@@ -232,6 +232,16 @@ func (r *recordingOrderRepo) List(_ context.Context, filter repository.OrderFilt
 	return paginateOrders(filtered, limit, offset), nil
 }
 
+func (r *recordingOrderRepo) ListOptionsLifecycleOrders(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Order, error) {
+	var values []domain.Order
+	for _, order := range r.list {
+		if order.AccountID == accountID && order.Environment == environment && (order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption) {
+			values = append(values, *cloneOrder(order))
+		}
+	}
+	return paginateOrders(values, limit, offset), nil
+}
+
 func (r *recordingOrderRepo) Count(ctx context.Context, filter repository.OrderFilter) (int, error) {
 	orders, err := r.List(ctx, filter, 0, 0)
 	if err != nil {
@@ -333,6 +343,16 @@ func (r *recordingPositionRepo) List(_ context.Context, filter repository.Positi
 		filtered = append(filtered, *clonePosition(position))
 	}
 	return paginatePositions(filtered, limit, offset), nil
+}
+
+func (r *recordingPositionRepo) ListOptionsLifecyclePositions(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error) {
+	var values []domain.Position
+	for _, position := range r.open {
+		if position.AccountID == accountID && position.Environment == environment && position.AssetClass == domain.AssetClassOption {
+			values = append(values, *clonePosition(position))
+		}
+	}
+	return paginatePositions(values, limit, offset), nil
 }
 
 func (r *recordingPositionRepo) Count(ctx context.Context, filter repository.PositionFilter) (int, error) {
@@ -442,6 +462,25 @@ func (r *recordingTradeRepo) List(_ context.Context, _ repository.TradeFilter, _
 		}
 	}
 	return trades, nil
+}
+
+func (r *recordingTradeRepo) ListOptionsLifecycleTrades(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Trade, error) {
+	var values []domain.Trade
+	for _, bucket := range r.byOrderExternalID {
+		for _, trade := range bucket {
+			if trade.AccountID == accountID && trade.Environment == environment && trade.AssetClass == domain.AssetClassOption {
+				values = append(values, *cloneTrade(trade))
+			}
+		}
+	}
+	if offset >= len(values) {
+		return nil, nil
+	}
+	end := len(values)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	return values[offset:end], nil
 }
 
 func (r *recordingTradeRepo) Count(ctx context.Context, filter repository.TradeFilter) (int, error) {

@@ -654,6 +654,18 @@ type AccountScopedPositionRepository interface {
 	GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter PositionFilter, limit, offset int) ([]domain.Position, error)
 }
 
+type OptionsLifecycleOrderRepository interface {
+	ListOptionsLifecycleOrders(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Order, error)
+}
+
+type OptionsLifecyclePositionRepository interface {
+	ListOptionsLifecyclePositions(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Position, error)
+}
+
+type OptionsLifecycleTradeRepository interface {
+	ListOptionsLifecycleTrades(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Trade, error)
+}
+
 // AtomicOptionCloseRepository creates close orders and reserves their exact
 // positions in one transaction, then repairs interrupted reservations at startup.
 type AtomicOptionCloseRepository interface {

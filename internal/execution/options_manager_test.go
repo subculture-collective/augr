@@ -551,6 +551,51 @@ func TestProcessSpreadSignalAtomicallyClosesPersistedLegGroup(t *testing.T) {
 	}
 }
 
+func TestProcessOptionSellPartitionsMultipleLegGroupsAtomically(t *testing.T) {
+	orderRepo, positionRepo, tradeRepo := &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}
+	strategyID := uuid.New()
+	scope := optionExecutionScope(strategyID, uuid.New())
+	originType, originID := scope.Origin()
+	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
+	optionType := domain.OptionTypeCall
+	targetTicker := "AAPL271217C00150000"
+	var positions []domain.Position
+	for _, siblingStrike := range []float64{155, 160} {
+		groupID := uuid.New()
+		for legIndex, strike := range []float64{150, siblingStrike} {
+			ticker := targetTicker
+			side := domain.PositionSideLong
+			if legIndex == 1 {
+				ticker = fmt.Sprintf("AAPL271217C%08d", int(strike*1000))
+				side = domain.PositionSideShort
+			}
+			positions = append(positions, domain.Position{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, StrategyID: &strategyID, MarketType: domain.MarketTypeOptions, Ticker: ticker, Side: side, Quantity: 1, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100, LegGroupID: &groupID})
+		}
+	}
+	positionRepo.getOpenFn = func(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
+		return positions, nil
+	}
+	positionRepo.executionScopeFn = func(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, repository.PositionFilter, int, int) ([]domain.Position, error) {
+		return positions, nil
+	}
+	spreadCalls := 0
+	broker := &mockOptionsBroker{submitSpreadOrderFn: func(_ context.Context, spread *domain.OptionSpread, _ float64, _ string) ([]string, error) {
+		spreadCalls++
+		if len(spread.Legs) != 2 || spread.Legs[0].ClosePositionID == uuid.Nil || spread.Legs[1].ClosePositionID == uuid.Nil {
+			t.Fatalf("non-atomic close spread: %+v", spread)
+		}
+		return []string{fmt.Sprintf("group-%d-a", spreadCalls), fmt.Sprintf("group-%d-b", spreadCalls)}, nil
+	}}
+	fillRepo := &recordingOptionFillRepo{}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, positionRepo, tradeRepo, &mockRiskEngine{}, fillRepo)
+	if err := mgr.ProcessOptionSignal(context.Background(), scope, execution.FinalSignal{Signal: domain.PipelineSignalSell}, execution.TradingPlan{Ticker: targetTicker, EntryPrice: 2, PositionSize: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if spreadCalls != 2 || len(fillRepo.batches) != 2 || len(fillRepo.batches[0]) != 2 || len(fillRepo.batches[1]) != 2 {
+		t.Fatalf("spread calls=%d batches=%v", spreadCalls, fillRepo.batches)
+	}
+}
+
 func TestProcessSpreadSignalRetainsMalformedAsyncResponseForReconciliation(t *testing.T) {
 	orderRepo, positionRepo, tradeRepo := &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}
 	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)

@@ -112,6 +112,19 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 	if err != nil {
 		return PaperOrderResult{}, err
 	}
+	var existingResult PaperOrderResult
+	if len(existing) > 0 {
+		existingResult, err = matchingCopyOrderResult(existing, request)
+		existingResult.Scope = request.Scope
+		if err != nil {
+			return existingResult, err
+		}
+		switch existingResult.Status {
+		case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
+		default:
+			return existingResult, nil
+		}
+	}
 	balance, err := e.deps.Broker.GetAccountBalance(ctx)
 	if err != nil {
 		return PaperOrderResult{}, err
@@ -136,16 +149,7 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 	scope := request.Scope
 	plan := execution.TradingPlan{Action: signal, MarketType: domain.MarketTypeStock, Ticker: request.Intent.Ticker, EntryType: "limit", EntryPrice: price, ReferencePrice: price, PositionSize: request.Intent.RequestedNotional / price, Confidence: 1, Rationale: "deterministic copy-subscription rebalance"}
 	if len(existing) > 0 {
-		result, matchErr := matchingCopyOrderResult(existing, request)
-		result.Scope = scope
-		if matchErr != nil {
-			return result, matchErr
-		}
-		switch result.Status {
-		case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
-		default:
-			return result, nil
-		}
+		result := existingResult
 		persisted, reloadErr := e.deps.Orders.Get(ctx, existing[0].ID)
 		if reloadErr != nil {
 			return result, fmt.Errorf("reload pending copy order: %w", reloadErr)

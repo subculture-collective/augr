@@ -69,6 +69,13 @@ func (r *TradeRepo) List(ctx context.Context, filter repository.TradeFilter, lim
 	return r.list(ctx, query, args, "list trades")
 }
 
+func (r *TradeRepo) ListOptionsLifecycleTrades(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Trade, error) {
+	if accountID != r.accountID || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: options lifecycle trade scope is invalid")
+	}
+	return r.list(ctx, tradeSelectSQL+` WHERE account_id=$1 AND environment=$2 AND asset_class='option' ORDER BY executed_at,id LIMIT $3 OFFSET $4`, []any{accountID, environment, limit, offset}, "list options lifecycle trades")
+}
+
 // GetByOrder returns trades for the given order with optional filtering and
 // pagination.
 func (r *TradeRepo) GetByOrder(ctx context.Context, orderID uuid.UUID, filter repository.TradeFilter, limit, offset int) ([]domain.Trade, error) {

@@ -93,7 +93,7 @@ func TestSettleExpiredOptionPositionsPersistsExerciseAndWorthlessExpiryWithoutFa
 	scope := optionExecutionScope(uuid.New(), uuid.New())
 	stampExpiryPositions(scope, positions)
 	settlementRepo := &recordingOptionSettlementRepo{}
-	summary, err := execution.SettleExpiredOptionPositions(context.Background(), scope, positions, map[string]float64{"AAPL": 155}, now, settlementRepo)
+	summary, err := execution.SettleExpiredOptionPositions(context.Background(), scope, positions, map[execution.OptionExpiryPriceKey]float64{execution.NewOptionExpiryPriceKey("AAPL", expiry): 155}, now, settlementRepo)
 	if err != nil {
 		t.Fatalf("SettleExpiredOptionPositions() error = %v", err)
 	}
@@ -141,7 +141,7 @@ func TestSettleExpiredOptionPositionsValidatesBatchBeforeMutation(t *testing.T) 
 	scope := optionExecutionScope(uuid.New(), uuid.New())
 	stampExpiryPositions(scope, positions)
 	settlementRepo := &recordingOptionSettlementRepo{}
-	_, err := execution.SettleExpiredOptionPositions(context.Background(), scope, positions, map[string]float64{"AAPL": 155}, now, settlementRepo)
+	_, err := execution.SettleExpiredOptionPositions(context.Background(), scope, positions, map[execution.OptionExpiryPriceKey]float64{execution.NewOptionExpiryPriceKey("AAPL", expiry): 155}, now, settlementRepo)
 	if err == nil || len(settlementRepo.inputs) != 0 {
 		t.Fatalf("invalid batch must fail before mutation: err=%v atomic_calls=%d", err, len(settlementRepo.inputs))
 	}
@@ -149,13 +149,14 @@ func TestSettleExpiredOptionPositionsValidatesBatchBeforeMutation(t *testing.T) 
 
 func TestSettleExpiredOptionPositionsFinishesPaperCleanupAfterCallerCancellation(t *testing.T) {
 	now := time.Date(2027, 12, 18, 22, 0, 0, 0, time.UTC)
-	positions := []domain.Position{expiryPosition("AAPL271217C00150000", "AAPL", domain.OptionTypeCall, 150, 2, 1, domain.PositionSideLong, now.Add(-24*time.Hour))}
+	expiry := now.Add(-24 * time.Hour)
+	positions := []domain.Position{expiryPosition("AAPL271217C00150000", "AAPL", domain.OptionTypeCall, 150, 2, 1, domain.PositionSideLong, expiry)}
 	scope := optionExecutionScope(uuid.New(), uuid.New())
 	stampExpiryPositions(scope, positions)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	state := &cancellationSafeSettlementState{}
-	if _, err := execution.SettleExpiredOptionPositions(ctx, scope, positions, map[string]float64{"AAPL": 155}, now, &recordingOptionSettlementRepo{}, state); err != nil {
+	if _, err := execution.SettleExpiredOptionPositions(ctx, scope, positions, map[execution.OptionExpiryPriceKey]float64{execution.NewOptionExpiryPriceKey("AAPL", expiry): 155}, now, &recordingOptionSettlementRepo{}, state); err != nil {
 		t.Fatalf("post-commit cleanup inherited caller cancellation: %v", err)
 	}
 	if !state.called {

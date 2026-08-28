@@ -35,6 +35,7 @@ type fakeBroker struct {
 	preparedUnderLock    atomic.Bool
 	sentUnderLock        atomic.Bool
 	persistedUnderLock   atomic.Bool
+	claimedUnderLock     atomic.Bool
 }
 
 func (f *fakeBroker) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
@@ -75,10 +76,12 @@ func (*recordingStopFinancialLifecycle) SettlePredictionDecision(context.Context
 }
 
 type sharedExitClaims struct {
-	mu             sync.Mutex
-	claims         map[uuid.UUID]uuid.UUID
-	terminalStatus domain.OrderStatus
-	reservedOrder  *domain.Order
+	mu                     sync.Mutex
+	claims                 map[uuid.UUID]uuid.UUID
+	terminalStatus         domain.OrderStatus
+	reservedOrder          *domain.Order
+	createErrAfterCommit   bool
+	finalizeErrAfterCommit bool
 }
 
 func (r *sharedExitClaims) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
@@ -86,6 +89,8 @@ func (r *sharedExitClaims) WithExecutionAccountLock(_ context.Context, _ uuid.UU
 }
 
 func (r *sharedExitClaims) GetPredictionExitOrderByPosition(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _ uuid.UUID) (*domain.Order, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.reservedOrder == nil {
 		return nil, repository.ErrNotFound
 	}
@@ -103,6 +108,12 @@ func (r *sharedExitClaims) CreatePredictionExitOrderAndReserve(_ context.Context
 		return errors.New("already claimed")
 	}
 	r.claims[positionID] = order.ID
+	copy := *order
+	r.reservedOrder = &copy
+	if r.createErrAfterCommit {
+		r.createErrAfterCommit = false
+		return errors.New("reservation commit acknowledgement lost")
+	}
 	return nil
 }
 func (*sharedExitClaims) ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
@@ -118,7 +129,12 @@ func (r *sharedExitClaims) FinalizePredictionExit(_ context.Context, _ uuid.UUID
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.claims, positionID)
+	r.reservedOrder = nil
 	r.terminalStatus = status
+	if r.finalizeErrAfterCommit {
+		r.finalizeErrAfterCommit = false
+		return errors.New("finalization commit acknowledgement lost")
+	}
 	return nil
 }
 
@@ -139,6 +155,7 @@ func scopedGuardPosition(position Position) Position {
 }
 
 func (f *fakeBroker) CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error {
+	f.claimedUnderLock.Store(f.lockDepth.Load() > 0)
 	return nil
 }
 
@@ -190,8 +207,8 @@ func TestStopGuardHoldsAccountLockAcrossBrokerEffectAndPersistence(t *testing.T)
 		t.Fatal(err)
 	}
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "lock-test", Side: "YES", Price: .4, ReceivedAt: time.Now()})
-	if !broker.preparedUnderLock.Load() || !broker.sentUnderLock.Load() || !broker.persistedUnderLock.Load() || broker.lockDepth.Load() != 0 {
-		t.Fatalf("lock coverage prepare=%v send=%v persist=%v depth=%d", broker.preparedUnderLock.Load(), broker.sentUnderLock.Load(), broker.persistedUnderLock.Load(), broker.lockDepth.Load())
+	if !broker.claimedUnderLock.Load() || !broker.preparedUnderLock.Load() || !broker.sentUnderLock.Load() || !broker.persistedUnderLock.Load() || broker.lockDepth.Load() != 0 {
+		t.Fatalf("lock coverage claim=%v prepare=%v send=%v persist=%v depth=%d", broker.claimedUnderLock.Load(), broker.preparedUnderLock.Load(), broker.sentUnderLock.Load(), broker.persistedUnderLock.Load(), broker.lockDepth.Load())
 	}
 }
 
@@ -282,6 +299,24 @@ func TestStopGuard_DurableClaimAllowsOneSendAcrossInstances(t *testing.T) {
 	wg.Wait()
 	if got := broker.sendCalls.Load(); got != 1 {
 		t.Fatalf("broker sends = %d, want one durable owner", got)
+	}
+}
+
+func TestStopGuardResolvesAmbiguousReservationCommitBeforeSend(t *testing.T) {
+	broker := &fakeBroker{}
+	claims := &sharedExitClaims{createErrAfterCommit: true}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	positionID := uuid.New()
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: positionID.String(), Slug: "ambiguous-claim", Side: "BUY", OutcomeSide: "YES", Size: 1, StopPx: .45})); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "ambiguous-claim", Side: "YES", Price: .4, ReceivedAt: time.Now()})
+	if broker.sendCalls.Load() != 1 || claims.reservedOrder == nil || claims.reservedOrder.ExternalID != "" {
+		_, resolveErr := g.resolveStopReservation(context.Background(), g.byID[positionID.String()], positionID)
+		t.Fatalf("ambiguous reservation recovery sends=%d reservation=%+v resolve=%v", broker.sendCalls.Load(), claims.reservedOrder, resolveErr)
 	}
 }
 
@@ -530,6 +565,24 @@ func TestStopGuard_DefinitiveTerminalOutcomeReleasesAtomically(t *testing.T) {
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: .44, ReceivedAt: time.Now()})
 	if g.Active() != 1 || claims.terminalStatus != domain.OrderStatusCancelled {
 		t.Fatalf("terminal stop outcome: active=%d status=%s", g.Active(), claims.terminalStatus)
+	}
+}
+
+func TestStopGuardResolvesAmbiguousPartialFinalizationAndReservesRemainder(t *testing.T) {
+	price, filledAt := .4, time.Now().UTC()
+	broker := &fakeBroker{sendErr: errors.New("timeout after send"), lookupStatus: domain.OrderStatusCancelled, lookupExternalID: "partial-cancel", lookupFilledQuantity: .4, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt}
+	claims := &sharedExitClaims{finalizeErrAfterCommit: true}
+	financial := &recordingStopFinancialLifecycle{}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims, FinancialLifecycle: financial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: uuid.NewString(), Slug: "partial-finalize", Side: "BUY", OutcomeSide: "YES", Size: 1, StopPx: .45})); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "partial-finalize", Side: "YES", Price: .4, ReceivedAt: time.Now()})
+	if len(financial.inputs) != 1 || claims.terminalStatus != domain.OrderStatusCancelled || claims.reservedOrder == nil || claims.reservedOrder.Status != domain.OrderStatusPending || claims.reservedOrder.Quantity != .6 {
+		t.Fatalf("partial finalization inputs=%v terminal=%s remainder=%+v", financial.inputs, claims.terminalStatus, claims.reservedOrder)
 	}
 }
 

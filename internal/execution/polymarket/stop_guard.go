@@ -423,26 +423,55 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 		if g.metrics != nil {
 			g.metrics.ObserveTickToFireSeconds(entry.slug, time.Since(t.ReceivedAt).Seconds())
 		}
-		if err := g.exitRepo.CreatePredictionExitOrderAndReserve(ctx, entry.order.AccountID, entry.order.Environment, entry.order.OriginType, entry.order.OriginID, positionID, entry.order); err != nil {
-			if g.logger != nil {
-				g.logger.Error("polymarket stop guard durable claim failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
-			}
-			entry.state.Store(int32(guardArmed))
-			continue
-		}
-		entry.claimed.Store(true)
 		locker, ok := g.exitRepo.(repository.ExecutionAccountLocker)
 		if !ok {
 			entry.state.Store(int32(guardArmed))
 			continue
 		}
 		if err := locker.WithExecutionAccountLock(ctx, entry.order.AccountID, func() error {
-			g.submitReservedStopLocked(context.WithValue(ctx, stopAccountLockHeldKey{}, true), entry, positionID)
+			lockedCtx := context.WithValue(ctx, stopAccountLockHeldKey{}, true)
+			if err := g.claimStopExitLocked(lockedCtx, entry, positionID); err != nil {
+				return err
+			}
+			g.submitReservedStopLocked(lockedCtx, entry, positionID)
 			return nil
 		}); err != nil {
+			if g.logger != nil {
+				g.logger.Error("polymarket stop guard durable claim failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
+			}
 			entry.state.Store(int32(guardArmed))
 		}
 	}
+}
+
+func (g *StopGuard) claimStopExitLocked(ctx context.Context, entry *guardEntry, positionID uuid.UUID) error {
+	err := g.exitRepo.CreatePredictionExitOrderAndReserve(ctx, entry.order.AccountID, entry.order.Environment, entry.order.OriginType, entry.order.OriginID, positionID, entry.order)
+	if err != nil {
+		resolved, resolveErr := g.resolveStopReservation(ctx, entry, positionID)
+		if resolveErr != nil {
+			return errors.Join(err, resolveErr)
+		}
+		entry.order = resolved
+	}
+	entry.claimed.Store(true)
+	return nil
+}
+
+func (g *StopGuard) resolveStopReservation(ctx context.Context, entry *guardEntry, positionID uuid.UUID) (*domain.Order, error) {
+	lookup, ok := g.exitRepo.(repository.PredictionExitReservationLookup)
+	if !ok {
+		return nil, errors.New("polymarket: prediction exit reservation lookup is required")
+	}
+	order, err := lookup.GetPredictionExitOrderByPosition(ctx, entry.order.AccountID, entry.order.Environment, positionID)
+	if err != nil {
+		return nil, fmt.Errorf("polymarket: resolve prediction exit reservation: %w", err)
+	}
+	if order.ID != entry.order.ID || order.AccountID != entry.order.AccountID || order.Environment != entry.order.Environment || order.OriginType != entry.order.OriginType || order.OriginID != entry.order.OriginID ||
+		order.ClientOrderID != entry.order.ClientOrderID || order.Quantity-order.FilledQuantity != entry.order.Quantity-entry.order.FilledQuantity || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != entry.order.OrderType ||
+		order.Ticker != entry.order.Ticker || order.PredictionSide != entry.order.PredictionSide || order.PolymarketIntent != entry.order.PolymarketIntent || order.Side != entry.order.Side || order.PositionIntent == nil || entry.order.PositionIntent == nil || *order.PositionIntent != *entry.order.PositionIntent {
+		return nil, errors.New("polymarket: resolved prediction exit reservation does not match claimed order")
+	}
+	return order, nil
 }
 
 func (g *StopGuard) submitReservedStopLocked(ctx context.Context, entry *guardEntry, positionID uuid.UUID) {
@@ -637,7 +666,17 @@ func (g *StopGuard) finalizeTerminalExit(ctx context.Context, entry *guardEntry,
 		return false
 	}
 	if err := terminalizer.FinalizePredictionExit(ctx, entry.order.AccountID, entry.order.Environment, positionID, entry.order.ID, status, strings.TrimSpace(externalID), time.Now().UTC()); err != nil {
-		return false
+		lookup, ok := g.exitRepo.(repository.PredictionExitReservationLookup)
+		if !ok {
+			return false
+		}
+		resolved, lookupErr := lookup.GetPredictionExitOrderByPosition(ctx, entry.order.AccountID, entry.order.Environment, positionID)
+		if lookupErr == nil && resolved.ID == entry.order.ID {
+			return false
+		}
+		if !errors.Is(lookupErr, repository.ErrNotFound) {
+			return false
+		}
 	}
 	remaining := entry.order.Quantity - entry.order.FilledQuantity
 	if remaining > 0 {
@@ -651,7 +690,10 @@ func (g *StopGuard) finalizeTerminalExit(ctx context.Context, entry *guardEntry,
 			return false
 		}
 		entry.order, entry.template = &fresh, tmpl
-		entry.claimed.Store(false)
+		if err := g.claimStopExitLocked(ctx, entry, positionID); err != nil {
+			entry.claimed.Store(false)
+			return false
+		}
 		entry.state.Store(int32(guardArmed))
 		return true
 	}

@@ -20,6 +20,21 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+func TestCanonicalizeCopyIntentNumericsMatchesDatabasePrecision(t *testing.T) {
+	price := 12.345678905
+	intent := &domain.CopyTradeIntent{TargetWeight: 0.123456789, TargetValue: 10.005, AttributedCurrentValue: 20.004, RequestedNotional: 30.006, ExecutablePrice: &price}
+	if err := canonicalizeCopyIntentNumerics(intent); err != nil {
+		t.Fatal(err)
+	}
+	if intent.TargetWeight != 0.12345679 || intent.TargetValue != 10.01 || intent.AttributedCurrentValue != 20 || intent.RequestedNotional != 30.01 || intent.ExecutablePrice == nil || *intent.ExecutablePrice != 12.34567891 {
+		t.Fatalf("canonical intent numerics=%+v price=%v", intent, intent.ExecutablePrice)
+	}
+	retry := *intent
+	if err := canonicalizeCopyIntentNumerics(&retry); err != nil || retry.TargetWeight != intent.TargetWeight || retry.TargetValue != intent.TargetValue || retry.AttributedCurrentValue != intent.AttributedCurrentValue || retry.RequestedNotional != intent.RequestedNotional || retry.ExecutablePrice == nil || *retry.ExecutablePrice != *intent.ExecutablePrice {
+		t.Fatalf("canonical retry err=%v retry=%+v", err, retry)
+	}
+}
+
 func TestCopyQuoteRetainedQualification(t *testing.T) {
 	databaseURL := os.Getenv("COPY_QUOTE_QUALIFICATION_DB_URL")
 	if databaseURL == "" {

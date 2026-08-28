@@ -707,12 +707,32 @@ func (m *OptionsOrderManager) closeLegacyStrategyOptionPositions(ctx context.Con
 	if err != nil {
 		return fmt.Errorf("options_manager: load account option positions for sell: %w", err)
 	}
-	closed := 0
+	targetGroups := map[uuid.UUID]struct{}{}
 	for i := range positions {
 		position := &positions[i]
-		if position.AssetClass != domain.AssetClassOption || position.Ticker != ticker || position.StrategyID == nil || *position.StrategyID != *scope.LegacyStrategyID() {
+		if position.AssetClass == domain.AssetClassOption && position.Ticker == ticker && position.StrategyID != nil && *position.StrategyID == *scope.LegacyStrategyID() && position.LegGroupID != nil {
+			targetGroups[*position.LegGroupID] = struct{}{}
+		}
+	}
+	groups := map[uuid.UUID][]domain.Position{}
+	var standalone []*domain.Position
+	for i := range positions {
+		position := &positions[i]
+		if position.AssetClass != domain.AssetClassOption || position.StrategyID == nil || *position.StrategyID != *scope.LegacyStrategyID() {
 			continue
 		}
+		if position.LegGroupID != nil {
+			if _, selected := targetGroups[*position.LegGroupID]; selected {
+				groups[*position.LegGroupID] = append(groups[*position.LegGroupID], *position)
+			}
+			continue
+		}
+		if position.Ticker == ticker {
+			standalone = append(standalone, position)
+		}
+	}
+	closed := 0
+	for _, position := range standalone {
 		versionID, parseErr := uuid.Parse(position.OriginID)
 		if position.OriginType != string(ledger.ExecutionOriginStrategyVersion) || parseErr != nil {
 			return fmt.Errorf("options_manager: option position %s lacks strategy-version ownership", position.ID)
@@ -726,10 +746,65 @@ func (m *OptionsOrderManager) closeLegacyStrategyOptionPositions(ctx context.Con
 		}
 		closed++
 	}
+	groupIDs := make([]uuid.UUID, 0, len(groups))
+	for groupID := range groups {
+		groupIDs = append(groupIDs, groupID)
+	}
+	sort.Slice(groupIDs, func(i, j int) bool { return groupIDs[i].String() < groupIDs[j].String() })
+	for _, groupID := range groupIDs {
+		legs := groups[groupID]
+		if len(legs) < 2 {
+			return fmt.Errorf("options_manager: persisted leg group %s is incomplete", groupID)
+		}
+		spread, quantity, spreadErr := closingSpreadFromPositions(legs, price)
+		if spreadErr != nil {
+			return spreadErr
+		}
+		if err := m.processSpreadSignal(ctx, scope, spread, quantity); err != nil {
+			return err
+		}
+		closed += len(legs)
+	}
 	if closed == 0 {
 		return fmt.Errorf("options_manager: no open option position for logical strategy and contract %s", ticker)
 	}
 	return nil
+}
+
+func closingSpreadFromPositions(positions []domain.Position, price float64) (*domain.OptionSpread, float64, error) {
+	sort.Slice(positions, func(i, j int) bool { return positions[i].Ticker < positions[j].Ticker })
+	units := make([]int64, len(positions))
+	for i := range positions {
+		position := &positions[i]
+		if position.OptionType == nil || position.Strike == nil || position.Expiry == nil || position.Quantity <= 0 || position.ContractMultiplier <= 0 || strings.TrimSpace(position.UnderlyingTicker) == "" {
+			return nil, 0, fmt.Errorf("options_manager: leg group position %s lacks contract metadata", position.ID)
+		}
+		units[i] = int64(math.Round(position.Quantity * 1e8))
+		if units[i] <= 0 || math.Abs(float64(units[i])/1e8-position.Quantity) > 1e-9 {
+			return nil, 0, fmt.Errorf("options_manager: leg group position %s has unsupported quantity precision", position.ID)
+		}
+	}
+	divisor := units[0]
+	for _, value := range units[1:] {
+		for value != 0 {
+			divisor, value = value, divisor%value
+		}
+	}
+	spread := &domain.OptionSpread{Underlying: positions[0].UnderlyingTicker, Legs: make([]domain.SpreadLeg, 0, len(positions))}
+	for i := range positions {
+		position := &positions[i]
+		if position.UnderlyingTicker != spread.Underlying {
+			return nil, 0, errors.New("options_manager: leg group mixes underlyings")
+		}
+		side, intent := domain.OrderSideSell, domain.PositionIntentSellToClose
+		if position.Side == domain.PositionSideShort {
+			side, intent = domain.OrderSideBuy, domain.PositionIntentBuyToClose
+		} else if position.Side != domain.PositionSideLong {
+			return nil, 0, fmt.Errorf("options_manager: leg group position %s has invalid side", position.ID)
+		}
+		spread.Legs = append(spread.Legs, domain.SpreadLeg{Contract: domain.OptionContract{OCCSymbol: position.Ticker, Underlying: position.UnderlyingTicker, OptionType: *position.OptionType, Strike: *position.Strike, Expiry: *position.Expiry, Multiplier: position.ContractMultiplier}, Side: side, PositionIntent: intent, Ratio: int(units[i] / divisor), ExecutablePrice: price, ClosePositionID: position.ID})
+	}
+	return spread, float64(divisor) / 1e8, nil
 }
 
 func (m *OptionsOrderManager) persistImmediateFill(ctx context.Context, order *domain.Order) error {
@@ -959,23 +1034,38 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 		if err != nil {
 			return fmt.Errorf("options_manager: load spread positions for close: %w", err)
 		}
+		positionsByID := make(map[uuid.UUID]*domain.Position, len(positions))
+		positionsByTicker := make(map[string][]*domain.Position, len(positions))
 		for index := range positions {
 			if positions[index].AssetClass == domain.AssetClassOption && positions[index].ClosedAt == nil {
 				if err := validatePositionScope(&positions[index], scope); err != nil {
 					return err
 				}
-				if _, duplicate := closePositions[positions[index].Ticker]; duplicate {
-					return fmt.Errorf("options_manager: multiple open positions match close contract %s", positions[index].Ticker)
-				}
-				closePositions[positions[index].Ticker] = &positions[index]
+				positionsByID[positions[index].ID] = &positions[index]
+				positionsByTicker[positions[index].Ticker] = append(positionsByTicker[positions[index].Ticker], &positions[index])
 			}
 		}
 		for legIndex := range spread.Legs {
 			leg := &spread.Legs[legIndex]
-			position := closePositions[leg.Contract.OCCSymbol]
+			var position *domain.Position
+			if leg.ClosePositionID != uuid.Nil {
+				position = positionsByID[leg.ClosePositionID]
+				if position != nil && position.Ticker != leg.Contract.OCCSymbol {
+					return fmt.Errorf("options_manager: close position %s does not match contract %s", leg.ClosePositionID, leg.Contract.OCCSymbol)
+				}
+			} else {
+				matches := positionsByTicker[leg.Contract.OCCSymbol]
+				if len(matches) > 1 {
+					return fmt.Errorf("options_manager: multiple open positions match close contract %s without exact position identity", leg.Contract.OCCSymbol)
+				}
+				if len(matches) == 1 {
+					position = matches[0]
+				}
+			}
 			if position == nil || position.Quantity != quantity*float64(leg.Ratio) || position.LegGroupID == nil {
 				return fmt.Errorf("options_manager: matching open spread position required for %s", leg.Contract.OCCSymbol)
 			}
+			closePositions[leg.Contract.OCCSymbol] = position
 			if existingGroupID == nil {
 				existingGroupID = position.LegGroupID
 			} else if *existingGroupID != *position.LegGroupID {

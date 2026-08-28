@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -380,6 +381,9 @@ func scanCopyIntent(row pgx.Row) (*domain.CopyTradeIntent, error) {
 }
 
 func (r *CopyTradingRepo) CreateIntent(ctx context.Context, intent *domain.CopyTradeIntent) (bool, error) {
+	if err := canonicalizeCopyIntentNumerics(intent); err != nil {
+		return false, err
+	}
 	if intent.AccountID != r.accountID || r.environment.IsValid() && intent.Environment != r.environment {
 		return false, fmt.Errorf("postgres: create copy intent: account mismatch")
 	}
@@ -407,6 +411,28 @@ func (r *CopyTradingRepo) CreateIntent(ctx context.Context, intent *domain.CopyT
 		return false, err
 	}
 	return true, nil
+}
+
+func canonicalizeCopyIntentNumerics(intent *domain.CopyTradeIntent) error {
+	if intent == nil {
+		return fmt.Errorf("postgres: create copy intent: intent is required")
+	}
+	values := []*float64{&intent.TargetWeight, &intent.TargetValue, &intent.AttributedCurrentValue, &intent.RequestedNotional}
+	scales := []int32{8, 2, 2, 2}
+	for i, value := range values {
+		if math.IsNaN(*value) || math.IsInf(*value, 0) {
+			return fmt.Errorf("postgres: create copy intent: numeric value is not finite")
+		}
+		*value = decimal.NewFromFloat(*value).Round(scales[i]).InexactFloat64()
+	}
+	if intent.ExecutablePrice != nil {
+		if math.IsNaN(*intent.ExecutablePrice) || math.IsInf(*intent.ExecutablePrice, 0) {
+			return fmt.Errorf("postgres: create copy intent: executable price is not finite")
+		}
+		value := decimal.NewFromFloat(*intent.ExecutablePrice).Round(8).InexactFloat64()
+		intent.ExecutablePrice = &value
+	}
+	return nil
 }
 
 func (r *CopyTradingRepo) ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error) {

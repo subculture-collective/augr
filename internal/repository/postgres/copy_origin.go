@@ -222,6 +222,9 @@ func validatePlannedIntents(envelope copyOriginEnvelope, intents []domain.CopyTr
 
 func createCopyIntentTx(ctx context.Context, tx pgx.Tx, value domain.CopyTradeIntent) (copyorigin.PlannedIntent, error) {
 	intent := &value
+	if err := canonicalizeCopyIntentNumerics(intent); err != nil {
+		return copyorigin.PlannedIntent{}, err
+	}
 	if intent.Calculation == nil {
 		intent.Calculation = json.RawMessage(`{}`)
 	}

@@ -3,6 +3,7 @@ package automation
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -37,7 +38,11 @@ func TestRegisterOptionsLifecycleJobRequiresPersistenceAndMarketData(t *testing.
 
 func TestOptionsLifecycleReconcileJobAcceptsEmptyDurableGraph(t *testing.T) {
 	orders := newRecordingOrderRepo()
-	orch := NewJobOrchestrator(OrchestratorDeps{OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: newRecordingTradeRepo(orders)})
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orch := NewJobOrchestrator(OrchestratorDeps{ExecutionAccount: binding, OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: newRecordingTradeRepo(orders)})
 	orch.RegisterAll()
 	if err := orch.optionsLifecycleReconcile(context.Background()); err != nil {
 		t.Fatalf("optionsLifecycleReconcile() error = %v", err)
@@ -83,5 +88,18 @@ func TestOptionsExpiryQueriesConfiguredAccountAndEnvironment(t *testing.T) {
 	}
 	if repo.accountID != accountID || repo.environment != domain.AccountEnvironmentPaperScored {
 		t.Fatalf("expiry query scope = %s/%s", repo.accountID, repo.environment)
+	}
+}
+
+func TestOptionExpirySessionCloseUsesFridayForDelayedMondayRun(t *testing.T) {
+	friday := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	bars := []domain.OHLCV{
+		{Timestamp: friday.Add(-24 * time.Hour), Close: 99},
+		{Timestamp: friday, Close: 101},
+		{Timestamp: friday.Add(72 * time.Hour), Close: 150},
+	}
+	got, ok := optionExpirySessionClose(bars, friday)
+	if !ok || got != 101 {
+		t.Fatalf("expiry close=(%v,%v), want Friday close 101", got, ok)
 	}
 }
