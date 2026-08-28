@@ -56,7 +56,7 @@ export class FakeWebSocket {
 }
 
 export function resetApp(path = '/login') {
-  document.body.innerHTML = ''
+  cleanup()
   window.history.pushState({}, '', path)
   localStorage.clear()
   sessionStorage.clear()
