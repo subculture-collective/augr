@@ -56,7 +56,7 @@ check_existing_metadata() {
 if (( from_version == 0 )); then
   # PostgreSQL requires the administrative connection to install the untrusted
   # vector and TimescaleDB extensions. Install the exact extension set declared
-  # by tracked migrations before handing every migration body to the non-login
+  # by tracked migrations before handing every migration body to the dedicated
   # database-owner role. CREATE EXTENSION IF NOT EXISTS remains idempotent when
   # a disposable database is retried before metadata initialization.
   run_sql <<'SQL'

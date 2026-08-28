@@ -324,7 +324,7 @@ wait_for_postgres
 
 echo "=== Preparing isolated database owner roles ==="
 psql_db postgres <<SQL
-CREATE ROLE augr_db_owner NOLOGIN;
+CREATE ROLE augr_db_owner LOGIN;
 CREATE ROLE augr_app_runtime NOLOGIN;
 CREATE ROLE augr_projection_writer NOLOGIN;
 GRANT augr_db_owner TO "$POSTGRES_USER";

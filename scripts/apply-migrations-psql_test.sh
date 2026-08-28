@@ -43,11 +43,6 @@ if [[ -n $query ]]; then
   exit 0
 fi
 input=$(sed -n '1,$p')
-if [[ $input == *"CREATE EXTENSION IF NOT EXISTS pgcrypto"* ]]; then
-  [[ $input == *"CREATE EXTENSION IF NOT EXISTS vector"* && $input == *"CREATE EXTENSION IF NOT EXISTS timescaledb"* ]] || exit 1
-  printf '%s\n' "$db" >>"$FAKE_STATE_DIR/extension_calls"
-  exit 0
-fi
 if $single; then
   [[ $input == SET\ ROLE\ augr_db_owner\;* ]] || { printf 'migration omitted SET ROLE\n' >&2; exit 1; }
   printf '%s\n' "${input%%$'\n'*}" >>"$FAKE_STATE_DIR/migration_calls"
@@ -55,6 +50,11 @@ if $single; then
     rm "$FAKE_STATE_DIR/fail_next"
     exit 1
   fi
+  exit 0
+fi
+if [[ $input == *"CREATE EXTENSION IF NOT EXISTS pgcrypto"* ]]; then
+  [[ $input == *"CREATE EXTENSION IF NOT EXISTS vector"* && $input == *"CREATE EXTENSION IF NOT EXISTS timescaledb"* ]] || exit 1
+  printf '%s\n' "$db" >>"$FAKE_STATE_DIR/extension_calls"
   exit 0
 fi
 if [[ $input == *"INSERT INTO schema_migrations(version,dirty) VALUES(0,false)"* ]]; then
@@ -113,6 +113,7 @@ expect_failure run_runner --database dirty --from 108 --to 109
 grep -q 'database dirty is dirty at version 108' "$test_root/stderr"
 
 FAKE_MISSING_VERSION=000109 expect_failure run_runner --database missing --from 0 --to 109
+rm -f "$test_root/state/migration_calls" "$test_root/state/extension_calls"
 
 run_runner --database full --from 0 --to 109
 grep -qx '1|109|f' "$test_root/state/full"

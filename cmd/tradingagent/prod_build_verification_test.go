@@ -55,7 +55,7 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		`VERIFY_ROLLBACK_IMAGE contains unsupported characters`,
 		`VERIFY_ROLLBACK_SCHEMA_VERSION must be a non-negative integer`,
 		`compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$database"`,
-		`CREATE ROLE augr_db_owner NOLOGIN`,
+		`CREATE ROLE augr_db_owner LOGIN`,
 		`GRANT augr_db_owner TO "$POSTGRES_USER"`,
 		`ALTER DATABASE "$POSTGRES_DB" OWNER TO augr_db_owner`,
 		`initialize_schema_metadata`,

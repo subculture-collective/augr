@@ -44,7 +44,7 @@ Record both hashes. A second prepare attempt must fail. Do not modify or chmod e
 
 ## Provision the fresh database
 
-Use `NEW_DB_NAME=tradingagent_canonical_20260827`. Prove it does not exist, create it with owner `augr_db_owner`, and run:
+Before creating the database, require the cluster roles `augr_app_runtime` and `augr_projection_writer` and a passwordless `augr_db_owner` role with `LOGIN`. TimescaleDB requires the hypertable owner to have `LOGIN` so its background workers can assume that role; do not grant it `SUPERUSER`. Use `NEW_DB_NAME=tradingagent_canonical_20260827`. Prove it does not exist, create it with owner `augr_db_owner`, and run:
 
 ```bash
 ./scripts/apply-migrations-psql.sh --database "$NEW_DB_NAME" --from 0 --to 109
