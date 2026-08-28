@@ -188,6 +188,37 @@ func TestPaperExecutorExecutesValidPaperDecision(t *testing.T) {
 	}
 }
 
+func TestPaperExecutorMapsProcessorOrderStatus(t *testing.T) {
+	strategyID, versionID, accountID, runID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	opportunity := domain.Opportunity{AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate, StrategyID: strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: .9, EntryPrice: 100, MaxLossPct: .05}
+	decision := domain.AllocationDecision{Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, NotionalUSD: 1000}
+	strategy := domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}
+	binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+
+	tests := []struct {
+		status domain.OrderStatus
+		want   domain.AllocationDecisionAction
+	}{
+		{domain.OrderStatusPending, domain.AllocationDecisionActionPaperOrderIntent},
+		{domain.OrderStatusSubmitted, domain.AllocationDecisionActionPaperOrderIntent},
+		{domain.OrderStatusPartial, domain.AllocationDecisionActionPaperOrderIntent},
+		{domain.OrderStatusCancelled, domain.AllocationDecisionActionExecutionRejected},
+		{domain.OrderStatusRejected, domain.AllocationDecisionActionExecutionRejected},
+		{domain.OrderStatusFilled, domain.AllocationDecisionActionExecuted},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.status), func(t *testing.T) {
+			orderID := uuid.New()
+			processor := &paperProcessorStub{result: PaperOrderResult{OrderID: &orderID, Status: tt.status}}
+			result, err := NewPaperExecutor(PaperExecutorDeps{Processor: processor, ExecutionAccount: binding}).ExecutePaperDecision(context.Background(), opportunity, decision, strategy)
+			if err != nil || result.Action != tt.want {
+				t.Fatalf("status %s: action=%s err=%v, want %s", tt.status, result.Action, err, tt.want)
+			}
+		})
+	}
+}
+
 func TestPaperExecutorConvertsProcessorErrorToExecutionRejected(t *testing.T) {
 	t.Parallel()
 

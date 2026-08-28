@@ -157,6 +157,13 @@ func (e *PaperExecutor) ExecutePaperDecisionScoped(ctx context.Context, scope ex
 	if orderResult.Skipped || orderResult.OrderID == nil {
 		return PaperExecutionResult{Action: domain.AllocationDecisionActionExecutionRejected, Reason: firstReason(orderResult.Reason, "paper_order_not_created"), FinalSignal: finalSignal, TradingPlan: plan}, nil
 	}
+	switch orderResult.Status {
+	case domain.OrderStatusFilled:
+	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
+		return PaperExecutionResult{Action: domain.AllocationDecisionActionExecutionRejected, Reason: firstReason(orderResult.Reason, "paper_order_"+string(orderResult.Status)), OrderID: orderResult.OrderID, FinalSignal: finalSignal, TradingPlan: plan}, nil
+	default:
+		return PaperExecutionResult{Action: domain.AllocationDecisionActionPaperOrderIntent, Reason: firstReason(orderResult.Reason, "paper_order_"+string(orderResult.Status)), OrderID: orderResult.OrderID, FinalSignal: finalSignal, TradingPlan: plan}, nil
+	}
 
 	return PaperExecutionResult{
 		Action:      domain.AllocationDecisionActionExecuted,
