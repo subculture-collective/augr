@@ -568,6 +568,53 @@ func TestStopGuardRecoveredFillDoesNotMutateOrderBeforeConfirmedCommit(t *testin
 	}
 }
 
+func TestStopGuardRetainsOldGuardWhenReplacementRecoveryFails(t *testing.T) {
+	positionID := uuid.New()
+	broker := &fakeBroker{}
+	claims := &sharedExitClaims{reservedOrder: &domain.Order{ID: uuid.New()}}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := scopedGuardPosition(Position{ID: positionID.String(), Slug: "old-slug", Side: "BUY", Size: 1, StopPx: .4})
+	if err := g.RegisterEntry(old); err != nil {
+		t.Fatal(err)
+	}
+	stop := .4
+	pos := domain.Position{ID: positionID, AccountID: old.AccountID, Environment: old.Environment, OriginType: old.OriginType, OriginID: old.OriginID, MarketType: domain.MarketTypePolymarket, Ticker: "new-slug:YES", Side: domain.PositionSideLong, Quantity: 1, StopLoss: &stop}
+	if err := g.RegisterPositionContext(context.Background(), pos); err == nil {
+		t.Fatal("replacement recovery unexpectedly succeeded")
+	}
+	if g.Active() != 1 {
+		t.Fatalf("active guards=%d, want retained old guard", g.Active())
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "old-slug", Side: "YES", Price: .3, ReceivedAt: time.Now()})
+	if broker.sendCalls.Load() != 1 {
+		t.Fatal("retained old guard did not fire")
+	}
+}
+
+func TestStopGuardRejectsFilledStatusWithoutFullQuantity(t *testing.T) {
+	positionID := uuid.New()
+	stop, price := .4, .41
+	filledAt := time.Now().UTC()
+	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), MarketType: domain.MarketTypePolymarket, Ticker: "slug:YES", Side: domain.PositionSideLong, Quantity: 2, StopLoss: &stop}
+	intent := domain.PositionIntentSellToClose
+	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, ClientOrderID: "reserved", Ticker: "slug", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusSubmitted, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG"}
+	claims := &sharedExitClaims{reservedOrder: reserved}
+	broker := &fakeBroker{lookupStatus: domain.OrderStatusFilled, lookupExternalID: "venue", lookupFilledQuantity: 1, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims, FinancialLifecycle: &recordingStopFinancialLifecycle{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterPositionContext(context.Background(), pos); err == nil {
+		t.Fatal("terminal short fill accepted")
+	}
+	if claims.terminalStatus != "" || g.Active() != 0 {
+		t.Fatalf("short terminal fill finalized=%s active=%d", claims.terminalStatus, g.Active())
+	}
+}
+
 func TestStopGuard_SendFailureRetainsDurableClaimWithoutResubmit(t *testing.T) {
 	broker := &fakeBroker{sendErr: errors.New("temporary")}
 	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})

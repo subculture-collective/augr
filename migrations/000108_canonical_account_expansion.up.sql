@@ -242,10 +242,12 @@ CREATE INDEX idx_replay_events_account_occurred ON replay_events(account_id,occu
 CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type)
     WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL
       AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_replay_events_fill_order ON replay_events(account_id,trade_decision_id,event_type,(payload->>'order_id'),
-    (COALESCE(payload->>'fill_id',payload->>'trade_id','')),(COALESCE(payload->>'cumulative_quantity',payload->>'filled_quantity','')))
+CREATE UNIQUE INDEX uq_replay_events_fill_trade ON replay_events(account_id,environment,trade_decision_id,event_type,(payload->>'order_id'),(payload->>'trade_id'))
     WHERE event_type='fill_observed' AND account_id IS NOT NULL AND environment IS NOT NULL
-      AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND payload->>'order_id' IS NOT NULL;
+      AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND payload->>'order_id' IS NOT NULL AND payload->>'trade_id' IS NOT NULL;
+CREATE UNIQUE INDEX uq_replay_events_fill_cumulative ON replay_events(account_id,environment,trade_decision_id,event_type,(payload->>'order_id'),(payload->>'cumulative_quantity'))
+    WHERE event_type='fill_observed' AND account_id IS NOT NULL AND environment IS NOT NULL
+      AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND payload->>'order_id' IS NOT NULL AND payload->>'cumulative_quantity' IS NOT NULL;
 CREATE UNIQUE INDEX uq_replay_events_position ON replay_events(account_id,trade_decision_id,event_type,(payload->>'position_id'))
     WHERE event_type='position_updated' AND account_id IS NOT NULL AND environment IS NOT NULL
       AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND payload->>'position_id' IS NOT NULL;

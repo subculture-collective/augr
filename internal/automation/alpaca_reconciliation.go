@@ -105,6 +105,7 @@ type AlpacaReconcilerDeps struct {
 	OrderRepo        OrderPersistence
 	PositionRepo     PositionPersistence
 	TradeRepo        TradePersistence
+	OptionFillRepo   repository.OptionFillRepository
 	AuditLogRepo     repository.AuditLogRepository
 	AccountLocker    repository.ExecutionAccountLocker
 	Logger           *slog.Logger
@@ -207,6 +208,7 @@ type AlpacaReconciler struct {
 	orderRepo        OrderPersistence
 	positionRepo     PositionPersistence
 	tradeRepo        TradePersistence
+	optionFillRepo   repository.OptionFillRepository
 	auditLogRepo     repository.AuditLogRepository
 	accountLocker    repository.ExecutionAccountLocker
 	logger           *slog.Logger
@@ -228,6 +230,7 @@ func NewAlpacaReconciler(deps AlpacaReconcilerDeps) *AlpacaReconciler {
 		orderRepo:        deps.OrderRepo,
 		positionRepo:     deps.PositionRepo,
 		tradeRepo:        deps.TradeRepo,
+		optionFillRepo:   deps.OptionFillRepo,
 		auditLogRepo:     deps.AuditLogRepo,
 		accountLocker:    deps.AccountLocker,
 		logger:           logger,
@@ -320,6 +323,9 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 		if !isAlpacaManagedPosition(position) {
 			continue
 		}
+		if positionByTicker[position.Ticker] != nil {
+			return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: duplicate scoped Alpaca positions for ticker %s", position.Ticker)
+		}
 		cloned := position
 		positionByTicker[position.Ticker] = &cloned
 	}
@@ -331,11 +337,17 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: list local trades: %w", err)
 	}
 	existingTradeKeys := make(map[string]struct{}, len(existingTrades))
+	optionFeeByOrder := make(map[uuid.UUID]float64)
+	optionPremiumByOrder := make(map[uuid.UUID]float64)
 	for _, trade := range existingTrades {
 		if trade.AccountID != r.executionAccount.AccountID() || trade.Environment != r.executionAccount.Environment() {
 			return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: trade %s belongs to a foreign execution account", trade.ID)
 		}
 		existingTradeKeys[tradeDedupeKey(trade)] = struct{}{}
+		if trade.OrderID != nil && trade.AssetClass == domain.AssetClassOption {
+			optionFeeByOrder[*trade.OrderID] += trade.Fee
+			optionPremiumByOrder[*trade.OrderID] += trade.Premium
+		}
 	}
 	fillLegacyKeyCounts := fillLegacyKeyCounts(fills)
 
@@ -350,7 +362,11 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 			strategyID = strategyByTicker[snapshot.Ticker]
 		}
 		if existing, ok := orderByExternalID[snapshot.ExternalID]; ok {
+			priorFilledQuantity, priorFilledAvgPrice, priorFilledAt, priorStatus := existing.FilledQuantity, cloneFloatPtr(existing.FilledAvgPrice), cloneTimePtr(existing.FilledAt), existing.Status
 			changed := applyOrderSnapshot(existing, snapshot, strategyID)
+			if snapshot.MarketType.Normalize() == domain.MarketTypeOptions || snapshot.AssetClass == domain.AssetClassOption {
+				existing.FilledQuantity, existing.FilledAvgPrice, existing.FilledAt, existing.Status = priorFilledQuantity, priorFilledAvgPrice, priorFilledAt, priorStatus
+			}
 			if changed {
 				if err := r.orderRepo.Update(ctx, existing); err != nil {
 					return summary, fmt.Errorf("alpaca_reconcile: update order %s: %w", snapshot.ExternalID, err)
@@ -375,6 +391,10 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 
 		order := snapshotToOrder(snapshot, strategyID)
 		r.bindImportedOwnership(&order.AccountID, &order.Environment, &order.OriginType, &order.OriginID)
+		if order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption {
+			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = 0, nil, nil
+			order.Status = domain.OrderStatusSubmitted
+		}
 		if err := r.orderRepo.Create(ctx, order); err != nil {
 			return summary, fmt.Errorf("alpaca_reconcile: create order %s: %w", snapshot.ExternalID, err)
 		}
@@ -382,9 +402,18 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 		summary.OrdersCreated++
 	}
 
+	optionFillTickers := make(map[string]struct{})
+	for _, fill := range fills {
+		if order := orderByExternalID[fill.ExternalID]; order != nil && (order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption) {
+			optionFillTickers[fill.Ticker] = struct{}{}
+		}
+	}
 	brokerPositionTickers := make(map[string]struct{}, len(positions))
 	for _, snapshot := range positions {
 		brokerPositionTickers[snapshot.Ticker] = struct{}{}
+		if _, persistedAtomically := optionFillTickers[snapshot.Ticker]; persistedAtomically {
+			continue
+		}
 		strategyID := strategyByTicker[snapshot.Ticker]
 		if existing, ok := positionByTicker[snapshot.Ticker]; ok {
 			changed := applyPositionSnapshot(existing, snapshot, strategyID)
@@ -427,6 +456,9 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 	}
 
 	sort.Slice(fills, func(i, j int) bool {
+		if fills[i].ExecutedAt.Equal(fills[j].ExecutedAt) {
+			return strings.TrimSpace(fills[i].ActivityID) < strings.TrimSpace(fills[j].ActivityID)
+		}
 		return fills[i].ExecutedAt.Before(fills[j].ExecutedAt)
 	})
 	for _, fill := range fills {
@@ -447,6 +479,55 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 			continue
 		}
 		position := positionByTicker[fill.Ticker]
+		if order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption {
+			if r.optionFillRepo == nil {
+				return summary, fmt.Errorf("alpaca_reconcile: option fill repository is required for %s", fill.ExternalID)
+			}
+			var positionID *uuid.UUID
+			if order.PositionIntent != nil && (*order.PositionIntent == domain.PositionIntentBuyToClose || *order.PositionIntent == domain.PositionIntentSellToClose) {
+				if position == nil {
+					return summary, fmt.Errorf("alpaca_reconcile: option close fill %s has no scoped position", fill.ExternalID)
+				}
+				positionID = &position.ID
+			}
+			cumulativeQuantity := order.FilledQuantity + fill.Quantity
+			if cumulativeQuantity > order.Quantity && !normalizedQuantityEqual(cumulativeQuantity, order.Quantity) {
+				return summary, fmt.Errorf("alpaca_reconcile: option fill %s exceeds order quantity", fill.ExternalID)
+			}
+			cumulativePrice := fill.Price
+			if order.FilledQuantity > 0 && order.FilledAvgPrice != nil {
+				cumulativePrice = (*order.FilledAvgPrice*order.FilledQuantity + fill.Price*fill.Quantity) / cumulativeQuantity
+			}
+			observedOrder := *order
+			observedOrder.FilledQuantity, observedOrder.FilledAvgPrice, observedOrder.FilledAt = cumulativeQuantity, &cumulativePrice, &fill.ExecutedAt
+			observedOrder.Status = fill.OrderStatus
+			if observedOrder.Status == "" || observedOrder.Status == domain.OrderStatusFilled && !normalizedQuantityEqual(cumulativeQuantity, observedOrder.Quantity) {
+				observedOrder.Status = domain.OrderStatusPartial
+				if normalizedQuantityEqual(cumulativeQuantity, observedOrder.Quantity) {
+					observedOrder.Status = domain.OrderStatusFilled
+				}
+			}
+			activityID := strings.TrimSpace(fill.ActivityID)
+			if activityID == "" {
+				activityID = fmt.Sprintf("%s:%d:%.8f", fill.ExternalID, fill.ExecutedAt.UTC().UnixNano(), cumulativeQuantity)
+			}
+			optionFeeByOrder[order.ID] += fill.Fee
+			optionPremiumByOrder[order.ID] += fill.Price * fill.Quantity * order.ContractMultiplier
+			exitReason := ""
+			if positionID != nil {
+				exitReason = "alpaca_reconciliation"
+			}
+			input := repository.OptionFillInput{IdempotencyKey: "alpaca_option_fill:v1:" + activityID, AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: &observedOrder, PositionID: positionID, FillPrice: cumulativePrice, FillQuantity: cumulativeQuantity, Fee: optionFeeByOrder[order.ID], Premium: optionPremiumByOrder[order.ID], FilledAt: fill.ExecutedAt, ExitReason: exitReason}
+			if _, err := r.optionFillRepo.ApplyOptionFills(ctx, []repository.OptionFillInput{input}); err != nil {
+				return summary, fmt.Errorf("alpaca_reconcile: persist option fill for %s: %w", fill.ExternalID, err)
+			}
+			*order = observedOrder
+			for _, key := range fillKeys {
+				existingTradeKeys[key] = struct{}{}
+			}
+			summary.TradesCreated++
+			continue
+		}
 		trade := &domain.Trade{
 			AccountID:          order.AccountID,
 			Environment:        order.Environment,

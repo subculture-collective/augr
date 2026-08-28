@@ -1515,7 +1515,7 @@ func (m *OrderManager) handleFill(
 		if position == nil && result.PositionID != nil {
 			position = &domain.Position{ID: *result.PositionID}
 		}
-		if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": fillPrice, "quantity": order.FilledQuantity, "prediction_side": order.PredictionSide}); err != nil {
+		if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": result.Trade.Price, "quantity": result.Trade.Quantity, "cumulative_quantity": order.FilledQuantity, "prediction_side": order.PredictionSide}); err != nil {
 			return err
 		}
 		if position != nil {
@@ -1636,7 +1636,7 @@ func (m *OrderManager) handleFill(
 
 	if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{
 		"order_id": order.ID, "trade_id": trade.ID, "price": fillPrice,
-		"quantity": order.FilledQuantity, "prediction_side": order.PredictionSide,
+		"quantity": trade.Quantity, "cumulative_quantity": order.FilledQuantity, "prediction_side": order.PredictionSide,
 	}); err != nil {
 		return err
 	}

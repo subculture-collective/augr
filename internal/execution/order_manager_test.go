@@ -860,6 +860,7 @@ type recoveryDecisionRecorder struct {
 	mockDecisionRecorder
 	decisionID uuid.UUID
 	events     []domain.ReplayEventType
+	payloads   []map[string]any
 	replayErr  error
 }
 
@@ -891,7 +892,7 @@ func (r *recoveryDecisionRecorder) ResolveAttachedOrderDecision(context.Context,
 	return r.decisionID, nil
 }
 
-func (r *recoveryDecisionRecorder) RecordReplayEvent(_ context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, _ string, _ any, _ time.Time) error {
+func (r *recoveryDecisionRecorder) RecordReplayEvent(_ context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, _ string, payload any, _ time.Time) error {
 	if r.replayErr != nil {
 		return r.replayErr
 	}
@@ -899,6 +900,9 @@ func (r *recoveryDecisionRecorder) RecordReplayEvent(_ context.Context, decision
 		return fmt.Errorf("wrong decision id %s", decisionID)
 	}
 	r.events = append(r.events, eventType)
+	if values, ok := payload.(map[string]any); ok {
+		r.payloads = append(r.payloads, values)
+	}
 	return nil
 }
 
@@ -988,7 +992,7 @@ func TestReconcilePersistedOrderRepairsReplayAfterCommittedFill(t *testing.T) {
 		t.Fatal("persisted filled recovery must not query broker")
 		return "", nil
 	}}
-	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker, Quantity: 1}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}, Replayed: true}}
+	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker, Quantity: 1}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side, Quantity: .25, Price: 102}, Replayed: true}}
 	recorder := &recoveryDecisionRecorder{decisionID: decisionID}
 	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { return order, nil }}
 	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
@@ -1001,6 +1005,9 @@ func TestReconcilePersistedOrderRepairsReplayAfterCommittedFill(t *testing.T) {
 	}
 	if financial.input.FillIntent.ExecutionPrice != price || !financial.input.Now.Equal(filledAt) {
 		t.Fatalf("durable fill evidence price/time=%v/%v, want %v/%v", financial.input.FillIntent.ExecutionPrice, financial.input.Now, price, filledAt)
+	}
+	if got := recorder.payloads[0]; got["quantity"] != .25 || got["price"] != float64(102) || got["cumulative_quantity"] != float64(1) || got["trade_id"] != tradeID {
+		t.Fatalf("fill replay payload=%v, want delta economics plus cumulative/trade identity", got)
 	}
 
 	recorder.replayErr = errors.New("replay unavailable")

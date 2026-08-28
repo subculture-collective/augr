@@ -63,6 +63,10 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"add column pipeline_run_id uuid, add column pipeline_run_trade_date date",
 		"where opportunity_id is not null and account_id is not null and environment is not null and origin_type is not null and origin_id is not null and pipeline_run_id is not null and pipeline_run_trade_date is not null",
 		"where event_type in ('decision_created','risk_reviewed') and account_id is not null and environment is not null and origin_type is not null and origin_id is not null",
+		"create unique index uq_replay_events_fill_trade",
+		"payload->>'trade_id' is not null",
+		"create unique index uq_replay_events_fill_cumulative",
+		"payload->>'cumulative_quantity' is not null",
 	} {
 		if !strings.Contains(up, fragment) {
 			t.Errorf("up migration missing %q", fragment)
@@ -70,6 +74,9 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 	}
 	if strings.Contains(up, "create unique index uq_positions_close_reservation_order") {
 		t.Error("close reservation index must allow one aggregate exit order to reserve multiple lots")
+	}
+	if strings.Contains(up, "uq_replay_events_fill_order") {
+		t.Error("fill replay identity must not combine trade and cumulative identities in one index")
 	}
 	for _, forbidden := range []string{"to_jsonb(s)::text", "on conflict", "alter column account_id set not null", "update pipeline_runs", "update orders"} {
 		if strings.Contains(up, forbidden) {
@@ -774,7 +781,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 		"idx_pipeline_runs_account_trade_date", "idx_pipeline_run_snapshots_account_run", "idx_agent_decisions_account_run",
 		"idx_agent_events_account_run", "idx_trade_decisions_account_created", "idx_orders_account_created",
 		"idx_positions_account_opened", "idx_trades_account_executed", "idx_portfolio_opportunities_account_created", "idx_portfolio_opportunities_allocation_claim", "uq_portfolio_opportunities_execution_dedupe",
-		"idx_allocation_decisions_account_created", "uq_allocation_decisions_opportunity", "idx_replay_events_account_occurred", "uq_replay_events_initial", "uq_replay_events_fill_order", "uq_replay_events_position", "uq_orders_client_order_id", "idx_financial_fill_idempotency_account",
+		"idx_allocation_decisions_account_created", "uq_allocation_decisions_opportunity", "idx_replay_events_account_occurred", "uq_replay_events_initial", "uq_replay_events_fill_trade", "uq_replay_events_fill_cumulative", "uq_replay_events_position", "uq_orders_client_order_id", "idx_financial_fill_idempotency_account",
 		"idx_prediction_settlement_idempotency_account", "idx_copy_subscriptions_account_status", "idx_copy_trade_intents_account_created",
 		"idx_copy_origin_rebalance_runs_account_created", "idx_copy_origin_rebalance_intents_account_run",
 		"idx_copy_target_drift_runs_account_created", "idx_copy_target_drift_legs_account_run",

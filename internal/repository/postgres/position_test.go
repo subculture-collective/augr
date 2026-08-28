@@ -789,7 +789,7 @@ func TestPositionRepoIntegration_CreateAlpacaOwnedDedupesAndRollsBack(t *testing
 	defer cleanup()
 
 	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
-	position := &domain.Position{MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
+	position := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
 	if err := repo.CreateAlpacaOwned(ctx, position); err != nil {
 		t.Fatalf("CreateAlpacaOwned() error = %v", err)
 	}
@@ -800,24 +800,32 @@ func TestPositionRepoIntegration_CreateAlpacaOwnedDedupesAndRollsBack(t *testing
 	if position.MarketType != domain.MarketTypeStock {
 		t.Fatalf("expected truthful market type stock, got %q", position.MarketType)
 	}
-	if err := repo.CreateAlpacaOwned(ctx, &domain.Position{MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}); err != nil {
+	reused := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
+	if err := repo.CreateAlpacaOwned(ctx, reused); err != nil {
 		t.Fatalf("CreateAlpacaOwned() dedupe error = %v", err)
 	}
-	if position.ID != firstID {
-		t.Fatalf("expected first call to preserve ID, got %s vs %s", position.ID, firstID)
+	if reused.ID != firstID {
+		t.Fatalf("expected same environment to reuse ID, got %s vs %s", reused.ID, firstID)
+	}
+	differentEnvironment := &domain.Position{Environment: domain.AccountEnvironmentPaperStress, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
+	if err := repo.CreateAlpacaOwned(ctx, differentEnvironment); err != nil {
+		t.Fatalf("CreateAlpacaOwned() different environment error = %v", err)
+	}
+	if differentEnvironment.ID == firstID {
+		t.Fatal("different environment reused Alpaca-owned position")
 	}
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM positions`).Scan(&count); err != nil {
 		t.Fatalf("count positions: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("expected 1 position, got %d", count)
+	if count != 2 {
+		t.Fatalf("expected 2 environment-scoped positions, got %d", count)
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM position_provenance`).Scan(&count); err != nil {
 		t.Fatalf("count provenance: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("expected 1 provenance row, got %d", count)
+	if count != 2 {
+		t.Fatalf("expected 2 provenance rows, got %d", count)
 	}
 }
 

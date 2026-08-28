@@ -889,7 +889,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				alpacaReconciler = automation.NewAlpacaReconciler(automation.AlpacaReconcilerDeps{
 					ExecutionAccount: executionAccount,
 					Broker:           alpacaAdapter, PLAggregate: pgrepo.NewAlpacaPLAggregateRepo(db.Pool), StrategyRepo: strategyRepo,
-					OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo, AuditLogRepo: auditLogRepo, AccountLocker: orderRepo, Logger: logger,
+					OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo, OptionFillRepo: db, AuditLogRepo: auditLogRepo, AccountLocker: orderRepo, Logger: logger,
 				})
 				return nil
 			}); err != nil {

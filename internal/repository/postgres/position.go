@@ -90,14 +90,14 @@ func (r *PositionRepo) CreateAlpacaOwned(ctx context.Context, position *domain.P
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, alpacaOwnedLockKey(position.Ticker, position.Side)); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, alpacaOwnedLockKey(r.accountID, position.Environment, position.Ticker, position.Side)); err != nil {
 		return fmt.Errorf("postgres: create alpaca-owned position advisory lock: %w", err)
 	}
 
 	row := tx.QueryRow(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.ticker = $1 AND p.side = $2 AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
 		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment WHERE t.position_id = p.id AND t.account_id = p.account_id AND t.environment=p.environment AND o.broker = 'alpaca')
-	) ORDER BY p.opened_at ASC, p.id ASC LIMIT 1`, position.Ticker, position.Side, r.accountID)
+	) AND p.environment=$4 ORDER BY p.opened_at ASC, p.id ASC LIMIT 1`, position.Ticker, position.Side, r.accountID, position.Environment)
 	if existing, err := scanPosition(row); err == nil {
 		*position = *existing
 		return tx.Commit(ctx)
@@ -273,8 +273,8 @@ func (r *PositionRepo) ListOpenAlpacaOwnedByAccount(ctx context.Context, account
 	return positions, nil
 }
 
-func alpacaOwnedLockKey(ticker string, side domain.PositionSide) int64 {
-	h := sha256.Sum256([]byte("alpaca-owned|" + strings.ToUpper(strings.TrimSpace(ticker)) + "|" + string(side)))
+func alpacaOwnedLockKey(accountID uuid.UUID, environment domain.AccountEnvironment, ticker string, side domain.PositionSide) int64 {
+	h := sha256.Sum256([]byte("alpaca-owned|" + accountID.String() + "|" + string(environment) + "|" + strings.ToUpper(strings.TrimSpace(ticker)) + "|" + string(side)))
 	return int64(binary.BigEndian.Uint64(h[:8]) &^ (1 << 63))
 }
 

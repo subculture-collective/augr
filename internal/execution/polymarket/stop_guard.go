@@ -131,47 +131,48 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 }
 
 func (g *StopGuard) RegisterEntry(pos Position) error {
-	return g.registerEntry(pos, guardArmed)
+	_, err := g.registerEntry(pos, guardArmed, true)
+	return err
 }
 
-func (g *StopGuard) registerEntry(pos Position, initialState guardState) error {
+func (g *StopGuard) registerEntry(pos Position, initialState guardState, activate bool) (*guardEntry, error) {
 	if g == nil {
-		return errors.New("polymarket: stop guard is nil")
+		return nil, errors.New("polymarket: stop guard is nil")
 	}
 	if err := g.executionAccount.Validate(); err != nil {
-		return fmt.Errorf("polymarket: stop guard execution account: %w", err)
+		return nil, fmt.Errorf("polymarket: stop guard execution account: %w", err)
 	}
 	if pos.AccountID != g.executionAccount.AccountID() || pos.Environment != g.executionAccount.Environment() {
-		return errors.New("polymarket: stop guard position belongs to a foreign execution account")
+		return nil, errors.New("polymarket: stop guard position belongs to a foreign execution account")
 	}
 	if strings.TrimSpace(pos.OriginType) == "" || strings.TrimSpace(pos.OriginID) == "" {
-		return errors.New("polymarket: stop guard position origin is required")
+		return nil, errors.New("polymarket: stop guard position origin is required")
 	}
 	positionID := strings.TrimSpace(pos.ID)
 	if positionID == "" {
-		return errors.New("polymarket: position id is required")
+		return nil, errors.New("polymarket: position id is required")
 	}
 	slug := strings.TrimSpace(pos.Slug)
 	if slug == "" {
-		return errors.New("polymarket: slug is required")
+		return nil, errors.New("polymarket: slug is required")
 	}
 	if pos.Size <= 0 {
-		return errors.New("polymarket: size must be greater than zero")
+		return nil, errors.New("polymarket: size must be greater than zero")
 	}
 	if pos.StopPx <= 0 && pos.TakeProfitPx <= 0 {
-		return errors.New("polymarket: stop price or take-profit price is required")
+		return nil, errors.New("polymarket: stop price or take-profit price is required")
 	}
 	long := strings.EqualFold(strings.TrimSpace(pos.Side), "BUY")
 	short := strings.EqualFold(strings.TrimSpace(pos.Side), "SELL")
 	if !long && !short {
-		return fmt.Errorf("polymarket: unsupported side %q", pos.Side)
+		return nil, fmt.Errorf("polymarket: unsupported side %q", pos.Side)
 	}
 	outcome := strings.ToUpper(strings.TrimSpace(pos.OutcomeSide))
 	if outcome == "" {
 		outcome = "YES"
 	}
 	if outcome != "YES" && outcome != "NO" {
-		return fmt.Errorf("polymarket: unsupported outcome side %q", pos.OutcomeSide)
+		return nil, fmt.Errorf("polymarket: unsupported outcome side %q", pos.OutcomeSide)
 	}
 	intent := "ORDER_INTENT_SELL_LONG"
 	switch {
@@ -198,12 +199,20 @@ func (g *StopGuard) registerEntry(pos Position, initialState guardState) error {
 	order.ClientOrderID = "augr-polymarket-stop-" + order.ID.String()
 	tmpl, err := g.broker.PrepareTemplate(order)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, order: order, receivedAt: time.Now()}
 	entry.state.Store(int32(initialState))
+	if activate {
+		g.activateEntry(entry)
+	}
+	return entry, nil
+}
+
+func (g *StopGuard) activateEntry(entry *guardEntry) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	positionID, slug := entry.positionID, entry.slug
 	if previous, exists := g.byID[positionID]; exists {
 		previous.state.Store(int32(guardFired))
 		oldEntries := g.bySlug[previous.slug]
@@ -220,7 +229,7 @@ func (g *StopGuard) registerEntry(pos Position, initialState guardState) error {
 		}
 		g.byID[positionID] = entry
 		g.bySlug[slug] = append(g.bySlug[slug], entry)
-		return nil
+		return
 	}
 	g.byID[positionID] = entry
 	g.bySlug[slug] = append(g.bySlug[slug], entry)
@@ -228,7 +237,6 @@ func (g *StopGuard) registerEntry(pos Position, initialState guardState) error {
 	if g.metrics != nil {
 		g.metrics.SetActive(float64(g.count.Load()))
 	}
-	return nil
 }
 
 func (g *StopGuard) RegisterPosition(pos domain.Position) error {
@@ -265,44 +273,38 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 	if pos.TakeProfit != nil {
 		entry.TakeProfitPx = *pos.TakeProfit
 	}
-	if err := g.registerEntry(entry, guardFiring); err != nil {
+	guard, err := g.registerEntry(entry, guardFiring, false)
+	if err != nil {
 		return err
 	}
 	lookup, ok := g.exitRepo.(repository.PredictionExitReservationLookup)
 	if !ok {
-		g.arm(positionID)
+		guard.state.Store(int32(guardArmed))
+		g.activateEntry(guard)
 		return nil
 	}
 	order, err := lookup.GetPredictionExitOrderByPosition(ctx, pos.AccountID, pos.Environment, pos.ID)
 	if errors.Is(err, repository.ErrNotFound) {
-		g.arm(positionID)
+		guard.state.Store(int32(guardArmed))
+		g.activateEntry(guard)
 		return nil
 	}
 	if err != nil {
-		g.Cancel(positionID)
 		return fmt.Errorf("polymarket: load reserved stop order: %w", err)
 	}
 	if err := validateRecoveredStopReservation(order, pos, entry); err != nil {
-		g.Cancel(positionID)
 		return err
 	}
 	if order.Status != domain.OrderStatusPending && order.Status != domain.OrderStatusSubmitted && order.Status != domain.OrderStatusPartial {
-		g.Cancel(positionID)
 		return fmt.Errorf("polymarket: reserved stop order has non-recoverable status %s", order.Status)
 	}
 	tmpl, err := g.broker.PrepareTemplate(order)
 	if err != nil {
-		g.Cancel(positionID)
 		return err
 	}
-	g.mu.Lock()
-	guard := g.byID[positionID]
-	if guard != nil {
-		guard.order, guard.template = order, tmpl
-		guard.claimed.Store(true)
-		guard.state.Store(int32(guardArmed))
-	}
-	g.mu.Unlock()
+	guard.order, guard.template = order, tmpl
+	guard.claimed.Store(true)
+	guard.state.Store(int32(guardArmed))
 	locker := g.exitRepo.(repository.ExecutionAccountLocker)
 	recovered := false
 	if err := locker.WithExecutionAccountLock(ctx, pos.AccountID, func() error {
@@ -312,8 +314,10 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 		}
 		return nil
 	}); err != nil {
-		g.Cancel(positionID)
 		return err
+	}
+	if guardState(guard.state.Load()) != guardFired {
+		g.activateEntry(guard)
 	}
 	return nil
 }
@@ -562,6 +566,10 @@ func (g *StopGuard) submitReservedStopLocked(ctx context.Context, entry *guardEn
 			return
 		}
 		if result.Status == domain.OrderStatusPartial || result.Status == domain.OrderStatusFilled {
+			if result.Status == domain.OrderStatusFilled && !canonicalPolymarketQuantityEqual(result.FilledQuantity, entry.order.Quantity) {
+				entry.state.Store(int32(guardArmed))
+				return
+			}
 			if !g.persistRecoveredExitFill(ctx, entry, externalID, result) {
 				entry.state.Store(int32(guardArmed))
 				return
@@ -629,6 +637,9 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 		return false
 	}
 	if result.Status == domain.OrderStatusPartial || result.Status == domain.OrderStatusFilled {
+		if result.Status == domain.OrderStatusFilled && !canonicalPolymarketQuantityEqual(result.FilledQuantity, entry.order.Quantity) {
+			return false
+		}
 		submittedAt := time.Now().UTC()
 		if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(externalID), submittedAt); err != nil && entry.order.Status == domain.OrderStatusPending {
 			return false

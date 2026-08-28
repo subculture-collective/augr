@@ -45,6 +45,13 @@ type alpacaPLAggregateStub struct {
 	calls  []string
 }
 
+type recordingAlpacaOptionFillRepo struct{ inputs []repository.OptionFillInput }
+
+func (r *recordingAlpacaOptionFillRepo) ApplyOptionFills(_ context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
+	r.inputs = append(r.inputs, inputs...)
+	return []repository.OptionFillResult{{OrderID: inputs[0].Order.ID, PositionID: uuid.New(), TradeID: uuid.New()}}, nil
+}
+
 func (s *alpacaPLAggregateStub) ClosedRealizedPnL(context.Context, uuid.UUID, domain.AccountEnvironment) (float64, error) {
 	s.calls = append(s.calls, "closed")
 	return s.closed, nil
@@ -764,6 +771,37 @@ func TestAlpacaReconcilerReconcile_DedupesRepeatedAlpacaImports(t *testing.T) {
 	}
 	if len(positions.created) != 1 {
 		t.Fatalf("created positions = %d, want 1", len(positions.created))
+	}
+}
+
+func TestAlpacaReconcilerFailsClosedOnDuplicateScopedTicker(t *testing.T) {
+	first := &domain.Position{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1}
+	second := clonePosition(first)
+	second.ID = uuid.New()
+	positions := newRecordingPositionRepo(first, second)
+	positions.proven = map[uuid.UUID]struct{}{first.ID: {}, second.ID: {}}
+	orders := newRecordingOrderRepo()
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: &alpacaReconciliationBrokerStub{}, OrderRepo: orders, PositionRepo: positions, TradeRepo: newRecordingTradeRepo(orders)})
+	if _, err := reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "duplicate scoped Alpaca positions") {
+		t.Fatalf("Reconcile() error = %v, want duplicate ticker rejection", err)
+	}
+}
+
+func TestAlpacaReconcilerRoutesOptionFillThroughAtomicRepository(t *testing.T) {
+	now := time.Now().UTC()
+	strategyID := uuid.New()
+	intent := domain.PositionIntentBuyToOpen
+	order := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "reconciliation", OriginID: "alpaca", ExternalID: "option-order", Ticker: "AAPL260821C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusSubmitted, Broker: "alpaca", SubmittedAt: &now, ContractMultiplier: 100, PositionIntent: &intent}
+	orders := newRecordingOrderRepo(order)
+	fillRepo := &recordingAlpacaOptionFillRepo{}
+	broker := &alpacaReconciliationBrokerStub{fills: []BrokerFillSnapshot{{ActivityID: "option-fill", ExternalID: order.ExternalID, Ticker: order.Ticker, Side: order.Side, Quantity: 1, Price: 2, ExecutedAt: now}}}
+	trades := newRecordingTradeRepo(orders)
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: broker, OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: trades, OptionFillRepo: fillRepo})
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fillRepo.inputs) != 1 || len(trades.created) != 0 || fillRepo.inputs[0].Premium != 200 {
+		t.Fatalf("option fill route inputs=%+v direct trades=%d", fillRepo.inputs, len(trades.created))
 	}
 }
 

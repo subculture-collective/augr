@@ -83,6 +83,10 @@ func TestListOpenPaperOrdersSQLMatchesScanOrder(t *testing.T) {
 	if !strings.Contains(normalized, wantTail) {
 		t.Fatalf("ListOpenPaperOrders select tail does not match scanOrder: %s", normalized)
 	}
+	wantCopyColumns := "o.pipeline_run_trade_date, o.copy_origin_rebalance_run_id, o.copy_intent_id, o.copy_execution_claim_id, o.external_id"
+	if !strings.Contains(normalized, wantCopyColumns) {
+		t.Fatalf("ListOpenPaperOrders copy columns do not match scanOrder: %s", normalized)
+	}
 	for _, required := range []string{"o.leg_group_id IS NOT NULL", "sibling.leg_group_id=o.leg_group_id", "sibling.status IN ('pending','submitted','partial')", "o.status='filled'", "o.status IN ('cancelled','rejected')", "re.event_type='fill_observed'", "re.event_type='position_updated'", "t.environment=o.environment", "d.environment=o.environment", "re.environment=o.environment", "f.environment=o.environment"} {
 		if !strings.Contains(normalized, required) {
 			t.Fatalf("ListOpenPaperOrders does not recover every leg in an unfinished group; missing %q", required)

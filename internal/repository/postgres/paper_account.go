@@ -95,7 +95,7 @@ func (r *PaperAccountRepo) GetOpenPaperPositions(ctx context.Context, accountID 
 }
 
 const listOpenPaperOrdersSQL = `SELECT o.id, o.strategy_id, o.pipeline_run_id, o.account_id, o.environment, o.origin_type, o.origin_id,
-		o.pipeline_run_trade_date, o.copy_origin_rebalance_run_id, o.external_id, o.ticker,
+		o.pipeline_run_trade_date, o.copy_origin_rebalance_run_id, o.copy_intent_id, o.copy_execution_claim_id, o.external_id, o.ticker,
 		o.market_type, o.side, o.order_type, o.quantity::double precision, o.limit_price::double precision,
 		o.stop_price::double precision, o.filled_quantity::double precision, o.filled_avg_price::double precision,
 		o.status, o.broker, o.submitted_at, o.filled_at, o.created_at, o.asset_class, o.underlying_ticker,

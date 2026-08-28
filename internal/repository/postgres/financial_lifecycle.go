@@ -148,8 +148,10 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	if order.Status != domain.OrderStatusPartial && order.Status != domain.OrderStatusFilled && order.Status != domain.OrderStatusCancelled && order.Status != domain.OrderStatusRejected {
 		order.Status = domain.OrderStatusFilled
 	}
-	if _, err := tx.Exec(ctx, `UPDATE orders SET filled_quantity=$1,filled_avg_price=$2,status=$3,filled_at=$4,external_id=COALESCE(NULLIF($6,''),external_id),broker=COALESCE(NULLIF($7,''),broker),submitted_at=COALESCE(submitted_at,$8) WHERE id=$5`, order.FilledQuantity, observedAvgPrice, order.Status, order.FilledAt, order.ID, strings.TrimSpace(order.ExternalID), strings.TrimSpace(order.Broker), order.SubmittedAt); err != nil {
+	if tag, err := tx.Exec(ctx, `UPDATE orders SET filled_quantity=$1,filled_avg_price=$2,status=$3,filled_at=$4,external_id=COALESCE(NULLIF($6,''),external_id),broker=COALESCE(NULLIF($7,''),broker),submitted_at=COALESCE(submitted_at,$8) WHERE id=$5 AND account_id=$9 AND environment=$10 AND origin_type=$11 AND origin_id=$12`, order.FilledQuantity, observedAvgPrice, order.Status, order.FilledAt, order.ID, strings.TrimSpace(order.ExternalID), strings.TrimSpace(order.Broker), order.SubmittedAt, order.AccountID, order.Environment, order.OriginType, order.OriginID); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: update filled order: %w", err)
+	} else if tag.RowsAffected() != 1 {
+		return repository.OrderFillResult{}, fmt.Errorf("postgres: filled order ownership changed concurrently")
 	}
 
 	marketType := order.MarketType.Normalize()
@@ -228,8 +230,10 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 				closedIDs = append(closedIDs, matchedPosition.ID)
 			}
 			releaseReservation := order.Status == domain.OrderStatusFilled || order.Status == domain.OrderStatusCancelled || order.Status == domain.OrderStatusRejected
-			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = $1, current_price = $2, realized_pnl = $3, closed_at = $4, close_reservation_order_id=CASE WHEN $7 AND close_reservation_order_id=$6 THEN NULL ELSE close_reservation_order_id END WHERE id = $5`, matchedPosition.Quantity, matchedPosition.CurrentPrice, matchedPosition.RealizedPnL, matchedPosition.ClosedAt, matchedPosition.ID, order.ID, releaseReservation); err != nil {
+			if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity = $1, current_price = $2, realized_pnl = $3, closed_at = $4, close_reservation_order_id=CASE WHEN $7 AND close_reservation_order_id=$6 THEN NULL ELSE close_reservation_order_id END WHERE id = $5 AND account_id=$8 AND environment=$9 AND origin_type=$10 AND origin_id=$11`, matchedPosition.Quantity, matchedPosition.CurrentPrice, matchedPosition.RealizedPnL, matchedPosition.ClosedAt, matchedPosition.ID, order.ID, releaseReservation, order.AccountID, order.Environment, order.OriginType, order.OriginID); err != nil {
 				return repository.OrderFillResult{}, fmt.Errorf("postgres: update polymarket position: %w", err)
+			} else if tag.RowsAffected() != 1 {
+				return repository.OrderFillResult{}, fmt.Errorf("postgres: polymarket position ownership changed concurrently")
 			}
 			updatedIDs = append(updatedIDs, matchedPosition.ID)
 			remaining -= consume
@@ -259,12 +263,14 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		positionSide := domain.PositionSideLong
 		var linkedID uuid.UUID
 		var linkedQuantity, linkedAverage float64
-		linkedErr := tx.QueryRow(ctx, `SELECT p.id,p.quantity::double precision,p.avg_entry::double precision FROM positions p JOIN trades t ON t.position_id=p.id WHERE t.order_id=$1 AND t.account_id=$2 ORDER BY t.created_at LIMIT 1 FOR UPDATE OF p`, order.ID, order.AccountID).Scan(&linkedID, &linkedQuantity, &linkedAverage)
+		linkedErr := tx.QueryRow(ctx, `SELECT p.id,p.quantity::double precision,p.avg_entry::double precision FROM positions p JOIN trades t ON t.position_id=p.id AND t.account_id=p.account_id AND t.environment=p.environment AND t.origin_type=p.origin_type AND t.origin_id=p.origin_id WHERE t.order_id=$1 AND t.account_id=$2 AND t.environment=$3 AND t.origin_type=$4 AND t.origin_id=$5 AND p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 ORDER BY t.created_at LIMIT 1 FOR UPDATE OF p`, order.ID, order.AccountID, order.Environment, order.OriginType, order.OriginID).Scan(&linkedID, &linkedQuantity, &linkedAverage)
 		if linkedErr == nil {
 			newQuantity := linkedQuantity + deltaQuantity
 			newAverage := (linkedQuantity*linkedAverage + deltaQuantity*fillPrice) / newQuantity
-			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,avg_entry=$2,current_price=$3 WHERE id=$4`, newQuantity, newAverage, fillPrice, linkedID); err != nil {
+			if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,avg_entry=$2,current_price=$3 WHERE id=$4 AND account_id=$5 AND environment=$6 AND origin_type=$7 AND origin_id=$8`, newQuantity, newAverage, fillPrice, linkedID, order.AccountID, order.Environment, order.OriginType, order.OriginID); err != nil {
 				return repository.OrderFillResult{}, fmt.Errorf("postgres: advance order-linked position: %w", err)
+			} else if tag.RowsAffected() != 1 {
+				return repository.OrderFillResult{}, fmt.Errorf("postgres: order-linked position ownership changed concurrently")
 			}
 			position = &domain.Position{ID: linkedID, AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: newQuantity, AvgEntry: newAverage, OpenedAt: now}
 		} else if !errors.Is(linkedErr, pgx.ErrNoRows) {
@@ -600,7 +606,7 @@ func applyOptionStatusTx(ctx context.Context, tx pgx.Tx, input repository.Option
 		return fmt.Errorf("postgres: option recovery status changed concurrently")
 	}
 	if terminalOrderStatusPostgres(order.Status) {
-		if _, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE account_id=$1 AND close_reservation_order_id=$2`, input.AccountID, order.ID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE account_id=$1 AND environment=$2 AND origin_type=$3 AND origin_id=$4 AND close_reservation_order_id=$5`, input.AccountID, input.Environment, input.OriginType, input.OriginID, order.ID); err != nil {
 			return fmt.Errorf("postgres: release terminal option reservation: %w", err)
 		}
 	}
@@ -672,7 +678,7 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 		deltaPrice = (input.FillPrice*input.FillQuantity - *persistedFilledAvgPrice*persistedFilledQuantity) / deltaQuantity
 	}
 	var priorFee, priorPremium float64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(fee),0)::double precision,COALESCE(SUM(premium),0)::double precision FROM trades WHERE order_id=$1 AND account_id=$2`, order.ID, input.AccountID).Scan(&priorFee, &priorPremium); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(SUM(fee),0)::double precision,COALESCE(SUM(premium),0)::double precision FROM trades WHERE order_id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5`, order.ID, input.AccountID, input.Environment, input.OriginType, input.OriginID).Scan(&priorFee, &priorPremium); err != nil {
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: load prior option accounting: %w", err)
 	}
 	deltaFee, deltaPremium := input.Fee-priorFee, input.Premium-priorPremium
@@ -680,12 +686,14 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: cumulative option accounting regressed")
 	}
 	filledAt := input.FilledAt.UTC()
-	if _, err := tx.Exec(ctx, `UPDATE orders SET external_id=$1, broker=$2, submitted_at=$3,
-		filled_quantity=$4, filled_avg_price=$5, status=$6, filled_at=$7 WHERE id=$8 AND account_id=$9`,
+	if tag, err := tx.Exec(ctx, `UPDATE orders SET external_id=$1, broker=$2, submitted_at=$3,
+		filled_quantity=$4, filled_avg_price=$5, status=$6, filled_at=$7 WHERE id=$8 AND account_id=$9 AND environment=$10 AND origin_type=$11 AND origin_id=$12`,
 		nullString(order.ExternalID), nullString(order.Broker), order.SubmittedAt,
-		input.FillQuantity, input.FillPrice, order.Status, filledAt, order.ID, input.AccountID,
+		input.FillQuantity, input.FillPrice, order.Status, filledAt, order.ID, input.AccountID, input.Environment, input.OriginType, input.OriginID,
 	); err != nil {
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: update filled option order: %w", err)
+	} else if tag.RowsAffected() != 1 {
+		return repository.OptionFillResult{}, fmt.Errorf("postgres: option order ownership changed concurrently")
 	}
 
 	var positionID uuid.UUID
@@ -698,7 +706,7 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 		if *order.PositionIntent == domain.PositionIntentSellToOpen {
 			positionSide = domain.PositionSideShort
 		}
-		err := tx.QueryRow(ctx, `SELECT p.id FROM positions p JOIN trades t ON t.position_id=p.id WHERE t.order_id=$1 AND t.account_id=$2 ORDER BY t.created_at LIMIT 1 FOR UPDATE OF p`, order.ID, input.AccountID).Scan(&positionID)
+		err := tx.QueryRow(ctx, `SELECT p.id FROM positions p JOIN trades t ON t.position_id=p.id AND t.account_id=p.account_id AND t.environment=p.environment AND t.origin_type=p.origin_type AND t.origin_id=p.origin_id WHERE t.order_id=$1 AND t.account_id=$2 AND t.environment=$3 AND t.origin_type=$4 AND t.origin_id=$5 AND p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 ORDER BY t.created_at LIMIT 1 FOR UPDATE OF p`, order.ID, input.AccountID, input.Environment, input.OriginType, input.OriginID).Scan(&positionID)
 		if err == nil {
 			var quantity, avgEntry float64
 			if err := tx.QueryRow(ctx, `SELECT quantity::double precision,avg_entry::double precision FROM positions WHERE id=$1 FOR UPDATE`, positionID).Scan(&quantity, &avgEntry); err != nil {
@@ -706,8 +714,10 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 			}
 			newQuantity := quantity + deltaQuantity
 			newAverage := (quantity*avgEntry + deltaQuantity*deltaPrice) / newQuantity
-			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,avg_entry=$2,current_price=$3 WHERE id=$4`, newQuantity, newAverage, input.FillPrice, positionID); err != nil {
+			if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,avg_entry=$2,current_price=$3 WHERE id=$4 AND account_id=$5 AND environment=$6 AND origin_type=$7 AND origin_id=$8`, newQuantity, newAverage, input.FillPrice, positionID, input.AccountID, input.Environment, input.OriginType, input.OriginID); err != nil {
 				return repository.OptionFillResult{}, fmt.Errorf("postgres: advance option position: %w", err)
+			} else if tag.RowsAffected() != 1 {
+				return repository.OptionFillResult{}, fmt.Errorf("postgres: option position ownership changed concurrently")
 			}
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: find prior option position: %w", err)
@@ -780,7 +790,7 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 		}
 		releaseReservation := terminalOrderStatusPostgres(order.Status)
 		if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,current_price=$2,realized_pnl=$3,
-			unrealized_pnl=NULL,closed_at=$4,close_reservation_order_id=CASE WHEN $8 THEN NULL ELSE close_reservation_order_id END WHERE id=$5 AND account_id=$6 AND close_reservation_order_id=$7`, remaining, input.FillPrice, realizedPnL+realizedDelta-deltaFee, closedAtValue, positionID, input.AccountID, order.ID, releaseReservation); err != nil {
+			unrealized_pnl=NULL,closed_at=$4,close_reservation_order_id=CASE WHEN $8 THEN NULL ELSE close_reservation_order_id END WHERE id=$5 AND account_id=$6 AND close_reservation_order_id=$7 AND environment=$9 AND origin_type=$10 AND origin_id=$11`, remaining, input.FillPrice, realizedPnL+realizedDelta-deltaFee, closedAtValue, positionID, input.AccountID, order.ID, releaseReservation, input.Environment, input.OriginType, input.OriginID); err != nil {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: close option position: %w", err)
 		} else if tag.RowsAffected() != 1 {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: option close reservation is missing or belongs to another order")
