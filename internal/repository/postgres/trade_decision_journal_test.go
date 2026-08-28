@@ -78,12 +78,14 @@ func TestBuildTradeDecisionCountQuery(t *testing.T) {
 func TestBuildTradeDecisionAttachQuery(t *testing.T) {
 	decisionID := uuid.New()
 	orderID := uuid.New()
-	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, decisionID, orderID, domain.TradeDecisionStatusPaper)
+	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, decisionID, orderID, domain.TradeDecisionStatusPaper, false)
 
-	assertContains(t, query, "UPDATE trade_decisions SET paper_order_id = $3")
+	assertContains(t, query, "UPDATE trade_decisions td SET paper_order_id = $3")
 	assertContains(t, query, "status = $4")
-	assertContains(t, query, "RETURNING id")
-	if len(args) != 4 || args[0] != decisionID || args[1] != canonicalRepositoryTestAccountID || args[2] != orderID || args[3] != domain.TradeDecisionStatusPaper {
+	assertContains(t, query, "RETURNING td.id")
+	assertContains(t, query, "o.account_id=td.account_id")
+	assertContains(t, query, "o.pipeline_run_id=td.pipeline_run_id")
+	if len(args) != 5 || args[0] != decisionID || args[1] != canonicalRepositoryTestAccountID || args[2] != orderID || args[3] != domain.TradeDecisionStatusPaper || args[4] != false {
 		t.Fatalf("unexpected attach args: %#v", args)
 	}
 }

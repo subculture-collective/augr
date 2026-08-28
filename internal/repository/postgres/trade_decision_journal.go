@@ -197,13 +197,13 @@ func (r *TradeDecisionJournalRepo) CountByNoActionReason(ctx context.Context, fi
 }
 
 // AttachPaperOrder links a paper order to the trade decision.
-func (r *TradeDecisionJournalRepo) AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
-	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper)
+func (r *TradeDecisionJournalRepo) AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper, false)
 }
 
 // AttachLiveOrder links a live order to the trade decision.
-func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
-	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive)
+func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true)
 }
 
 // ResolvePredictionOutcome marks a paper event-market decision closed after
@@ -221,16 +221,30 @@ func (r *TradeDecisionJournalRepo) ResolvePredictionOutcome(ctx context.Context,
 	return nil
 }
 
-func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, orderID uuid.UUID, column string, status domain.TradeDecisionStatus) error {
-	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status)
+func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, orderID uuid.UUID, column string, status domain.TradeDecisionStatus, live bool) (bool, error) {
+	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live)
 	var updatedID uuid.UUID
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&updatedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: attach %s order to trade decision %s: %w", column, decisionID, ErrNotFound)
+			decision, getErr := r.Get(ctx, decisionID)
+			if getErr != nil {
+				return false, fmt.Errorf("postgres: attach %s order to trade decision %s: %w", column, decisionID, getErr)
+			}
+			attached := decision.PaperOrderID
+			if live {
+				attached = decision.LiveOrderID
+			}
+			if attached != nil && *attached == orderID {
+				return false, nil
+			}
+			if attached != nil {
+				return false, fmt.Errorf("postgres: attach %s order to trade decision %s: different order already attached", column, decisionID)
+			}
+			return false, fmt.Errorf("postgres: attach %s order to trade decision %s: order ownership or environment mismatch", column, decisionID)
 		}
-		return fmt.Errorf("postgres: attach %s order to trade decision: %w", column, err)
+		return false, fmt.Errorf("postgres: attach %s order to trade decision: %w", column, err)
 	}
-	return nil
+	return true, nil
 }
 
 func (r *TradeDecisionJournalRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.TradeDecision, error) {
@@ -359,9 +373,15 @@ func buildTradeDecisionListQuery(accountID uuid.UUID, filter repository.TradeDec
 	return query, args
 }
 
-func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus) (string, []any) {
-	query := fmt.Sprintf(`UPDATE trade_decisions SET %s = $3, status = $4, updated_at = NOW() WHERE id = $1 AND account_id=$2 RETURNING id`, column)
-	return query, []any{decisionID, accountID, orderID, status}
+func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus, live bool) (string, []any) {
+	query := fmt.Sprintf(`UPDATE trade_decisions td SET %s = $3, status = $4, updated_at = NOW()
+		WHERE td.id = $1 AND td.account_id=$2 AND td.%s IS NULL
+		AND EXISTS (SELECT 1 FROM orders o WHERE o.id=$3 AND o.account_id=td.account_id
+			AND o.environment=td.environment AND o.origin_type=td.origin_type AND o.origin_id=td.origin_id
+			AND o.pipeline_run_id=td.pipeline_run_id AND o.pipeline_run_trade_date=td.pipeline_run_trade_date
+			AND (($5 AND o.environment='live') OR (NOT $5 AND o.environment IN ('paper_scored','paper_stress'))))
+		RETURNING td.id`, column, column)
+	return query, []any{decisionID, accountID, orderID, status, live}
 }
 
 func buildTradeDecisionFilteredQuery(accountID uuid.UUID, base string, filter repository.TradeDecisionFilter, limit, offset int, includePagination bool) (string, []any) {

@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -41,9 +42,22 @@ func (*decisionJournalStub) Count(context.Context, repository.TradeDecisionFilte
 	return 0, nil
 }
 
-func (*decisionJournalStub) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+func (s *decisionJournalStub) AttachPaperOrder(_ context.Context, decisionID, orderID uuid.UUID) (bool, error) {
+	decision := s.stored[decisionID]
+	if decision.PaperOrderID != nil {
+		if *decision.PaperOrderID == orderID {
+			return false, nil
+		}
+		return false, fmt.Errorf("different order")
+	}
+	decision.PaperOrderID = &orderID
+	s.stored[decisionID] = decision
+	return true, nil
+}
 
-func (*decisionJournalStub) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) error { return nil }
+func (*decisionJournalStub) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
+}
 
 type replayEventStub struct{ events []domain.ReplayEvent }
 
@@ -134,5 +148,35 @@ func TestTradeDecisionJournalRecorderRestartRetryUsesPersistedParentScope(t *tes
 	last := replay.events[len(replay.events)-1]
 	if last.AccountID != scope.AccountID() || last.Environment != scope.Environment() {
 		t.Fatalf("restart replay scope = %+v", last)
+	}
+}
+
+func TestTradeDecisionJournalRecorderOrderAttachmentIsCASIdempotent(t *testing.T) {
+	journal, replay := &decisionJournalStub{}, &replayEventStub{}
+	run := domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}
+	scope, _ := NewStrategyExecutionScope(uuid.New(), domain.AccountEnvironmentPaperScored, uuid.New(), run)
+	decision := &domain.TradeDecision{ID: uuid.New(), Status: domain.TradeDecisionStatusCandidate}
+	recorder := NewTradeDecisionJournalRecorder(journal, replay).(ScopedDecisionRecorder)
+	if err := recorder.RecordDecisionScoped(context.Background(), scope, decision); err != nil {
+		t.Fatal(err)
+	}
+	orderID := uuid.New()
+	if err := recorder.AttachPaperOrderScoped(context.Background(), scope, decision.ID, orderID); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.AttachPaperOrderScoped(context.Background(), scope, decision.ID, orderID); err != nil {
+		t.Fatalf("same-order retry failed: %v", err)
+	}
+	if err := recorder.AttachPaperOrderScoped(context.Background(), scope, decision.ID, uuid.New()); err == nil {
+		t.Fatal("different-order retry succeeded")
+	}
+	ordered := 0
+	for _, event := range replay.events {
+		if event.EventType == domain.ReplayEventTypePaperOrdered {
+			ordered++
+		}
+	}
+	if ordered != 1 {
+		t.Fatalf("paper ordered replay events = %d, want 1", ordered)
 	}
 }

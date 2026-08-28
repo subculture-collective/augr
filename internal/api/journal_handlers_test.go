@@ -62,12 +62,12 @@ func (s *stubTradeDecisionJournalRepo) Count(_ context.Context, filter repositor
 	return len(s.listResult), nil
 }
 
-func (s *stubTradeDecisionJournalRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *stubTradeDecisionJournalRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
-func (s *stubTradeDecisionJournalRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *stubTradeDecisionJournalRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
 func TestJournalRoutesReturnNotImplementedWithoutRepo(t *testing.T) {

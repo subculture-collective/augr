@@ -87,8 +87,12 @@ func (r *tradeDecisionJournalRecorder) AttachPaperOrder(ctx context.Context, dec
 	if r == nil || r.repo == nil {
 		return nil
 	}
-	if err := r.repo.AttachPaperOrder(ctx, decisionID, orderID); err != nil {
+	applied, err := r.repo.AttachPaperOrder(ctx, decisionID, orderID)
+	if err != nil {
 		return err
+	}
+	if !applied {
+		return nil
 	}
 	return r.RecordReplayEvent(ctx, decisionID, domain.ReplayEventTypePaperOrdered, "order_manager", map[string]any{"order_id": orderID}, time.Now().UTC())
 }
@@ -104,8 +108,12 @@ func (r *tradeDecisionJournalRecorder) AttachLiveOrder(ctx context.Context, deci
 	if r == nil || r.repo == nil {
 		return nil
 	}
-	if err := r.repo.AttachLiveOrder(ctx, decisionID, orderID); err != nil {
+	applied, err := r.repo.AttachLiveOrder(ctx, decisionID, orderID)
+	if err != nil {
 		return err
+	}
+	if !applied {
+		return nil
 	}
 	return r.RecordReplayEvent(ctx, decisionID, domain.ReplayEventTypeLiveOrdered, "order_manager", map[string]any{"order_id": orderID}, time.Now().UTC())
 }

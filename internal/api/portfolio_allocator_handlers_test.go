@@ -114,12 +114,12 @@ func (s *portfolioDiagnosticsTradeDecisionRepo) CountByNoActionReason(context.Co
 	return map[string]int{string(portfolio.NoActionReasonRiskRejected): 1}, nil
 }
 
-func (s *portfolioDiagnosticsTradeDecisionRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *portfolioDiagnosticsTradeDecisionRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
-func (s *portfolioDiagnosticsTradeDecisionRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *portfolioDiagnosticsTradeDecisionRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
 type portfolioDiagnosticsStrategyRepo struct {

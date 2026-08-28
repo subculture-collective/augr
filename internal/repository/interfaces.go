@@ -776,8 +776,8 @@ type TradeDecisionJournalRepository interface {
 	List(ctx context.Context, filter TradeDecisionFilter, limit, offset int) ([]domain.TradeDecision, error)
 	// Count returns the total number of trade decisions matching the filter.
 	Count(ctx context.Context, filter TradeDecisionFilter) (int, error)
-	AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) error
-	AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error
+	AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error)
+	AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error)
 }
 
 // OpportunityRepository provides CRUD operations for portfolio opportunities.

@@ -54,12 +54,12 @@ func (s *stubReplayTradeDecisionRepo) Count(context.Context, repository.TradeDec
 	return 0, nil
 }
 
-func (s *stubReplayTradeDecisionRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *stubReplayTradeDecisionRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
-func (s *stubReplayTradeDecisionRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *stubReplayTradeDecisionRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
 func TestReplayRouteReturnsNotImplementedWithoutDeps(t *testing.T) {
