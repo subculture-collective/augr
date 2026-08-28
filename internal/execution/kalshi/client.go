@@ -1,6 +1,9 @@
 package kalshi
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // LiveClient is the narrow Kalshi live-execution boundary used by the broker.
 type LiveClient interface {
@@ -30,8 +33,16 @@ type CreateOrderResponse struct {
 
 // OrderResponse captures the minimal live order state needed by the broker.
 type OrderResponse struct {
-	OrderID string
-	Status  string
+	OrderID       string
+	ClientOrderID string
+	Status        string
+	FilledCount   int64
+	AveragePrice  *float64
+	FilledAt      *time.Time
+}
+
+type ClientOrderLookup interface {
+	GetOrderByClientOrderID(context.Context, string) (OrderResponse, error)
 }
 
 // PositionResponse captures the minimal live position payload.

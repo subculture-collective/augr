@@ -75,6 +75,31 @@ func NewCopyExecutionScope(accountID uuid.UUID, environment domain.AccountEnviro
 	}, nil
 }
 
+// ExecutionScopeFromOrder rebuilds the exact durable scope used for restart recovery.
+func ExecutionScopeFromOrder(order domain.Order) (ExecutionScope, error) {
+	originType := ledger.ExecutionOriginType(order.OriginType)
+	switch originType {
+	case ledger.ExecutionOriginStrategyVersion:
+		originID, err := uuid.Parse(order.OriginID)
+		if err != nil || order.PipelineRunID == nil || order.PipelineRunTradeDate == nil {
+			return ExecutionScope{}, fmt.Errorf("complete strategy order scope is required")
+		}
+		var legacy []uuid.UUID
+		if order.StrategyID != nil {
+			legacy = append(legacy, *order.StrategyID)
+		}
+		return NewStrategyExecutionScope(order.AccountID, order.Environment, originID, domain.PipelineRunRef{ID: *order.PipelineRunID, TradeDate: *order.PipelineRunTradeDate}, legacy...)
+	case ledger.ExecutionOriginCopySubscription:
+		originID, err := uuid.Parse(order.OriginID)
+		if err != nil || order.CopyOriginRebalanceRunID == uuid.Nil {
+			return ExecutionScope{}, fmt.Errorf("complete copy order scope is required")
+		}
+		return NewCopyExecutionScope(order.AccountID, order.Environment, originID, order.CopyOriginRebalanceRunID)
+	default:
+		return NewNonRunExecutionScope(order.AccountID, order.Environment, originType, order.OriginID)
+	}
+}
+
 func NewNonRunExecutionScope(accountID uuid.UUID, environment domain.AccountEnvironment, originType ledger.ExecutionOriginType, originID string) (ExecutionScope, error) {
 	binding, err := domain.NewExecutionAccountBinding(accountID, environment)
 	if err != nil {

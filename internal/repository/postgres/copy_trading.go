@@ -417,6 +417,10 @@ func (r *CopyTradingRepo) UpdateIntent(ctx context.Context, intent *domain.CopyT
 	return r.pool.QueryRow(ctx, `UPDATE copy_trade_intents SET pipeline_run_id=$2,risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,updated_at=NOW() WHERE id=$1 AND account_id=$7 RETURNING updated_at`, intent.ID, intent.PipelineRunID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status, r.accountID).Scan(&intent.UpdatedAt)
 }
 
+func (r *CopyTradingRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
+	return (&OrderRepo{pool: r.pool, accountID: r.accountID}).WithExecutionAccountLock(ctx, accountID, fn)
+}
+
 func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error) {
 	tag, err := r.pool.Exec(ctx, `WITH locked AS (
 		SELECT i.id FROM copy_trade_intents i JOIN copy_subscriptions s ON s.id=i.subscription_id

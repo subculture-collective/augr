@@ -303,60 +303,87 @@ func (b *Broker) CancelOrder(ctx context.Context, externalID string) error {
 
 // GetOrderStatus fetches a Polymarket order by external ID and maps its status.
 func (b *Broker) GetOrderStatus(ctx context.Context, externalID string) (domain.OrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, externalID)
+	return result.Status, err
+}
+
+// GetOrderStatusResult returns authoritative cumulative fill state.
+func (b *Broker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
 	if b == nil || b.client == nil {
-		return "", errors.New("polymarket: broker client is required")
+		return execution.BrokerOrderStatus{}, errors.New("polymarket: broker client is required")
 	}
 
 	orderID := strings.TrimSpace(externalID)
 	if orderID == "" {
-		return "", errors.New("polymarket: external order id is required")
+		return execution.BrokerOrderStatus{}, errors.New("polymarket: external order id is required")
 	}
 
 	responseBody, err := b.client.Get(ctx, "/v1/order/"+url.PathEscape(orderID), nil)
 	if err != nil {
-		return "", fmt.Errorf("polymarket: get order status: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: get order status: %w", err)
 	}
 
 	var response getOrderResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return "", fmt.Errorf("polymarket: decode order status response: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode order status response: %w", err)
 	}
 
 	status, err := mapOrderStatus(response.Order.State)
 	if err != nil {
-		return "", err
+		return execution.BrokerOrderStatus{}, err
 	}
-
-	return status, nil
+	return richRetailOrderStatus(response.Order, status)
 }
 
 // GetOrderByClientOrderID uses the retail API's idempotency lookup and returns
 // the provider-issued order ID. It never treats the client ID as an external ID.
 func (b *Broker) GetOrderByClientOrderID(ctx context.Context, clientOrderID string) (string, domain.OrderStatus, error) {
+	externalID, result, err := b.GetOrderStatusByClientOrderIDResult(ctx, clientOrderID)
+	return externalID, result.Status, err
+}
+
+// GetOrderStatusByClientOrderIDResult returns provider identity and cumulative fill state.
+func (b *Broker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
 	if b == nil || b.client == nil {
-		return "", "", errors.New("polymarket: broker client is required")
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: broker client is required")
 	}
 	clientOrderID = strings.TrimSpace(clientOrderID)
 	if clientOrderID == "" {
-		return "", "", errors.New("polymarket: client order id is required")
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: client order id is required")
 	}
 	body, err := b.client.Get(ctx, "/v1/orders/by-client-order-id", url.Values{"clientOrderId": []string{clientOrderID}})
 	if err != nil {
 		var providerErr *ErrorResponse
 		if errors.As(err, &providerErr) && providerErr.StatusCode() == http.StatusNotFound {
-			return "", "", execution.ErrBrokerOrderNotFound
+			return "", execution.BrokerOrderStatus{}, execution.ErrBrokerOrderNotFound
 		}
-		return "", "", fmt.Errorf("polymarket: lookup client order id: %w", err)
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: lookup client order id: %w", err)
 	}
 	var response getOrderResponse
 	if err := json.Unmarshal(body, &response); err != nil {
-		return "", "", fmt.Errorf("polymarket: decode client order lookup: %w", err)
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode client order lookup: %w", err)
 	}
 	if strings.TrimSpace(response.Order.ID) == "" {
-		return "", "", errors.New("polymarket: client order lookup missing provider id")
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: client order lookup missing provider id")
 	}
 	status, err := mapOrderStatus(response.Order.State)
-	return strings.TrimSpace(response.Order.ID), status, err
+	if err != nil {
+		return "", execution.BrokerOrderStatus{}, err
+	}
+	result, err := richRetailOrderStatus(response.Order, status)
+	return strings.TrimSpace(response.Order.ID), result, err
+}
+
+func richRetailOrderStatus(order retailOrder, status domain.OrderStatus) (execution.BrokerOrderStatus, error) {
+	result := execution.BrokerOrderStatus{Status: status, FilledQuantity: order.CumQuantity}
+	if order.AvgPx != nil && strings.TrimSpace(order.AvgPx.Value) != "" {
+		price, err := strconv.ParseFloat(order.AvgPx.Value, 64)
+		if err != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode average fill price: %w", err)
+		}
+		result.FilledAvgPrice = &price
+	}
+	return result, nil
 }
 
 // GetPositions returns current Polymarket positions mapped to domain positions.

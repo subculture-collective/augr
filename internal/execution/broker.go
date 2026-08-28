@@ -41,3 +41,8 @@ type BrokerOrderStatusProvider interface {
 type BrokerClientOrderStatusProvider interface {
 	GetOrderStatusByClientOrderIDResult(context.Context, string) (string, BrokerOrderStatus, error)
 }
+
+type BrokerOrderFillCompensator interface {
+	RollbackOrderFill(context.Context, string) error
+	CommitOrderFill(string)
+}

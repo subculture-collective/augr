@@ -298,7 +298,7 @@ ALTER TABLE copy_origin_rebalance_runs DROP COLUMN environment,DROP COLUMN accou
 ALTER TABLE copy_trade_intents DROP CONSTRAINT copy_intent_execution_claim_pair,DROP COLUMN execution_claimed_at,DROP COLUMN execution_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE copy_subscriptions DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE prediction_settlement_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE financial_fill_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE financial_fill_idempotency DROP COLUMN cumulative_exit_reason,DROP COLUMN cumulative_status,DROP COLUMN cumulative_filled_at,DROP COLUMN cumulative_premium,DROP COLUMN cumulative_fee,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE replay_events DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE allocation_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN pipeline_run_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

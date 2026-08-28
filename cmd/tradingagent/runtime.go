@@ -972,7 +972,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if _, persistent := paperAccountRepo.(*pgrepo.PaperAccountRepo); persistent {
 			optionCloseRepos = append(optionCloseRepos, orderRepo)
 		}
-		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, Fills: db}); err != nil {
+		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, Fills: db, Financial: db, Decisions: tradeDecisionRecorder}); err != nil {
 			return nil, nil, nil, err
 		}
 		strategyRunner.portfolioAllocatorMode = portfolioAllocatorMode
@@ -1146,6 +1146,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						OrderRepo:                    orderRepo,
 						TradeRepo:                    tradeRepo,
 						OptionSettlementRepo:         db,
+						OptionSettlementLocker:       orderRepo,
+						OptionSettlementState:        strategyRunner.localPaperBroker,
 						RunRepo:                      runRepo,
 						OpportunityRepo:              opportunityRepo,
 						AllocationDecisionRepo:       allocationDecisionRepo,

@@ -3,6 +3,7 @@ package execution_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"strings"
@@ -24,6 +25,7 @@ type mockOptionsBroker struct {
 	submitSpreadOrderFn func(ctx context.Context, spread *domain.OptionSpread, quantity float64, clientOrderID string) ([]string, error)
 	optionFillReportFn  func(ctx context.Context, order *domain.Order) (execution.OptionFillReport, error)
 	getOrderStatusFn    func(context.Context, string) (execution.BrokerOrderStatus, error)
+	spreadStatusFn      func(context.Context, string) (execution.BrokerSpreadOrderStatus, error)
 }
 
 func (b *mockOptionsBroker) GetOrderStatusResult(ctx context.Context, id string) (execution.BrokerOrderStatus, error) {
@@ -39,6 +41,9 @@ func (b *mockOptionsBroker) GetOrderStatusByClientOrderIDResult(ctx context.Cont
 }
 
 func (b *mockOptionsBroker) GetSpreadOrderStatusByClientOrderIDResult(ctx context.Context, id string) (execution.BrokerSpreadOrderStatus, error) {
+	if b.spreadStatusFn != nil {
+		return b.spreadStatusFn(ctx, id)
+	}
 	status, err := b.GetOrderStatusResult(ctx, id)
 	if err != nil {
 		return execution.BrokerSpreadOrderStatus{}, err
@@ -593,12 +598,16 @@ func TestReconcileOptionSpreadReloadsEveryNonterminalLegAndPersistsOneBatch(t *t
 	orders := make([]domain.Order, 2)
 	byID := make(map[uuid.UUID]domain.Order, 2)
 	for i := range orders {
-		orders[i] = domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "spread-client-" + uuid.NewString(), ExternalID: "spread-real-" + uuid.NewString(), Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusSubmitted, LegGroupID: &groupID}
+		orders[i] = domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "spread-client-" + uuid.NewString(), ExternalID: "spread-real-" + uuid.NewString(), Ticker: fmt.Sprintf("AAPL271217C00%d", 150000+i), MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusSubmitted, LegGroupID: &groupID}
 		byID[orders[i].ID] = orders[i]
 	}
 	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
 	}}
+	broker.spreadStatusFn = func(context.Context, string) (execution.BrokerSpreadOrderStatus, error) {
+		status := execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}
+		return execution.BrokerSpreadOrderStatus{Legs: []execution.BrokerSpreadLegStatus{{Ticker: orders[1].Ticker, ExternalID: "leg-2", Status: status}, {Ticker: orders[0].Ticker, ExternalID: "leg-1", Status: status}}}, nil
+	}
 	reloads := 0
 	orderRepo := &mockOrderRepo{getFn: func(_ context.Context, id uuid.UUID) (*domain.Order, error) {
 		reloads++

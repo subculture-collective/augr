@@ -18,6 +18,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data/rss"
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	prediction "github.com/PatrickFanella/get-rich-quick/internal/execution/prediction"
@@ -138,6 +139,8 @@ type OrchestratorDeps struct {
 	OrderRepo                    repository.OrderRepository
 	TradeRepo                    repository.TradeRepository
 	OptionSettlementRepo         repository.OptionSettlementRepository
+	OptionSettlementLocker       repository.ExecutionAccountLocker
+	OptionSettlementState        execution.OptionSettlementState
 	OpportunityRepo              repository.OpportunityRepository
 	AllocationDecisionRepo       repository.AllocationDecisionRepository
 	RunRepo                      repository.PipelineRunRepository

@@ -72,6 +72,11 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 	return result, err
 }
 
+// ExecuteCopyOrderWithAccountLockHeld executes under an account lock owned by the caller.
+func (e *OrderManagerExecutor) ExecuteCopyOrderWithAccountLockHeld(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
+	return e.executeCopyOrderLocked(ctx, request)
+}
+
 func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
 	if e == nil || e.deps.Broker == nil || e.deps.Risk == nil || e.deps.Positions == nil || e.deps.Orders == nil || e.deps.Trades == nil {
 		return PaperOrderResult{}, fmt.Errorf("copy paper executor dependencies are unavailable")
@@ -133,20 +138,20 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 		}
 		persisted, reloadErr := e.deps.Orders.Get(ctx, existing[0].ID)
 		if reloadErr != nil {
-			return PaperOrderResult{}, fmt.Errorf("reload pending copy order: %w", reloadErr)
+			return result, fmt.Errorf("reload pending copy order: %w", reloadErr)
 		}
 		order := *persisted
 		provider, ok := any(e.deps.Broker).(execution.BrokerClientOrderStatusProvider)
 		if !ok {
-			return PaperOrderResult{}, fmt.Errorf("copy pending recovery requires client-id lookup")
+			return result, fmt.Errorf("copy pending recovery requires client-id lookup")
 		}
 		externalID, brokerResult, lookupErr := provider.GetOrderStatusByClientOrderIDResult(ctx, order.ClientOrderID)
 		if lookupErr != nil && !errors.Is(lookupErr, execution.ErrBrokerOrderNotFound) {
-			return PaperOrderResult{}, fmt.Errorf("lookup pending copy order: %w", lookupErr)
+			return result, fmt.Errorf("lookup pending copy order: %w", lookupErr)
 		}
 		if errors.Is(lookupErr, execution.ErrBrokerOrderNotFound) {
 			if order.Status != domain.OrderStatusPending || strings.TrimSpace(order.ExternalID) != "" {
-				return PaperOrderResult{}, fmt.Errorf("lookup persisted copy order: %w", lookupErr)
+				return result, fmt.Errorf("lookup persisted copy order: %w", lookupErr)
 			}
 			var submitErr error
 			externalID, submitErr = e.deps.Broker.SubmitOrder(ctx, &order)
@@ -155,11 +160,12 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 			}
 			brokerResult, lookupErr = e.deps.Broker.GetOrderStatusResult(ctx, externalID)
 			if lookupErr != nil {
-				return PaperOrderResult{}, fmt.Errorf("verify resumed copy order: %w", lookupErr)
+				return result, fmt.Errorf("verify resumed copy order: %w", lookupErr)
 			}
 		}
 		order.ExternalID, order.Status = externalID, brokerResult.Status
 		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, brokerResult.FilledAvgPrice, brokerResult.FilledAt
+		result.Status = order.Status
 		submittedAt := time.Now().UTC()
 		order.SubmittedAt = &submittedAt
 		if order.Status == domain.OrderStatusPending {
@@ -167,10 +173,10 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 		}
 		if order.FilledQuantity > persisted.FilledQuantity {
 			if err := manager.HandleFillForTest(ctx, &order, plan, scope, uuid.Nil); err != nil {
-				return PaperOrderResult{}, fmt.Errorf("persist resumed copy fill: %w", err)
+				return result, fmt.Errorf("persist resumed copy fill: %w", err)
 			}
 		} else if err := e.deps.Orders.Update(ctx, &order); err != nil {
-			return PaperOrderResult{}, fmt.Errorf("persist resumed copy order: %w", err)
+			return result, fmt.Errorf("persist resumed copy order: %w", err)
 		}
 		return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, nil
 	}

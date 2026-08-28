@@ -24,10 +24,14 @@ type optionSettlement struct {
 	reason     string
 }
 
+type OptionSettlementState interface {
+	ApplyOptionSettlement(context.Context, uuid.UUID, float64) error
+}
+
 // SettleExpiredOptionPositions cash-settles expired paper options. It does not
 // fabricate underlying-share assignment. Every candidate is validated before
 // persistence begins so missing prices or contract metadata fail the batch.
-func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[string]float64, now time.Time, settlementRepo repository.OptionSettlementRepository) (OptionsExpirySummary, error) {
+func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[string]float64, now time.Time, settlementRepo repository.OptionSettlementRepository, states ...OptionSettlementState) (OptionsExpirySummary, error) {
 	if settlementRepo == nil {
 		return OptionsExpirySummary{}, errors.New("options expiry: atomic settlement repository is required")
 	}
@@ -69,6 +73,11 @@ func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, pos
 			SettledAt: now.UTC(), ExitReason: settlement.reason,
 		}); err != nil {
 			return summary, fmt.Errorf("options expiry: settle position %s: %w", settlement.positionID, err)
+		}
+		if len(states) > 0 && states[0] != nil {
+			if err := states[0].ApplyOptionSettlement(ctx, settlement.positionID, settlement.intrinsic); err != nil {
+				return summary, fmt.Errorf("options expiry: update paper broker position %s: %w", settlement.positionID, err)
+			}
 		}
 		if settlement.intrinsic > 0 {
 			summary.CashSettled++

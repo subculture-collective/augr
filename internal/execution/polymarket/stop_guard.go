@@ -423,8 +423,7 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			entry.state.Store(int32(guardArmed))
 			continue
 		}
-		entry.state.Store(int32(guardFired))
-		g.Cancel(entry.positionID)
+		entry.state.Store(int32(guardArmed))
 	}
 }
 
@@ -449,8 +448,7 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 			if markErr := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, externalID, submittedAt); markErr != nil {
 				return false
 			}
-			entry.state.Store(int32(guardFired))
-			g.Cancel(entry.positionID)
+			entry.state.Store(int32(guardArmed))
 			return true
 		}
 		return false
@@ -465,8 +463,12 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 	if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(externalID), submittedAt); err != nil {
 		return false
 	}
-	entry.state.Store(int32(guardFired))
-	g.Cancel(entry.positionID)
+	if status == domain.OrderStatusFilled {
+		entry.state.Store(int32(guardFired))
+		g.Cancel(entry.positionID)
+	} else {
+		entry.state.Store(int32(guardArmed))
+	}
 	return true
 }
 

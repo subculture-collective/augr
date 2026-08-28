@@ -12,8 +12,10 @@ import (
 )
 
 type optionRecoveryDependencies struct {
-	Orders repository.OrderRepository
-	Fills  repository.OptionFillRepository
+	Orders    repository.OrderRepository
+	Fills     repository.OptionFillRepository
+	Financial repository.FinancialLifecycleRepository
+	Decisions execution.DecisionRecorder
 }
 
 func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos []repository.AtomicOptionCloseRepository, recovery ...optionRecoveryDependencies) error {
@@ -85,6 +87,23 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, nil, nil, nil).WithOptionFillRepo(recovery[0].Fills)
 		if err := manager.ReconcilePendingOptionOrders(ctx, binding, allOrders, allPositions); err != nil {
 			return fmt.Errorf("reconcile pending option orders: %w", err)
+		}
+	}
+	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].Financial != nil {
+		manager := execution.NewOrderManager(broker, "paper", nil, nil, recovery[0].Orders, nil, nil, nil, execution.SizingConfig{}, nil).
+			WithFinancialLifecycleRepo(recovery[0].Financial).WithDecisionRecorder(recovery[0].Decisions)
+		for i := range allOrders {
+			order := &allOrders[i]
+			if order.MarketType.Normalize() == domain.MarketTypeOptions {
+				continue
+			}
+			scope, scopeErr := execution.ExecutionScopeFromOrder(*order)
+			if scopeErr != nil {
+				return fmt.Errorf("rebuild pending paper order %s scope: %w", order.ID, scopeErr)
+			}
+			if _, reconcileErr := manager.ReconcilePersistedOrder(ctx, scope, order); reconcileErr != nil {
+				return fmt.Errorf("reconcile pending paper order %s: %w", order.ID, reconcileErr)
+			}
 		}
 	}
 	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx, binding.AccountID(), binding.Environment())

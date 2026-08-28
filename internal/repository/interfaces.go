@@ -898,6 +898,10 @@ type AtomicDecisionReplayRepository interface {
 	CreateWithInitialReplay(ctx context.Context, decision *domain.TradeDecision) error
 }
 
+type AtomicOrderDecisionRepository interface {
+	CreateOrderWithDecision(ctx context.Context, order *domain.Order, decision *domain.TradeDecision, live bool, scope DecisionOrderAttachmentScope) error
+}
+
 // AllocationDecisionRepository provides access to allocator decision records.
 type AllocationDecisionRepository interface {
 	Create(ctx context.Context, decision *domain.AllocationDecision) error

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // signedClient is the minimal authenticated Kalshi transport used by the live adapter.
@@ -101,7 +102,33 @@ func (c *HTTPClient) GetOrder(ctx context.Context, orderID string) (OrderRespons
 	if strings.TrimSpace(order.OrderID) == "" {
 		order.OrderID = orderID
 	}
-	return OrderResponse{OrderID: strings.TrimSpace(order.OrderID), Status: status}, nil
+	filled := float64(0)
+	if strings.TrimSpace(order.FillCountFP) != "" {
+		filled, err = parseFixedFloat(order.FillCountFP)
+		if err != nil {
+			return OrderResponse{}, fmt.Errorf("kalshi: parse filled count: %w", err)
+		}
+	}
+	if filled != math.Trunc(filled) {
+		return OrderResponse{}, errors.New("kalshi: filled count is not whole-contract")
+	}
+	var average *float64
+	if strings.TrimSpace(order.AveragePriceDollars) != "" {
+		value, parseErr := parseFixedFloat(order.AveragePriceDollars)
+		if parseErr != nil {
+			return OrderResponse{}, fmt.Errorf("kalshi: parse average fill price: %w", parseErr)
+		}
+		average = &value
+	}
+	var filledAt *time.Time
+	if strings.TrimSpace(order.LastUpdateTime) != "" {
+		value, parseErr := time.Parse(time.RFC3339Nano, order.LastUpdateTime)
+		if parseErr != nil {
+			return OrderResponse{}, fmt.Errorf("kalshi: parse order update time: %w", parseErr)
+		}
+		filledAt = &value
+	}
+	return OrderResponse{OrderID: strings.TrimSpace(order.OrderID), ClientOrderID: strings.TrimSpace(order.ClientOrderID), Status: status, FilledCount: int64(filled), AveragePrice: average, FilledAt: filledAt}, nil
 }
 
 func (c *HTTPClient) ListPositions(ctx context.Context) ([]PositionResponse, error) {
@@ -177,9 +204,13 @@ type createOrderEnvelope struct {
 
 type getOrderEnvelope struct {
 	Order struct {
-		OrderID          string `json:"order_id"`
-		Status           string `json:"status"`
-		RemainingCountFP string `json:"remaining_count_fp"`
+		OrderID             string `json:"order_id"`
+		ClientOrderID       string `json:"client_order_id"`
+		Status              string `json:"status"`
+		RemainingCountFP    string `json:"remaining_count_fp"`
+		FillCountFP         string `json:"fill_count_fp"`
+		AveragePriceDollars string `json:"average_price_dollars"`
+		LastUpdateTime      string `json:"last_update_time"`
 	} `json:"order"`
 }
 

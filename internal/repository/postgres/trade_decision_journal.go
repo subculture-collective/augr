@@ -26,6 +26,7 @@ type TradeDecisionJournalRepo struct {
 var _ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
 var _ repository.AtomicOrderReplayRepository = (*TradeDecisionJournalRepo)(nil)
 var _ repository.AtomicDecisionReplayRepository = (*TradeDecisionJournalRepo)(nil)
+var _ repository.AtomicOrderDecisionRepository = (*TradeDecisionJournalRepo)(nil)
 
 // NewTradeDecisionJournalRepo returns a repository backed by the given pool.
 func NewTradeDecisionJournalRepo(pool *pgxpool.Pool, accountID uuid.UUID) *TradeDecisionJournalRepo {
@@ -187,6 +188,56 @@ func (r *TradeDecisionJournalRepo) CreateWithInitialReplay(ctx context.Context, 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit decision replay: %w", err)
+	}
+	return nil
+}
+
+// CreateOrderWithDecision atomically persists the pending order, authorization,
+// mandatory replay evidence, and scoped attachment.
+func (r *TradeDecisionJournalRepo) CreateOrderWithDecision(ctx context.Context, order *domain.Order, decision *domain.TradeDecision, live bool, scope repository.DecisionOrderAttachmentScope) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin atomic order decision: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := (&OrderRepo{pool: r.pool, accountID: r.accountID}).create(ctx, tx, order); err != nil {
+		return err
+	}
+	if err := r.create(ctx, tx, decision, true); err != nil {
+		return err
+	}
+	decisionPayload, err := json.Marshal(decision)
+	if err != nil {
+		return err
+	}
+	riskPayload, err := json.Marshal(map[string]any{"status": decision.RiskStatus, "reasons": decision.RiskReasons, "proposed_size": decision.ProposedSize, "approved_size": decision.ApprovedSize})
+	if err != nil {
+		return err
+	}
+	for _, event := range []struct {
+		kind    domain.ReplayEventType
+		source  string
+		payload []byte
+		at      time.Time
+	}{{domain.ReplayEventTypeDecisionCreated, "decision_journal", decisionPayload, decision.CreatedAt}, {domain.ReplayEventTypeRiskReviewed, "risk_engine", riskPayload, decision.UpdatedAt}} {
+		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.kind, event.source, event.payload, event.at); err != nil {
+			return err
+		}
+	}
+	column, status, eventType := "paper_order_id", domain.TradeDecisionStatusPaper, domain.ReplayEventTypePaperOrdered
+	if live {
+		column, status, eventType = "live_order_id", domain.TradeDecisionStatusLive, domain.ReplayEventTypeLiveOrdered
+	}
+	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decision.ID, order.ID, status, live, &scope)
+	var updated uuid.UUID
+	if err := tx.QueryRow(ctx, query, args...).Scan(&updated); err != nil {
+		return fmt.Errorf("postgres: atomically attach order decision: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) SELECT account_id,environment,origin_type,origin_id,id,$3,'order_manager',jsonb_build_object('order_id',$2::text),$4 FROM trade_decisions WHERE id=$1 AND account_id=$5`, decision.ID, order.ID, eventType, time.Now().UTC(), r.accountID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit atomic order decision: %w", err)
 	}
 	return nil
 }

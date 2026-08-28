@@ -31,6 +31,7 @@ type PaperBroker struct {
 	optionSpreads       map[string]float64
 	optionSpreadEffects map[string][]optionPositionEffect
 	optionOrderEffects  map[string]optionPositionEffect
+	orderEffects        map[string]standardOrderEffect
 	optionSpreadOrders  map[string]execution.BrokerSpreadOrderStatus
 	balance             execution.Balance
 	slippageBps         float64
@@ -83,6 +84,7 @@ func newPaperBroker(profile domain.PaperEvaluationProfile) *PaperBroker {
 		optionSpreads:       make(map[string]float64),
 		optionSpreadEffects: make(map[string][]optionPositionEffect),
 		optionOrderEffects:  make(map[string]optionPositionEffect),
+		orderEffects:        make(map[string]standardOrderEffect),
 		optionSpreadOrders:  make(map[string]execution.BrokerSpreadOrderStatus),
 		balance: execution.Balance{
 			Currency:    "USD",
@@ -95,6 +97,12 @@ func newPaperBroker(profile domain.PaperEvaluationProfile) *PaperBroker {
 		evaluation:  profile,
 		now:         time.Now,
 	}
+}
+
+type standardOrderEffect struct {
+	balance  execution.Balance
+	ticker   string
+	position *domain.Position
 }
 
 // EvaluationProfile returns the broker's immutable scored-or-stress identity.
@@ -281,6 +289,11 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 		b.orders[externalID] = cloneOrder(order)
 		return externalID, nil
 	}
+	var priorPosition *domain.Position
+	if existing := b.positions[positionTicker]; existing != nil {
+		priorPosition = clonePosition(existing)
+	}
+	b.orderEffects[externalID] = standardOrderEffect{balance: b.balance, ticker: positionTicker, position: priorPosition}
 
 	notional := fillPrice * order.Quantity
 	fee := notional * b.feePct
@@ -307,6 +320,63 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 	b.orders[externalID] = cloneOrder(order)
 
 	return externalID, nil
+}
+
+// RollbackOrderFill restores broker state from before an immediate fill.
+func (b *PaperBroker) RollbackOrderFill(ctx context.Context, externalID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id := strings.TrimSpace(externalID)
+	effect, ok := b.orderEffects[id]
+	if !ok {
+		return fmt.Errorf("paper: order fill effect %q not found", externalID)
+	}
+	b.balance = effect.balance
+	if effect.position == nil {
+		delete(b.positions, effect.ticker)
+	} else {
+		b.positions[effect.ticker] = clonePosition(effect.position)
+	}
+	delete(b.orders, id)
+	delete(b.orderEffects, id)
+	return nil
+}
+
+// CommitOrderFill releases rollback state after durable persistence.
+func (b *PaperBroker) CommitOrderFill(externalID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.orderEffects, strings.TrimSpace(externalID))
+}
+
+func (b *PaperBroker) ApplyOptionSettlement(ctx context.Context, positionID uuid.UUID, settlementPrice float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for ticker, position := range b.positions {
+		if position.ID != positionID {
+			continue
+		}
+		cash := settlementPrice * position.Quantity * position.ContractMultiplier
+		if position.Side == domain.PositionSideLong {
+			b.balance.Cash += cash
+		} else if position.Side == domain.PositionSideShort {
+			b.balance.Cash -= cash
+		} else {
+			return errors.New("paper: option settlement position side is invalid")
+		}
+		delete(b.positions, ticker)
+		b.balance.BuyingPower = b.balance.Cash
+		b.balance.Equity = b.markToMarketEquityLocked()
+		return nil
+	}
+	// Idempotent replay after the broker state already reflects durable settlement.
+	return nil
 }
 
 // CancelOrder cancels an existing resting paper order.

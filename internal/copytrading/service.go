@@ -482,7 +482,7 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 		if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
 			return result, err
 		}
-		if candidate.PolicyStatus != "approved" || candidate.OrderID != nil || candidate.Status != "received" {
+		if candidate.PolicyStatus != "approved" || candidate.Status != "received" {
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
@@ -495,62 +495,85 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
-		reauthorizedIntent, reauthorizedSubscription, reloadErr := s.deps.Repo.GetClaimedIntentExecution(ctx, candidate.ID, claimID)
-		if reloadErr != nil {
-			return result, fmt.Errorf("reauthorize claimed copy intent %s: %w", candidate.ID, reloadErr)
+		locked := false
+		run := func() error {
+			var runErr error
+			candidate, subscription, runErr = s.executeClaimedIntent(ctx, candidate, subscription, persistedOrigin.ID(), claimID, locked)
+			return runErr
 		}
-		candidate, subscription = *reauthorizedIntent, reauthorizedSubscription
-		if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
+		if locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker); ok {
+			locked = true
+			if err := locker.WithExecutionAccountLock(ctx, subscription.AccountID, run); err != nil {
+				return result, err
+			}
+		} else if err := run(); err != nil {
 			return result, err
-		}
-		if s.deps.Lifecycle != nil {
-			if lifecycleErr := s.deps.Lifecycle.ProposeCopyIntent(ctx, *subscription, candidate, persistedOrigin.ID()); lifecycleErr != nil {
-				candidate.Status, candidate.RiskStatus = "failed", "pending"
-				candidate.RiskReasons = []string{fmt.Errorf("propose copy common lifecycle: %w", lifecycleErr).Error()}
-				completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
-				if completeErr != nil || !completed {
-					return result, fmt.Errorf("complete copy intent %s after lifecycle failure: applied=%t: %w", candidate.ID, completed, completeErr)
-				}
-				result.Intents = append(result.Intents, candidate)
-				continue
-			}
-		}
-		scope, scopeErr := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, persistedOrigin.ID())
-		if scopeErr != nil {
-			return result, fmt.Errorf("copy execution scope: %w", scopeErr)
-		}
-		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID(), ClaimID: claimID})
-		candidate.OrderID = executionResult.OrderID
-		if executeErr != nil {
-			candidate.Status, candidate.RiskStatus = "failed", "pending"
-			candidate.RiskReasons = []string{executeErr.Error()}
-		} else if err := validatePaperOrderResult(executionResult, scope); err != nil {
-			candidate.Status, candidate.RiskStatus, candidate.OrderID = "failed", "pending", nil
-			candidate.RiskReasons = []string{err.Error()}
-		} else {
-			candidate.RiskStatus = "approved"
-			switch executionResult.Status {
-			case domain.OrderStatusFilled:
-				candidate.Status = "filled"
-			case domain.OrderStatusSubmitted:
-				candidate.Status = "ordered"
-			case domain.OrderStatusPartial, domain.OrderStatusPending:
-				candidate.Status = "partial"
-			default:
-				candidate.Status, candidate.RiskStatus = "failed", "pending"
-				candidate.RiskReasons = []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
-			}
-		}
-		completed, updateErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
-		if updateErr != nil {
-			return result, fmt.Errorf("update copy intent %s: %w", candidate.ID, updateErr)
-		}
-		if !completed {
-			return result, fmt.Errorf("update copy intent %s: execution claim lost", candidate.ID)
 		}
 		result.Intents = append(result.Intents, candidate)
 	}
 	return result, nil
+}
+
+type lockedCopyExecutor interface {
+	ExecuteCopyOrderWithAccountLockHeld(context.Context, PaperOrderRequest) (PaperOrderResult, error)
+}
+
+func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.CopyTradeIntent, subscription *domain.CopySubscription, originRunID, claimID uuid.UUID, lockHeld bool) (domain.CopyTradeIntent, *domain.CopySubscription, error) {
+	reauthorized, currentSubscription, err := s.deps.Repo.GetClaimedIntentExecution(ctx, candidate.ID, claimID)
+	if err != nil {
+		return candidate, subscription, fmt.Errorf("reauthorize claimed copy intent %s: %w", candidate.ID, err)
+	}
+	candidate, subscription = *reauthorized, currentSubscription
+	if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
+		return candidate, subscription, err
+	}
+	if s.deps.Lifecycle != nil {
+		if err := s.deps.Lifecycle.ProposeCopyIntent(ctx, *subscription, candidate, originRunID); err != nil {
+			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{fmt.Errorf("propose copy common lifecycle: %w", err).Error()}
+			completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+			if completeErr != nil || !completed {
+				return candidate, subscription, fmt.Errorf("complete copy intent %s after lifecycle failure: applied=%t: %w", candidate.ID, completed, completeErr)
+			}
+			return candidate, subscription, nil
+		}
+	}
+	scope, err := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, originRunID)
+	if err != nil {
+		return candidate, subscription, fmt.Errorf("copy execution scope: %w", err)
+	}
+	request := PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: originRunID, ClaimID: claimID}
+	var executionResult PaperOrderResult
+	if executor, ok := s.deps.Executor.(lockedCopyExecutor); lockHeld && ok {
+		executionResult, err = executor.ExecuteCopyOrderWithAccountLockHeld(ctx, request)
+	} else {
+		executionResult, err = s.deps.Executor.ExecuteCopyOrder(ctx, request)
+	}
+	candidate.OrderID = executionResult.OrderID
+	if err != nil {
+		candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{err.Error()}
+		if candidate.OrderID != nil {
+			candidate.Status = "received"
+		}
+	} else if validationErr := validatePaperOrderResult(executionResult, scope); validationErr != nil {
+		candidate.Status, candidate.RiskStatus, candidate.OrderID, candidate.RiskReasons = "failed", "pending", nil, []string{validationErr.Error()}
+	} else {
+		candidate.RiskStatus = "approved"
+		switch executionResult.Status {
+		case domain.OrderStatusFilled:
+			candidate.Status = "filled"
+		case domain.OrderStatusSubmitted:
+			candidate.Status = "ordered"
+		case domain.OrderStatusPartial, domain.OrderStatusPending:
+			candidate.Status = "partial"
+		default:
+			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
+		}
+	}
+	completed, updateErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+	if updateErr != nil || !completed {
+		return candidate, subscription, fmt.Errorf("update copy intent %s: applied=%t: %w", candidate.ID, completed, updateErr)
+	}
+	return candidate, subscription, nil
 }
 
 func (s *Service) validateSubscriptionBinding(subscription *domain.CopySubscription) error {

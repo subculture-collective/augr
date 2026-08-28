@@ -6,14 +6,14 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
-func TestQuantizeKalshiContractsUsesFixedPointGranularity(t *testing.T) {
+func TestQuantizeKalshiContractsUsesWholeContracts(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		input float64
 		want  float64
 	}{
-		{input: 1.234567, want: 1.23},
-		{input: 0.019, want: 0.01},
+		{input: 1.234567, want: 1},
+		{input: 0.019, want: 0},
 		{input: 2, want: 2},
 		{input: 0.009, want: 0},
 	} {

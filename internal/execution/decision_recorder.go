@@ -46,9 +46,21 @@ type RecoverableOrderDecisionRecorder interface {
 	EnsureOrderDecisionAttachment(context.Context, ExecutionScope, *domain.TradeDecision, uuid.UUID, bool) (uuid.UUID, error)
 }
 
+type AtomicOrderDecisionRecorder interface {
+	CreateOrderWithDecision(context.Context, ExecutionScope, *domain.Order, *domain.TradeDecision, bool) error
+}
+
 type tradeDecisionJournalRecorder struct {
 	repo       repository.TradeDecisionJournalRepository
 	replayRepo repository.ReplayEventRepository
+}
+
+func (r *tradeDecisionJournalRecorder) CreateOrderWithDecision(ctx context.Context, scope ExecutionScope, order *domain.Order, decision *domain.TradeDecision, live bool) error {
+	atomic, ok := r.repo.(repository.AtomicOrderDecisionRepository)
+	if !ok || r.replayRepo == nil {
+		return fmt.Errorf("decision recorder: atomic order decision repository is required")
+	}
+	return atomic.CreateOrderWithDecision(ctx, order, decision, live, decisionOrderAttachmentScope(scope))
 }
 
 // NewTradeDecisionJournalRecorder adapts the Phase 2 repository to the execution seam.

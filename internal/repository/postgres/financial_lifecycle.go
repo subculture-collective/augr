@@ -251,16 +251,30 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		}
 	} else {
 		positionSide := domain.PositionSideLong
-		position = &domain.Position{ID: uuid.New(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: deltaQuantity, AvgEntry: fillPrice, OpenedAt: now}
-		if input.StopLoss != nil {
-			position.StopLoss = input.StopLoss
-		}
-		if input.TakeProfit != nil {
-			position.TakeProfit = input.TakeProfit
-		}
-		if err := tx.QueryRow(ctx, `INSERT INTO positions (id, strategy_id, account_id, environment, origin_type, origin_id, ticker, side, quantity, avg_entry, stop_loss, take_profit, opened_at, asset_class, underlying_ticker, contract_multiplier)
+		var linkedID uuid.UUID
+		var linkedQuantity, linkedAverage float64
+		linkedErr := tx.QueryRow(ctx, `SELECT p.id,p.quantity::double precision,p.avg_entry::double precision FROM positions p JOIN trades t ON t.position_id=p.id WHERE t.order_id=$1 AND t.account_id=$2 ORDER BY t.created_at LIMIT 1 FOR UPDATE OF p`, order.ID, order.AccountID).Scan(&linkedID, &linkedQuantity, &linkedAverage)
+		if linkedErr == nil {
+			newQuantity := linkedQuantity + deltaQuantity
+			newAverage := (linkedQuantity*linkedAverage + deltaQuantity*fillPrice) / newQuantity
+			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,avg_entry=$2,current_price=$3 WHERE id=$4`, newQuantity, newAverage, fillPrice, linkedID); err != nil {
+				return repository.OrderFillResult{}, fmt.Errorf("postgres: advance order-linked position: %w", err)
+			}
+			position = &domain.Position{ID: linkedID, AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: newQuantity, AvgEntry: newAverage, OpenedAt: now}
+		} else if !errors.Is(linkedErr, pgx.ErrNoRows) {
+			return repository.OrderFillResult{}, fmt.Errorf("postgres: load order-linked position: %w", linkedErr)
+		} else {
+			position = &domain.Position{ID: uuid.New(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, StrategyID: order.StrategyID, MarketType: marketType, Ticker: positionTicker, Side: positionSide, Quantity: deltaQuantity, AvgEntry: fillPrice, OpenedAt: now}
+			if input.StopLoss != nil {
+				position.StopLoss = input.StopLoss
+			}
+			if input.TakeProfit != nil {
+				position.TakeProfit = input.TakeProfit
+			}
+			if err := tx.QueryRow(ctx, `INSERT INTO positions (id, strategy_id, account_id, environment, origin_type, origin_id, ticker, side, quantity, avg_entry, stop_loss, take_profit, opened_at, asset_class, underlying_ticker, contract_multiplier)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id, opened_at`, position.ID, position.StrategyID, position.AccountID, position.Environment, position.OriginType, position.OriginID, position.Ticker, position.Side, position.Quantity, position.AvgEntry, position.StopLoss, position.TakeProfit, position.OpenedAt, position.AssetClass, nullString(position.UnderlyingTicker), position.ContractMultiplier).Scan(&position.ID, &position.OpenedAt); err != nil {
-			return repository.OrderFillResult{}, fmt.Errorf("postgres: create position: %w", err)
+				return repository.OrderFillResult{}, fmt.Errorf("postgres: create position: %w", err)
+			}
 		}
 	}
 
@@ -357,9 +371,9 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 		var existingOriginType, existingOriginID string
 		err := tx.QueryRow(ctx, `SELECT f.order_id, f.position_id, f.trade_id, f.fill_quantity, f.fill_price,
 			f.account_id,f.environment,f.origin_type,f.origin_id,
-			COALESCE((SELECT SUM(all_t.fee) FROM trades all_t WHERE all_t.order_id=f.order_id AND all_t.account_id=f.account_id),0)::double precision,
-			COALESCE((SELECT SUM(all_t.premium) FROM trades all_t WHERE all_t.order_id=f.order_id AND all_t.account_id=f.account_id),0)::double precision,
-			t.executed_at, COALESCE(t.exit_reason,'')
+			COALESCE(f.cumulative_fee,(SELECT SUM(all_t.fee) FROM trades all_t WHERE all_t.order_id=f.order_id AND all_t.account_id=f.account_id),0)::double precision,
+			COALESCE(f.cumulative_premium,(SELECT SUM(all_t.premium) FROM trades all_t WHERE all_t.order_id=f.order_id AND all_t.account_id=f.account_id),0)::double precision,
+			COALESCE(f.cumulative_filled_at,t.executed_at), COALESCE(f.cumulative_exit_reason,t.exit_reason,'')
 			FROM financial_fill_idempotency f JOIN trades t ON t.id=f.trade_id
 			WHERE f.idempotency_key=$1 FOR UPDATE OF f`, key).Scan(
 			&existingOrderID, &existingPositionID, &existingTradeID, &existingQuantity, &existingPrice,
@@ -435,15 +449,15 @@ func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.O
 		var accountID uuid.UUID
 		var environment domain.AccountEnvironment
 		var originType, originID string
-		var quantity, price, fee, premium, orderQuantity, orderPrice float64
+		var quantity, price, fee, premium float64
 		var status domain.OrderStatus
 		var filledAt time.Time
 		err := db.Pool.QueryRow(ctx, `SELECT f.order_id,f.position_id,f.trade_id,f.account_id,f.environment,f.origin_type,f.origin_id,f.fill_quantity::double precision,f.fill_price::double precision,
-			COALESCE((SELECT SUM(t.fee) FROM trades t WHERE t.order_id=f.order_id AND t.account_id=f.account_id),0)::double precision,
-			COALESCE((SELECT SUM(t.premium) FROM trades t WHERE t.order_id=f.order_id AND t.account_id=f.account_id),0)::double precision,
-			o.status,o.filled_quantity::double precision,o.filled_avg_price::double precision,o.filled_at
+			COALESCE(f.cumulative_fee,(SELECT SUM(t.fee) FROM trades t WHERE t.order_id=f.order_id AND t.account_id=f.account_id),0)::double precision,
+			COALESCE(f.cumulative_premium,(SELECT SUM(t.premium) FROM trades t WHERE t.order_id=f.order_id AND t.account_id=f.account_id),0)::double precision,
+			COALESCE(f.cumulative_status,o.status),COALESCE(f.cumulative_filled_at,o.filled_at)
 			FROM financial_fill_idempotency f JOIN orders o ON o.id=f.order_id AND o.account_id=f.account_id WHERE f.idempotency_key=$1`, input.IdempotencyKey).Scan(
-			&results[index].OrderID, &results[index].PositionID, &results[index].TradeID, &accountID, &environment, &originType, &originID, &quantity, &price, &fee, &premium, &status, &orderQuantity, &orderPrice, &filledAt,
+			&results[index].OrderID, &results[index].PositionID, &results[index].TradeID, &accountID, &environment, &originType, &originID, &quantity, &price, &fee, &premium, &status, &filledAt,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, false, nil
@@ -451,7 +465,7 @@ func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.O
 		if err != nil {
 			return nil, false, fmt.Errorf("postgres: resolve option fill commit: %w", err)
 		}
-		if results[index].OrderID != input.Order.ID || accountID != input.AccountID || environment != input.Environment || originType != input.OriginType || originID != input.OriginID || !numeric8Equal(quantity, input.FillQuantity) || !numeric8Equal(price, input.FillPrice) || !numeric8Equal(fee, input.Fee) || !numeric8Equal(premium, input.Premium) || status != input.Order.Status || !numeric8Equal(orderQuantity, input.FillQuantity) || !numeric8Equal(orderPrice, input.FillPrice) || !filledAt.Equal(input.FilledAt.UTC()) {
+		if results[index].OrderID != input.Order.ID || accountID != input.AccountID || environment != input.Environment || originType != input.OriginType || originID != input.OriginID || !numeric8Equal(quantity, input.FillQuantity) || !numeric8Equal(price, input.FillPrice) || !numeric8Equal(fee, input.Fee) || !numeric8Equal(premium, input.Premium) || status != input.Order.Status || !filledAt.Equal(input.FilledAt.UTC()) {
 			return nil, false, fmt.Errorf("postgres: resolved option fill payload mismatch for order %s", input.Order.ID)
 		}
 	}
@@ -707,8 +721,8 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 	}
 	key := input.IdempotencyKey
 	if _, err := tx.Exec(ctx, `INSERT INTO financial_fill_idempotency
-		(idempotency_key,account_id,environment,origin_type,origin_id,order_id,position_id,trade_id,fill_quantity,fill_price) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		key, input.AccountID, input.Environment, input.OriginType, input.OriginID, order.ID, positionID, tradeID, input.FillQuantity, input.FillPrice,
+		(idempotency_key,account_id,environment,origin_type,origin_id,order_id,position_id,trade_id,fill_quantity,fill_price,cumulative_fee,cumulative_premium,cumulative_filled_at,cumulative_status,cumulative_exit_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		key, input.AccountID, input.Environment, input.OriginType, input.OriginID, order.ID, positionID, tradeID, input.FillQuantity, input.FillPrice, input.Fee, input.Premium, filledAt, order.Status, strings.TrimSpace(input.ExitReason),
 	); err != nil {
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: finalize option fill idempotency: %w", err)
 	}

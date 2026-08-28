@@ -118,7 +118,12 @@ ALTER TABLE financial_fill_idempotency
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT;
+    ADD COLUMN origin_id TEXT,
+    ADD COLUMN cumulative_fee NUMERIC(20,8),
+    ADD COLUMN cumulative_premium NUMERIC(20,8),
+    ADD COLUMN cumulative_filled_at TIMESTAMPTZ,
+    ADD COLUMN cumulative_status TEXT CHECK (cumulative_status IN ('partial','filled','cancelled','rejected')),
+    ADD COLUMN cumulative_exit_reason TEXT;
 ALTER TABLE prediction_settlement_idempotency
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
@@ -204,7 +209,8 @@ CREATE INDEX idx_replay_events_account_occurred ON replay_events(account_id,occu
 CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type)
     WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL
       AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_replay_events_fill_order ON replay_events(account_id,trade_decision_id,event_type,(payload->>'order_id'))
+CREATE UNIQUE INDEX uq_replay_events_fill_order ON replay_events(account_id,trade_decision_id,event_type,(payload->>'order_id'),
+    (COALESCE(payload->>'fill_id',payload->>'trade_id','')),(COALESCE(payload->>'cumulative_quantity',payload->>'filled_quantity','')))
     WHERE event_type='fill_observed' AND account_id IS NOT NULL AND environment IS NOT NULL
       AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND payload->>'order_id' IS NOT NULL;
 CREATE UNIQUE INDEX uq_replay_events_position ON replay_events(account_id,trade_decision_id,event_type,(payload->>'position_id'))

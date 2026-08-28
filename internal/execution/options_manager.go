@@ -192,16 +192,21 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 			legsByTicker := make(map[string][]BrokerSpreadLegStatus, len(spreadResult.Legs))
 			for _, leg := range spreadResult.Legs {
 				key := strings.ReplaceAll(strings.TrimSpace(leg.Ticker), " ", "")
+				if key == "" {
+					return fmt.Errorf("options_manager: recover spread %s returned a leg without a ticker", groupID)
+				}
 				legsByTicker[key] = append(legsByTicker[key], leg)
 			}
 			persistedQuantities := make(map[uuid.UUID]float64, len(group))
-			for index, order := range group {
+			for _, order := range group {
 				persistedQuantities[order.ID] = order.FilledQuantity
-				leg := spreadResult.Legs[index]
 				key := strings.ReplaceAll(strings.TrimSpace(order.Ticker), " ", "")
-				if matches := legsByTicker[key]; len(matches) == 1 {
-					leg = matches[0]
+				matches := legsByTicker[key]
+				if len(matches) != 1 {
+					return fmt.Errorf("options_manager: recover spread %s requires one broker leg for ticker %q, got %d", groupID, order.Ticker, len(matches))
 				}
+				leg := matches[0]
+				delete(legsByTicker, key)
 				order.ExternalID, order.Status = leg.ExternalID, leg.Status.Status
 				order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = leg.Status.FilledQuantity, cloneFloatPtr(leg.Status.FilledAvgPrice), cloneTimePtr(leg.Status.FilledAt)
 				if order.SubmittedAt == nil {
@@ -211,6 +216,9 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 					}
 					order.SubmittedAt = &submittedAt
 				}
+			}
+			if len(legsByTicker) != 0 {
+				return fmt.Errorf("options_manager: recover spread %s returned unmatched broker tickers", groupID)
 			}
 			inputs := make([]repository.OptionFillInput, 0, len(group))
 			allTerminal := true

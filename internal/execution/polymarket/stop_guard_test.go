@@ -281,8 +281,8 @@ func TestStopGuard_AmbiguousSendRecoversByClientIDBeforeDisarm(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.44, ReceivedAt: time.Now()})
-	if g.Active() != 0 {
-		t.Fatalf("recovered submitted stop remained armed")
+	if g.Active() != 1 {
+		t.Fatalf("recovered submitted stop lost durable protection")
 	}
 	if broker.submittedExternalID != "poly-real-42" {
 		t.Fatalf("persisted external id = %q", broker.submittedExternalID)
@@ -410,7 +410,7 @@ func TestStopGuard_DefinitiveClientIDMissRetriesSameDurableOrder(t *testing.T) {
 	g.OnTick(context.Background(), tick)
 	broker.sendErr, broker.lookupErr = nil, execution.ErrBrokerOrderNotFound
 	g.OnTick(context.Background(), tick)
-	if broker.sendCalls.Load() != 2 || g.Active() != 0 {
+	if broker.sendCalls.Load() != 2 || g.Active() != 1 {
 		t.Fatalf("definitive miss retry: sends=%d active=%d", broker.sendCalls.Load(), g.Active())
 	}
 }

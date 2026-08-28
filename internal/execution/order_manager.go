@@ -611,7 +611,15 @@ func (m *OrderManager) processSignal(
 		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
 	}
 
-	if err := m.orderRepo.Create(ctx, order); err != nil {
+	decision := m.newTradeDecision(scope, plan, order.MarketType, string(order.Side), quantity, quantity, domain.RiskDecisionApproved, nil, domain.TradeDecisionStatusCandidate)
+	decision.ID = recoveryTradeDecisionID(order.ID)
+	atomicCreated := false
+	if atomic, ok := m.decisionRecorder.(AtomicOrderDecisionRecorder); ok {
+		if err := atomic.CreateOrderWithDecision(ctx, scope, order, decision, m.liveTrading); err != nil {
+			return fmt.Errorf("order_manager: create authorized order: %w", err)
+		}
+		atomicCreated = true
+	} else if err := m.orderRepo.Create(ctx, order); err != nil {
 		return fmt.Errorf("order_manager: create order: %w", err)
 	}
 	m.recordOrderMetric(order.Side, order.Status)
@@ -627,25 +635,24 @@ func (m *OrderManager) processSignal(
 		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 	}
 
-	decision := m.newTradeDecision(
-		scope,
-		plan,
-		order.MarketType,
-		string(order.Side),
-		quantity,
-		quantity,
-		domain.RiskDecisionApproved,
-		nil,
-		domain.TradeDecisionStatusCandidate,
-	)
-	decision.ID = recoveryTradeDecisionID(order.ID)
-	if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
-		return err
+	if !atomicCreated {
+		if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
+			if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
+				return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
+			}
+			return err
+		}
 	}
 	if err := m.fenceEffect(ctx); err != nil {
+		if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
+			return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
+		}
 		return err
 	}
 	if err := m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading); err != nil {
+		if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
+			return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
+		}
 		return err
 	}
 
@@ -762,7 +769,7 @@ func quantizeKalshiContracts(quantity float64) float64 {
 	if quantity <= 0 {
 		return 0
 	}
-	return math.Floor((quantity+1e-9)*100) / 100
+	return math.Floor(quantity + 1e-9)
 }
 
 func planMarketType(plan TradingPlan) domain.MarketType {
@@ -1380,7 +1387,15 @@ func (m *OrderManager) handleFill(
 		}
 		result, err := m.financialRepo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("paper_fill:v1:%s:observed:%.8f", order.ID, order.FilledQuantity), Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade})
 		if err != nil {
+			if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok && strings.TrimSpace(order.ExternalID) != "" {
+				if rollbackErr := compensator.RollbackOrderFill(ctx, order.ExternalID); rollbackErr != nil {
+					return fmt.Errorf("order_manager: persist fill: %v; paper rollback: %w", err, rollbackErr)
+				}
+			}
 			return fmt.Errorf("order_manager: persist fill: %w", err)
+		}
+		if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok {
+			compensator.CommitOrderFill(order.ExternalID)
 		}
 		if err := validateOrderFillResult(result, order, scope); err != nil {
 			return fmt.Errorf("order_manager: invalid persisted fill result: %w", err)
