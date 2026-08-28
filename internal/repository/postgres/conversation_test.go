@@ -57,6 +57,7 @@ func TestConversationRepoIntegration_CreateAndGetConversation(t *testing.T) {
 
 	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := &domain.Conversation{
+		Environment:          domain.AccountEnvironmentPaperScored,
 		PipelineRunID:        uuid.New(),
 		PipelineRunTradeDate: canonicalRepositoryTestTradeDate,
 		AgentRole:            domain.AgentRoleTrader,
@@ -284,6 +285,7 @@ func createTestConversationWithID(t *testing.T, ctx context.Context, repo *Conve
 
 	conv := &domain.Conversation{
 		ID:                   id,
+		Environment:          domain.AccountEnvironmentPaperScored,
 		PipelineRunID:        runID,
 		PipelineRunTradeDate: canonicalRepositoryTestTradeDate,
 		AgentRole:            role,
@@ -357,7 +359,7 @@ func newConversationIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 		`CREATE TABLE conversations (
 			id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id      UUID,
-			environment     TEXT,
+			environment     TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
 			pipeline_run_id UUID        NOT NULL,
 			pipeline_run_trade_date DATE,
 			agent_role      TEXT        NOT NULL,

@@ -18,7 +18,7 @@ func validateOptionalPipelineRunRef(id *uuid.UUID, tradeDate *time.Time) error {
 }
 
 func validatePipelineRunRef(id uuid.UUID, tradeDate time.Time) error {
-	if (id == uuid.Nil) != tradeDate.IsZero() {
+	if id == uuid.Nil || tradeDate.IsZero() {
 		return fmt.Errorf("pipeline run ID and trade date must both be set or both be absent")
 	}
 	return nil

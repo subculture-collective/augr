@@ -60,3 +60,9 @@ func TestValidateOptionalPipelineRunRefRejectsZeroValues(t *testing.T) {
 		t.Fatal("expected zero-valued pair to be rejected")
 	}
 }
+
+func TestValidatePipelineRunRefRejectsZeroValues(t *testing.T) {
+	if err := validatePipelineRunRef(uuid.Nil, time.Time{}); err == nil {
+		t.Fatal("expected zero-valued required pair to be rejected")
+	}
+}

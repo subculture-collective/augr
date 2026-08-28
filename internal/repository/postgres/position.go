@@ -80,6 +80,10 @@ func (r *PositionRepo) CreateAlpacaOwned(ctx context.Context, position *domain.P
 	if position == nil {
 		return fmt.Errorf("postgres: create alpaca-owned position: position is nil")
 	}
+	if position.AccountID != uuid.Nil && position.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create alpaca-owned position: account mismatch")
+	}
+	position.AccountID = r.accountID
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("postgres: create alpaca-owned position begin tx: %w", err)
@@ -280,7 +284,7 @@ const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environme
 		p.delta::double precision, p.gamma::double precision, p.theta::double precision,
 		p.vega::double precision
 	 FROM positions p
-	 LEFT JOIN strategies s ON s.id = p.strategy_id AND s.account_id = p.account_id`
+	 LEFT JOIN strategies s ON s.id = p.strategy_id`
 
 func (r *PositionRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.Position, error) {
 	rows, err := r.pool.Query(ctx, query, args...)

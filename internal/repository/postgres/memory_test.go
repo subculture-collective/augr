@@ -183,6 +183,7 @@ func TestMemoryRepoIntegration_CreateAndSearch(t *testing.T) {
 
 	runID := uuid.New()
 	m1 := &domain.AgentMemory{
+		Environment:          domain.AccountEnvironmentPaperScored,
 		AgentRole:            domain.AgentRoleMarketAnalyst,
 		Situation:            "AAPL showing a strong bullish reversal with increasing volume",
 		Recommendation:       "Consider buying AAPL",
@@ -191,11 +192,13 @@ func TestMemoryRepoIntegration_CreateAndSearch(t *testing.T) {
 		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "MSFT earnings beat expectations with cloud revenue growth",
 		Recommendation: "MSFT is a strong hold",
 	}
 	m3 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Market-wide bearish sentiment following interest rate hike",
 		Recommendation: "Reduce exposure to equities",
@@ -258,11 +261,13 @@ func TestMemoryRepoIntegration_SearchWithRoleFilter(t *testing.T) {
 
 	// Insert memories with different roles but overlapping situation text.
 	m1 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "Stock market experiencing significant volatility",
 		Recommendation: "Wait for clarity",
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Volatility index spiking during market selloff",
 		Recommendation: "Tighten stops",
@@ -297,6 +302,7 @@ func TestMemoryRepoIntegration_Delete(t *testing.T) {
 	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleRiskManager,
 		Situation:      "Portfolio risk exceeding maximum threshold",
 		Recommendation: "Reduce position sizes",
@@ -360,11 +366,13 @@ func TestMemoryRepoIntegration_SearchNoFTS(t *testing.T) {
 	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m1 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "First memory situation",
 		Recommendation: "First recommendation",
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Second memory situation",
 		Recommendation: "Second recommendation",
@@ -401,6 +409,7 @@ func TestMemoryRepoIntegration_Pagination(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		m := &domain.AgentMemory{
+			Environment:    domain.AccountEnvironmentPaperScored,
 			AgentRole:      domain.AgentRoleMarketAnalyst,
 			Situation:      "Market analysis report number",
 			Recommendation: "Hold positions",
@@ -445,6 +454,7 @@ func TestMemoryRepoIntegration_NullableFieldsRoundTrip(t *testing.T) {
 
 	// Memory with all optional fields omitted.
 	m := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleInvestJudge,
 		Situation:      "Minimal memory with no optional fields",
 		Recommendation: "No recommendation",
@@ -483,11 +493,13 @@ func TestMemoryRepoIntegration_FTSRelevanceRanking(t *testing.T) {
 
 	// m1 contains "bullish" once; m2 has a more relevant situation text.
 	m1 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "The technology sector shows mixed signals with some bullish indicators",
 		Recommendation: "Monitor closely",
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "Strong bullish reversal pattern with bullish engulfing candle confirmed on daily chart",
 		Recommendation: "Buy signal",
@@ -529,6 +541,7 @@ func TestMemoryRepoIntegration_SearchWithDateFilter(t *testing.T) {
 	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Date filter test memory",
 		Recommendation: "Test",
@@ -567,7 +580,7 @@ func TestMemoryRepoIntegration_SearchExcludesForeignAndLegacyRows(t *testing.T) 
 	defer cleanup()
 
 	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
-	canonical := &domain.AgentMemory{AgentRole: domain.AgentRoleTrader, Situation: "canonical memory", Recommendation: "hold"}
+	canonical := &domain.AgentMemory{Environment: domain.AccountEnvironmentPaperScored, AgentRole: domain.AgentRoleTrader, Situation: "canonical memory", Recommendation: "hold"}
 	if err := repo.Create(ctx, canonical); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -639,7 +652,7 @@ func newMemoryIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool,
 		`CREATE TABLE agent_memories (
 			id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id       UUID,
-			environment      TEXT,
+			environment      TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
 			agent_role       TEXT        NOT NULL,
 			situation        TEXT        NOT NULL,
 			situation_tsv    TSVECTOR,

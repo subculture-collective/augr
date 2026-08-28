@@ -766,6 +766,9 @@ func TestPositionRepoIntegration_CreateAlpacaOwnedDedupesAndRollsBack(t *testing
 	if err := repo.CreateAlpacaOwned(ctx, position); err != nil {
 		t.Fatalf("CreateAlpacaOwned() error = %v", err)
 	}
+	if position.AccountID != canonicalRepositoryTestAccountID {
+		t.Fatalf("AccountID = %s, want %s", position.AccountID, canonicalRepositoryTestAccountID)
+	}
 	firstID := position.ID
 	if position.MarketType != domain.MarketTypeStock {
 		t.Fatalf("expected truthful market type stock, got %q", position.MarketType)
@@ -788,6 +791,15 @@ func TestPositionRepoIntegration_CreateAlpacaOwnedDedupesAndRollsBack(t *testing
 	}
 	if count != 1 {
 		t.Fatalf("expected 1 provenance row, got %d", count)
+	}
+}
+
+func TestCreateAlpacaOwnedRejectsConflictingAccountBeforeWrite(t *testing.T) {
+	accountID := uuid.New()
+	repo := NewPositionRepo(nil, accountID)
+	foreign := &domain.Position{AccountID: uuid.New()}
+	if err := repo.CreateAlpacaOwned(context.Background(), foreign); err == nil {
+		t.Fatal("expected conflicting account ownership to be rejected")
 	}
 }
 

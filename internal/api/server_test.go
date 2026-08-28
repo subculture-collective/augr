@@ -2175,6 +2175,38 @@ func TestDeleteMemory(t *testing.T) {
 	}
 }
 
+func TestAccountScopedRoutesHideForeignAccounts(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	foreignAccountID := uuid.NewString()
+	resourceID := uuid.NewString()
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   any
+	}{
+		{"list conversations", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/conversations", nil},
+		{"create conversation", http.MethodPost, "/api/v1/accounts/" + foreignAccountID + "/conversations", map[string]any{}},
+		{"get conversation messages", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/conversations/" + resourceID + "/messages", nil},
+		{"create conversation message", http.MethodPost, "/api/v1/accounts/" + foreignAccountID + "/conversations/" + resourceID + "/messages", map[string]string{"content": "secret"}},
+		{"search memories", http.MethodPost, "/api/v1/accounts/" + foreignAccountID + "/memories/search", map[string]string{"query": "secret"}},
+		{"delete memory", http.MethodDelete, "/api/v1/accounts/" + foreignAccountID + "/memories/" + resourceID, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := doRequest(t, srv, tt.method, tt.path, tt.body)
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
+			}
+			body := decodeJSON[ErrorResponse](t, rr)
+			if body.Code != ErrCodeNotFound || body.Error != "account not found" {
+				t.Fatalf("error = %#v, want account-level non-disclosure", body)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Risk
 // ---------------------------------------------------------------------------
@@ -2750,7 +2782,7 @@ func (*stubRunRepo) Create(context.Context, *domain.PipelineRun) error { return 
 
 func (s *stubRunRepo) Get(_ context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	for i := range s.runs {
-		if s.runs[i].ID == ref.ID && (ref.TradeDate.IsZero() || s.runs[i].TradeDate.Equal(ref.TradeDate)) {
+		if s.runs[i].ID == ref.ID && s.runs[i].TradeDate.Equal(ref.TradeDate) {
 			return &s.runs[i], nil
 		}
 	}
