@@ -315,7 +315,7 @@ func (r *OrderRepo) MarkPredictionExitSubmitted(ctx context.Context, accountID, 
 	if accountID == uuid.Nil || accountID != r.accountID || orderID == uuid.Nil || strings.TrimSpace(externalID) == "" || submittedAt.IsZero() {
 		return fmt.Errorf("postgres: mark prediction exit submitted: complete broker evidence is required")
 	}
-	tag, err := r.pool.Exec(ctx, `UPDATE orders SET external_id=$1,status='submitted',submitted_at=$2 WHERE id=$3 AND account_id=$4 AND status='pending'`, strings.TrimSpace(externalID), submittedAt.UTC(), orderID, accountID)
+	tag, err := r.pool.Exec(ctx, `UPDATE orders SET external_id=$1,status='submitted',submitted_at=COALESCE(submitted_at,$2) WHERE id=$3 AND account_id=$4 AND status IN ('pending','submitted') AND (external_id IS NULL OR external_id='' OR external_id=$1)`, strings.TrimSpace(externalID), submittedAt.UTC(), orderID, accountID)
 	if err != nil {
 		return err
 	}
@@ -323,6 +323,34 @@ func (r *OrderRepo) MarkPredictionExitSubmitted(ctx context.Context, accountID, 
 		return fmt.Errorf("postgres: mark prediction exit submitted: pending order not found")
 	}
 	return nil
+}
+
+// FinalizePredictionExit atomically records a definitive unsuccessful venue
+// outcome and releases the matching position reservation.
+func (r *OrderRepo) FinalizePredictionExit(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, positionID, orderID uuid.UUID, status domain.OrderStatus, externalID string, observedAt time.Time) error {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || positionID == uuid.Nil || orderID == uuid.Nil || (status != domain.OrderStatusCancelled && status != domain.OrderStatusRejected) || observedAt.IsZero() {
+		return fmt.Errorf("postgres: finalize prediction exit: invalid terminal outcome")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE orders SET external_id=COALESCE(NULLIF($1,''),external_id),status=$2,submitted_at=COALESCE(submitted_at,$3) WHERE id=$4 AND account_id=$5 AND environment=$6 AND status IN ('pending','submitted','partial')`, strings.TrimSpace(externalID), status, observedAt.UTC(), orderID, accountID, environment)
+	if err != nil {
+		return fmt.Errorf("postgres: finalize prediction exit order: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("postgres: finalize prediction exit: retryable order not found")
+	}
+	tag, err = tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE id=$1 AND account_id=$2 AND environment=$3 AND close_reservation_order_id=$4`, positionID, accountID, environment, orderID)
+	if err != nil {
+		return fmt.Errorf("postgres: finalize prediction exit reservation: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("postgres: finalize prediction exit: reservation not found")
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *OrderRepo) ReconcilePredictionExitReservations(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) error {

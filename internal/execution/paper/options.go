@@ -111,7 +111,7 @@ func (b *PaperBroker) SubmitOptionOrder(ctx context.Context, order *domain.Order
 
 // SubmitSpreadOrder remains disabled until atomic per-leg persistence and
 // rollback semantics are available. Partial paper spreads would be misleading.
-func (b *PaperBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64) ([]string, error) {
+func (b *PaperBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64, clientOrderID string) ([]string, error) {
 	if err := b.PreflightSpread(ctx, spread, quantity); err != nil {
 		return nil, err
 	}
@@ -135,14 +135,33 @@ func (b *PaperBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Opti
 	b.balance.BuyingPower = b.balance.Cash
 	b.balance.Equity = b.markToMarketEquityLocked()
 	ids := make([]string, len(spread.Legs))
+	now := time.Now().UTC()
+	status := execution.BrokerSpreadOrderStatus{ParentExternalID: strings.TrimSpace(clientOrderID), Legs: make([]execution.BrokerSpreadLegStatus, 0, len(spread.Legs))}
 	for index := range spread.Legs {
 		ids[index] = b.nextExternalIDLocked()
+		price := spread.Legs[index].ExecutablePrice
+		filledAt := now
+		status.Legs = append(status.Legs, execution.BrokerSpreadLegStatus{ExternalID: ids[index], Ticker: spread.Legs[index].Contract.OCCSymbol, Status: execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: quantity * float64(spread.Legs[index].Ratio), FilledAvgPrice: &price, FilledAt: &filledAt}})
 	}
 	if b.optionSpreads == nil {
 		b.optionSpreads = make(map[string]float64)
 	}
 	b.optionSpreads[strings.Join(ids, "|")] = total
+	b.optionSpreadOrders[strings.TrimSpace(clientOrderID)] = status
 	return ids, nil
+}
+
+func (b *PaperBroker) GetSpreadOrderStatusByClientOrderIDResult(_ context.Context, clientOrderID string) (execution.BrokerSpreadOrderStatus, error) {
+	if b == nil {
+		return execution.BrokerSpreadOrderStatus{}, errors.New("paper: broker is required")
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	status, ok := b.optionSpreadOrders[strings.TrimSpace(clientOrderID)]
+	if !ok {
+		return execution.BrokerSpreadOrderStatus{}, execution.ErrBrokerOrderNotFound
+	}
+	return status, nil
 }
 
 // RollbackOptionOrder compensates an immediate paper option fill when its
@@ -283,7 +302,7 @@ func (b *PaperBroker) OptionFillReport(_ context.Context, order *domain.Order) (
 
 var _ interface {
 	SubmitOptionOrder(context.Context, *domain.Order) (string, error)
-	SubmitSpreadOrder(context.Context, *domain.OptionSpread, float64) ([]string, error)
+	SubmitSpreadOrder(context.Context, *domain.OptionSpread, float64, string) ([]string, error)
 } = (*PaperBroker)(nil)
 
 // IsExpired checks if an options position has expired at the given time.

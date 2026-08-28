@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	marketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 )
 
@@ -37,8 +38,9 @@ func (f *fakeBroker) GetOrderByClientOrderID(context.Context, string) (string, d
 }
 
 type sharedExitClaims struct {
-	mu     sync.Mutex
-	claims map[uuid.UUID]uuid.UUID
+	mu             sync.Mutex
+	claims         map[uuid.UUID]uuid.UUID
+	terminalStatus domain.OrderStatus
 }
 
 func (r *sharedExitClaims) CreatePredictionExitOrderAndReserve(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ string, positionID uuid.UUID, order *domain.Order) error {
@@ -60,6 +62,13 @@ func (*sharedExitClaims) MarkPredictionExitSubmitted(context.Context, uuid.UUID,
 	return nil
 }
 func (*sharedExitClaims) ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	return nil
+}
+func (r *sharedExitClaims) FinalizePredictionExit(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, positionID, _ uuid.UUID, status domain.OrderStatus, _ string, _ time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.claims, positionID)
+	r.terminalStatus = status
 	return nil
 }
 
@@ -351,6 +360,40 @@ func TestStopGuard_SendFailureRetainsDurableClaimWithoutResubmit(t *testing.T) {
 	}
 	if got := g.Active(); got != 1 {
 		t.Fatalf("active guards = %d, want durable claim retained", got)
+	}
+}
+
+func TestStopGuard_DefinitiveClientIDMissRetriesSameDurableOrder(t *testing.T) {
+	broker := &fakeBroker{sendErr: errors.New("timeout after send"), lookupErr: execution.ErrBrokerOrderNotFound}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "retry", Slug: "slug-a", Side: "BUY", Size: 1, StopPx: .45})); err != nil {
+		t.Fatal(err)
+	}
+	tick := marketdata.Tick{Slug: "slug-a", Side: "YES", Price: .44, ReceivedAt: time.Now()}
+	g.OnTick(context.Background(), tick)
+	broker.sendErr, broker.lookupErr = nil, execution.ErrBrokerOrderNotFound
+	g.OnTick(context.Background(), tick)
+	if broker.sendCalls.Load() != 2 || g.Active() != 0 {
+		t.Fatalf("definitive miss retry: sends=%d active=%d", broker.sendCalls.Load(), g.Active())
+	}
+}
+
+func TestStopGuard_DefinitiveTerminalOutcomeReleasesAtomically(t *testing.T) {
+	broker := &fakeBroker{sendErr: errors.New("timeout after send"), lookupStatus: domain.OrderStatusCancelled, lookupExternalID: "cancelled-order"}
+	claims := &sharedExitClaims{}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: uuid.NewString(), Slug: "slug-a", Side: "BUY", Size: 1, StopPx: .45})); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: .44, ReceivedAt: time.Now()})
+	if g.Active() != 0 || claims.terminalStatus != domain.OrderStatusCancelled {
+		t.Fatalf("terminal stop outcome: active=%d status=%s", g.Active(), claims.terminalStatus)
 	}
 }
 

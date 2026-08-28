@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	marketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
@@ -56,6 +57,10 @@ type stopOrderLookup interface {
 	GetOrderByClientOrderID(context.Context, string) (string, domain.OrderStatus, error)
 }
 
+type stopOrderTerminalizer interface {
+	FinalizePredictionExit(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID, uuid.UUID, domain.OrderStatus, string, time.Time) error
+}
+
 type guardState int32
 
 const (
@@ -75,6 +80,7 @@ type guardEntry struct {
 	order      *domain.Order
 	state      atomic.Int32
 	receivedAt time.Time
+	claimed    atomic.Bool
 }
 
 type StopGuard struct {
@@ -315,6 +321,13 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 		if parseErr != nil {
 			positionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(entry.positionID))
 		}
+		if entry.claimed.Load() {
+			if g.recoverClaimedExit(ctx, entry, positionID) {
+				continue
+			}
+			entry.state.Store(int32(guardArmed))
+			continue
+		}
 		if err := g.exitRepo.CreatePredictionExitOrderAndReserve(ctx, entry.order.AccountID, entry.order.Environment, entry.order.OriginType, entry.order.OriginID, positionID, entry.order); err != nil {
 			if g.logger != nil {
 				g.logger.Error("polymarket stop guard durable claim failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
@@ -322,9 +335,10 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			entry.state.Store(int32(guardArmed))
 			continue
 		}
+		entry.claimed.Store(true)
 		freshTemplate, err := g.broker.PrepareTemplate(entry.order)
 		if err != nil {
-			entry.state.Store(int32(guardFired))
+			entry.state.Store(int32(guardArmed))
 			continue
 		}
 		entry.template = freshTemplate
@@ -342,17 +356,27 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			if lookup, ok := g.broker.(stopOrderLookup); ok {
 				externalID, status, lookupErr = lookup.GetOrderByClientOrderID(ctx, entry.order.ClientOrderID)
 			} else {
-				entry.state.Store(int32(guardFired))
+				entry.state.Store(int32(guardArmed))
 				continue
 			}
-			if lookupErr != nil || (status != domain.OrderStatusPending && status != domain.OrderStatusSubmitted && status != domain.OrderStatusPartial && status != domain.OrderStatusFilled) {
-				entry.state.Store(int32(guardFired))
+			if lookupErr != nil {
+				entry.state.Store(int32(guardArmed))
+				continue
+			}
+			if status == domain.OrderStatusCancelled || status == domain.OrderStatusRejected {
+				if !g.finalizeTerminalExit(ctx, entry, positionID, status, externalID) {
+					entry.state.Store(int32(guardArmed))
+				}
+				continue
+			}
+			if status != domain.OrderStatusPending && status != domain.OrderStatusSubmitted && status != domain.OrderStatusPartial && status != domain.OrderStatusFilled {
+				entry.state.Store(int32(guardArmed))
 				continue
 			}
 			response = &CreateOrderResponse{ID: externalID}
 		}
 		if response == nil || strings.TrimSpace(response.ID) == "" {
-			entry.state.Store(int32(guardFired))
+			entry.state.Store(int32(guardArmed))
 			continue
 		}
 		submittedAt := time.Now().UTC()
@@ -361,12 +385,67 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			if g.logger != nil {
 				g.logger.Error("polymarket stop guard submission persistence failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
 			}
-			entry.state.Store(int32(guardFired))
+			entry.state.Store(int32(guardArmed))
 			continue
 		}
 		entry.state.Store(int32(guardFired))
 		g.Cancel(entry.positionID)
 	}
+}
+
+func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, positionID uuid.UUID) bool {
+	lookup, ok := g.broker.(stopOrderLookup)
+	if !ok {
+		return false
+	}
+	externalID, status, err := lookup.GetOrderByClientOrderID(ctx, entry.order.ClientOrderID)
+	if err != nil {
+		if errors.Is(err, execution.ErrBrokerOrderNotFound) {
+			tmpl, prepareErr := g.broker.PrepareTemplate(entry.order)
+			if prepareErr != nil {
+				return false
+			}
+			response, sendErr := g.broker.SendTemplate(ctx, tmpl)
+			if sendErr != nil || response == nil || strings.TrimSpace(response.ID) == "" {
+				return false
+			}
+			externalID = strings.TrimSpace(response.ID)
+			submittedAt := time.Now().UTC()
+			if markErr := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, externalID, submittedAt); markErr != nil {
+				return false
+			}
+			entry.state.Store(int32(guardFired))
+			g.Cancel(entry.positionID)
+			return true
+		}
+		return false
+	}
+	if status == domain.OrderStatusCancelled || status == domain.OrderStatusRejected {
+		return g.finalizeTerminalExit(ctx, entry, positionID, status, externalID)
+	}
+	if status != domain.OrderStatusPending && status != domain.OrderStatusSubmitted && status != domain.OrderStatusPartial && status != domain.OrderStatusFilled {
+		return false
+	}
+	submittedAt := time.Now().UTC()
+	if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(externalID), submittedAt); err != nil {
+		return false
+	}
+	entry.state.Store(int32(guardFired))
+	g.Cancel(entry.positionID)
+	return true
+}
+
+func (g *StopGuard) finalizeTerminalExit(ctx context.Context, entry *guardEntry, positionID uuid.UUID, status domain.OrderStatus, externalID string) bool {
+	terminalizer, ok := g.exitRepo.(stopOrderTerminalizer)
+	if !ok {
+		return false
+	}
+	if err := terminalizer.FinalizePredictionExit(ctx, entry.order.AccountID, entry.order.Environment, positionID, entry.order.ID, status, strings.TrimSpace(externalID), time.Now().UTC()); err != nil {
+		return false
+	}
+	entry.state.Store(int32(guardFired))
+	g.Cancel(entry.positionID)
+	return true
 }
 
 func polymarketPositionParts(ticker string) (string, string, error) {

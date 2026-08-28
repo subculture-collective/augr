@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 
 type mockOptionsBroker struct {
 	submitOptionOrderFn func(ctx context.Context, order *domain.Order) (string, error)
-	submitSpreadOrderFn func(ctx context.Context, spread *domain.OptionSpread, quantity float64) ([]string, error)
+	submitSpreadOrderFn func(ctx context.Context, spread *domain.OptionSpread, quantity float64, clientOrderID string) ([]string, error)
 	optionFillReportFn  func(ctx context.Context, order *domain.Order) (execution.OptionFillReport, error)
 	getOrderStatusFn    func(context.Context, string) (execution.BrokerOrderStatus, error)
 }
@@ -37,12 +38,20 @@ func (b *mockOptionsBroker) GetOrderStatusByClientOrderIDResult(ctx context.Cont
 	return id, result, err
 }
 
+func (b *mockOptionsBroker) GetSpreadOrderStatusByClientOrderIDResult(ctx context.Context, id string) (execution.BrokerSpreadOrderStatus, error) {
+	status, err := b.GetOrderStatusResult(ctx, id)
+	if err != nil {
+		return execution.BrokerSpreadOrderStatus{}, err
+	}
+	return execution.BrokerSpreadOrderStatus{ParentExternalID: id, Legs: []execution.BrokerSpreadLegStatus{{ExternalID: "leg-1", Status: status}, {ExternalID: "leg-2", Status: status}}}, nil
+}
+
 type malformedAsyncSpreadBroker struct{}
 
 func (malformedAsyncSpreadBroker) SubmitOptionOrder(context.Context, *domain.Order) (string, error) {
 	return "", nil
 }
-func (malformedAsyncSpreadBroker) SubmitSpreadOrder(context.Context, *domain.OptionSpread, float64) ([]string, error) {
+func (malformedAsyncSpreadBroker) SubmitSpreadOrder(context.Context, *domain.OptionSpread, float64, string) ([]string, error) {
 	return []string{"only-one"}, nil
 }
 func (malformedAsyncSpreadBroker) PreflightSpread(context.Context, *domain.OptionSpread, float64) error {
@@ -53,11 +62,14 @@ func (malformedAsyncSpreadBroker) GetAccountBalance(context.Context) (execution.
 }
 
 type recordingOptionFillRepo struct {
+	mu      sync.Mutex
 	batches [][]repository.OptionFillInput
 	err     error
 }
 
 func (r *recordingOptionFillRepo) ApplyOptionFills(_ context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -72,6 +84,30 @@ func (r *recordingOptionFillRepo) ApplyOptionFills(_ context.Context, inputs []r
 		results[index] = repository.OptionFillResult{OrderID: input.Order.ID, PositionID: positionID, TradeID: uuid.New()}
 	}
 	return results, nil
+}
+
+func TestReconcileCancelledOptionAppliesPartialFillBeforeTerminalStatus(t *testing.T) {
+	price, filledAt := 2.5, time.Now().UTC()
+	strategyID := uuid.New()
+	optionType, strike := domain.OptionTypeCall, 150.0
+	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
+	intent := domain.PositionIntentBuyToOpen
+	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "partial-cancel", ExternalID: "alpaca-partial", Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100, PositionIntent: &intent, Side: domain.OrderSideBuy, Quantity: 2, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt, Status: domain.OrderStatusCancelled, Broker: "alpaca", SubmittedAt: &filledAt}
+	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
+		return execution.BrokerOrderStatus{Status: domain.OrderStatusCancelled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
+	}}
+	fillRepo := &recordingOptionFillRepo{}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := order; return &copy, nil }}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
+	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fillRepo.batches) != 1 || fillRepo.batches[0][0].FillQuantity != 1 || fillRepo.batches[0][0].Order.Status != domain.OrderStatusCancelled {
+		t.Fatalf("partial cancelled fill lifecycle = %+v", fillRepo.batches)
+	}
+	if len(orderRepo.updates) != 1 || orderRepo.updates[0].Status != domain.OrderStatusCancelled {
+		t.Fatalf("terminal status not persisted after fill: %+v", orderRepo.updates)
+	}
 }
 
 func (b *mockOptionsBroker) GetAccountBalance(context.Context) (execution.Balance, error) {
@@ -92,9 +128,9 @@ func (b *mockOptionsBroker) SubmitOptionOrder(ctx context.Context, order *domain
 	return "opt-ext-123", nil
 }
 
-func (b *mockOptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64) ([]string, error) {
+func (b *mockOptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64, clientOrderID string) ([]string, error) {
 	if b.submitSpreadOrderFn != nil {
-		return b.submitSpreadOrderFn(ctx, spread, quantity)
+		return b.submitSpreadOrderFn(ctx, spread, quantity, clientOrderID)
 	}
 	return []string{"leg-1"}, nil
 }

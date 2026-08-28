@@ -41,11 +41,13 @@ type submitOrderResponse struct {
 }
 
 type orderStatusResponse struct {
-	ID             string  `json:"id"`
-	Status         string  `json:"status"`
-	FilledQty      string  `json:"filled_qty"`
-	FilledAvgPrice *string `json:"filled_avg_price"`
-	FilledAt       *string `json:"filled_at"`
+	ID             string                `json:"id"`
+	Symbol         string                `json:"symbol"`
+	Status         string                `json:"status"`
+	FilledQty      string                `json:"filled_qty"`
+	FilledAvgPrice *string               `json:"filled_avg_price"`
+	FilledAt       *string               `json:"filled_at"`
+	Legs           []orderStatusResponse `json:"legs"`
 }
 
 type positionResponse struct {
@@ -155,6 +157,10 @@ func (b *Broker) GetOrderStatusByClientOrderIDResult(ctx context.Context, client
 	}
 	body, err := b.client.Get(ctx, "/v2/orders:by_client_order_id", url.Values{"client_order_id": []string{clientOrderID}})
 	if err != nil {
+		var providerErr *ErrorResponse
+		if errors.As(err, &providerErr) && providerErr.StatusCode() == 404 {
+			return "", execution.BrokerOrderStatus{}, execution.ErrBrokerOrderNotFound
+		}
 		return "", execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: lookup client order id: %w", err)
 	}
 	var response orderStatusResponse

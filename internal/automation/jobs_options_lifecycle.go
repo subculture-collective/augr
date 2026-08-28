@@ -55,7 +55,7 @@ func (o *JobOrchestrator) optionsExpirySettlement(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("options_expiry_settlement: execution scope: %w", err)
 	}
-	positions, err := listAllOpenPositions(ctx, o.deps.PositionRepo)
+	positions, err := listAllOpenPositionsByAccount(ctx, o.deps.PositionRepo, o.deps.ExecutionAccount)
 	if err != nil {
 		return fmt.Errorf("options_expiry_settlement: list positions: %w", err)
 	}
@@ -92,6 +92,28 @@ func listAllOpenPositions(ctx context.Context, repo repository.PositionRepositor
 	var all []domain.Position
 	for offset := 0; ; offset += pageSize {
 		page, err := repo.GetOpen(ctx, repository.PositionFilter{}, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			return all, nil
+		}
+	}
+}
+
+func listAllOpenPositionsByAccount(ctx context.Context, repo repository.PositionRepository, account domain.ExecutionAccountBinding) ([]domain.Position, error) {
+	if err := account.Validate(); err != nil {
+		return nil, fmt.Errorf("options lifecycle account: %w", err)
+	}
+	scoped, ok := repo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("options lifecycle requires account-scoped position repository")
+	}
+	const pageSize = 250
+	var all []domain.Position
+	for offset := 0; ; offset += pageSize {
+		page, err := scoped.GetOpenByAccount(ctx, account.AccountID(), account.Environment(), repository.PositionFilter{}, pageSize, offset)
 		if err != nil {
 			return nil, err
 		}

@@ -254,6 +254,16 @@ func (m *OrderManager) ProcessSignal(
 	})
 }
 
+// ProcessSignalWithAccountLockHeld executes a signal when the caller already
+// owns the execution-account lock. It exists for workflows that must claim and
+// reauthorize work inside the same serialized account operation.
+func (m *OrderManager) ProcessSignalWithAccountLockHeld(ctx context.Context, scope ExecutionScope, signal FinalSignal, plan TradingPlan) error {
+	if m == nil {
+		return fmt.Errorf("order_manager: manager is nil")
+	}
+	return m.processSignal(ctx, scope, signal, plan)
+}
+
 func (m *OrderManager) processSignal(
 	ctx context.Context,
 	scope ExecutionScope,

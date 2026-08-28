@@ -47,14 +47,6 @@ func (r claimedCopyOrderRepo) Create(ctx context.Context, order *domain.Order) e
 	return r.OrderRepository.Create(ctx, order)
 }
 
-func (r claimedCopyOrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
-	locker, ok := r.OrderRepository.(repository.ExecutionAccountLocker)
-	if !ok {
-		return fmt.Errorf("copy order repository lacks execution account locker")
-	}
-	return locker.WithExecutionAccountLock(ctx, accountID, fn)
-}
-
 func NewOrderManagerExecutor(deps OrderManagerExecutorDeps) *OrderManagerExecutor {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
@@ -174,7 +166,7 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 		}
 		return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, nil
 	}
-	if err := manager.ProcessSignal(ctx, scope, execution.FinalSignal{Signal: signal, Confidence: 1}, plan); err != nil {
+	if err := manager.ProcessSignalWithAccountLockHeld(ctx, scope, execution.FinalSignal{Signal: signal, Confidence: 1}, plan); err != nil {
 		return PaperOrderResult{}, err
 	}
 	orders, err := e.deps.Orders.GetByCopyOriginRun(ctx, e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 10, 0)

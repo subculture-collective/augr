@@ -24,17 +24,18 @@ const (
 
 // PaperBroker implements an in-memory execution.Broker for paper trading.
 type PaperBroker struct {
-	mu            sync.RWMutex
-	nowMu         sync.RWMutex
-	orders        map[string]*domain.Order
-	positions     map[string]*domain.Position
-	optionSpreads map[string]float64
-	balance       execution.Balance
-	slippageBps   float64
-	feePct        float64
-	evaluation    domain.PaperEvaluationProfile
-	nextOrderID   uint64
-	now           func() time.Time
+	mu                 sync.RWMutex
+	nowMu              sync.RWMutex
+	orders             map[string]*domain.Order
+	positions          map[string]*domain.Position
+	optionSpreads      map[string]float64
+	optionSpreadOrders map[string]execution.BrokerSpreadOrderStatus
+	balance            execution.Balance
+	slippageBps        float64
+	feePct             float64
+	evaluation         domain.PaperEvaluationProfile
+	nextOrderID        uint64
+	now                func() time.Time
 }
 
 // NewPaperBroker constructs an in-memory paper trading broker.
@@ -75,9 +76,10 @@ func NewPaperBrokerWithProfile(profile domain.PaperEvaluationProfile) (*PaperBro
 
 func newPaperBroker(profile domain.PaperEvaluationProfile) *PaperBroker {
 	return &PaperBroker{
-		orders:        make(map[string]*domain.Order),
-		positions:     make(map[string]*domain.Position),
-		optionSpreads: make(map[string]float64),
+		orders:             make(map[string]*domain.Order),
+		positions:          make(map[string]*domain.Position),
+		optionSpreads:      make(map[string]float64),
+		optionSpreadOrders: make(map[string]execution.BrokerSpreadOrderStatus),
 		balance: execution.Balance{
 			Currency:    "USD",
 			Cash:        profile.InitialCapital,

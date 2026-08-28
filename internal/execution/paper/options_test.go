@@ -55,7 +55,7 @@ func TestSubmitOptionOrderFillsWithoutExternalBroker(t *testing.T) {
 
 func TestSubmitSpreadOrderFailsClosed(t *testing.T) {
 	broker := NewPaperBroker(10000, 0, 0)
-	if _, err := broker.SubmitSpreadOrder(context.Background(), &domain.OptionSpread{}, 1); err == nil {
+	if _, err := broker.SubmitSpreadOrder(context.Background(), &domain.OptionSpread{}, 1, "spread-test"); err == nil {
 		t.Fatal("expected malformed spread to fail closed")
 	}
 }
@@ -67,7 +67,7 @@ func TestSubmitSpreadOrderAtomicallyDebitsVertical(t *testing.T) {
 		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00155000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 155, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, ExecutablePrice: 1},
 	}}
 	broker := NewPaperBroker(10000, 0, 0)
-	ids, err := broker.SubmitSpreadOrder(context.Background(), spread, 1)
+	ids, err := broker.SubmitSpreadOrder(context.Background(), spread, 1, "spread-test")
 	if err != nil || len(ids) != 2 {
 		t.Fatalf("SubmitSpreadOrder() ids=%v err=%v", ids, err)
 	}
@@ -94,7 +94,7 @@ func TestFinalizeOptionSpreadRemovesCompensationRecord(t *testing.T) {
 		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00155000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 155, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, ExecutablePrice: 1},
 	}}
 	broker := NewPaperBroker(10000, 0, 0)
-	ids, err := broker.SubmitSpreadOrder(context.Background(), spread, 1)
+	ids, err := broker.SubmitSpreadOrder(context.Background(), spread, 1, "spread-test")
 	if err != nil {
 		t.Fatalf("SubmitSpreadOrder() error = %v", err)
 	}

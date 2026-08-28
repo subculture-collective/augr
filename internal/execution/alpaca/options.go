@@ -51,14 +51,45 @@ func (b *OptionsBroker) GetOrderStatusByClientOrderIDResult(ctx context.Context,
 	return NewBroker(b.client).GetOrderStatusByClientOrderIDResult(ctx, clientOrderID)
 }
 
+func (b *OptionsBroker) GetSpreadOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (execution.BrokerSpreadOrderStatus, error) {
+	if b == nil || b.client == nil {
+		return execution.BrokerSpreadOrderStatus{}, errors.New("alpaca: options broker is required")
+	}
+	body, err := b.client.Get(ctx, "/v2/orders:by_client_order_id", url.Values{"client_order_id": []string{strings.TrimSpace(clientOrderID)}, "nested": []string{"true"}})
+	if err != nil {
+		var providerErr *ErrorResponse
+		if errors.As(err, &providerErr) && providerErr.StatusCode() == 404 {
+			return execution.BrokerSpreadOrderStatus{}, execution.ErrBrokerOrderNotFound
+		}
+		return execution.BrokerSpreadOrderStatus{}, fmt.Errorf("alpaca: lookup spread client order id: %w", err)
+	}
+	var response orderStatusResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return execution.BrokerSpreadOrderStatus{}, fmt.Errorf("alpaca: decode spread client order lookup: %w", err)
+	}
+	result := execution.BrokerSpreadOrderStatus{ParentExternalID: strings.TrimSpace(response.ID), Legs: make([]execution.BrokerSpreadLegStatus, 0, len(response.Legs))}
+	if result.ParentExternalID == "" {
+		return execution.BrokerSpreadOrderStatus{}, errors.New("alpaca: spread client order lookup missing parent id")
+	}
+	for _, leg := range response.Legs {
+		status, mapErr := mapBrokerOrderStatus(leg)
+		if mapErr != nil {
+			return execution.BrokerSpreadOrderStatus{}, mapErr
+		}
+		result.Legs = append(result.Legs, execution.BrokerSpreadLegStatus{ExternalID: strings.TrimSpace(leg.ID), Ticker: strings.TrimSpace(leg.Symbol), Status: status})
+	}
+	return result, nil
+}
+
 // mlegOrderRequest is the Alpaca multi-leg options order payload.
 type mlegOrderRequest struct {
-	Qty         string    `json:"qty"`
-	Type        string    `json:"type"`
-	TimeInForce string    `json:"time_in_force"`
-	OrderClass  string    `json:"order_class"`
-	Legs        []mlegLeg `json:"legs"`
-	LimitPrice  string    `json:"limit_price,omitempty"`
+	Qty           string    `json:"qty"`
+	Type          string    `json:"type"`
+	TimeInForce   string    `json:"time_in_force"`
+	OrderClass    string    `json:"order_class"`
+	Legs          []mlegLeg `json:"legs"`
+	LimitPrice    string    `json:"limit_price,omitempty"`
+	ClientOrderID string    `json:"client_order_id,omitempty"`
 }
 
 type mlegLeg struct {
@@ -161,7 +192,7 @@ func (b *OptionsBroker) SubmitOptionOrder(ctx context.Context, order *domain.Ord
 
 // SubmitSpreadOrder submits a multi-leg options order.
 // Uses POST /v2/orders with order_class "mleg" and a legs array.
-func (b *OptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64) ([]string, error) {
+func (b *OptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64, clientOrderID string) ([]string, error) {
 	if err := b.PreflightSpread(ctx, spread, quantity); err != nil {
 		return nil, err
 	}
@@ -176,11 +207,15 @@ func (b *OptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Op
 	}
 
 	req := mlegOrderRequest{
-		Qty:         formatFloat(quantity),
-		Type:        "market",
-		TimeInForce: defaultTimeInForce,
-		OrderClass:  "mleg",
-		Legs:        legs,
+		Qty:           formatFloat(quantity),
+		Type:          "market",
+		TimeInForce:   defaultTimeInForce,
+		OrderClass:    "mleg",
+		Legs:          legs,
+		ClientOrderID: strings.TrimSpace(clientOrderID),
+	}
+	if req.ClientOrderID == "" {
+		return nil, errors.New("alpaca: spread client order id is required")
 	}
 
 	responseBody, err := b.client.Post(ctx, "/v2/orders", req)

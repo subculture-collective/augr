@@ -401,7 +401,7 @@ func validateOptionFillInput(input repository.OptionFillInput) error {
 	if order == nil || input.IdempotencyKey == "" || input.AccountID == uuid.Nil || !input.Environment.IsValid() || strings.TrimSpace(input.OriginType) == "" || strings.TrimSpace(input.OriginID) == "" || order.ID == uuid.Nil || order.AccountID != input.AccountID || order.Environment != input.Environment || order.OriginType != input.OriginType || order.OriginID != input.OriginID || order.StrategyID == nil || order.Ticker == "" || strings.TrimSpace(order.ExternalID) == "" || strings.TrimSpace(order.Broker) == "" || order.SubmittedAt == nil || order.MarketType.Normalize() != domain.MarketTypeOptions || order.AssetClass != domain.AssetClassOption || order.PositionIntent == nil {
 		return fmt.Errorf("postgres: invalid option fill input")
 	}
-	if order.Status != domain.OrderStatusFilled || order.FilledAvgPrice == nil || order.FilledAt == nil || !numeric8Equal(order.Quantity, input.FillQuantity) || !numeric8Equal(order.FilledQuantity, input.FillQuantity) || !numeric8Equal(*order.FilledAvgPrice, input.FillPrice) || !order.FilledAt.UTC().Equal(input.FilledAt.UTC()) || order.SubmittedAt.After(*order.FilledAt) {
+	if order.Status != domain.OrderStatusFilled || order.FilledAvgPrice == nil || order.FilledAt == nil || input.FillQuantity > order.Quantity || !numeric8Equal(order.FilledQuantity, input.FillQuantity) || !numeric8Equal(*order.FilledAvgPrice, input.FillPrice) || !order.FilledAt.UTC().Equal(input.FilledAt.UTC()) || order.SubmittedAt.After(*order.FilledAt) {
 		return fmt.Errorf("postgres: option order does not contain the reported fill")
 	}
 	if input.FilledAt.IsZero() || input.FillQuantity <= 0 || input.FillPrice < 0 || input.Fee < 0 || input.Premium < 0 || math.IsNaN(input.FillQuantity) || math.IsInf(input.FillQuantity, 0) || math.IsNaN(input.FillPrice) || math.IsInf(input.FillPrice, 0) || math.IsNaN(input.Fee) || math.IsInf(input.Fee, 0) || math.IsNaN(input.Premium) || math.IsInf(input.Premium, 0) {
@@ -473,7 +473,7 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 	}
 	metadataMatches := persistedStrategyID != nil && *persistedStrategyID == *order.StrategyID && persistedAccountID == input.AccountID && persistedEnvironment == input.Environment && persistedOriginType == input.OriginType && persistedOriginID == input.OriginID &&
 		persistedTicker == order.Ticker && persistedMarketType.Normalize() == domain.MarketTypeOptions &&
-		persistedSide == order.Side && numeric8Equal(persistedQuantity, input.FillQuantity) &&
+		persistedSide == order.Side && numeric8Equal(persistedQuantity, order.Quantity) && input.FillQuantity <= persistedQuantity &&
 		persistedAssetClass == domain.AssetClassOption && persistedUnderlyingTicker == order.UnderlyingTicker &&
 		persistedOptionType != nil && *persistedOptionType == *order.OptionType &&
 		persistedStrike != nil && numeric8Equal(*persistedStrike, *order.Strike) &&
@@ -550,20 +550,26 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 			expiry != nil && expiry.UTC().Equal(order.Expiry.UTC()) &&
 			numeric8Equal(contractMultiplier, order.ContractMultiplier) &&
 			((legGroupID == nil && order.LegGroupID == nil) || (legGroupID != nil && order.LegGroupID != nil && *legGroupID == *order.LegGroupID))
-		if strategyID == nil || *strategyID != *order.StrategyID || ticker != order.Ticker || underlyingTicker != order.UnderlyingTicker || assetClass != domain.AssetClassOption || closedAt != nil || !numeric8Equal(quantity, input.FillQuantity) || !contractMatches {
-			return repository.OptionFillResult{}, fmt.Errorf("postgres: option close position does not match full fill")
+		if strategyID == nil || *strategyID != *order.StrategyID || ticker != order.Ticker || underlyingTicker != order.UnderlyingTicker || assetClass != domain.AssetClassOption || closedAt != nil || input.FillQuantity > quantity || !contractMatches {
+			return repository.OptionFillResult{}, fmt.Errorf("postgres: option close position does not match fill")
 		}
-		realizedDelta := (input.FillPrice - avgEntry) * quantity * contractMultiplier
+		realizedDelta := (input.FillPrice - avgEntry) * input.FillQuantity * contractMultiplier
 		if *order.PositionIntent == domain.PositionIntentBuyToClose {
 			if side != domain.PositionSideShort {
 				return repository.OptionFillResult{}, fmt.Errorf("postgres: buy-to-close requires a short option position")
 			}
-			realizedDelta = (avgEntry - input.FillPrice) * quantity * contractMultiplier
+			realizedDelta = (avgEntry - input.FillPrice) * input.FillQuantity * contractMultiplier
 		} else if side != domain.PositionSideLong {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: sell-to-close requires a long option position")
 		}
-		if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity=0,current_price=$1,realized_pnl=$2,
-			unrealized_pnl=NULL,closed_at=$3,close_reservation_order_id=NULL WHERE id=$4 AND account_id=$5 AND close_reservation_order_id=$6`, input.FillPrice, realizedPnL+realizedDelta-input.Fee, filledAt, positionID, input.AccountID, order.ID); err != nil {
+		remaining := quantity - input.FillQuantity
+		var closedAtValue *time.Time
+		if numeric8Equal(remaining, 0) {
+			remaining = 0
+			closedAtValue = &filledAt
+		}
+		if tag, err := tx.Exec(ctx, `UPDATE positions SET quantity=$1,current_price=$2,realized_pnl=$3,
+			unrealized_pnl=NULL,closed_at=$4,close_reservation_order_id=NULL WHERE id=$5 AND account_id=$6 AND close_reservation_order_id=$7`, remaining, input.FillPrice, realizedPnL+realizedDelta-input.Fee, closedAtValue, positionID, input.AccountID, order.ID); err != nil {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: close option position: %w", err)
 		} else if tag.RowsAffected() != 1 {
 			return repository.OptionFillResult{}, fmt.Errorf("postgres: option close reservation is missing or belongs to another order")

@@ -342,6 +342,10 @@ func (b *Broker) GetOrderByClientOrderID(ctx context.Context, clientOrderID stri
 	}
 	body, err := b.client.Get(ctx, "/v1/orders/by-client-order-id", url.Values{"clientOrderId": []string{clientOrderID}})
 	if err != nil {
+		var providerErr *ErrorResponse
+		if errors.As(err, &providerErr) && providerErr.StatusCode() == http.StatusNotFound {
+			return "", "", execution.ErrBrokerOrderNotFound
+		}
 		return "", "", fmt.Errorf("polymarket: lookup client order id: %w", err)
 	}
 	var response getOrderResponse
