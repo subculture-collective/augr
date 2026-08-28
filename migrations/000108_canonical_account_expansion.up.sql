@@ -86,6 +86,7 @@ ALTER TABLE trades
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
     ADD COLUMN origin_id TEXT;
 ALTER TABLE portfolio_opportunities
+    DROP CONSTRAINT portfolio_opportunities_dedupe_key_key,
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
@@ -176,6 +177,7 @@ CREATE INDEX idx_positions_account_opened ON positions(account_id,opened_at,id) 
 CREATE INDEX idx_trades_account_executed ON trades(account_id,executed_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_portfolio_opportunities_account_created ON portfolio_opportunities(account_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_portfolio_opportunities_allocation_claim ON portfolio_opportunities(account_id,status,allocation_claim_expires_at,id) WHERE status='selected';
+CREATE UNIQUE INDEX uq_portfolio_opportunities_execution_dedupe ON portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key);
 CREATE INDEX idx_allocation_decisions_account_created ON allocation_decisions(account_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_allocation_decisions_opportunity ON allocation_decisions(opportunity_id) WHERE opportunity_id IS NOT NULL;
 CREATE INDEX idx_replay_events_account_occurred ON replay_events(account_id,occurred_at,id) WHERE account_id IS NOT NULL;

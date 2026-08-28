@@ -262,6 +262,7 @@ DROP INDEX idx_positions_account_opened;
 DROP INDEX idx_trades_account_executed;
 DROP INDEX idx_portfolio_opportunities_account_created;
 DROP INDEX idx_portfolio_opportunities_allocation_claim;
+DROP INDEX uq_portfolio_opportunities_execution_dedupe;
 DROP INDEX idx_allocation_decisions_account_created;
 DROP INDEX uq_allocation_decisions_opportunity;
 DROP INDEX idx_replay_events_account_occurred;
@@ -294,7 +295,7 @@ ALTER TABLE prediction_settlement_idempotency DROP COLUMN origin_id,DROP COLUMN 
 ALTER TABLE financial_fill_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE replay_events DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE allocation_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN pipeline_run_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id,ADD CONSTRAINT portfolio_opportunities_dedupe_key_key UNIQUE(dedupe_key);
 ALTER TABLE trades DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE positions DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE orders DROP COLUMN allocation_opportunity_id,DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

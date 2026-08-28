@@ -24,6 +24,7 @@ type PaperOrderRequest struct {
 	NotionalUSD   float64
 	OpportunityID uuid.UUID
 	ClaimID       uuid.UUID
+	Opportunity   domain.Opportunity
 }
 
 type PaperOrderResult struct {
@@ -83,6 +84,9 @@ func (e *PaperExecutor) ExecutePaperDecisionScoped(ctx context.Context, scope ex
 	}
 	if decision.Action != domain.AllocationDecisionActionShadowSelected && decision.Action != domain.AllocationDecisionActionPaperOrderIntent {
 		return e.rejected("invalid_decision_action"), nil
+	}
+	if !decisionMatchesOpportunity(decision, opportunity) {
+		return e.rejected("decision_scope_mismatch"), nil
 	}
 	if !strategy.IsPaper {
 		return e.rejected("strategy_not_paper"), nil
@@ -147,7 +151,7 @@ func (e *PaperExecutor) ExecutePaperDecisionScoped(ctx context.Context, scope ex
 	if !hasRun || scope.AccountID() != opportunity.AccountID || scope.Environment() != opportunity.Environment || string(originType) != opportunity.OriginType || originID != opportunity.OriginID || run.ID != *opportunity.PipelineRunID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate) {
 		return e.rejected("execution_scope_mismatch"), nil
 	}
-	request := PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD, ClaimID: decision.ExecutionClaimID}
+	request := PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD, ClaimID: decision.ExecutionClaimID, Opportunity: opportunity}
 	if decision.OpportunityID != nil {
 		request.OpportunityID = *decision.OpportunityID
 	}
@@ -181,6 +185,15 @@ func (e *PaperExecutor) ExecutePaperDecisionScoped(ctx context.Context, scope ex
 		FinalSignal: finalSignal,
 		TradingPlan: plan,
 	}, nil
+}
+
+func decisionMatchesOpportunity(decision domain.AllocationDecision, opportunity domain.Opportunity) bool {
+	return decision.AccountID != uuid.Nil && decision.AccountID == opportunity.AccountID &&
+		decision.Environment == opportunity.Environment && decision.OriginType == opportunity.OriginType && decision.OriginID == opportunity.OriginID &&
+		decision.PipelineRunID != nil && opportunity.PipelineRunID != nil && *decision.PipelineRunID == *opportunity.PipelineRunID &&
+		decision.PipelineRunTradeDate != nil && opportunity.PipelineRunTradeDate != nil && decision.PipelineRunTradeDate.Equal(*opportunity.PipelineRunTradeDate) &&
+		decision.OpportunityID != nil && *decision.OpportunityID == opportunity.ID && decision.StrategyID != nil && *decision.StrategyID == opportunity.StrategyID &&
+		decision.ExecutionClaimID != uuid.Nil
 }
 
 func scopeFromOpportunity(opportunity domain.Opportunity, strategy domain.Strategy) (execution.ExecutionScope, error) {

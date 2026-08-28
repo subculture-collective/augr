@@ -49,6 +49,8 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"add constraint copy_intent_execution_claim_pair check ((execution_claim_id is null) = (execution_claimed_at is null))",
 		"create unique index orders_copy_origin_effect_once on orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) where origin_type='copy_subscription' and copy_origin_rebalance_run_id is not null",
 		"create unique index orders_allocation_effect_once on orders(account_id,allocation_opportunity_id) where allocation_opportunity_id is not null",
+		"drop constraint portfolio_opportunities_dedupe_key_key",
+		"create unique index uq_portfolio_opportunities_execution_dedupe on portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key)",
 		"alter table allocation_decisions add column account_id",
 		"add column pipeline_run_id uuid, add column pipeline_run_trade_date date",
 	} {
@@ -79,6 +81,8 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"drop index uq_strategies_paper_event_market_ticker",
 		"drop index orders_copy_origin_effect_once",
 		"drop index orders_allocation_effect_once",
+		"drop index uq_portfolio_opportunities_execution_dedupe",
+		"add constraint portfolio_opportunities_dedupe_key_key unique(dedupe_key)",
 		"drop constraint copy_intent_execution_claim_pair",
 		"expected_through_transaction_id uuid",
 		"order by effective_at desc, observed_at desc, id desc",
@@ -682,7 +686,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 	indexes := []string{
 		"idx_pipeline_runs_account_trade_date", "idx_pipeline_run_snapshots_account_run", "idx_agent_decisions_account_run",
 		"idx_agent_events_account_run", "idx_trade_decisions_account_created", "idx_orders_account_created",
-		"idx_positions_account_opened", "idx_trades_account_executed", "idx_portfolio_opportunities_account_created", "idx_portfolio_opportunities_allocation_claim",
+		"idx_positions_account_opened", "idx_trades_account_executed", "idx_portfolio_opportunities_account_created", "idx_portfolio_opportunities_allocation_claim", "uq_portfolio_opportunities_execution_dedupe",
 		"idx_allocation_decisions_account_created", "uq_allocation_decisions_opportunity", "idx_replay_events_account_occurred", "uq_replay_events_initial", "idx_financial_fill_idempotency_account",
 		"idx_prediction_settlement_idempotency_account", "idx_copy_subscriptions_account_status", "idx_copy_trade_intents_account_created",
 		"idx_copy_origin_rebalance_runs_account_created", "idx_copy_origin_rebalance_intents_account_run",

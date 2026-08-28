@@ -132,7 +132,7 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		return nil, NoActionReasonUnknown, fmt.Errorf("unsupported market type: %q", input.Strategy.MarketType)
 	}
 
-	opportunity.DedupeKey = dedupeKey(createdAt, input.Strategy.ID, opportunity.MarketType, opportunity.Ticker, side, input.Signal)
+	opportunity.DedupeKey = dedupeKey(createdAt, opportunity.AccountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, runRef, input.Strategy.ID, opportunity.MarketType, opportunity.Ticker, side, input.Signal)
 	return opportunity, "", nil
 }
 
@@ -172,9 +172,15 @@ func normalizeEvidence(evidence json.RawMessage) json.RawMessage {
 	return evidence
 }
 
-func dedupeKey(now time.Time, strategyID uuid.UUID, marketType domain.MarketType, ticker string, side domain.OrderSide, signal domain.PipelineSignal) string {
-	return strings.ToLower(fmt.Sprintf("%s:%s:%s:%s:%s:%s",
+func dedupeKey(now time.Time, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, run domain.PipelineRunRef, strategyID uuid.UUID, marketType domain.MarketType, ticker string, side domain.OrderSide, signal domain.PipelineSignal) string {
+	return strings.ToLower(fmt.Sprintf("%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s",
 		now.UTC().Format("2006-01-02"),
+		accountID,
+		environment,
+		originType,
+		originID,
+		run.ID,
+		run.TradeDate.UTC().Format("2006-01-02"),
 		strategyID,
 		marketType.Normalize(),
 		ticker,

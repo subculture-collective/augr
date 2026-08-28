@@ -69,22 +69,17 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 		t.Fatalf("Create(opportunity) error = %v", err)
 	}
 
-	createdOrderID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO orders (id) VALUES ($2)`, createdOrderID); err != nil {
-		t.Fatalf("create order fixture: %v", err)
-	}
 	decision := &domain.AllocationDecision{
 		AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment,
 		OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
-		OpportunityID:  &opportunity.ID,
-		StrategyID:     &strategyID,
-		Mode:           domain.AllocationDecisionModeShadow,
-		Action:         domain.AllocationDecisionActionShadowSelected,
-		Score:          91.5,
-		NotionalUSD:    5000,
-		Quantity:       25,
-		Reasons:        []string{"edge", "liquidity"},
-		CreatedOrderID: &createdOrderID,
+		OpportunityID: &opportunity.ID,
+		StrategyID:    &strategyID,
+		Mode:          domain.AllocationDecisionModeShadow,
+		Action:        domain.AllocationDecisionActionShadowSelected,
+		Score:         91.5,
+		NotionalUSD:   5000,
+		Quantity:      25,
+		Reasons:       []string{"edge", "liquidity"},
 	}
 	if err := repo.Create(ctx, decision); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -100,7 +95,7 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != decision.ID {
 		t.Fatalf("unexpected list result: %+v", listed)
 	}
-	if listed[0].CreatedOrderID == nil || *listed[0].CreatedOrderID != createdOrderID {
+	if listed[0].CreatedOrderID != nil {
 		t.Fatalf("unexpected created order id: %+v", listed[0])
 	}
 
@@ -133,5 +128,34 @@ func TestAllocationDecisionRepoIntegration_ConflictNeverReturnsForeignLineage(t 
 	}
 	if foreign.ID != uuid.Nil {
 		t.Fatalf("foreign decision received ID %s", foreign.ID)
+	}
+}
+
+func TestAllocationDecisionRepoIntegration_RecordPaperOrderResultFencesFullLineage(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	opportunity := &domain.Opportunity{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusSelected, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	decision := &domain.AllocationDecision{AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}
+	repo := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID)
+	if err := repo.Create(ctx, decision); err != nil {
+		t.Fatal(err)
+	}
+	orderID, wrongStrategyID := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO orders(id,account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,allocation_opportunity_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, orderID, canonicalRepositoryTestAccountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, runID, canonicalRepositoryTestTradeDate, wrongStrategyID, opportunity.ID); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || applied {
+		t.Fatalf("mismatched strategy attachment = %t, %v", applied, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE orders SET strategy_id=$1 WHERE id=$2`, strategyID, orderID); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || !applied {
+		t.Fatalf("matching attachment = %t, %v", applied, err)
 	}
 }

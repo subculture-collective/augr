@@ -624,7 +624,7 @@ type OrderRepository interface {
 }
 
 type AllocationOrderRepository interface {
-	GetByAllocationOpportunity(ctx context.Context, opportunityID uuid.UUID) (*domain.Order, error)
+	GetByAllocationOpportunity(ctx context.Context, opportunity domain.Opportunity) (*domain.Order, error)
 }
 
 // PositionRepository provides CRUD operations for positions.

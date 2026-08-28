@@ -50,6 +50,12 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 			  AND o.pipeline_run_id IS NOT DISTINCT FROM $6
 			  AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $7
 			  AND o.strategy_id IS NOT DISTINCT FROM $8
+			  AND ($15::uuid IS NULL OR EXISTS (
+				SELECT 1 FROM orders ord WHERE ord.id=$15 AND ord.account_id=$1 AND ord.allocation_opportunity_id=$5
+				  AND ord.environment IS NOT DISTINCT FROM $2 AND ord.origin_type IS NOT DISTINCT FROM $3 AND ord.origin_id IS NOT DISTINCT FROM $4
+				  AND ord.pipeline_run_id IS NOT DISTINCT FROM $6 AND ord.pipeline_run_trade_date IS NOT DISTINCT FROM $7
+				  AND ord.strategy_id IS NOT DISTINCT FROM $8
+			  ))
 		), inserted AS (
 			INSERT INTO allocation_decisions (
 				account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date,
@@ -68,6 +74,8 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 		  AND d.origin_id IS NOT DISTINCT FROM $4
 		  AND d.pipeline_run_id IS NOT DISTINCT FROM $6
 		  AND d.pipeline_run_trade_date IS NOT DISTINCT FROM $7
+		  AND d.strategy_id IS NOT DISTINCT FROM $8
+		  AND d.created_order_id IS NOT DISTINCT FROM $15
 		LIMIT 1`,
 		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.OpportunityID,
 		decision.PipelineRunID, decision.PipelineRunTradeDate, decision.StrategyID,
@@ -123,7 +131,15 @@ func (r *AllocationDecisionRepo) RecordPaperOrderResult(ctx context.Context, id 
 	if action != domain.AllocationDecisionActionPaperOrderIntent && action != domain.AllocationDecisionActionExecuted && action != domain.AllocationDecisionActionExecutionRejected {
 		return false, fmt.Errorf("postgres: record paper order result: paper action required")
 	}
-	tag, err := r.pool.Exec(ctx, `UPDATE allocation_decisions SET action=$1, reasons=$2, created_order_id=COALESCE(created_order_id,$3) WHERE id=$4 AND account_id=$5 AND action=$6 AND (created_order_id IS NULL OR created_order_id=$3)`, action, stringSliceOrEmpty(reasons), orderID, id, r.accountID, domain.AllocationDecisionActionPaperOrderIntent)
+	tag, err := r.pool.Exec(ctx, `UPDATE allocation_decisions d SET action=$1, reasons=$2, created_order_id=COALESCE(d.created_order_id,$3)
+		WHERE d.id=$4 AND d.account_id=$5 AND d.action=$6 AND (d.created_order_id IS NULL OR d.created_order_id=$3)
+		  AND (($3::uuid IS NULL AND $1 IN ('paper_order_intent','execution_rejected')) OR ($3::uuid IS NOT NULL AND EXISTS (
+			SELECT 1 FROM orders o
+			WHERE o.id=$3 AND o.account_id=d.account_id AND o.allocation_opportunity_id=d.opportunity_id
+			  AND o.environment IS NOT DISTINCT FROM d.environment AND o.origin_type IS NOT DISTINCT FROM d.origin_type AND o.origin_id IS NOT DISTINCT FROM d.origin_id
+			  AND o.pipeline_run_id IS NOT DISTINCT FROM d.pipeline_run_id AND o.pipeline_run_trade_date IS NOT DISTINCT FROM d.pipeline_run_trade_date
+			  AND o.strategy_id IS NOT DISTINCT FROM d.strategy_id
+		  )))`, action, stringSliceOrEmpty(reasons), orderID, id, r.accountID, domain.AllocationDecisionActionPaperOrderIntent)
 	if err != nil {
 		return false, fmt.Errorf("postgres: record paper order result: %w", err)
 	}

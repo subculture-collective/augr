@@ -252,7 +252,24 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 		if len(decisions) != 0 {
 			decision := decisions[0]
 			if decision.Action == domain.AllocationDecisionActionPaperOrderIntent {
-				if err := o.reconcilePendingPaperDecision(ctx, opportunity, &decision); err != nil {
+				order, err := o.findOpportunityOrder(ctx, opportunity)
+				if err != nil {
+					return err
+				}
+				if order == nil {
+					decision.ExecutionClaimID = claimID
+					decision, err = o.executePaperAllocatorDecision(ctx, decision, map[uuid.UUID]domain.Opportunity{opportunity.ID: opportunity})
+					applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, decision.CreatedOrderID, decision.Action, decision.Reasons)
+					if recordErr != nil {
+						return fmt.Errorf("portfolio_allocator: record recovered paper result: %w", recordErr)
+					}
+					if !applied {
+						return fmt.Errorf("portfolio_allocator: record recovered paper result: compare-and-swap failed")
+					}
+					if err != nil {
+						return fmt.Errorf("portfolio_allocator: recovered paper execution ambiguous: %w", err)
+					}
+				} else if err := o.reconcilePendingPaperDecision(ctx, opportunity, &decision, order); err != nil {
 					return err
 				}
 			}
@@ -287,32 +304,20 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 	return nil
 }
 
-func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opportunity domain.Opportunity, decision *domain.AllocationDecision) error {
-	var order *domain.Order
-	var err error
-	if decision.CreatedOrderID != nil && o.deps.OrderRepo != nil {
-		order, err = o.deps.OrderRepo.Get(ctx, *decision.CreatedOrderID)
+func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opportunity domain.Opportunity, decision *domain.AllocationDecision, order *domain.Order) error {
+	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovery_order_pending"
+	if !orderMatchesOpportunity(*order, opportunity) {
+		return fmt.Errorf("portfolio_allocator: recovered order lineage mismatch")
+	}
+	if order.Status == domain.OrderStatusFilled {
+		decision.CreatedOrderID = &order.ID
+		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
+	} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+		decision.CreatedOrderID = &order.ID
+		action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
 	} else {
-		order, err = o.findOpportunityOrder(ctx, opportunity)
-	}
-	if err != nil && !errors.Is(err, repository.ErrNotFound) {
-		return fmt.Errorf("portfolio_allocator: load pending paper order: %w", err)
-	}
-	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovery_order_missing"
-	if order != nil {
-		if !orderMatchesOpportunity(*order, opportunity) {
-			order = nil
-			reason = "recovery_order_scope_mismatch"
-		} else if order.Status == domain.OrderStatusFilled {
-			decision.CreatedOrderID = &order.ID
-			action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
-		} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
-			decision.CreatedOrderID = &order.ID
-			action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
-		} else {
-			decision.CreatedOrderID = &order.ID
-			action, reason = domain.AllocationDecisionActionExecutionRejected, "recovery_nonterminal_order:"+order.Status.String()
-		}
+		decision.CreatedOrderID = &order.ID
+		reason = "recovery_nonterminal_order:" + order.Status.String()
 	}
 	decision.Action = action
 	decision.Reasons = append(decision.Reasons, reason)
@@ -327,29 +332,33 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 }
 
 func (o *JobOrchestrator) findOpportunityOrder(ctx context.Context, opportunity domain.Opportunity) (*domain.Order, error) {
-	if o.deps.OrderRepo == nil || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
+	if o.deps.OrderRepo == nil {
 		return nil, nil
 	}
-	orders, err := o.deps.OrderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, repository.OrderFilter{}, 100, 0)
+	allocationRepo, ok := o.deps.OrderRepo.(repository.AllocationOrderRepository)
+	if !ok {
+		return nil, fmt.Errorf("portfolio_allocator: allocation order repository is required for recovery")
+	}
+	order, err := allocationRepo.GetByAllocationOpportunity(ctx, opportunity)
 	if err != nil {
-		return nil, fmt.Errorf("portfolio_allocator: list scoped recovery orders: %w", err)
-	}
-	for i := range orders {
-		order := orders[i]
-		if orderMatchesOpportunity(order, opportunity) {
-			return &order, nil
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, nil
 		}
+		return nil, fmt.Errorf("portfolio_allocator: get scoped recovery order: %w", err)
 	}
-	return nil, nil
+	if !orderMatchesOpportunity(*order, opportunity) {
+		return nil, fmt.Errorf("portfolio_allocator: recovered order lineage mismatch")
+	}
+	return order, nil
 }
 
 func orderMatchesOpportunity(order domain.Order, opportunity domain.Opportunity) bool {
-	return order.AccountID == opportunity.AccountID && order.Environment == opportunity.Environment && order.OriginType == opportunity.OriginType && order.OriginID == opportunity.OriginID && opportunity.PipelineRunID != nil && order.PipelineRunID != nil && *order.PipelineRunID == *opportunity.PipelineRunID && opportunity.PipelineRunTradeDate != nil && order.PipelineRunTradeDate != nil && order.PipelineRunTradeDate.Equal(*opportunity.PipelineRunTradeDate)
+	return order.AccountID == opportunity.AccountID && order.Environment == opportunity.Environment && order.OriginType == opportunity.OriginType && order.OriginID == opportunity.OriginID && order.AllocationOpportunityID != nil && *order.AllocationOpportunityID == opportunity.ID && order.StrategyID != nil && *order.StrategyID == opportunity.StrategyID && opportunity.PipelineRunID != nil && order.PipelineRunID != nil && *order.PipelineRunID == *opportunity.PipelineRunID && opportunity.PipelineRunTradeDate != nil && order.PipelineRunTradeDate != nil && order.PipelineRunTradeDate.Equal(*opportunity.PipelineRunTradeDate)
 }
 
 func recoveredAllocationDecision(opportunity domain.Opportunity, order domain.Order) domain.AllocationDecision {
 	opportunityID, strategyID, orderID := opportunity.ID, opportunity.StrategyID, order.ID
-	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovery_nonterminal_order:"+order.Status.String()
+	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovery_nonterminal_order:"+order.Status.String()
 	if order.Status == domain.OrderStatusFilled {
 		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
 	} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {

@@ -355,7 +355,8 @@ func (p *restartPaperProcessor) ProcessPaperOrder(ctx context.Context, req portf
 		p.completedEffects++
 		run, _ := req.Scope.PipelineRun()
 		originType, originID := req.Scope.Origin()
-		_ = p.orders.Create(ctx, &domain.Order{ID: p.orderID, AccountID: req.Scope.AccountID(), Environment: req.Scope.Environment(), OriginType: string(originType), OriginID: originID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, Status: domain.OrderStatusFilled})
+		strategyID := req.Opportunity.StrategyID
+		_ = p.orders.Create(ctx, &domain.Order{ID: p.orderID, AccountID: req.Scope.AccountID(), Environment: req.Scope.Environment(), OriginType: string(originType), OriginID: originID, StrategyID: &strategyID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, AllocationOpportunityID: &req.Opportunity.ID, Status: domain.OrderStatusFilled})
 	}
 	if p.errAfterEffect {
 		p.errAfterEffect = false
@@ -365,6 +366,15 @@ func (p *restartPaperProcessor) ProcessPaperOrder(ctx context.Context, req portf
 }
 
 type portfolioRecoveryOrderRepo struct{ *recordingOrderRepo }
+
+func (r *portfolioRecoveryOrderRepo) GetByAllocationOpportunity(_ context.Context, opportunity domain.Opportunity) (*domain.Order, error) {
+	for _, order := range r.list {
+		if order.AllocationOpportunityID != nil && *order.AllocationOpportunityID == opportunity.ID {
+			return order, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
 
 func (r *portfolioRecoveryOrderRepo) GetByRun(_ context.Context, ref domain.PipelineRunRef, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
 	out := make([]domain.Order, 0)
@@ -869,37 +879,39 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	}
 }
 
-func TestPortfolioAllocatorRestartRejectsNonterminalIntentDeterministically(t *testing.T) {
+func TestPortfolioAllocatorRestartKeepsNonterminalIntentPending(t *testing.T) {
 	now := time.Now().UTC()
 	runID, accountID, versionID, strategyID, opportunityID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{created: []*domain.AllocationDecision{{ID: uuid.New(), AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, CreatedOrderID: &orderID}}}
-	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OrderStatusSubmitted})}
+	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, StrategyID: &strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, AllocationOpportunityID: &opportunityID, Status: domain.OrderStatusSubmitted})}
 	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, OrderRepo: orders})
 	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
 		t.Fatal(err)
 	}
-	if opportunityRepo.items[0].Status != domain.OpportunityStatusRejected {
-		t.Fatalf("opportunity status = %s, want rejected", opportunityRepo.items[0].Status)
+	if opportunityRepo.items[0].Status != domain.OpportunityStatusSelected {
+		t.Fatalf("opportunity status = %s, want selected", opportunityRepo.items[0].Status)
 	}
-	if decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "recovery_nonterminal_order:submitted") {
-		t.Fatalf("pending decision did not converge: %+v", decisionRepo.created[0])
+	if decisionRepo.created[0].Action != domain.AllocationDecisionActionPaperOrderIntent || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "recovery_nonterminal_order:submitted") {
+		t.Fatalf("pending decision did not remain recoverable: %+v", decisionRepo.created[0])
 	}
 }
 
-func TestPortfolioAllocatorRestartRejectsMissingOrderDeterministically(t *testing.T) {
+func TestPortfolioAllocatorRestartRetriesMissingOrderEffect(t *testing.T) {
 	now := time.Now().UTC()
-	opportunityID, oldOwner := uuid.New(), uuid.New()
-	opportunity := domain.Opportunity{ID: opportunityID, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
+	opportunityID, oldOwner, accountID, versionID, strategyID, runID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, EntryPrice: 100, MaxLossPct: .05, ExpiresAt: now.Add(time.Hour)}
 	repo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}, claims: map[uuid.UUID]uuid.UUID{opportunityID: oldOwner}, claimExpires: map[uuid.UUID]time.Time{opportunityID: now.Add(-time.Minute)}}
-	decisionRepo := &portfolioAllocatorDecisionRepo{created: []*domain.AllocationDecision{{ID: uuid.New(), OpportunityID: &opportunityID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}}}
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: decisionRepo})
+	decisionRepo := &portfolioAllocatorDecisionRepo{created: []*domain.AllocationDecision{{ID: uuid.New(), AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, NotionalUSD: 1000}}}
+	processor := &portfolioPaperProcessorStub{}
+	binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+	orch := NewJobOrchestrator(OrchestratorDeps{ExecutionAccount: binding, OpportunityRepo: repo, AllocationDecisionRepo: decisionRepo, StrategyRepo: &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}}, PortfolioPaperProcessor: processor})
 	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
 		t.Fatal(err)
 	}
-	if repo.items[0].Status != domain.OpportunityStatusRejected || decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "recovery_order_missing") {
-		t.Fatalf("missing order did not converge: opportunity=%+v decision=%+v", repo.items[0], decisionRepo.created[0])
+	if repo.items[0].Status != domain.OpportunityStatusExecuted || decisionRepo.created[0].Action != domain.AllocationDecisionActionExecuted || processor.called != 1 {
+		t.Fatalf("missing effect was not retried: opportunity=%+v decision=%+v calls=%d", repo.items[0], decisionRepo.created[0], processor.called)
 	}
 }
 
@@ -945,7 +957,7 @@ func TestPortfolioAllocatorConcurrentRecoverersCreateOneDecision(t *testing.T) {
 	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
 	repo := &concurrentClaimOpportunityRepo{portfolioAllocatorOpportunityRepo: portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}, claims: map[uuid.UUID]uuid.UUID{opportunityID: oldOwner}, claimExpires: map[uuid.UUID]time.Time{opportunityID: now.Add(-time.Minute)}}}
 	decisions := &portfolioAllocatorDecisionRepo{}
-	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OrderStatusFilled})}
+	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, StrategyID: &strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, AllocationOpportunityID: &opportunityID, Status: domain.OrderStatusFilled})}
 	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: decisions, OrderRepo: orders})
 	var wg sync.WaitGroup
 	for range 2 {

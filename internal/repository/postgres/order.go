@@ -131,8 +131,11 @@ func (r *OrderRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Order, error
 	return order, nil
 }
 
-func (r *OrderRepo) GetByAllocationOpportunity(ctx context.Context, opportunityID uuid.UUID) (*domain.Order, error) {
-	order, err := scanOrder(r.pool.QueryRow(ctx, orderSelectSQL+` WHERE allocation_opportunity_id=$1 AND account_id=$2`, opportunityID, r.accountID))
+func (r *OrderRepo) GetByAllocationOpportunity(ctx context.Context, opportunity domain.Opportunity) (*domain.Order, error) {
+	if opportunity.ID == uuid.Nil || opportunity.AccountID != r.accountID || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil || opportunity.StrategyID == uuid.Nil {
+		return nil, fmt.Errorf("postgres: get allocation order: complete account-bound lineage is required")
+	}
+	order, err := scanOrder(r.pool.QueryRow(ctx, orderSelectSQL+` WHERE allocation_opportunity_id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND pipeline_run_id=$6 AND pipeline_run_trade_date=$7 AND strategy_id=$8`, opportunity.ID, r.accountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, opportunity.PipelineRunID, opportunity.PipelineRunTradeDate, opportunity.StrategyID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: get allocation order: %w", ErrNotFound)
 	}
@@ -280,7 +283,7 @@ const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, account_id, env
 		filled_at, created_at, asset_class, underlying_ticker, option_type,
 		strike::double precision, expiry, contract_multiplier::double precision,
 		position_intent, leg_group_id, COALESCE(prediction_side, ''),
-		COALESCE(polymarket_intent, '')
+		COALESCE(polymarket_intent, ''), allocation_opportunity_id
 	 FROM orders`
 
 func (r *OrderRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.Order, error) {
@@ -365,6 +368,7 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 		&order.LegGroupID,
 		&order.PredictionSide,
 		&order.PolymarketIntent,
+		&order.AllocationOpportunityID,
 	)
 	if err != nil {
 		return nil, err

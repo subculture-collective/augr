@@ -304,7 +304,7 @@ func TestOpportunityRepoIntegration_TakesOverLegacySelectedNullClaim(t *testing.
 	}
 }
 
-func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t *testing.T) {
+func TestOpportunityRepoIntegration_UpsertDedupeSeparatesAccountAndLegacyScopes(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
@@ -330,8 +330,8 @@ func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t 
 		Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued,
 		Confidence: 0.9, ExpiresAt: time.Now().UTC().Add(2 * time.Hour), DedupeKey: owned.DedupeKey,
 	}
-	if err := foreignRepo.UpsertQueuedByDedupeKey(ctx, incoming); err == nil {
-		t.Fatal("foreign UpsertQueuedByDedupeKey() error = nil, want ownership conflict")
+	if err := foreignRepo.UpsertQueuedByDedupeKey(ctx, incoming); err != nil {
+		t.Fatalf("foreign scoped upsert: %v", err)
 	}
 	got, err := ownerRepo.Get(ctx, owned.ID)
 	if err != nil || got.AccountID != canonicalRepositoryTestAccountID || got.Confidence != 0.4 {
@@ -342,8 +342,8 @@ func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t 
 		t.Fatalf("make legacy row: %v", err)
 	}
 	incoming.AccountID = uuid.Nil
-	if err := ownerRepo.UpsertQueuedByDedupeKey(ctx, incoming); err == nil {
-		t.Fatal("legacy UpsertQueuedByDedupeKey() error = nil, want ownership conflict")
+	if err := ownerRepo.UpsertQueuedByDedupeKey(ctx, incoming); err != nil {
+		t.Fatalf("canonical upsert beside legacy row: %v", err)
 	}
 	var accountID *uuid.UUID
 	var confidence float64
@@ -355,7 +355,7 @@ func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t 
 	}
 }
 
-func TestOpportunityRepoIntegration_QueuedDedupeRejectsLineageRefreshAtomically(t *testing.T) {
+func TestOpportunityRepoIntegration_QueuedDedupeSeparatesRunLineage(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
@@ -366,18 +366,19 @@ func TestOpportunityRepoIntegration_QueuedDedupeRejectsLineageRefreshAtomically(
 		t.Fatal(err)
 	}
 	conflicting := *opportunity
-	conflicting.OriginID = uuid.NewString()
+	secondRunID := uuid.New()
+	conflicting.PipelineRunID = &secondRunID
 	conflicting.Confidence = .9
 	conflicting.Evidence = json.RawMessage(`{"source":"foreign"}`)
-	if err := repo.UpsertQueuedByDedupeKey(ctx, &conflicting); err == nil {
-		t.Fatal("lineage-conflicting refresh succeeded")
+	if err := repo.UpsertQueuedByDedupeKey(ctx, &conflicting); err != nil {
+		t.Fatalf("second run graph upsert: %v", err)
 	}
 	stored, err := repo.Get(ctx, opportunity.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.OriginID != versionID.String() || stored.Confidence != .4 || !jsonBytesEqual(stored.Evidence, opportunity.Evidence) {
-		t.Fatalf("conflicting refresh partially changed row: %+v", stored)
+	if stored.OriginID != versionID.String() || stored.Confidence != .4 || !jsonBytesEqual(stored.Evidence, opportunity.Evidence) || conflicting.ID == opportunity.ID {
+		t.Fatalf("second run graph conflicted with original: original=%+v second=%+v", stored, conflicting)
 	}
 }
 
@@ -545,7 +546,7 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		`CREATE TYPE pipeline_signal AS ENUM ('buy', 'sell', 'hold')`,
 		`CREATE TABLE strategies (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
 		`CREATE TABLE pipeline_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
-		`CREATE TABLE orders (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
+		`CREATE TABLE orders (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID, environment TEXT, origin_type TEXT, origin_id TEXT, pipeline_run_id UUID, pipeline_run_trade_date DATE, strategy_id UUID, allocation_opportunity_id UUID)`,
 		`CREATE TABLE portfolio_opportunities (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID,
@@ -581,8 +582,9 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			expires_at TIMESTAMPTZ NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			dedupe_key TEXT NOT NULL UNIQUE
+			dedupe_key TEXT NOT NULL
 		)`,
+		`CREATE UNIQUE INDEX uq_portfolio_opportunities_execution_dedupe ON portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key)`,
 		`CREATE INDEX idx_portfolio_opportunities_status_expires_at ON portfolio_opportunities (status, expires_at)`,
 		`CREATE INDEX idx_portfolio_opportunities_strategy_id ON portfolio_opportunities (strategy_id)`,
 		`CREATE INDEX idx_portfolio_opportunities_market_type_ticker ON portfolio_opportunities (market_type, ticker)`,

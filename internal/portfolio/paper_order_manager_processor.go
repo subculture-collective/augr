@@ -100,7 +100,7 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		return PaperOrderResult{Skipped: true, Reason: "missing_order_repo"}, nil
 	}
 	if allocationRepo, ok := p.deps.OrderRepo.(repository.AllocationOrderRepository); ok && request.OpportunityID != uuid.Nil {
-		order, err := allocationRepo.GetByAllocationOpportunity(ctx, request.OpportunityID)
+		order, err := allocationRepo.GetByAllocationOpportunity(ctx, request.Opportunity)
 		if err == nil {
 			return PaperOrderResult{OrderID: &order.ID, Status: order.Status}, processErr
 		}
@@ -111,44 +111,10 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 			return PaperOrderResult{}, processErr
 		}
 	}
-	run, ok := request.Scope.PipelineRun()
-	if !ok {
-		return PaperOrderResult{Skipped: true, Reason: "missing_pipeline_run"}, nil
+	if processErr != nil {
+		return PaperOrderResult{}, processErr
 	}
-	const pageSize = 100
-	orders := make([]domain.Order, 0)
-	for offset := 0; ; offset += pageSize {
-		page, err := p.deps.OrderRepo.GetByRun(ctx, run, repository.OrderFilter{}, pageSize, offset)
-		if err != nil {
-			return PaperOrderResult{}, errors.Join(processErr, err)
-		}
-		orders = append(orders, page...)
-		if len(page) < pageSize {
-			break
-		}
-	}
-	if len(orders) == 0 {
-		if processErr != nil {
-			return PaperOrderResult{}, processErr
-		}
-		return PaperOrderResult{Skipped: true, Reason: "paper_order_not_created"}, nil
-	}
-	var order domain.Order
-	found := false
-	originType, originID := request.Scope.Origin()
-	for _, candidate := range orders {
-		if candidate.AccountID == request.Scope.AccountID() && candidate.Environment == request.Scope.Environment() && candidate.OriginType == string(originType) && candidate.OriginID == originID && candidate.PipelineRunID != nil && *candidate.PipelineRunID == run.ID && candidate.PipelineRunTradeDate != nil && candidate.PipelineRunTradeDate.Equal(run.TradeDate) {
-			order, found = candidate, true
-			break
-		}
-	}
-	if !found {
-		if processErr != nil {
-			return PaperOrderResult{}, processErr
-		}
-		return PaperOrderResult{Skipped: true, Reason: "paper_order_scope_mismatch"}, nil
-	}
-	return PaperOrderResult{OrderID: &order.ID, Status: order.Status, Skipped: false}, processErr
+	return PaperOrderResult{Skipped: true, Reason: "paper_order_not_created"}, nil
 }
 
 // Compile-time assertion that the processor stays on the paper execution boundary.

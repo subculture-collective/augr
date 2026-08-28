@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,7 +72,8 @@ func TestBuildOpportunityBuyStock(t *testing.T) {
 	if opportunity.ExpiresAt.Sub(now) != 24*time.Hour {
 		t.Fatalf("expires at delta = %v, want 24h", opportunity.ExpiresAt.Sub(now))
 	}
-	if opportunity.DedupeKey != "2026-06-19:"+strategyID.String()+":stock:aapl:buy:buy" {
+	wantDedupe := strings.ToLower("2026-06-19:" + run.AccountID.String() + ":" + string(run.Environment) + ":" + run.OriginType + ":" + run.OriginID + ":" + run.ID.String() + ":" + run.TradeDate.Format("2006-01-02") + ":" + strategyID.String() + ":stock:aapl:buy:buy")
+	if opportunity.DedupeKey != wantDedupe {
 		t.Fatalf("dedupe key = %q", opportunity.DedupeKey)
 	}
 	if opportunity.PipelineRunID == nil || *opportunity.PipelineRunID != runID {

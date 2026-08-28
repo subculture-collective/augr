@@ -182,7 +182,7 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	)
 	VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)`
 	if upsert {
-		query += ` ON CONFLICT (dedupe_key) DO UPDATE SET
+		query += ` ON CONFLICT (account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key) DO UPDATE SET
 			market_type = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.market_type ELSE portfolio_opportunities.market_type END,
 			ticker = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.ticker ELSE portfolio_opportunities.ticker END,
 			side = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.side ELSE portfolio_opportunities.side END,
