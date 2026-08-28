@@ -635,6 +635,7 @@ func (m *OrderManager) ProcessSignal(
 		nil,
 		domain.TradeDecisionStatusCandidate,
 	)
+	decision.ID = recoveryTradeDecisionID(order.ID)
 	if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
 		return err
 	}
@@ -840,6 +841,14 @@ func cloneFloatPtr(value *float64) *float64 {
 	return &cloned
 }
 
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 func (m *OrderManager) recordTradeDecision(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision) error {
 	if m == nil || m.decisionRecorder == nil || decision == nil {
 		return nil
@@ -907,6 +916,51 @@ func (m *OrderManager) resolveAttachedOrderDecision(ctx context.Context, scope E
 	}
 	if decisionID == uuid.Nil {
 		return uuid.Nil, fmt.Errorf("order_manager: recovered fill has no attached decision")
+	}
+	return decisionID, nil
+}
+
+func recoveryTradeDecisionID(orderID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("augr:order-decision:v1:"+orderID.String()))
+}
+
+func (m *OrderManager) ensureAttachedOrderDecision(ctx context.Context, scope ExecutionScope, order *domain.Order) (uuid.UUID, error) {
+	if order == nil {
+		return uuid.Nil, fmt.Errorf("order_manager: persisted order is required")
+	}
+	if decisionID, err := m.resolveAttachedOrderDecision(ctx, scope, order.ID); err == nil {
+		return decisionID, nil
+	}
+	recoverer, ok := m.decisionRecorder.(RecoverableOrderDecisionRecorder)
+	if !ok {
+		return uuid.Nil, fmt.Errorf("order_manager: recoverable decision recorder is required before broker recovery")
+	}
+	createdAt := order.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = m.currentTime()
+	}
+	executablePrice := 0.0
+	if order.LimitPrice != nil {
+		executablePrice = *order.LimitPrice
+	}
+	decision := &domain.TradeDecision{
+		ID: recoveryTradeDecisionID(order.ID), AccountID: scope.AccountID(), Environment: scope.Environment(),
+		MarketType: order.MarketType.Normalize(), InstrumentKey: strings.TrimSpace(order.Ticker), Side: order.Side,
+		Outcome: strings.ToUpper(strings.TrimSpace(order.PredictionSide)), ExecutablePrice: executablePrice,
+		ProposedSize: order.Quantity, ApprovedSize: order.Quantity, RiskStatus: domain.RiskDecisionApproved,
+		Status: domain.TradeDecisionStatusCandidate, CreatedAt: createdAt, UpdatedAt: createdAt,
+	}
+	originType, originID := scope.Origin()
+	decision.OriginType, decision.OriginID = string(originType), originID
+	decision.StrategyID = order.StrategyID
+	decision.PipelineRunID = order.PipelineRunID
+	decision.PipelineRunTradeDate = order.PipelineRunTradeDate
+	decisionID, err := recoverer.EnsureOrderDecisionAttachment(ctx, scope, decision, order.ID, m.liveTrading)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("order_manager: repair recovered order decision attachment: %w", err)
+	}
+	if decisionID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("order_manager: repaired order decision attachment is missing")
 	}
 	return decisionID, nil
 }
@@ -1081,6 +1135,20 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 	if _, _, _, err := scopeOriginIDs(scope); err != nil {
 		return "", fmt.Errorf("order_manager: reconcile execution scope: %w", err)
 	}
+	decisionID, err := m.ensureAttachedOrderDecision(ctx, scope, order)
+	if err != nil {
+		return "", err
+	}
+	if order.Status == domain.OrderStatusFilled {
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return "", err
+		}
+		plan := recoveredOrderPlan(order)
+		if err := m.handleFill(ctx, order, plan, scope, decisionID); err != nil {
+			return "", err
+		}
+		return domain.OrderStatusFilled, nil
+	}
 	brokerOrderID := strings.TrimSpace(order.ExternalID)
 	if brokerOrderID == "" {
 		brokerOrderID = strings.TrimSpace(order.ClientOrderID)
@@ -1095,7 +1163,8 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		}
 		return order.Status, nil
 	}
-	status, err := m.broker.GetOrderStatus(ctx, brokerOrderID)
+	brokerResult, err := m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+	status := brokerResult.Status
 	if err != nil {
 		if order.Status != domain.OrderStatusPending || strings.TrimSpace(order.ExternalID) != "" || !errors.Is(err, ErrBrokerOrderNotFound) {
 			return "", fmt.Errorf("order_manager: reconcile broker status: %w", err)
@@ -1110,7 +1179,8 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		if strings.TrimSpace(externalID) != brokerOrderID {
 			return "", fmt.Errorf("order_manager: resubmitted client order identity mismatch")
 		}
-		status, err = m.broker.GetOrderStatus(ctx, brokerOrderID)
+		brokerResult, err = m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+		status = brokerResult.Status
 		if err != nil {
 			return "", fmt.Errorf("order_manager: verify resubmitted order: %w", err)
 		}
@@ -1136,7 +1206,8 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		if err := m.fenceEffect(ctx); err != nil {
 			return "", err
 		}
-		status, err = m.broker.GetOrderStatus(ctx, brokerOrderID)
+		brokerResult, err = m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+		status = brokerResult.Status
 		if err != nil {
 			return "", fmt.Errorf("order_manager: verify recovered paper cancellation: %w", err)
 		}
@@ -1147,19 +1218,11 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 	}
 	switch status {
 	case domain.OrderStatusFilled:
-		plan := TradingPlan{Ticker: order.Ticker, MarketType: order.MarketType, Side: order.PredictionSide}
-		if order.FilledAvgPrice != nil {
-			plan.EntryPrice = *order.FilledAvgPrice
-		} else if order.LimitPrice != nil {
-			plan.EntryPrice = *order.LimitPrice
-		}
-		if order.StopPrice != nil {
-			plan.StopLoss = *order.StopPrice
-		}
-		decisionID, err := m.resolveAttachedOrderDecision(ctx, scope, order.ID)
-		if err != nil {
+		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
+		if err := validateRecoveredFillEvidence(order); err != nil {
 			return "", err
 		}
+		plan := recoveredOrderPlan(order)
 		if err := m.handleFill(ctx, order, plan, scope, decisionID); err != nil {
 			return "", err
 		}
@@ -1171,6 +1234,35 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		return "", fmt.Errorf("order_manager: recovered paper order remained nonterminal: %s", status)
 	}
 	return status, nil
+}
+
+func (m *OrderManager) recoveryBrokerOrderStatus(ctx context.Context, brokerOrderID string) (BrokerOrderStatus, error) {
+	if provider, ok := m.broker.(BrokerOrderStatusProvider); ok {
+		return provider.GetOrderStatusResult(ctx, brokerOrderID)
+	}
+	status, err := m.broker.GetOrderStatus(ctx, brokerOrderID)
+	if err != nil {
+		return BrokerOrderStatus{}, err
+	}
+	if status == domain.OrderStatusFilled {
+		return BrokerOrderStatus{}, fmt.Errorf("order_manager: broker fill evidence provider is required for recovery")
+	}
+	return BrokerOrderStatus{Status: status}, nil
+}
+
+func validateRecoveredFillEvidence(order *domain.Order) error {
+	if order == nil || order.FilledAvgPrice == nil || *order.FilledAvgPrice <= 0 || order.FilledQuantity <= 0 || order.FilledAt == nil || order.FilledAt.IsZero() {
+		return fmt.Errorf("order_manager: recovered filled order lacks authoritative fill evidence")
+	}
+	return nil
+}
+
+func recoveredOrderPlan(order *domain.Order) TradingPlan {
+	plan := TradingPlan{Ticker: order.Ticker, MarketType: order.MarketType, Side: order.PredictionSide, EntryPrice: *order.FilledAvgPrice}
+	if order.StopPrice != nil {
+		plan.StopLoss = *order.StopPrice
+	}
+	return plan
 }
 
 // handleFill creates a Trade and creates or updates the Position.
@@ -1186,13 +1278,22 @@ func (m *OrderManager) handleFill(
 		return fmt.Errorf("order_manager: fill execution scope: %w", err)
 	}
 	now := m.currentTime()
-	order.FilledQuantity = order.Quantity
-	order.FilledAt = &now
+	if order.FilledQuantity <= 0 {
+		order.FilledQuantity = order.Quantity
+	}
+	if order.FilledAt == nil || order.FilledAt.IsZero() {
+		order.FilledAt = &now
+	} else {
+		now = order.FilledAt.UTC()
+	}
 
 	// Determine fill price.
 	fillPrice := plan.EntryPrice
 	if order.FilledAvgPrice != nil {
 		fillPrice = *order.FilledAvgPrice
+	}
+	if fillPrice <= 0 {
+		return fmt.Errorf("order_manager: fill price must be positive")
 	}
 
 	marketType := order.MarketType.Normalize()

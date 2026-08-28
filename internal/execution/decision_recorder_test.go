@@ -127,6 +127,20 @@ func (s *decisionJournalStub) AttachPaperOrderScoped(ctx context.Context, decisi
 	return s.AttachPaperOrder(ctx, decisionID, orderID)
 }
 
+func (s *decisionJournalStub) GetByOrderScoped(_ context.Context, orderID uuid.UUID, live bool, _ repository.DecisionOrderAttachmentScope) (*domain.TradeDecision, error) {
+	for _, decision := range s.stored {
+		attached := decision.PaperOrderID
+		if live {
+			attached = decision.LiveOrderID
+		}
+		if attached != nil && *attached == orderID {
+			copy := decision
+			return &copy, nil
+		}
+	}
+	return nil, repository.ErrNotFound
+}
+
 func (*decisionJournalStub) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 	return true, nil
 }
@@ -191,6 +205,27 @@ func TestTradeDecisionJournalRecorderWritesReplayLifecycle(t *testing.T) {
 		if replay.events[i].AccountID != accountID || replay.events[i].Environment != scope.Environment() || replay.events[i].OriginID != versionID.String() {
 			t.Fatalf("events[%d] scope = %+v, want persisted decision scope", i, replay.events[i])
 		}
+	}
+}
+
+func TestTradeDecisionJournalRecorderRepairsMissingOrderAttachment(t *testing.T) {
+	accountID, versionID, runID := uuid.New(), uuid.New(), uuid.New()
+	tradeDate := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	scope, err := NewStrategyExecutionScope(accountID, domain.AccountEnvironmentPaperScored, versionID, domain.PipelineRunRef{ID: runID, TradeDate: tradeDate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisionID, orderID := uuid.New(), uuid.New()
+	decision := &domain.TradeDecision{ID: decisionID, AccountID: accountID, Environment: scope.Environment(), OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate, MarketType: domain.MarketTypeStock, InstrumentKey: "AAPL", RiskStatus: domain.RiskDecisionApproved, Status: domain.TradeDecisionStatusCandidate}
+	journal := &decisionJournalStub{stored: map[uuid.UUID]domain.TradeDecision{decisionID: *decision}}
+	recorder := NewTradeDecisionJournalRecorder(journal).(RecoverableOrderDecisionRecorder)
+
+	resolved, err := recorder.EnsureOrderDecisionAttachment(context.Background(), scope, decision, orderID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != decisionID || journal.stored[decisionID].PaperOrderID == nil || *journal.stored[decisionID].PaperOrderID != orderID {
+		t.Fatalf("resolved=%s stored=%+v", resolved, journal.stored[decisionID])
 	}
 }
 

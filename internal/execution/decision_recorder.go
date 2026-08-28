@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -39,6 +40,10 @@ type ScopedDecisionRecorder interface {
 
 type AttachedOrderDecisionRecorder interface {
 	ResolveAttachedOrderDecision(context.Context, ExecutionScope, uuid.UUID, bool) (uuid.UUID, error)
+}
+
+type RecoverableOrderDecisionRecorder interface {
+	EnsureOrderDecisionAttachment(context.Context, ExecutionScope, *domain.TradeDecision, uuid.UUID, bool) (uuid.UUID, error)
 }
 
 type tradeDecisionJournalRecorder struct {
@@ -205,6 +210,41 @@ func (r *tradeDecisionJournalRecorder) ResolveAttachedOrderDecision(ctx context.
 		return uuid.Nil, fmt.Errorf("decision recorder: attached order decision scope is invalid")
 	}
 	return decision.ID, nil
+}
+
+func (r *tradeDecisionJournalRecorder) EnsureOrderDecisionAttachment(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision, orderID uuid.UUID, live bool) (uuid.UUID, error) {
+	decisionID, err := r.ResolveAttachedOrderDecision(ctx, scope, orderID, live)
+	if err == nil {
+		return decisionID, nil
+	}
+	if !errors.Is(err, repository.ErrNotFound) {
+		return uuid.Nil, err
+	}
+	if decision == nil || decision.ID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("decision recorder: recovered decision intent is required")
+	}
+	persisted, getErr := r.repo.Get(ctx, decision.ID)
+	if getErr == nil {
+		if persisted == nil || !tradeDecisionMatchesScope(*persisted, scope) {
+			return uuid.Nil, fmt.Errorf("decision recorder: recovered decision intent scope is invalid")
+		}
+		decision = persisted
+	} else if errors.Is(getErr, repository.ErrNotFound) {
+		if err := r.RecordDecisionScoped(ctx, scope, decision); err != nil {
+			return uuid.Nil, fmt.Errorf("decision recorder: recover persisted decision intent: %w", err)
+		}
+	} else {
+		return uuid.Nil, fmt.Errorf("decision recorder: load recovered decision intent: %w", getErr)
+	}
+	if live {
+		err = r.AttachLiveOrderScoped(ctx, scope, decision.ID, orderID)
+	} else {
+		err = r.AttachPaperOrderScoped(ctx, scope, decision.ID, orderID)
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("decision recorder: recover order attachment: %w", err)
+	}
+	return r.ResolveAttachedOrderDecision(ctx, scope, orderID, live)
 }
 
 func (r *tradeDecisionJournalRecorder) persistedDecisionScope(ctx context.Context, decisionID uuid.UUID, supplied *ExecutionScope) (*domain.TradeDecision, error) {

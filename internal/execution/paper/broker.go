@@ -335,16 +335,22 @@ func (b *PaperBroker) CancelOrder(ctx context.Context, externalID string) error 
 
 // GetOrderStatus returns the tracked paper order status.
 func (b *PaperBroker) GetOrderStatus(ctx context.Context, externalID string) (domain.OrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, externalID)
+	return result.Status, err
+}
+
+// GetOrderStatusResult returns status with broker-authoritative fill evidence.
+func (b *PaperBroker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
 	if b == nil {
-		return "", errors.New("paper: broker is required")
+		return execution.BrokerOrderStatus{}, errors.New("paper: broker is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("paper: get order status: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("paper: get order status: %w", err)
 	}
 
 	id := strings.TrimSpace(externalID)
 	if id == "" {
-		return "", errors.New("paper: external order id is required")
+		return execution.BrokerOrderStatus{}, errors.New("paper: external order id is required")
 	}
 
 	b.mu.RLock()
@@ -352,10 +358,10 @@ func (b *PaperBroker) GetOrderStatus(ctx context.Context, externalID string) (do
 
 	order, ok := b.orders[id]
 	if !ok {
-		return "", fmt.Errorf("paper: order %q not found: %w", id, execution.ErrBrokerOrderNotFound)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("paper: order %q not found: %w", id, execution.ErrBrokerOrderNotFound)
 	}
 
-	return order.Status, nil
+	return execution.BrokerOrderStatus{Status: order.Status, FilledQuantity: order.FilledQuantity, FilledAvgPrice: cloneFloatPtr(order.FilledAvgPrice), FilledAt: cloneTimePtr(order.FilledAt)}, nil
 }
 
 // GetPositions returns a copy of the current open paper positions.

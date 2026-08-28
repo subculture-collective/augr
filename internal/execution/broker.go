@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
@@ -18,4 +19,19 @@ type Broker interface {
 	GetOrderStatus(ctx context.Context, externalID string) (domain.OrderStatus, error)
 	GetPositions(ctx context.Context) ([]domain.Position, error)
 	GetAccountBalance(ctx context.Context) (Balance, error)
+}
+
+// BrokerOrderStatus carries broker-authoritative fill evidence used during
+// restart recovery.
+type BrokerOrderStatus struct {
+	Status         domain.OrderStatus
+	FilledQuantity float64
+	FilledAvgPrice *float64
+	FilledAt       *time.Time
+}
+
+// BrokerOrderStatusProvider exposes fill evidence without widening the core
+// broker contract for venues that do not support allocator recovery.
+type BrokerOrderStatusProvider interface {
+	GetOrderStatusResult(context.Context, string) (BrokerOrderStatus, error)
 }
