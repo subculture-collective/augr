@@ -593,25 +593,35 @@ func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.Cop
 		executionResult, err = s.deps.Executor.ExecuteCopyOrder(ctx, request)
 	}
 	candidate.OrderID = executionResult.OrderID
-	if err != nil {
+	terminalMapped := false
+	if executionResult.Status == domain.OrderStatusFilled {
+		candidate.Status, candidate.RiskStatus, terminalMapped = "filled", "approved", true
+	} else if executionResult.Status == domain.OrderStatusRejected || executionResult.Status == domain.OrderStatusCancelled {
+		candidate.Status, candidate.RiskStatus, terminalMapped = "failed", "rejected", true
+	}
+	if err != nil && !terminalMapped {
 		candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{err.Error()}
-		if candidate.OrderID != nil {
+		if candidate.OrderID != nil && (executionResult.Status == domain.OrderStatusPending || executionResult.Status == domain.OrderStatusSubmitted || executionResult.Status == domain.OrderStatusPartial) {
 			candidate.Status = "received"
 		}
-	} else if validationErr := validatePaperOrderResult(executionResult, scope); validationErr != nil {
-		candidate.Status, candidate.RiskStatus, candidate.OrderID, candidate.RiskReasons = "failed", "pending", nil, []string{validationErr.Error()}
-	} else {
-		candidate.RiskStatus = "approved"
-		switch executionResult.Status {
-		case domain.OrderStatusFilled:
-			candidate.Status = "filled"
-		case domain.OrderStatusSubmitted:
-			candidate.Status = "ordered"
-		case domain.OrderStatusPartial, domain.OrderStatusPending:
-			candidate.Status = "partial"
-		default:
-			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
+	} else if err == nil && !terminalMapped {
+		if validationErr := validatePaperOrderResult(executionResult, scope); validationErr != nil {
+			candidate.Status, candidate.RiskStatus, candidate.OrderID, candidate.RiskReasons = "failed", "pending", nil, []string{validationErr.Error()}
+		} else {
+			candidate.RiskStatus = "approved"
+			switch executionResult.Status {
+			case domain.OrderStatusFilled:
+				candidate.Status = "filled"
+			case domain.OrderStatusSubmitted:
+				candidate.Status = "ordered"
+			case domain.OrderStatusPartial, domain.OrderStatusPending:
+				candidate.Status = "partial"
+			default:
+				candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
+			}
 		}
+	} else if err != nil {
+		candidate.RiskReasons = []string{err.Error()}
 	}
 	completed, updateErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
 	if updateErr != nil || !completed {

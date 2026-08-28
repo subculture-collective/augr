@@ -93,6 +93,8 @@ type retailOrder struct {
 	LeavesQuantity float64 `json:"leavesQuantity"`
 	Price          *amount `json:"price,omitempty"`
 	AvgPx          *amount `json:"avgPx,omitempty"`
+	LastUpdateTime string  `json:"lastUpdateTime"`
+	UpdatedAt      string  `json:"updatedAt"`
 	MarketMetadata *struct {
 		Slug    string `json:"slug"`
 		Outcome string `json:"outcome"`
@@ -383,7 +385,23 @@ func richRetailOrderStatus(order retailOrder, status domain.OrderStatus) (execut
 		}
 		result.FilledAvgPrice = &price
 	}
+	if timestamp := firstRetailTimestamp(strings.TrimSpace(order.LastUpdateTime), strings.TrimSpace(order.UpdatedAt)); timestamp != "" {
+		filledAt, err := time.Parse(time.RFC3339Nano, timestamp)
+		if err != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode provider order timestamp: %w", err)
+		}
+		result.FilledAt = &filledAt
+	}
 	return result, nil
+}
+
+func firstRetailTimestamp(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // GetPositions returns current Polymarket positions mapped to domain positions.

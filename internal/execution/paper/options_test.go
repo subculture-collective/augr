@@ -2,11 +2,13 @@ package paper
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/google/uuid"
 )
 
@@ -14,6 +16,48 @@ func optionOrder(price *float64) *domain.Order {
 	optionType := domain.OptionTypeCall
 	intent := domain.PositionIntentBuyToOpen
 	return &domain.Order{Ticker: "AAPL271217C00150000", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 2, LimitPrice: price, AssetClass: domain.AssetClassOption, OptionType: &optionType, ContractMultiplier: 100, PositionIntent: &intent}
+}
+
+func TestOptionLotsRemainDistinctBehindAggregateExecutionView(t *testing.T) {
+	price := 2.50
+	broker := NewPaperBroker(10000, 0, 0)
+	first, second := optionOrder(&price), optionOrder(&price)
+	if _, err := broker.SubmitOptionOrder(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	firstID := uuid.New()
+	if err := broker.BindDurableOptionPosition(context.Background(), first.Ticker, firstID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broker.SubmitOptionOrder(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	secondID := uuid.New()
+	if err := broker.BindDurableOptionPosition(context.Background(), second.Ticker, secondID); err != nil {
+		t.Fatal(err)
+	}
+	if len(broker.optionLots) != 2 {
+		t.Fatalf("durable option lots = %d, want 2", len(broker.optionLots))
+	}
+	positions, err := broker.GetPositions(context.Background())
+	if err != nil || len(positions) != 1 || positions[0].Quantity != 4 {
+		t.Fatalf("aggregate execution view = %+v, err=%v", positions, err)
+	}
+	if err := broker.ApplyOptionSettlement(context.Background(), firstID, 5); err != nil {
+		t.Fatal(err)
+	}
+	if broker.optionLots[firstID] != nil || broker.optionLots[secondID] == nil || broker.optionLots[secondID].Quantity != 2 {
+		t.Fatalf("settlement did not delete exact lot: %+v", broker.optionLots)
+	}
+}
+
+func TestOptionInsufficientFundsIsDefinitiveBrokerRejection(t *testing.T) {
+	price := 2.50
+	broker := NewPaperBroker(1, 0, 0)
+	_, err := broker.SubmitOptionOrder(context.Background(), optionOrder(&price))
+	if !errors.Is(err, execution.ErrBrokerOrderRejected) {
+		t.Fatalf("SubmitOptionOrder() error = %v, want ErrBrokerOrderRejected", err)
+	}
 }
 
 func TestOptionSettlementRequiresCommittedDurablePositionIdentity(t *testing.T) {

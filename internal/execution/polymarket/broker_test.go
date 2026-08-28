@@ -517,6 +517,24 @@ func TestBrokerGetOrderStatus_MapsStatuses(t *testing.T) {
 	}
 }
 
+func TestBrokerRichOrderStatusUsesProviderTimestamp(t *testing.T) {
+	filledAt := "2026-08-28T12:34:56.123456Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"order":{"id":"order-1","state":"ORDER_STATE_FILLED","cumQuantity":2,"avgPx":{"value":"0.42"},"lastUpdateTime":"` + filledAt + `"}}`))
+	}))
+	defer server.Close()
+	client := newTestClient()
+	client.SetAPIBaseURL(server.URL)
+	result, err := NewBroker(client).GetOrderStatusResult(context.Background(), "order-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := time.Parse(time.RFC3339Nano, filledAt)
+	if result.FilledAt == nil || !result.FilledAt.Equal(want) {
+		t.Fatalf("FilledAt = %v, want provider timestamp %v", result.FilledAt, want)
+	}
+}
+
 func TestBrokerGetPositions_MapsResponse(t *testing.T) {
 	t.Parallel()
 

@@ -567,6 +567,27 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 			t.Fatalf("completed intent=%+v", repo.completed)
 		}
 	})
+
+	for _, terminal := range []struct {
+		status     domain.OrderStatus
+		wantStatus string
+		wantRisk   string
+	}{{domain.OrderStatusFilled, "filled", "approved"}, {domain.OrderStatusRejected, "failed", "rejected"}, {domain.OrderStatusCancelled, "failed", "rejected"}} {
+		t.Run("terminal order maps before executor error "+terminal.status.String(), func(t *testing.T) {
+			repo.completed = nil
+			orderID := uuid.New()
+			executeErr := errors.New("terminal recovery notice")
+			executor := &resultCopyExecutor{result: PaperOrderResult{OrderID: &orderID, Status: terminal.status}, err: executeErr}
+			service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: &plannedOriginStore{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+			result, rebalanceErr := service.Rebalance(context.Background(), subscription.ID)
+			if rebalanceErr != nil || len(result.Intents) != 1 || repo.completed == nil {
+				t.Fatalf("Rebalance() = (%+v, %v), completed=%+v", result, rebalanceErr, repo.completed)
+			}
+			if repo.completed.Status != terminal.wantStatus || repo.completed.RiskStatus != terminal.wantRisk {
+				t.Fatalf("completed terminal intent=%+v", repo.completed)
+			}
+		})
+	}
 }
 
 func newLegacyEffectService(repo *effectCopyRepo, runs *authorizedRunRepo, events *effectEventRepo, executor PaperOrderExecutor) (*Service, uuid.UUID) {

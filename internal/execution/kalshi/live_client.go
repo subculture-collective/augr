@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 )
 
 // signedClient is the minimal authenticated Kalshi transport used by the live adapter.
@@ -89,7 +91,53 @@ func (c *HTTPClient) GetOrder(ctx context.Context, orderID string) (OrderRespons
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return OrderResponse{}, fmt.Errorf("kalshi: decode get order response: %w", err)
 	}
-	order := resp.Order
+	return mapWireOrder(resp.Order, orderID)
+}
+
+func (c *HTTPClient) GetOrderByClientOrderID(ctx context.Context, clientOrderID string) (OrderResponse, error) {
+	if c == nil || c.client == nil {
+		return OrderResponse{}, errors.New("kalshi: live client is required")
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return OrderResponse{}, errors.New("kalshi: client order id is required")
+	}
+	query := url.Values{"client_order_id": []string{clientOrderID}}
+	for _, path := range []string{"/portfolio/orders", "/historical/orders"} {
+		body, err := c.client.Get(ctx, path, query, true)
+		if err != nil {
+			if strings.Contains(err.Error(), "status=404") {
+				continue
+			}
+			return OrderResponse{}, fmt.Errorf("kalshi: lookup client order id: %w", err)
+		}
+		var response struct {
+			Orders []json.RawMessage `json:"orders"`
+			Order  json.RawMessage   `json:"order"`
+		}
+		if err := json.Unmarshal(body, &response); err != nil {
+			return OrderResponse{}, fmt.Errorf("kalshi: decode client order lookup: %w", err)
+		}
+		raw := response.Order
+		if len(response.Orders) > 0 {
+			raw = response.Orders[0]
+		}
+		if len(raw) != 0 && string(raw) != "null" {
+			return decodeOrderResponse(raw, "")
+		}
+	}
+	return OrderResponse{}, execution.ErrBrokerOrderNotFound
+}
+
+func decodeOrderResponse(raw []byte, fallbackID string) (OrderResponse, error) {
+	var order wireOrder
+	if err := json.Unmarshal(raw, &order); err != nil {
+		return OrderResponse{}, fmt.Errorf("kalshi: decode order response: %w", err)
+	}
+	return mapWireOrder(order, fallbackID)
+}
+
+func mapWireOrder(order wireOrder, fallbackID string) (OrderResponse, error) {
 	status := strings.TrimSpace(order.Status)
 	if status == "" {
 		remaining, parseErr := parseFixedFloat(order.RemainingCountFP)
@@ -100,10 +148,11 @@ func (c *HTTPClient) GetOrder(ctx context.Context, orderID string) (OrderRespons
 		}
 	}
 	if strings.TrimSpace(order.OrderID) == "" {
-		order.OrderID = orderID
+		order.OrderID = fallbackID
 	}
 	filled := float64(0)
 	if strings.TrimSpace(order.FillCountFP) != "" {
+		var err error
 		filled, err = parseFixedFloat(order.FillCountFP)
 		if err != nil {
 			return OrderResponse{}, fmt.Errorf("kalshi: parse filled count: %w", err)
@@ -203,15 +252,17 @@ type createOrderEnvelope struct {
 }
 
 type getOrderEnvelope struct {
-	Order struct {
-		OrderID             string `json:"order_id"`
-		ClientOrderID       string `json:"client_order_id"`
-		Status              string `json:"status"`
-		RemainingCountFP    string `json:"remaining_count_fp"`
-		FillCountFP         string `json:"fill_count_fp"`
-		AveragePriceDollars string `json:"average_price_dollars"`
-		LastUpdateTime      string `json:"last_update_time"`
-	} `json:"order"`
+	Order wireOrder `json:"order"`
+}
+
+type wireOrder struct {
+	OrderID             string `json:"order_id"`
+	ClientOrderID       string `json:"client_order_id"`
+	Status              string `json:"status"`
+	RemainingCountFP    string `json:"remaining_count_fp"`
+	FillCountFP         string `json:"fill_count_fp"`
+	AveragePriceDollars string `json:"average_price_dollars"`
+	LastUpdateTime      string `json:"last_update_time"`
 }
 
 type listPositionsEnvelope struct {

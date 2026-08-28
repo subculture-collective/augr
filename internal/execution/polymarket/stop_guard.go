@@ -19,11 +19,12 @@ import (
 )
 
 type StopGuardConfig struct {
-	ExecutionAccount domain.ExecutionAccountBinding
-	Broker           templateSender
-	ExitRepo         repository.AtomicPredictionExitRepository
-	Logger           *slog.Logger
-	Metrics          StopGuardMetrics
+	ExecutionAccount   domain.ExecutionAccountBinding
+	Broker             templateSender
+	ExitRepo           repository.AtomicPredictionExitRepository
+	FinancialLifecycle repository.FinancialLifecycleRepository
+	Logger             *slog.Logger
+	Metrics            StopGuardMetrics
 }
 
 type StopGuardMetrics interface {
@@ -54,7 +55,7 @@ type templateSender interface {
 }
 
 type stopOrderLookup interface {
-	GetOrderByClientOrderID(context.Context, string) (string, domain.OrderStatus, error)
+	GetOrderStatusByClientOrderIDResult(context.Context, string) (string, execution.BrokerOrderStatus, error)
 }
 
 type stopOrderTerminalizer interface {
@@ -84,11 +85,12 @@ type guardEntry struct {
 }
 
 type StopGuard struct {
-	executionAccount domain.ExecutionAccountBinding
-	broker           templateSender
-	exitRepo         repository.AtomicPredictionExitRepository
-	logger           *slog.Logger
-	metrics          StopGuardMetrics
+	executionAccount   domain.ExecutionAccountBinding
+	broker             templateSender
+	exitRepo           repository.AtomicPredictionExitRepository
+	financialLifecycle repository.FinancialLifecycleRepository
+	logger             *slog.Logger
+	metrics            StopGuardMetrics
 
 	mu     sync.RWMutex
 	bySlug map[string][]*guardEntry
@@ -110,13 +112,14 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 		return nil, errors.New("polymarket: durable stop exit repository is required")
 	}
 	return &StopGuard{
-		executionAccount: cfg.ExecutionAccount,
-		broker:           cfg.Broker,
-		exitRepo:         cfg.ExitRepo,
-		logger:           cfg.Logger,
-		metrics:          cfg.Metrics,
-		bySlug:           make(map[string][]*guardEntry),
-		byID:             make(map[string]*guardEntry),
+		executionAccount:   cfg.ExecutionAccount,
+		broker:             cfg.Broker,
+		exitRepo:           cfg.ExitRepo,
+		financialLifecycle: cfg.FinancialLifecycle,
+		logger:             cfg.Logger,
+		metrics:            cfg.Metrics,
+		bySlug:             make(map[string][]*guardEntry),
+		byID:               make(map[string]*guardEntry),
 	}, nil
 }
 
@@ -357,6 +360,17 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 		if entry == nil || !entry.state.CompareAndSwap(int32(guardArmed), int32(guardFiring)) {
 			continue
 		}
+		positionID, parseErr := uuid.Parse(entry.positionID)
+		if parseErr != nil {
+			positionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(entry.positionID))
+		}
+		if entry.claimed.Load() {
+			if g.recoverClaimedExit(ctx, entry, positionID) {
+				continue
+			}
+			entry.state.Store(int32(guardArmed))
+			continue
+		}
 		crossed := (entry.long && ((entry.stopPx > 0 && t.Price <= entry.stopPx) || (entry.takePx > 0 && t.Price >= entry.takePx))) ||
 			(!entry.long && ((entry.stopPx > 0 && t.Price >= entry.stopPx) || (entry.takePx > 0 && t.Price <= entry.takePx)))
 		if !crossed {
@@ -368,17 +382,6 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 		}
 		if g.metrics != nil {
 			g.metrics.ObserveTickToFireSeconds(entry.slug, time.Since(t.ReceivedAt).Seconds())
-		}
-		positionID, parseErr := uuid.Parse(entry.positionID)
-		if parseErr != nil {
-			positionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(entry.positionID))
-		}
-		if entry.claimed.Load() {
-			if g.recoverClaimedExit(ctx, entry, positionID) {
-				continue
-			}
-			entry.state.Store(int32(guardArmed))
-			continue
 		}
 		if err := g.exitRepo.CreatePredictionExitOrderAndReserve(ctx, entry.order.AccountID, entry.order.Environment, entry.order.OriginType, entry.order.OriginID, positionID, entry.order); err != nil {
 			if g.logger != nil {
@@ -409,10 +412,10 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 				continue
 			}
 			var externalID string
-			var status domain.OrderStatus
+			var result execution.BrokerOrderStatus
 			var lookupErr error
 			if lookup, ok := g.broker.(stopOrderLookup); ok {
-				externalID, status, lookupErr = lookup.GetOrderByClientOrderID(ctx, entry.order.ClientOrderID)
+				externalID, result, lookupErr = lookup.GetOrderStatusByClientOrderIDResult(ctx, entry.order.ClientOrderID)
 			} else {
 				entry.state.Store(int32(guardArmed))
 				continue
@@ -421,13 +424,25 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 				entry.state.Store(int32(guardArmed))
 				continue
 			}
-			if status == domain.OrderStatusCancelled || status == domain.OrderStatusRejected {
-				if !g.finalizeTerminalExit(ctx, entry, positionID, status, externalID) {
+			if result.Status == domain.OrderStatusCancelled || result.Status == domain.OrderStatusRejected {
+				if !g.finalizeTerminalExit(ctx, entry, positionID, result.Status, externalID) {
 					entry.state.Store(int32(guardArmed))
 				}
 				continue
 			}
-			if status != domain.OrderStatusPending && status != domain.OrderStatusSubmitted && status != domain.OrderStatusPartial && status != domain.OrderStatusFilled {
+			if result.Status != domain.OrderStatusPending && result.Status != domain.OrderStatusSubmitted && result.Status != domain.OrderStatusPartial && result.Status != domain.OrderStatusFilled {
+				entry.state.Store(int32(guardArmed))
+				continue
+			}
+			if result.Status == domain.OrderStatusPartial || result.Status == domain.OrderStatusFilled {
+				if !g.persistRecoveredExitFill(ctx, entry, externalID, result) {
+					entry.state.Store(int32(guardArmed))
+					continue
+				}
+				if result.Status == domain.OrderStatusFilled {
+					g.Cancel(entry.positionID)
+					continue
+				}
 				entry.state.Store(int32(guardArmed))
 				continue
 			}
@@ -455,7 +470,7 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 	if !ok {
 		return false
 	}
-	externalID, status, err := lookup.GetOrderByClientOrderID(ctx, entry.order.ClientOrderID)
+	externalID, result, err := lookup.GetOrderStatusByClientOrderIDResult(ctx, entry.order.ClientOrderID)
 	if err != nil {
 		if errors.Is(err, execution.ErrBrokerOrderNotFound) {
 			tmpl, prepareErr := g.broker.PrepareTemplate(entry.order)
@@ -476,21 +491,56 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 		}
 		return false
 	}
-	if status == domain.OrderStatusCancelled || status == domain.OrderStatusRejected {
-		return g.finalizeTerminalExit(ctx, entry, positionID, status, externalID)
+	if result.Status == domain.OrderStatusCancelled || result.Status == domain.OrderStatusRejected {
+		return g.finalizeTerminalExit(ctx, entry, positionID, result.Status, externalID)
 	}
-	if status != domain.OrderStatusPending && status != domain.OrderStatusSubmitted && status != domain.OrderStatusPartial && status != domain.OrderStatusFilled {
+	if result.Status != domain.OrderStatusPending && result.Status != domain.OrderStatusSubmitted && result.Status != domain.OrderStatusPartial && result.Status != domain.OrderStatusFilled {
 		return false
+	}
+	if result.Status == domain.OrderStatusPartial || result.Status == domain.OrderStatusFilled {
+		submittedAt := time.Now().UTC()
+		if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(externalID), submittedAt); err != nil && entry.order.Status == domain.OrderStatusPending {
+			return false
+		}
+		if !g.persistRecoveredExitFill(ctx, entry, externalID, result) {
+			return false
+		}
+		if result.Status == domain.OrderStatusFilled {
+			entry.state.Store(int32(guardFired))
+			g.Cancel(entry.positionID)
+			return true
+		}
 	}
 	submittedAt := time.Now().UTC()
 	if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(externalID), submittedAt); err != nil {
 		return false
 	}
-	if status == domain.OrderStatusFilled {
-		entry.state.Store(int32(guardFired))
-		g.Cancel(entry.positionID)
-	} else {
-		entry.state.Store(int32(guardArmed))
+	entry.state.Store(int32(guardArmed))
+	return true
+}
+
+func (g *StopGuard) persistRecoveredExitFill(ctx context.Context, entry *guardEntry, externalID string, result execution.BrokerOrderStatus) bool {
+	if g.financialLifecycle == nil || result.FilledQuantity <= 0 || result.FilledAvgPrice == nil || *result.FilledAvgPrice <= 0 || result.FilledAt == nil || result.FilledAt.IsZero() {
+		return false
+	}
+	entry.order.ExternalID = strings.TrimSpace(externalID)
+	entry.order.Status = result.Status
+	entry.order.FilledQuantity = result.FilledQuantity
+	entry.order.FilledAvgPrice = result.FilledAvgPrice
+	entry.order.FilledAt = result.FilledAt
+	if entry.order.SubmittedAt == nil {
+		submittedAt := result.FilledAt.UTC()
+		entry.order.SubmittedAt = &submittedAt
+	}
+	trade := &domain.Trade{ID: uuid.New(), AccountID: entry.order.AccountID, Environment: entry.order.Environment, OriginType: entry.order.OriginType, OriginID: entry.order.OriginID, OrderID: &entry.order.ID, Ticker: entry.order.Ticker, Side: entry.order.Side, Quantity: result.FilledQuantity, Price: *result.FilledAvgPrice, ExecutedAt: result.FilledAt.UTC()}
+	input := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("polymarket_stop_fill:v1:%s:observed:%.8f", entry.order.ID, result.FilledQuantity), Order: entry.order, FillIntent: repository.OrderFillIntent{Side: entry.order.Side, Quantity: result.FilledQuantity, ExecutionPrice: *result.FilledAvgPrice}, Now: result.FilledAt.UTC(), Trade: trade}
+	_, err := g.financialLifecycle.ApplyOrderFill(ctx, input)
+	if err != nil {
+		if resolver, ok := g.financialLifecycle.(repository.OrderFillCommitResolver); ok {
+			_, committed, resolveErr := resolver.ResolveOrderFillCommit(ctx, input)
+			return resolveErr == nil && committed
+		}
+		return false
 	}
 	return true
 }

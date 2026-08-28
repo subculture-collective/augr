@@ -28,6 +28,8 @@ type PaperBroker struct {
 	nowMu               sync.RWMutex
 	orders              map[string]*domain.Order
 	positions           map[string]*domain.Position
+	optionLots          map[uuid.UUID]*domain.Position
+	pendingOptionLots   map[string][]uuid.UUID
 	optionSpreads       map[string]float64
 	optionSpreadEffects map[string][]optionPositionEffect
 	optionOrderEffects  map[string]optionPositionEffect
@@ -82,6 +84,8 @@ func newPaperBroker(profile domain.PaperEvaluationProfile) *PaperBroker {
 	return &PaperBroker{
 		orders:              make(map[string]*domain.Order),
 		positions:           make(map[string]*domain.Position),
+		optionLots:          make(map[uuid.UUID]*domain.Position),
+		pendingOptionLots:   make(map[string][]uuid.UUID),
 		optionSpreads:       make(map[string]float64),
 		optionSpreadEffects: make(map[string][]optionPositionEffect),
 		optionOrderEffects:  make(map[string]optionPositionEffect),
@@ -189,6 +193,8 @@ func (b *PaperBroker) RestorePositions(positions []domain.Position) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.positions = make(map[string]*domain.Position, len(positions))
+	b.optionLots = make(map[uuid.UUID]*domain.Position)
+	b.pendingOptionLots = make(map[string][]uuid.UUID)
 	grouped := make(map[string]*domain.Position)
 	for i := range positions {
 		position := clonePosition(&positions[i])
@@ -199,6 +205,13 @@ func (b *PaperBroker) RestorePositions(positions []domain.Position) error {
 			return fmt.Errorf("paper: restored position must have ticker and positive quantity")
 		}
 		key := positionKey(position)
+		if position.AssetClass == domain.AssetClassOption {
+			if position.ID == uuid.Nil {
+				return fmt.Errorf("paper: restored option position requires durable id")
+			}
+			b.optionLots[position.ID] = position
+			continue
+		}
 		if existing, ok := grouped[key]; ok {
 			merged, err := mergeRestoredPositions(existing, position)
 			if err != nil {
@@ -304,7 +317,7 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 		if b.balance.Cash < totalCost {
 			order.Status = domain.OrderStatusRejected
 			b.orders[externalID] = cloneOrder(order)
-			return externalID, fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalCost, b.balance.Cash)
+			return externalID, errors.Join(execution.ErrBrokerOrderRejected, fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalCost, b.balance.Cash))
 		}
 		b.balance.Cash -= totalCost
 	} else {
@@ -363,10 +376,8 @@ func (b *PaperBroker) ApplyOptionSettlement(ctx context.Context, positionID uuid
 	if _, settled := b.settledOptions[positionID]; settled {
 		return nil
 	}
-	for ticker, position := range b.positions {
-		if position.ID != positionID {
-			continue
-		}
+	position := b.optionLots[positionID]
+	if position != nil {
 		cash := settlementPrice * position.Quantity * position.ContractMultiplier
 		if position.Side == domain.PositionSideLong {
 			b.balance.Cash += cash
@@ -375,7 +386,7 @@ func (b *PaperBroker) ApplyOptionSettlement(ctx context.Context, positionID uuid
 		} else {
 			return errors.New("paper: option settlement position side is invalid")
 		}
-		delete(b.positions, ticker)
+		delete(b.optionLots, positionID)
 		b.settledOptions[positionID] = struct{}{}
 		b.balance.BuyingPower = b.balance.Cash
 		b.balance.Equity = b.markToMarketEquityLocked()
@@ -394,11 +405,19 @@ func (b *PaperBroker) BindDurableOptionPosition(ctx context.Context, ticker stri
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	key := canonicalPositionKey(domain.MarketTypeOptions, ticker, "")
-	position := b.positions[key]
-	if position == nil || position.AssetClass != domain.AssetClassOption {
+	queue := b.pendingOptionLots[key]
+	if len(queue) == 0 {
 		return fmt.Errorf("paper: option position %q not found for durable binding", ticker)
 	}
+	transientID := queue[0]
+	b.pendingOptionLots[key] = queue[1:]
+	position := b.optionLots[transientID]
+	if position == nil {
+		return fmt.Errorf("paper: option position %q lost before durable binding", ticker)
+	}
+	delete(b.optionLots, transientID)
 	position.ID = positionID
+	b.optionLots[positionID] = position
 	return nil
 }
 
@@ -506,6 +525,7 @@ func (b *PaperBroker) GetPositions(ctx context.Context) ([]domain.Position, erro
 	for _, ticker := range tickers {
 		positions = append(positions, *clonePosition(b.positions[ticker]))
 	}
+	positions = append(positions, aggregateOptionLots(b.optionLots)...)
 
 	return positions, nil
 }
@@ -549,6 +569,7 @@ func (b *PaperBroker) CaptureLegacyAccounting(ctx context.Context) (accountingre
 	for _, ticker := range tickers {
 		positions = append(positions, *clonePosition(b.positions[ticker]))
 	}
+	positions = append(positions, aggregateOptionLots(b.optionLots)...)
 	return accountingrecon.LegacyCapture{
 		Balance: accountingrecon.LegacyBalance{
 			Currency: b.balance.Currency, Cash: b.balance.Cash,
@@ -683,7 +704,43 @@ func (b *PaperBroker) markToMarketEquityLocked() float64 {
 		}
 		equity -= position.Quantity * price * multiplier
 	}
+	for _, position := range b.optionLots {
+		price := position.AvgEntry
+		if position.CurrentPrice != nil {
+			price = *position.CurrentPrice
+		}
+		value := position.Quantity * price * position.ContractMultiplier
+		if position.Side == domain.PositionSideLong {
+			equity += value
+		} else {
+			equity -= value
+		}
+	}
 	return equity
+}
+
+func aggregateOptionLots(lots map[uuid.UUID]*domain.Position) []domain.Position {
+	grouped := make(map[string]*domain.Position)
+	for _, lot := range lots {
+		key := positionKey(lot) + ":" + string(lot.Side)
+		if current := grouped[key]; current != nil {
+			total := current.Quantity + lot.Quantity
+			current.AvgEntry = (current.AvgEntry*current.Quantity + lot.AvgEntry*lot.Quantity) / total
+			current.Quantity = total
+			continue
+		}
+		grouped[key] = clonePosition(lot)
+	}
+	keys := make([]string, 0, len(grouped))
+	for key := range grouped {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]domain.Position, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, *grouped[key])
+	}
+	return result
 }
 
 func positionKey(position *domain.Position) string {

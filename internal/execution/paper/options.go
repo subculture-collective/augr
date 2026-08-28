@@ -33,7 +33,7 @@ type optionPositionEffect struct {
 	price      float64
 	multiplier float64
 	opened     bool
-	previous   *domain.Position
+	previous   map[uuid.UUID]*domain.Position
 }
 
 // SimulateOptionFill calculates the fill for an explicitly priced options
@@ -102,7 +102,7 @@ func (b *PaperBroker) SubmitOptionOrder(ctx context.Context, order *domain.Order
 	}
 	totalDebit := result.Premium + result.Fee
 	if order.Side == domain.OrderSideBuy && b.balance.Cash < totalDebit {
-		return "", fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalDebit, b.balance.Cash)
+		return "", errors.Join(execution.ErrBrokerOrderRejected, fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalDebit, b.balance.Cash))
 	}
 	if err := ApplyOptionFill(order, result); err != nil {
 		return "", err
@@ -153,7 +153,7 @@ func (b *PaperBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Opti
 	}
 	total := debit + fees
 	if b.balance.Cash < total {
-		return nil, fmt.Errorf("paper: insufficient balance for debit spread: need %.2f, have %.2f", total, b.balance.Cash)
+		return nil, errors.Join(execution.ErrBrokerOrderRejected, fmt.Errorf("paper: insufficient balance for debit spread: need %.2f, have %.2f", total, b.balance.Cash))
 	}
 	ids := make([]string, len(spread.Legs))
 	now := time.Now().UTC()
@@ -297,40 +297,65 @@ func (b *PaperBroker) applyOptionPositionLocked(ticker, underlying string, optio
 	}
 	key := canonicalPositionKey(domain.MarketTypeOptions, ticker, "")
 	side, opening := optionPositionSide(intent), isOpeningOptionIntent(intent)
-	effect := optionPositionEffect{ticker: key, side: side, quantity: quantity, price: price, multiplier: multiplier, opened: opening, previous: clonePosition(b.positions[key])}
-	position := b.positions[key]
+	effect := optionPositionEffect{ticker: key, side: side, quantity: quantity, price: price, multiplier: multiplier, opened: opening, previous: cloneOptionLots(b.optionLots, key)}
 	if opening {
-		if position == nil {
-			b.positions[key] = &domain.Position{ID: uuid.New(), Ticker: ticker, MarketType: domain.MarketTypeOptions, Side: side, Quantity: quantity, AvgEntry: price, CurrentPrice: floatPtr(price), OpenedAt: now, AssetClass: domain.AssetClassOption, UnderlyingTicker: underlying, OptionType: optionType, Strike: strike, Expiry: expiry, ContractMultiplier: multiplier}
-			return effect, nil
-		}
-		if position.Side != side || position.ContractMultiplier != multiplier {
-			return optionPositionEffect{}, errors.New("paper: option position metadata mismatch")
-		}
-		position.AvgEntry = (position.AvgEntry*position.Quantity + price*quantity) / (position.Quantity + quantity)
-		position.Quantity += quantity
-		position.CurrentPrice = floatPtr(price)
+		id := uuid.New()
+		b.optionLots[id] = &domain.Position{ID: id, Ticker: ticker, MarketType: domain.MarketTypeOptions, Side: side, Quantity: quantity, AvgEntry: price, CurrentPrice: floatPtr(price), OpenedAt: now, AssetClass: domain.AssetClassOption, UnderlyingTicker: underlying, OptionType: optionType, Strike: strike, Expiry: expiry, ContractMultiplier: multiplier}
+		b.pendingOptionLots[key] = append(b.pendingOptionLots[key], id)
 		return effect, nil
 	}
-	if position == nil || position.Side != side || position.Quantity < quantity {
-		return optionPositionEffect{}, errors.New("paper: option close exceeds broker position")
+	remaining := quantity
+	for id, position := range b.optionLots {
+		if positionKey(position) != key || position.Side != side || remaining <= 0 {
+			continue
+		}
+		closed := math.Min(position.Quantity, remaining)
+		position.RealizedPnL += realizedPnL(side, position.AvgEntry, price, closed) * multiplier
+		position.Quantity -= closed
+		position.CurrentPrice = floatPtr(price)
+		remaining -= closed
+		if position.Quantity == 0 {
+			delete(b.optionLots, id)
+		}
 	}
-	position.RealizedPnL += realizedPnL(side, position.AvgEntry, price, quantity) * multiplier
-	position.Quantity -= quantity
-	position.CurrentPrice = floatPtr(price)
-	if position.Quantity == 0 {
-		delete(b.positions, key)
+	if remaining > 0 {
+		b.restoreOptionLotsLocked(key, effect.previous)
+		return optionPositionEffect{}, errors.New("paper: option close exceeds broker position")
 	}
 	return effect, nil
 }
 
 func (b *PaperBroker) reverseOptionPositionLocked(effect optionPositionEffect) error {
-	if effect.previous == nil {
-		delete(b.positions, effect.ticker)
-		return nil
-	}
-	b.positions[effect.ticker] = clonePosition(effect.previous)
+	b.restoreOptionLotsLocked(effect.ticker, effect.previous)
 	return nil
+}
+
+func cloneOptionLots(lots map[uuid.UUID]*domain.Position, key string) map[uuid.UUID]*domain.Position {
+	result := make(map[uuid.UUID]*domain.Position)
+	for id, position := range lots {
+		if positionKey(position) == key {
+			result[id] = clonePosition(position)
+		}
+	}
+	return result
+}
+
+func (b *PaperBroker) restoreOptionLotsLocked(key string, previous map[uuid.UUID]*domain.Position) {
+	for id, position := range b.optionLots {
+		if positionKey(position) == key {
+			delete(b.optionLots, id)
+		}
+	}
+	for id, position := range previous {
+		b.optionLots[id] = clonePosition(position)
+	}
+	queue := b.pendingOptionLots[key][:0]
+	for _, id := range b.pendingOptionLots[key] {
+		if b.optionLots[id] != nil {
+			queue = append(queue, id)
+		}
+	}
+	b.pendingOptionLots[key] = queue
 }
 
 // PreflightSpread fails before any leg orders are persisted. Atomic paper

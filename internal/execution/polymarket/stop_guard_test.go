@@ -18,24 +18,40 @@ import (
 )
 
 type fakeBroker struct {
-	prepareTmpl         *OrderTemplate
-	sendCalls           atomic.Int32
-	sendErr             error
-	lastTmpl            *OrderTemplate
-	lastOrder           *domain.Order
-	mu                  sync.Mutex
-	lookupStatus        domain.OrderStatus
-	lookupErr           error
-	lookupExternalID    string
-	submittedExternalID string
+	prepareTmpl          *OrderTemplate
+	sendCalls            atomic.Int32
+	sendErr              error
+	lastTmpl             *OrderTemplate
+	lastOrder            *domain.Order
+	mu                   sync.Mutex
+	lookupStatus         domain.OrderStatus
+	lookupErr            error
+	lookupExternalID     string
+	lookupFilledQuantity float64
+	lookupFilledAvgPrice *float64
+	lookupFilledAt       *time.Time
+	submittedExternalID  string
 }
 
 func (f *fakeBroker) GetOrderStatus(context.Context, string) (domain.OrderStatus, error) {
 	return f.lookupStatus, f.lookupErr
 }
 
-func (f *fakeBroker) GetOrderByClientOrderID(context.Context, string) (string, domain.OrderStatus, error) {
-	return f.lookupExternalID, f.lookupStatus, f.lookupErr
+func (f *fakeBroker) GetOrderStatusByClientOrderIDResult(context.Context, string) (string, execution.BrokerOrderStatus, error) {
+	return f.lookupExternalID, execution.BrokerOrderStatus{Status: f.lookupStatus, FilledQuantity: f.lookupFilledQuantity, FilledAvgPrice: f.lookupFilledAvgPrice, FilledAt: f.lookupFilledAt}, f.lookupErr
+}
+
+type recordingStopFinancialLifecycle struct {
+	inputs []repository.OrderFillInput
+}
+
+func (r *recordingStopFinancialLifecycle) ApplyOrderFill(_ context.Context, input repository.OrderFillInput) (repository.OrderFillResult, error) {
+	r.inputs = append(r.inputs, input)
+	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, nil
+}
+
+func (*recordingStopFinancialLifecycle) SettlePredictionDecision(context.Context, repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
+	return repository.PredictionDecisionSettlementResult{}, nil
 }
 
 type sharedExitClaims struct {
@@ -368,6 +384,32 @@ func TestStopGuardBootstrapResumesReservedOrderIdentity(t *testing.T) {
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.39, ReceivedAt: time.Now()})
 	if broker.sendCalls.Load() != 0 {
 		t.Fatal("reserved order was resubmitted")
+	}
+}
+
+func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
+	positionID := uuid.New()
+	stop := 0.40
+	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
+	intent := domain.PositionIntentSellToClose
+	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, Quantity: 2, Status: domain.OrderStatusSubmitted, PositionIntent: &intent, ClientOrderID: "reserved-stop-client"}
+	price := 0.41
+	filledAt := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	broker := &fakeBroker{lookupStatus: domain.OrderStatusFilled, lookupExternalID: "filled-venue-id", lookupFilledQuantity: 2, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt}
+	financial := &recordingStopFinancialLifecycle{}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: &sharedExitClaims{reservedOrder: reserved}, FinancialLifecycle: financial})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterPositionContext(context.Background(), pos); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.50, ReceivedAt: time.Now()})
+	if len(financial.inputs) != 1 || !financial.inputs[0].Now.Equal(filledAt) || financial.inputs[0].FillIntent.Quantity != 2 {
+		t.Fatalf("recovered economics = %+v", financial.inputs)
+	}
+	if g.Active() != 0 || broker.sendCalls.Load() != 0 {
+		t.Fatalf("filled recovery active=%d sends=%d", g.Active(), broker.sendCalls.Load())
 	}
 }
 

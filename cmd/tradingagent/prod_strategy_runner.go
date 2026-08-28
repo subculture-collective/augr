@@ -202,7 +202,7 @@ func newRealStrategyRunner(
 		runner.polymarketMarketData = client
 		if liveAuthorized && strings.TrimSpace(pm.SecretKey) != "" {
 			exitRepo, _ := orderRepo.(repository.AtomicPredictionExitRepository)
-			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), ExitRepo: exitRepo, Logger: logger, Metrics: appMetrics}); err == nil {
+			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), ExitRepo: exitRepo, FinancialLifecycle: financialRepo, Logger: logger, Metrics: appMetrics}); err == nil {
 				runner.polymarketStopGuard = guard
 			} else {
 				logger.Warn("polymarket stop guard disabled", slog.String("error", err.Error()))
