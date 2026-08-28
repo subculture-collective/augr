@@ -52,6 +52,8 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create unique index uq_portfolio_opportunities_execution_dedupe on portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key)",
 		"alter table allocation_decisions add column account_id",
 		"add column pipeline_run_id uuid, add column pipeline_run_trade_date date",
+		"where opportunity_id is not null and account_id is not null and environment is not null and origin_type is not null and origin_id is not null and pipeline_run_id is not null and pipeline_run_trade_date is not null",
+		"where event_type in ('decision_created','risk_reviewed') and account_id is not null and environment is not null and origin_type is not null and origin_id is not null",
 	} {
 		if !strings.Contains(up, fragment) {
 			t.Errorf("up migration missing %q", fragment)
@@ -93,6 +95,30 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 	frontierCheck := strings.Index(down, "checkpoint.projection_version is not null")
 	if ledgerLock < 0 || frontierCheck < 0 || ledgerLock > frontierCheck {
 		t.Fatal("down migration must lock ledger_transactions before checkpoint frontier safety checks")
+	}
+}
+
+func TestCanonicalAccountExpansionToleratesLegacyDecisionDuplicates(t *testing.T) {
+	ctx, pool := newCanonicalExpansionPool(t)
+	strategyID := insertCanonicalExpansionStrategy(t, ctx, pool)
+	var runID, opportunityID, decisionID uuid.UUID
+	if err := pool.QueryRow(ctx, `INSERT INTO pipeline_runs(strategy_id,ticker,trade_date,started_at) VALUES($1,'SPY',current_date,now()) RETURNING id`, strategyID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO portfolio_opportunities(strategy_id,pipeline_run_id,market_type,ticker,side,signal,status,expires_at,dedupe_key) VALUES($1,$2,'stock','SPY','buy','buy','queued',now()+interval '1 day',$3) RETURNING id`, strategyID, runID, uuid.NewString()).Scan(&opportunityID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO trade_decisions(strategy_id,pipeline_run_id,market_type,instrument_key,side,risk_status,status) VALUES($1,$2,'stock','SPY','buy','approved','candidate') RETURNING id`, strategyID, runID).Scan(&decisionID); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := pool.Exec(ctx, `INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) VALUES($1,$2,'paper','paper_order_intent'); INSERT INTO replay_events(trade_decision_id,event_type,occurred_at) VALUES($3,'decision_created',now())`, opportunityID, strategyID, decisionID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	applyCanonicalExpansion(t, ctx, pool)
+	if _, err := pool.Exec(ctx, `INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) VALUES($1,$2,'paper','paper_order_intent'); INSERT INTO replay_events(trade_decision_id,event_type,occurred_at) VALUES($3,'decision_created',now())`, opportunityID, strategyID, decisionID); err != nil {
+		t.Fatalf("schema-107 duplicate writer after migration 108: %v", err)
 	}
 }
 

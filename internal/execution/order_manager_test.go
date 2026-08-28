@@ -656,8 +656,8 @@ func TestProcessSignal_PostSubmitLeaseLossLeavesRecoverableBrokerEvidence(t *tes
 	if len(orderRepo.updates) == 0 {
 		t.Fatal("submitted broker order was not persisted")
 	}
-	if submittedClientID == "" || orderRepo.updates[0].ClientOrderID != submittedClientID || orderRepo.updates[0].ExternalID != "" {
-		t.Fatalf("client order id was not durably persisted before submit: submitted=%q first_update=%+v", submittedClientID, orderRepo.updates[0])
+	if submittedClientID == "" || len(orderRepo.orders) != 1 || orderRepo.orders[0].ClientOrderID != submittedClientID || orderRepo.orders[0].ExternalID != "" {
+		t.Fatalf("client order id was not durably persisted before submit: submitted=%q created=%+v", submittedClientID, orderRepo.orders)
 	}
 	persisted := orderRepo.updates[len(orderRepo.updates)-1]
 	if persisted.ExternalID != externalID || persisted.Status != domain.OrderStatusSubmitted || persisted.SubmittedAt == nil {
@@ -796,8 +796,10 @@ func (f *fakeFinancialLifecycleRepo) SettlePredictionDecision(context.Context, r
 
 func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	strategyID, runID, decisionID := uuid.New(), uuid.New(), uuid.New()
+	scope := strategyScope(strategyID, runID)
+	originType, originID := scope.Origin()
 	orderID := uuid.New()
-	order := &domain.Order{ID: orderID, StrategyID: &strategyID, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusSubmitted, Quantity: 10}
+	order := &domain.Order{ID: orderID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, StrategyID: &strategyID, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusSubmitted, Quantity: 10}
 	plan := defaultPlan()
 	plan.EntryPrice = 101
 	tradeRepo := &mockTradeRepo{}
@@ -806,9 +808,10 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	auditRepo := &mockAuditLogRepo{}
 	metrics := &mockMetricsRecorder{}
 	positionID := uuid.New()
-	financialRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, TradeID: uuid.New(), Replayed: false, PositionID: &positionID}}
+	tradeID := uuid.New()
+	financialRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}, Replayed: false, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker}}}
 	mgr := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, orderRepo, positionRepo, tradeRepo, auditRepo).WithFinancialLifecycleRepo(financialRepo).WithMetrics(metrics)
-	if err := mgr.HandleFillForTest(context.Background(), order, plan, strategyScope(strategyID, runID), decisionID); err != nil {
+	if err := mgr.HandleFillForTest(context.Background(), order, plan, scope, decisionID); err != nil {
 		t.Fatalf("HandleFillForTest() error = %v", err)
 	}
 	if financialRepo.called != 1 {
@@ -823,15 +826,16 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	if len(orderRepo.updates) != 0 {
 		t.Fatalf("expected no order repo updates")
 	}
-	order2 := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, Ticker: "MSFT", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusSubmitted, Quantity: 5}
+	order2 := &domain.Order{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, StrategyID: &strategyID, Ticker: "MSFT", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusSubmitted, Quantity: 5}
 	replayPositionID := uuid.New()
-	replayRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: order2.ID, PositionID: &replayPositionID, TradeID: uuid.New(), Replayed: true}}
+	replayTradeID := uuid.New()
+	replayRepo := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: order2.ID, PositionID: &replayPositionID, Position: &domain.Position{ID: replayPositionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order2.Ticker, Quantity: 5}, TradeID: replayTradeID, Trade: &domain.Trade{ID: replayTradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &order2.ID, PositionID: &replayPositionID, Ticker: order2.Ticker, Side: order2.Side}, Replayed: true}}
 	auditRepo2 := &mockAuditLogRepo{}
 	tradeRepo2 := &mockTradeRepo{}
 	positionRepo2 := &mockPositionRepo{}
 	metrics2 := &mockMetricsRecorder{}
 	mgr2 := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, &mockOrderRepo{}, positionRepo2, tradeRepo2, auditRepo2).WithFinancialLifecycleRepo(replayRepo).WithMetrics(metrics2)
-	if err := mgr2.HandleFillForTest(context.Background(), order2, plan, strategyScope(strategyID, runID), decisionID); err != nil {
+	if err := mgr2.HandleFillForTest(context.Background(), order2, plan, scope, decisionID); err != nil {
 		t.Fatalf("HandleFillForTest replay() error = %v", err)
 	}
 	if len(auditRepo2.entries) != 0 || len(tradeRepo2.trades) != 0 || len(positionRepo2.positions) != 0 || len(metrics2.records) != 0 {
@@ -867,7 +871,7 @@ func TestReconcilePersistedOrderRepairsReplayAfterCommittedFill(t *testing.T) {
 		}
 		return domain.OrderStatusFilled, nil
 	}}
-	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, TradeID: tradeID, Replayed: true}}
+	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker, Quantity: 1}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}, Replayed: true}}
 	recorder := &recoveryDecisionRecorder{decisionID: decisionID}
 	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
 	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
@@ -881,6 +885,48 @@ func TestReconcilePersistedOrderRepairsReplayAfterCommittedFill(t *testing.T) {
 	recorder.replayErr = errors.New("replay unavailable")
 	if _, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order); !errors.Is(err, recorder.replayErr) {
 		t.Fatalf("replay repair error=%v want %v", err, recorder.replayErr)
+	}
+}
+
+func TestReconcilePersistedOrderResubmitsCrashBeforeSubmit(t *testing.T) {
+	strategyVersionID, runID, decisionID := uuid.New(), uuid.New(), uuid.New()
+	scope := strategyScope(strategyVersionID, runID)
+	originType, originID := scope.Origin()
+	run, _ := scope.PipelineRun()
+	orderID, positionID, tradeID := uuid.New(), uuid.New(), uuid.New()
+	price := 100.0
+	order := &domain.Order{ID: orderID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, StrategyID: scope.LegacyStrategyID(), PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, ClientOrderID: "augr-" + orderID.String(), Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, LimitPrice: &price, Status: domain.OrderStatusPending, CreatedAt: time.Now().UTC()}
+	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker, Quantity: 1}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}}}
+	recorder := &recoveryDecisionRecorder{decisionID: decisionID}
+	broker := paperbroker.NewPaperBroker(100_000, 0, 0)
+	fenceCalls := 0
+	mgr := execution.NewOrderManager(broker, "paper", &mockRiskEngine{}, &mockPositionRepo{}, &mockOrderRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}, nil, execution.SizingConfig{}, slog.Default()).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder).WithEffectFence(func(context.Context) error {
+		fenceCalls++
+		return nil
+	})
+
+	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
+	if err != nil {
+		t.Fatalf("ReconcilePersistedOrder() error=%v", err)
+	}
+	if status != domain.OrderStatusFilled || financial.called != 1 || fenceCalls == 0 {
+		t.Fatalf("status=%s fill calls=%d fence calls=%d, want filled/1/positive", status, financial.called, fenceCalls)
+	}
+	if brokerStatus, err := broker.GetOrderStatus(context.Background(), order.ClientOrderID); err != nil || brokerStatus != domain.OrderStatusFilled {
+		t.Fatalf("broker status=%s error=%v", brokerStatus, err)
+	}
+}
+
+func TestHandleFillRejectsReplayedPositionIdentityWithoutPersistedRow(t *testing.T) {
+	strategyVersionID, runID := uuid.New(), uuid.New()
+	scope := strategyScope(strategyVersionID, runID)
+	originType, originID := scope.Origin()
+	orderID, positionID, tradeID := uuid.New(), uuid.New(), uuid.New()
+	order := &domain.Order{ID: orderID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusFilled}
+	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}, Replayed: true}}
+	mgr := newTestOrderManager(&mockBroker{}, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial)
+	if err := mgr.HandleFillForTest(context.Background(), order, defaultPlan(), scope, uuid.New()); err == nil || !strings.Contains(err.Error(), "persisted position is required") {
+		t.Fatalf("HandleFillForTest() error=%v", err)
 	}
 }
 

@@ -333,7 +333,7 @@ func TestTradeDecisionJournalRepo_InitialReplayRollbackAndRestartRepair(t *testi
 		ADD COLUMN paper_order_id UUID, ADD COLUMN live_order_id UUID, ADD COLUMN status TEXT NOT NULL DEFAULT 'candidate',
 		ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 		ALTER TABLE replay_events ADD COLUMN account_id UUID, ADD COLUMN environment TEXT, ADD COLUMN origin_type TEXT, ADD COLUMN origin_id TEXT;
-		CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed');
+		CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL;
 		CREATE FUNCTION fail_risk_replay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='risk_reviewed' THEN RAISE EXCEPTION 'injected replay failure'; END IF; RETURN NEW; END $$;
 		CREATE TRIGGER fail_risk_replay BEFORE INSERT ON replay_events FOR EACH ROW EXECUTE FUNCTION fail_risk_replay()`)
 	if err != nil {

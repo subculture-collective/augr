@@ -181,7 +181,7 @@ func (r *TradeDecisionJournalRepo) CreateWithInitialReplay(ctx context.Context, 
 		payload []byte
 		at      time.Time
 	}{{domain.ReplayEventTypeDecisionCreated, "decision_journal", decisionPayload, decision.CreatedAt}, {domain.ReplayEventTypeRiskReviewed, "risk_engine", riskPayload, decision.UpdatedAt}} {
-		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.type_, event.source, event.payload, event.at); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.type_, event.source, event.payload, event.at); err != nil {
 			return fmt.Errorf("postgres: insert initial decision replay: %w", err)
 		}
 	}

@@ -354,6 +354,12 @@ type restartPaperProcessor struct {
 	completedEffects int
 	orders           *portfolioRecoveryOrderRepo
 	errAfterEffect   bool
+	reconcileCalls   int
+}
+
+func (p *restartPaperProcessor) ReconcilePaperOrder(_ context.Context, _ domain.Opportunity, order *domain.Order, _ uuid.UUID) (portfolio.PaperOrderResult, error) {
+	p.reconcileCalls++
+	return portfolio.PaperOrderResult{OrderID: &order.ID, Status: order.Status}, nil
 }
 
 func (p *restartPaperProcessor) ProcessPaperOrder(ctx context.Context, req portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
@@ -429,6 +435,10 @@ func (p *portfolioPaperProcessorStub) ProcessPaperOrder(_ context.Context, req p
 	p.scope = req.Scope
 	id := uuid.New()
 	return portfolio.PaperOrderResult{OrderID: &id, Status: domain.OrderStatusFilled}, nil
+}
+
+func (p *portfolioPaperProcessorStub) ReconcilePaperOrder(_ context.Context, _ domain.Opportunity, order *domain.Order, _ uuid.UUID) (portfolio.PaperOrderResult, error) {
+	return portfolio.PaperOrderResult{OrderID: &order.ID, Status: order.Status}, nil
 }
 
 type preclaimFailOpportunityRepo struct {
@@ -910,8 +920,8 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	if err := restarted.jobs["portfolio_allocator"].Fn(context.Background()); err != nil {
 		t.Fatalf("restart run error = %v", err)
 	}
-	if processor.calls != 1 || processor.completedEffects != 1 {
-		t.Fatalf("processor calls/effects = %d/%d, want recovery without duplicate execution", processor.calls, processor.completedEffects)
+	if processor.calls != 1 || processor.completedEffects != 1 || processor.reconcileCalls != 1 {
+		t.Fatalf("processor calls/effects/reconciliations = %d/%d/%d, want fill repair without duplicate execution", processor.calls, processor.completedEffects, processor.reconcileCalls)
 	}
 	if opportunityRepo.items[0].Status != domain.OpportunityStatusExecuted || len(decisionRepo.created) != 1 || decisionRepo.created[0].CreatedOrderID == nil || *decisionRepo.created[0].CreatedOrderID != processor.orderID {
 		t.Fatalf("restart did not reconcile completed effect: opportunity=%+v decisions=%+v", opportunityRepo.items[0], decisionRepo.created)
@@ -998,7 +1008,8 @@ func TestPortfolioAllocatorConcurrentRecoverersCreateOneDecision(t *testing.T) {
 	repo := &concurrentClaimOpportunityRepo{portfolioAllocatorOpportunityRepo: portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}, claims: map[uuid.UUID]uuid.UUID{opportunityID: oldOwner}, claimExpires: map[uuid.UUID]time.Time{opportunityID: now.Add(-time.Minute)}}}
 	decisions := &portfolioAllocatorDecisionRepo{}
 	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, StrategyID: &strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, AllocationOpportunityID: &opportunityID, Status: domain.OrderStatusFilled})}
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: decisions, OrderRepo: orders})
+	processor := &terminalRecoveryProcessor{status: domain.OrderStatusFilled}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: decisions, OrderRepo: orders, PortfolioPaperProcessor: processor})
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Add(1)
@@ -1010,8 +1021,8 @@ func TestPortfolioAllocatorConcurrentRecoverersCreateOneDecision(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if len(decisions.created) != 1 || repo.items[0].Status != domain.OpportunityStatusExecuted {
-		t.Fatalf("recovery decisions/status = %d/%s, want 1/executed", len(decisions.created), repo.items[0].Status)
+	if len(decisions.created) != 1 || repo.items[0].Status != domain.OpportunityStatusExecuted || processor.calls != 1 {
+		t.Fatalf("recovery decisions/status/repairs = %d/%s/%d, want 1/executed/1", len(decisions.created), repo.items[0].Status, processor.calls)
 	}
 }
 

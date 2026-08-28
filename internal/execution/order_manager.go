@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -545,6 +546,7 @@ func (m *OrderManager) ProcessSignal(
 		CreatedAt:                now,
 		PredictionSide:           plan.Side,
 	}
+	order.ClientOrderID = "augr-" + order.ID.String()
 	if originType == ledger.ExecutionOriginStrategyVersion {
 		order.StrategyID = scope.LegacyStrategyID()
 	}
@@ -573,10 +575,6 @@ func (m *OrderManager) ProcessSignal(
 
 	if err := m.orderRepo.Create(ctx, order); err != nil {
 		return fmt.Errorf("order_manager: create order: %w", err)
-	}
-	order.ClientOrderID = "augr-" + order.ID.String()
-	if err := m.orderRepo.Update(ctx, order); err != nil {
-		return fmt.Errorf("order_manager: persist client order id: %w", err)
 	}
 	m.recordOrderMetric(order.Side, order.Status)
 
@@ -1099,7 +1097,23 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 	}
 	status, err := m.broker.GetOrderStatus(ctx, brokerOrderID)
 	if err != nil {
-		return "", fmt.Errorf("order_manager: reconcile broker status: %w", err)
+		if order.Status != domain.OrderStatusPending || strings.TrimSpace(order.ExternalID) != "" || !errors.Is(err, ErrBrokerOrderNotFound) {
+			return "", fmt.Errorf("order_manager: reconcile broker status: %w", err)
+		}
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
+		externalID, submitErr := m.broker.SubmitOrder(ctx, order)
+		if submitErr != nil {
+			return "", fmt.Errorf("order_manager: resubmit persisted order: %w", submitErr)
+		}
+		if strings.TrimSpace(externalID) != brokerOrderID {
+			return "", fmt.Errorf("order_manager: resubmitted client order identity mismatch")
+		}
+		status, err = m.broker.GetOrderStatus(ctx, brokerOrderID)
+		if err != nil {
+			return "", fmt.Errorf("order_manager: verify resubmitted order: %w", err)
+		}
 	}
 	if order.Status == domain.OrderStatusPending {
 		if err := m.fenceEffect(ctx); err != nil {
@@ -1360,21 +1374,33 @@ func (m *OrderManager) handleFill(
 }
 
 func validateOrderFillResult(result repository.OrderFillResult, order *domain.Order, scope ExecutionScope) error {
-	if order == nil || result.OrderID != order.ID || result.TradeID == uuid.Nil {
+	if order == nil || result.OrderID != order.ID || result.TradeID == uuid.Nil || result.Trade == nil {
 		return fmt.Errorf("order and trade identities are incomplete or mismatched")
 	}
 	if order.Side == domain.OrderSideBuy && result.PositionID == nil {
 		return fmt.Errorf("opening fill has no position identity")
 	}
-	if result.Position == nil {
+	originType, originID := scope.Origin()
+	trade := result.Trade
+	if trade.ID != result.TradeID || trade.AccountID != scope.AccountID() || trade.Environment != scope.Environment() ||
+		trade.OriginType != string(originType) || trade.OriginID != originID || trade.OrderID == nil || *trade.OrderID != order.ID ||
+		trade.Ticker != order.Ticker || trade.Side != order.Side {
+		return fmt.Errorf("trade identity or canonical scope is inconsistent")
+	}
+	if result.PositionID == nil {
+		if result.Position != nil || trade.PositionID != nil {
+			return fmt.Errorf("position identity is inconsistent")
+		}
 		return nil
 	}
-	originType, originID := scope.Origin()
+	if result.Position == nil {
+		return fmt.Errorf("persisted position is required")
+	}
 	position := result.Position
 	if result.PositionID == nil || *result.PositionID != position.ID || position.ID == uuid.Nil ||
 		position.AccountID != scope.AccountID() || position.Environment != scope.Environment() ||
 		position.OriginType != string(originType) || position.OriginID != originID ||
-		position.Ticker != fillPositionTicker(order) {
+		position.Ticker != fillPositionTicker(order) || trade.PositionID == nil || *trade.PositionID != position.ID {
 		return fmt.Errorf("position identity or canonical scope is inconsistent")
 	}
 	return nil

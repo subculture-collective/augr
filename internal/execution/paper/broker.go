@@ -352,7 +352,7 @@ func (b *PaperBroker) GetOrderStatus(ctx context.Context, externalID string) (do
 
 	order, ok := b.orders[id]
 	if !ok {
-		return "", fmt.Errorf("paper: order %q not found", id)
+		return "", fmt.Errorf("paper: order %q not found: %w", id, execution.ErrBrokerOrderNotFound)
 	}
 
 	return order.Status, nil

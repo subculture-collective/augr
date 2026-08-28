@@ -78,10 +78,21 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		if existingOrderID != input.Order.ID || existingAccountID != input.Order.AccountID || existingEnvironment != string(input.Order.Environment) || existingOriginType != input.Order.OriginType || existingOriginID != input.Order.OriginID || !numeric8Equal(existingFillQuantity, input.FillIntent.Quantity) || !numeric8Equal(existingFillPrice, input.FillIntent.ExecutionPrice) {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: idempotency key %s reused with mismatched payload", input.IdempotencyKey)
 		}
+		var existingPosition *domain.Position
+		if existingPositionID != nil {
+			existingPosition, err = scanPosition(tx.QueryRow(ctx, positionSelectSQL+` WHERE p.id=$1 AND p.account_id=$2`, *existingPositionID, existingAccountID))
+			if err != nil {
+				return repository.OrderFillResult{}, fmt.Errorf("postgres: load replayed fill position: %w", err)
+			}
+		}
+		existingTrade, err := scanTrade(tx.QueryRow(ctx, tradeSelectSQL+` WHERE id=$1 AND account_id=$2`, existingTradeID, existingAccountID))
+		if err != nil {
+			return repository.OrderFillResult{}, fmt.Errorf("postgres: load replayed fill trade: %w", err)
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: commit replayed order fill: %w", err)
 		}
-		return repository.OrderFillResult{OrderID: existingOrderID, PositionID: existingPositionID, TradeID: existingTradeID, CreatedAt: existingCreatedAt, Replayed: true}, nil
+		return repository.OrderFillResult{OrderID: existingOrderID, PositionID: existingPositionID, Position: existingPosition, TradeID: existingTradeID, Trade: existingTrade, CreatedAt: existingCreatedAt, Replayed: true}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: select order fill idempotency: %w", err)
 	}
@@ -239,7 +250,7 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	if err := tx.Commit(ctx); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: commit order fill: %w", err)
 	}
-	return repository.OrderFillResult{OrderID: order.ID, PositionID: positionID, Position: position, TradeID: trade.ID, CreatedAt: trade.CreatedAt}, nil
+	return repository.OrderFillResult{OrderID: order.ID, PositionID: positionID, Position: position, TradeID: trade.ID, Trade: trade, CreatedAt: trade.CreatedAt}, nil
 }
 
 func validateOrderFillInput(input repository.OrderFillInput) error {

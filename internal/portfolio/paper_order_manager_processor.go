@@ -145,7 +145,8 @@ func (p *PaperOrderManagerProcessor) ReconcilePaperOrder(ctx context.Context, op
 	}
 	manager := execution.NewOrderManager(p.deps.PaperBroker, "paper", p.deps.RiskEngine, p.deps.PositionRepo, p.deps.OrderRepo, p.deps.TradeRepo, p.deps.AuditLogRepo, p.deps.AgentEventRepo, execution.SizingConfig{}, p.deps.Logger).
 		WithFinancialLifecycleRepo(p.deps.FinancialLifecycleRepo).WithLiveTrading(false).
-		WithEffectFence(p.claimFence(opportunity.ID, claimID))
+		WithEffectFence(p.claimFence(opportunity.ID, claimID)).
+		WithDecisionRecorder(p.deps.DecisionRecorder)
 	status, err := manager.ReconcilePersistedOrder(ctx, scope, order)
 	return PaperOrderResult{OrderID: &order.ID, Status: status}, err
 }

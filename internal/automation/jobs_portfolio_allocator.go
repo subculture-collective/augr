@@ -370,12 +370,12 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 }
 
 func (o *JobOrchestrator) reconcileNonterminalPaperOrder(ctx context.Context, opportunity domain.Opportunity, order *domain.Order, claimID uuid.UUID) error {
-	if order.Status == domain.OrderStatusFilled || order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+	if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
 		return nil
 	}
 	reconciler, ok := o.deps.PortfolioPaperProcessor.(portfolio.PaperOrderReconciler)
 	if !ok {
-		return fmt.Errorf("portfolio_allocator: paper order reconciler is required for nonterminal recovery")
+		return fmt.Errorf("portfolio_allocator: paper order reconciler is required for fill-safe recovery")
 	}
 	result, err := reconciler.ReconcilePaperOrder(ctx, opportunity, order, claimID)
 	if err != nil {

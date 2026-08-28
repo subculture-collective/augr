@@ -695,6 +695,7 @@ type OrderFillResult struct {
 	PositionID *uuid.UUID
 	Position   *domain.Position
 	TradeID    uuid.UUID
+	Trade      *domain.Trade
 	CreatedAt  time.Time
 	Replayed   bool
 }

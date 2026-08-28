@@ -65,7 +65,7 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 			)
 			SELECT $1,$2,$3,$4,$6,$7,$5,$8,$9,$10,$11,$12,$13,$14,$15 FROM authorized
 			WHERE $16::uuid IS NULL OR EXISTS (SELECT 1 FROM portfolio_opportunities claimed WHERE claimed.id=$5 AND claimed.account_id=$1 AND claimed.status='selected' AND claimed.allocation_claim_id=$16 AND claimed.allocation_claim_expires_at>clock_timestamp())
-			ON CONFLICT (opportunity_id) WHERE opportunity_id IS NOT NULL DO NOTHING
+			ON CONFLICT (opportunity_id) WHERE opportunity_id IS NOT NULL AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND pipeline_run_id IS NOT NULL AND pipeline_run_trade_date IS NOT NULL DO NOTHING
 			RETURNING id, created_at
 		)
 		SELECT id,created_at FROM inserted

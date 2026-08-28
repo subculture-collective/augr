@@ -179,11 +179,20 @@ CREATE INDEX idx_portfolio_opportunities_account_created ON portfolio_opportunit
 CREATE INDEX idx_portfolio_opportunities_allocation_claim ON portfolio_opportunities(account_id,status,allocation_claim_expires_at,id) WHERE status='selected';
 CREATE UNIQUE INDEX uq_portfolio_opportunities_execution_dedupe ON portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key);
 CREATE INDEX idx_allocation_decisions_account_created ON allocation_decisions(account_id,created_at,id) WHERE account_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_allocation_decisions_opportunity ON allocation_decisions(opportunity_id) WHERE opportunity_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_allocation_decisions_opportunity ON allocation_decisions(opportunity_id)
+    WHERE opportunity_id IS NOT NULL AND account_id IS NOT NULL AND environment IS NOT NULL
+      AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND pipeline_run_id IS NOT NULL
+      AND pipeline_run_trade_date IS NOT NULL;
 CREATE INDEX idx_replay_events_account_occurred ON replay_events(account_id,occurred_at,id) WHERE account_id IS NOT NULL;
-CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed');
-CREATE UNIQUE INDEX uq_replay_events_fill_order ON replay_events(account_id,trade_decision_id,event_type,(payload->>'order_id')) WHERE event_type='fill_observed';
-CREATE UNIQUE INDEX uq_replay_events_position ON replay_events(account_id,trade_decision_id,event_type,(payload->>'position_id')) WHERE event_type='position_updated';
+CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type)
+    WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL
+      AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_replay_events_fill_order ON replay_events(account_id,trade_decision_id,event_type,(payload->>'order_id'))
+    WHERE event_type='fill_observed' AND account_id IS NOT NULL AND environment IS NOT NULL
+      AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND payload->>'order_id' IS NOT NULL;
+CREATE UNIQUE INDEX uq_replay_events_position ON replay_events(account_id,trade_decision_id,event_type,(payload->>'position_id'))
+    WHERE event_type='position_updated' AND account_id IS NOT NULL AND environment IS NOT NULL
+      AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND payload->>'position_id' IS NOT NULL;
 CREATE UNIQUE INDEX uq_orders_client_order_id ON orders(client_order_id) WHERE client_order_id IS NOT NULL;
 CREATE INDEX idx_financial_fill_idempotency_account ON financial_fill_idempotency(account_id,created_at,idempotency_key) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_prediction_settlement_idempotency_account ON prediction_settlement_idempotency(account_id,created_at,idempotency_key) WHERE account_id IS NOT NULL;
