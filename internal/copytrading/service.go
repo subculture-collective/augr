@@ -43,6 +43,10 @@ type PaperOrderExecutor interface {
 	ExecuteCopyOrder(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error)
 }
 
+type durableCopyOrderEffectFinder interface {
+	FindCopyOrderEffect(context.Context, PaperOrderRequest) (bool, error)
+}
+
 type CopyOriginLifecycle interface {
 	ProposeCopyIntent(context.Context, domain.CopySubscription, domain.CopyTradeIntent, uuid.UUID) error
 }
@@ -611,6 +615,20 @@ func (s *Service) executePlannedRun(ctx context.Context, subscription *domain.Co
 		retryable := candidate.Status == "received" || candidate.Status == "ordered" || candidate.Status == "partial" || (candidate.Status == "failed" && candidate.RiskStatus == "pending")
 		if subscription.Status != domain.CopySubscriptionPaperActive || !subscription.IsPaper {
 			retryable = (candidate.Status == "ordered" || candidate.Status == "partial") && candidate.OrderID != nil
+			if candidate.Status == "received" && subscription.IsPaper {
+				scope, scopeErr := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, persistedOrigin.ID())
+				if scopeErr != nil {
+					return result, scopeErr
+				}
+				finder, ok := s.deps.Executor.(durableCopyOrderEffectFinder)
+				if ok {
+					durable, effectErr := finder.FindCopyOrderEffect(ctx, PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
+					if effectErr != nil {
+						return result, fmt.Errorf("discover durable copy order for intent %s: %w", candidate.ID, effectErr)
+					}
+					retryable = durable
+				}
+			}
 		}
 		if candidate.PolicyStatus != "approved" || !retryable {
 			result.Intents = append(result.Intents, candidate)
@@ -662,7 +680,19 @@ func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.Cop
 	if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
 		return candidate, subscription, err
 	}
-	if s.deps.Lifecycle != nil {
+	scope, err := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, originRunID)
+	if err != nil {
+		return candidate, subscription, fmt.Errorf("copy execution scope: %w", err)
+	}
+	request := PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: originRunID, ClaimID: claimID}
+	hasDurableEffect := false
+	if finder, ok := s.deps.Executor.(durableCopyOrderEffectFinder); ok {
+		hasDurableEffect, err = finder.FindCopyOrderEffect(ctx, request)
+		if err != nil {
+			return candidate, subscription, fmt.Errorf("discover durable copy order for intent %s: %w", candidate.ID, err)
+		}
+	}
+	if s.deps.Lifecycle != nil && !hasDurableEffect {
 		if err := s.deps.Lifecycle.ProposeCopyIntent(ctx, *subscription, candidate, originRunID); err != nil {
 			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{fmt.Errorf("propose copy common lifecycle: %w", err).Error()}
 			completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
@@ -672,11 +702,6 @@ func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.Cop
 			return candidate, subscription, nil
 		}
 	}
-	scope, err := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, originRunID)
-	if err != nil {
-		return candidate, subscription, fmt.Errorf("copy execution scope: %w", err)
-	}
-	request := PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: originRunID, ClaimID: claimID}
 	var executionResult PaperOrderResult
 	if executor, ok := s.deps.Executor.(lockedCopyExecutor); lockHeld && ok {
 		executionResult, err = executor.ExecuteCopyOrderWithAccountLockHeld(ctx, request)

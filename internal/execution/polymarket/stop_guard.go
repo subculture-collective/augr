@@ -192,6 +192,9 @@ func (g *StopGuard) registerEntry(pos Position, initialState guardState) error {
 		positionIntent = domain.PositionIntentSellToClose
 	}
 	order.PositionIntent = &positionIntent
+	if durablePositionID, parseErr := uuid.Parse(positionID); parseErr == nil {
+		order.ClosePositionIDs = []uuid.UUID{durablePositionID}
+	}
 	order.ClientOrderID = "augr-polymarket-stop-" + order.ID.String()
 	tmpl, err := g.broker.PrepareTemplate(order)
 	if err != nil {
@@ -486,7 +489,7 @@ func (g *StopGuard) resolveStopReservation(ctx context.Context, entry *guardEntr
 		return nil, fmt.Errorf("polymarket: resolve prediction exit reservation: %w", err)
 	}
 	if order.AccountID != entry.order.AccountID || order.Environment != entry.order.Environment || order.OriginType != entry.order.OriginType || order.OriginID != entry.order.OriginID ||
-		order.Quantity-order.FilledQuantity != entry.order.Quantity-entry.order.FilledQuantity || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != entry.order.OrderType ||
+		!canonicalPolymarketQuantityEqual(order.Quantity-order.FilledQuantity, entry.order.Quantity-entry.order.FilledQuantity) || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != entry.order.OrderType ||
 		order.Ticker != entry.order.Ticker || order.PredictionSide != entry.order.PredictionSide || order.PolymarketIntent != entry.order.PolymarketIntent || order.Side != entry.order.Side || order.PositionIntent == nil || entry.order.PositionIntent == nil || *order.PositionIntent != *entry.order.PositionIntent {
 		return nil, errors.New("polymarket: resolved prediction exit reservation does not match claimed order")
 	}

@@ -467,7 +467,10 @@ func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, cl
 		 AND i.origin_type='copy_subscription' AND s.origin_type='copy_subscription'
 		 AND i.origin_id=s.id AND s.origin_id=s.id AND s.is_paper=true
 		 AND i.policy_status='approved' AND (i.status IN ('received','ordered','partial') OR (i.status='failed' AND i.risk_status='pending'))
-		 AND (s.status='paper_active' OR (i.status IN ('ordered','partial') AND i.order_id IS NOT NULL))
+		 AND (s.status='paper_active' OR (i.status IN ('received','ordered','partial') AND EXISTS (
+			SELECT 1 FROM orders o JOIN copy_origin_rebalance_intents ri ON ri.run_id=o.copy_origin_rebalance_run_id AND ri.intent_id=i.id
+			WHERE o.account_id=i.account_id AND o.environment=i.environment AND o.origin_type=i.origin_type
+			  AND o.origin_id=i.origin_id::text AND o.copy_intent_id=i.id)))
 		 AND (i.status NOT IN ('ordered','partial') OR i.order_id IS NOT NULL)
 		 AND (i.order_id IS NULL OR EXISTS (
 			SELECT 1 FROM orders o JOIN copy_origin_rebalance_intents ri ON ri.run_id=o.copy_origin_rebalance_run_id AND ri.intent_id=i.id

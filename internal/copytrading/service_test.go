@@ -200,6 +200,22 @@ type countingCopyExecutor struct {
 	request PaperOrderRequest
 }
 
+type recoveringCopyExecutor struct {
+	countingCopyExecutor
+	found bool
+}
+
+func (e *recoveringCopyExecutor) FindCopyOrderEffect(context.Context, PaperOrderRequest) (bool, error) {
+	return e.found, nil
+}
+
+type countingCopyLifecycle struct{ calls int }
+
+func (l *countingCopyLifecycle) ProposeCopyIntent(context.Context, domain.CopySubscription, domain.CopyTradeIntent, uuid.UUID) error {
+	l.calls++
+	return nil
+}
+
 func (e *countingCopyExecutor) ExecuteCopyOrder(_ context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
 	e.calls++
 	e.request = request
@@ -607,6 +623,33 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 				t.Fatalf("completed terminal intent=%+v", repo.completed)
 			}
 		})
+	}
+}
+
+func TestPausedReceivedIntentRecoversDurableOrderWithoutProposal(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := domain.DefaultCopySubscription()
+	subscription.ID, subscription.AccountID, subscription.Environment = uuid.New(), binding.AccountID(), binding.Environment()
+	subscription.OriginType, subscription.OriginID, subscription.Status, subscription.IsPaper = "copy_subscription", subscription.ID, domain.CopySubscriptionPaused, true
+	price := 100.0
+	intent := domain.CopyTradeIntent{ID: uuid.New(), AccountID: subscription.AccountID, Environment: subscription.Environment, SubscriptionID: subscription.ID, OriginType: subscription.OriginType, OriginID: subscription.OriginID, SourceObservationID: uuid.New(), InstrumentKey: "AAPL", Ticker: "AAPL", Side: domain.OrderSideBuy, RequestedNotional: 1000, ExecutablePrice: &price, CalculationVersion: 1, PolicyStatus: "approved", RiskStatus: "pending", Status: "received"}
+	run, err := copyorigin.NewRun(subscription, []domain.CopyTradeIntent{intent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &cancellationRaceCopyRepo{subscription: subscription, observation: domain.CopySourceObservation{ID: intent.SourceObservationID}, mapping: domain.CopyInstrumentMapping{Ticker: intent.Ticker}, intent: &intent}
+	executor := &recoveringCopyExecutor{found: true}
+	lifecycle := &countingCopyLifecycle{}
+	service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, Executor: executor, Lifecycle: lifecycle})
+	result, err := service.executePlannedRun(context.Background(), &subscription, run, []copyorigin.PlannedIntent{{Intent: intent}}, Preview{Intents: []domain.CopyTradeIntent{intent}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.calls != 1 || lifecycle.calls != 0 || result.Intents[0].Status != "ordered" {
+		t.Fatalf("recovery calls=%d proposals=%d result=%+v", executor.calls, lifecycle.calls, result.Intents)
 	}
 }
 

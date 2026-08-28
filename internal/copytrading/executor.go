@@ -87,6 +87,21 @@ func (e *OrderManagerExecutor) ExecuteCopyOrderWithAccountLockHeld(ctx context.C
 	return e.executeCopyOrderLocked(ctx, request)
 }
 
+func (e *OrderManagerExecutor) FindCopyOrderEffect(ctx context.Context, request PaperOrderRequest) (bool, error) {
+	if e == nil || e.deps.Orders == nil {
+		return false, fmt.Errorf("copy paper executor dependencies are unavailable")
+	}
+	orders, err := e.deps.Orders.GetByCopyOriginRun(ctx, request.Subscription.AccountID, request.Subscription.Environment, request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 2, 0)
+	if err != nil || len(orders) == 0 {
+		return false, err
+	}
+	result, matchErr := matchingCopyOrderResult(orders, request)
+	if matchErr != nil && result.OrderID == nil {
+		return false, matchErr
+	}
+	return result.OrderID != nil, nil
+}
+
 func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
 	if e == nil || e.deps.Broker == nil || e.deps.Risk == nil || e.deps.Positions == nil || e.deps.Orders == nil || e.deps.Trades == nil {
 		return PaperOrderResult{}, fmt.Errorf("copy paper executor dependencies are unavailable")
@@ -224,6 +239,7 @@ func matchingCopyOrderResult(orders []domain.Order, request PaperOrderRequest) (
 	quantity := request.Intent.RequestedNotional / price
 	if order.AccountID != request.Subscription.AccountID || order.Environment != request.Subscription.Environment ||
 		order.OriginType != "copy_subscription" || order.OriginID != request.Subscription.ID.String() || order.CopyOriginRebalanceRunID != request.OriginRunID ||
+		order.CopyIntentID == nil || *order.CopyIntentID != request.Intent.ID ||
 		order.MarketType.Normalize() != domain.MarketTypeStock || order.Ticker != request.Intent.Ticker || order.Side != request.Intent.Side ||
 		order.OrderType != domain.OrderTypeLimit || order.LimitPrice == nil || math.Abs(*order.LimitPrice-price) > 1e-8 || math.Abs(order.Quantity-quantity) > 1e-8 {
 		return PaperOrderResult{}, fmt.Errorf("persisted copy order does not match requested stock command")

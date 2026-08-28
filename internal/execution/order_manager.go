@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -606,7 +607,8 @@ func (m *OrderManager) processSignal(
 			return fmt.Errorf("order_manager: load durable effect: %w", loadErr)
 		}
 		if len(existing) > 0 {
-			if len(existing) != 1 || existing[0].ID != order.ID || existing[0].AccountID != order.AccountID || existing[0].Environment != order.Environment || existing[0].OriginType != order.OriginType || existing[0].OriginID != order.OriginID || existing[0].MarketType.Normalize() != order.MarketType.Normalize() || existing[0].Ticker != order.Ticker || existing[0].Side != order.Side || existing[0].OrderType != order.OrderType || !sameOptionalFloat(existing[0].LimitPrice, order.LimitPrice) || !sameOptionalFloat(existing[0].StopPrice, order.StopPrice) || !strings.EqualFold(strings.TrimSpace(existing[0].PredictionSide), strings.TrimSpace(order.PredictionSide)) {
+			intentMismatch := (existing[0].PositionIntent == nil) != (order.PositionIntent == nil) || existing[0].PositionIntent != nil && *existing[0].PositionIntent != *order.PositionIntent
+			if len(existing) != 1 || existing[0].ID != order.ID || existing[0].AccountID != order.AccountID || existing[0].Environment != order.Environment || existing[0].OriginType != order.OriginType || existing[0].OriginID != order.OriginID || existing[0].MarketType.Normalize() != order.MarketType.Normalize() || existing[0].Ticker != order.Ticker || existing[0].Side != order.Side || existing[0].OrderType != order.OrderType || existing[0].Quantity != order.Quantity || existing[0].ClientOrderID != order.ClientOrderID || existing[0].Broker != order.Broker || intentMismatch || !sameOptionalFloat(existing[0].LimitPrice, order.LimitPrice) || !sameOptionalFloat(existing[0].StopPrice, order.StopPrice) || !strings.EqualFold(strings.TrimSpace(existing[0].PredictionSide), strings.TrimSpace(order.PredictionSide)) {
 				return fmt.Errorf("order_manager: durable effect key conflicts with persisted order")
 			}
 			switch existing[0].Status {
@@ -1061,12 +1063,20 @@ func (m *OrderManager) openPredictionPositions(ctx context.Context, scope Execut
 
 	total := 0.0
 	ids := make([]uuid.UUID, 0, len(positions))
+	originType, originID := scope.Origin()
+	wantTicker := polymarketPositionTicker(slug, side)
 	for _, position := range positions {
+		wrongScope := position.AccountID != uuid.Nil && position.AccountID != scope.AccountID() || position.Environment != "" && position.Environment != scope.Environment() || position.OriginType != "" && position.OriginType != string(originType) || position.OriginID != "" && position.OriginID != originID
+		wrongMarket := position.MarketType != "" && position.MarketType.Normalize() != marketType.Normalize()
+		if position.ID == uuid.Nil || wrongScope || wrongMarket || position.Ticker != wantTicker || position.Side != domain.PositionSideLong {
+			return 0, nil, fmt.Errorf("order_manager: prediction position escaped immutable execution command")
+		}
 		if position.ClosedAt == nil && position.Quantity > 0 {
 			total += position.Quantity
 			ids = append(ids, position.ID)
 		}
 	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 
 	return total, ids, nil
 }

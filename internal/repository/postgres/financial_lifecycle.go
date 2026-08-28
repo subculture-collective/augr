@@ -493,7 +493,7 @@ type optionStatusIdempotencyEvidence struct {
 func optionStatusIdempotencyMatches(existing optionStatusIdempotencyEvidence, input repository.OptionFillInput) bool {
 	return existing.key == input.IdempotencyKey && existing.orderID == input.Order.ID && existing.accountID == input.AccountID && existing.environment == input.Environment &&
 		existing.originType == input.OriginType && existing.originID == input.OriginID && existing.status == input.Order.Status && numeric8Equal(existing.quantity, input.FillQuantity) &&
-		existing.externalID == strings.TrimSpace(input.Order.ExternalID) && sameTimePointer(existing.submittedAt, input.Order.SubmittedAt)
+		existing.externalID == strings.TrimSpace(input.Order.ExternalID) && equalOrderTimePointer(existing.submittedAt, input.Order.SubmittedAt)
 }
 
 func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, bool, error) {

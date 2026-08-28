@@ -209,7 +209,7 @@ func sameOrderCreation(left, right *domain.Order) bool {
 	}
 	return left.ID == right.ID && equalUUIDPointer(left.StrategyID, right.StrategyID) && equalUUIDPointer(left.PipelineRunID, right.PipelineRunID) &&
 		left.AccountID == right.AccountID && left.Environment == right.Environment && left.OriginType == right.OriginType && left.OriginID == right.OriginID &&
-		equalOrderTimePointer(left.PipelineRunTradeDate, right.PipelineRunTradeDate) && left.CopyOriginRebalanceRunID == right.CopyOriginRebalanceRunID &&
+		equalOrderTimePointer(left.PipelineRunTradeDate, right.PipelineRunTradeDate) && left.CopyOriginRebalanceRunID == right.CopyOriginRebalanceRunID && equalUUIDPointer(left.CopyIntentID, right.CopyIntentID) && equalUUIDPointer(left.CopyExecutionClaimID, right.CopyExecutionClaimID) &&
 		left.ExternalID == right.ExternalID && left.Ticker == right.Ticker && left.MarketType.Normalize() == right.MarketType.Normalize() && left.Side == right.Side && left.OrderType == right.OrderType &&
 		numeric8Equal(left.Quantity, right.Quantity) && equalOrderFloatPointer(left.LimitPrice, right.LimitPrice) && equalOrderFloatPointer(left.StopPrice, right.StopPrice) && numeric8Equal(left.FilledQuantity, right.FilledQuantity) && equalOrderFloatPointer(left.FilledAvgPrice, right.FilledAvgPrice) &&
 		left.Status == right.Status && left.Broker == right.Broker && equalOrderTimePointer(left.SubmittedAt, right.SubmittedAt) && equalOrderTimePointer(left.FilledAt, right.FilledAt) &&
@@ -246,6 +246,13 @@ func (r *OrderRepo) CreateOptionCloseOrdersAndReserve(ctx context.Context, accou
 	for i, order := range orders {
 		if order == nil || order.AccountID != accountID || order.Environment != environment || order.OriginType != originType || order.OriginID != originID || order.MarketType.Normalize() != domain.MarketTypeOptions || order.Status != domain.OrderStatusPending || order.PositionIntent == nil || (*order.PositionIntent != domain.PositionIntentBuyToClose && *order.PositionIntent != domain.PositionIntentSellToClose) {
 			return fmt.Errorf("postgres: atomic option close: invalid close order")
+		}
+		position, lockErr := scanPosition(tx.QueryRow(ctx, positionSelectSQL+` WHERE p.id=$1 AND p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.asset_class='option' AND p.closed_at IS NULL AND p.quantity>0 AND p.close_reservation_order_id IS NULL FOR UPDATE OF p`, positionIDs[i], accountID, environment, originType, originID))
+		if lockErr != nil {
+			return fmt.Errorf("postgres: lock option close position %s: %w", positionIDs[i], lockErr)
+		}
+		if err := validateOptionCloseCommand(order, position); err != nil {
+			return fmt.Errorf("postgres: atomic option close: %w", err)
 		}
 		if err := r.create(ctx, tx, order); err != nil {
 			return err
@@ -361,17 +368,13 @@ func (r *OrderRepo) CreatePredictionExitOrderAndReserve(ctx context.Context, acc
 		return fmt.Errorf("postgres: atomic prediction exit begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var positionSide domain.PositionSide
-	var positionQuantity float64
-	if err := tx.QueryRow(ctx, `SELECT side,quantity::double precision FROM positions WHERE id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND closed_at IS NULL AND quantity>0 AND close_reservation_order_id IS NULL FOR UPDATE`, positionID, accountID, environment, originType, originID).Scan(&positionSide, &positionQuantity); err != nil {
+	position, err := scanPosition(tx.QueryRow(ctx, positionSelectSQL+` WHERE p.id=$1 AND p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.closed_at IS NULL AND p.quantity>0 AND p.close_reservation_order_id IS NULL FOR UPDATE OF p`, positionID, accountID, environment, originType, originID))
+	if err != nil {
 		return fmt.Errorf("postgres: lock prediction exit position: %w", err)
 	}
-	validLongExit := positionSide == domain.PositionSideLong && order.Side == domain.OrderSideSell && *order.PositionIntent == domain.PositionIntentSellToClose
-	validShortExit := positionSide == domain.PositionSideShort && order.Side == domain.OrderSideBuy && *order.PositionIntent == domain.PositionIntentBuyToClose
-	if !validLongExit && !validShortExit {
-		return fmt.Errorf("postgres: prediction exit direction and intent do not close the locked position")
+	if err := validatePredictionExitCommand(order, position); err != nil {
+		return fmt.Errorf("postgres: atomic prediction exit: %w", err)
 	}
-	order.Quantity = positionQuantity
 	if err := r.create(ctx, tx, order); err != nil {
 		return err
 	}
@@ -383,6 +386,46 @@ func (r *OrderRepo) CreatePredictionExitOrderAndReserve(ctx context.Context, acc
 		return fmt.Errorf("postgres: prediction position %s is already reserved or ownership changed", positionID)
 	}
 	return tx.Commit(ctx)
+}
+
+func validateOptionCloseCommand(order *domain.Order, position *domain.Position) error {
+	if order == nil || position == nil || position.ID == uuid.Nil || position.AssetClass != domain.AssetClassOption || position.MarketType.Normalize() != domain.MarketTypeOptions || position.ClosedAt != nil || !numeric8Equal(order.Quantity, position.Quantity) ||
+		order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || !equalUUIDPointer(order.StrategyID, position.StrategyID) || order.Ticker != position.Ticker || order.AssetClass != position.AssetClass || order.UnderlyingTicker != position.UnderlyingTicker ||
+		!equalOptionTypePointer(order.OptionType, position.OptionType) || !equalOrderFloatPointer(order.Strike, position.Strike) || !equalOrderTimePointer(order.Expiry, position.Expiry) || !numeric8Equal(order.ContractMultiplier, position.ContractMultiplier) || !equalUUIDPointer(order.LegGroupID, position.LegGroupID) || len(order.ClosePositionIDs) != 1 || order.ClosePositionIDs[0] != position.ID || order.PositionIntent == nil {
+		return errors.New("close order does not match the full locked option position")
+	}
+	validLong := position.Side == domain.PositionSideLong && order.Side == domain.OrderSideSell && *order.PositionIntent == domain.PositionIntentSellToClose
+	validShort := position.Side == domain.PositionSideShort && order.Side == domain.OrderSideBuy && *order.PositionIntent == domain.PositionIntentBuyToClose
+	if !validLong && !validShort {
+		return errors.New("close direction does not match the locked option position")
+	}
+	return nil
+}
+
+func validatePredictionExitCommand(order *domain.Order, position *domain.Position) error {
+	if order == nil || position == nil || position.ID == uuid.Nil || position.MarketType.Normalize() != domain.MarketTypePolymarket || position.ClosedAt != nil || !numeric8Equal(order.Quantity, position.Quantity) ||
+		order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType.Normalize() != position.MarketType.Normalize() || order.OrderType != domain.OrderTypeMarket || order.PositionIntent == nil || len(order.ClosePositionIDs) != 1 || order.ClosePositionIDs[0] != position.ID {
+		return errors.New("exit order does not match the full locked prediction position")
+	}
+	slug, outcome, found := strings.Cut(position.Ticker, ":")
+	if !found || strings.TrimSpace(slug) != strings.TrimSpace(order.Ticker) || !strings.EqualFold(strings.TrimSpace(outcome), strings.TrimSpace(order.PredictionSide)) {
+		return errors.New("exit contract does not match the locked prediction position")
+	}
+	validLong := position.Side == domain.PositionSideLong && order.Side == domain.OrderSideSell && *order.PositionIntent == domain.PositionIntentSellToClose
+	validShort := position.Side == domain.PositionSideShort && order.Side == domain.OrderSideBuy && *order.PositionIntent == domain.PositionIntentBuyToClose
+	if !validLong && !validShort {
+		return errors.New("exit direction does not match the locked prediction position")
+	}
+	wantVenueIntent := "ORDER_INTENT_SELL_LONG"
+	if position.Side == domain.PositionSideShort {
+		wantVenueIntent = "ORDER_INTENT_BUY_SHORT"
+	} else if strings.EqualFold(strings.TrimSpace(outcome), "NO") {
+		wantVenueIntent = "ORDER_INTENT_SELL_SHORT"
+	}
+	if strings.TrimSpace(order.PolymarketIntent) != wantVenueIntent {
+		return errors.New("exit venue intent does not match the locked prediction position")
+	}
+	return nil
 }
 
 func (r *OrderRepo) ReleasePredictionExitPosition(ctx context.Context, accountID, positionID, orderID uuid.UUID) error {
@@ -652,7 +695,7 @@ type runOrderScope struct {
 }
 
 const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
-		pipeline_run_trade_date, copy_origin_rebalance_run_id, external_id, ticker, market_type, side,
+		pipeline_run_trade_date, copy_origin_rebalance_run_id, copy_intent_id, copy_execution_claim_id, external_id, ticker, market_type, side,
 		order_type, quantity::double precision, limit_price::double precision,
 		stop_price::double precision, filled_quantity::double precision,
 		filled_avg_price::double precision, status, broker, submitted_at,
@@ -720,6 +763,8 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 		&originID,
 		&order.PipelineRunTradeDate,
 		&copyOriginRunID,
+		&order.CopyIntentID,
+		&order.CopyExecutionClaimID,
 		&externalID,
 		&order.Ticker,
 		&marketType,

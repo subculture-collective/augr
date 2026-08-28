@@ -39,8 +39,13 @@ func TestOptionStatusIdempotencyIncludesSubmittedAt(t *testing.T) {
 	}
 	other := now.Add(time.Nanosecond)
 	existing.submittedAt = &other
+	if !optionStatusIdempotencyMatches(existing, input) {
+		t.Fatal("database microsecond normalization rejected")
+	}
+	other = now.Add(time.Microsecond)
+	existing.submittedAt = &other
 	if optionStatusIdempotencyMatches(existing, input) {
-		t.Fatal("submitted_at mismatch accepted")
+		t.Fatal("distinct submitted_at microsecond accepted")
 	}
 }
 

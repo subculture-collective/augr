@@ -739,6 +739,27 @@ func TestReconcileOptionSpreadUsesDurableTradeQuantity(t *testing.T) {
 	}
 }
 
+func TestReconcileOptionOrderNeverRegressesDurableFillQuantity(t *testing.T) {
+	price, filledAt := 1.25, time.Now().UTC()
+	strategyID, originID := uuid.New(), uuid.NewString()
+	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: originID, StrategyID: &strategyID, ClientOrderID: "monotonic-option", ExternalID: "alpaca-option", Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 2, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt, SubmittedAt: &filledAt, Status: domain.OrderStatusPartial}
+	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
+		return execution.BrokerOrderStatus{Status: domain.OrderStatusCancelled, FilledQuantity: 0}, nil
+	}}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { value := order; return &value, nil }}
+	tradeRepo := &mockTradeRepo{getByOrderFn: func(context.Context, uuid.UUID, repository.TradeFilter, int, int) ([]domain.Trade, error) {
+		return []domain.Trade{{AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Quantity: 1}}, nil
+	}}
+	fillRepo := &recordingOptionFillRepo{}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, tradeRepo, &mockRiskEngine{}, fillRepo)
+	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fillRepo.batches) != 1 || len(fillRepo.batches[0]) != 1 || !fillRepo.batches[0][0].StatusOnly || fillRepo.batches[0][0].FillQuantity != 1 {
+		t.Fatalf("monotonic terminal recovery = %+v", fillRepo.batches)
+	}
+}
+
 func TestReconcileOptionSpreadPersistsRecoveredSubmissionWithoutFill(t *testing.T) {
 	groupID, strategyID, originID := uuid.New(), uuid.New(), uuid.NewString()
 	orders := make([]domain.Order, 2)

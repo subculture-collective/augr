@@ -23,14 +23,15 @@ func TestNewOrderManagerExecutorRetainsExecutionAccount(t *testing.T) {
 func TestMatchingCopyOrderResultRequiresOneExactStockCommand(t *testing.T) {
 	accountID, subscriptionID, runID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	price := 100.0
+	intentID, claimID := uuid.New(), uuid.New()
 	request := PaperOrderRequest{
-		ClaimID:      uuid.New(),
+		ClaimID:      claimID,
 		Subscription: domain.CopySubscription{ID: subscriptionID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored},
-		Intent:       domain.CopyTradeIntent{Ticker: "AAPL", Side: domain.OrderSideBuy, RequestedNotional: 1000, ExecutablePrice: &price},
+		Intent:       domain.CopyTradeIntent{ID: intentID, Ticker: "AAPL", Side: domain.OrderSideBuy, RequestedNotional: 1000, ExecutablePrice: &price},
 		OriginRunID:  runID,
 	}
 	limit := price
-	order := domain.Order{ID: orderID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "copy_subscription", OriginID: subscriptionID.String(), CopyOriginRebalanceRunID: runID, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 10, LimitPrice: &limit, Status: domain.OrderStatusSubmitted}
+	order := domain.Order{ID: orderID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "copy_subscription", OriginID: subscriptionID.String(), CopyOriginRebalanceRunID: runID, CopyIntentID: &intentID, CopyExecutionClaimID: &claimID, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 10, LimitPrice: &limit, Status: domain.OrderStatusSubmitted}
 	result, err := matchingCopyOrderResult([]domain.Order{order}, request)
 	if err != nil || result.OrderID == nil || *result.OrderID != orderID {
 		t.Fatalf("exact result = %+v, %v", result, err)
@@ -39,6 +40,7 @@ func TestMatchingCopyOrderResultRequiresOneExactStockCommand(t *testing.T) {
 		"duplicate":     {order, order},
 		"wrong market":  {func() domain.Order { value := order; value.MarketType = domain.MarketTypePolymarket; return value }()},
 		"wrong command": {func() domain.Order { value := order; value.Quantity = 9; return value }()},
+		"wrong lineage": {func() domain.Order { value := order; other := uuid.New(); value.CopyIntentID = &other; return value }()},
 	} {
 		if _, err := matchingCopyOrderResult(orders, request); err == nil {
 			t.Fatalf("%s accepted", name)

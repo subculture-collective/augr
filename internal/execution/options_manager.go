@@ -167,8 +167,15 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 		if err != nil {
 			return err
 		}
+		persistedFilled, persistedAvgPrice, persistedFilledAt := order.FilledQuantity, cloneFloatPtr(order.FilledAvgPrice), cloneTimePtr(order.FilledAt)
 		order.ExternalID, order.Status = lookupID, result.Status
 		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = result.FilledQuantity, cloneFloatPtr(result.FilledAvgPrice), cloneTimePtr(result.FilledAt)
+		if canonicalOptionQuantity(order.FilledQuantity) <= canonicalOptionQuantity(durableFilled) {
+			order.FilledQuantity = durableFilled
+			if canonicalOptionQuantity(persistedFilled) >= canonicalOptionQuantity(durableFilled) {
+				order.FilledAvgPrice, order.FilledAt = persistedAvgPrice, persistedFilledAt
+			}
+		}
 		if order.SubmittedAt == nil {
 			submittedAt := time.Now().UTC()
 			if order.FilledAt != nil {
@@ -249,8 +256,15 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 			}
 			leg := matches[0]
 			delete(legsByTicker, key)
+			persistedFilled, persistedAvgPrice, persistedFilledAt := order.FilledQuantity, cloneFloatPtr(order.FilledAvgPrice), cloneTimePtr(order.FilledAt)
 			order.ExternalID, order.Status = leg.ExternalID, leg.Status.Status
 			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = leg.Status.FilledQuantity, cloneFloatPtr(leg.Status.FilledAvgPrice), cloneTimePtr(leg.Status.FilledAt)
+			if canonicalOptionQuantity(order.FilledQuantity) <= canonicalOptionQuantity(durableFilled) {
+				order.FilledQuantity = durableFilled
+				if canonicalOptionQuantity(persistedFilled) >= canonicalOptionQuantity(durableFilled) {
+					order.FilledAvgPrice, order.FilledAt = persistedAvgPrice, persistedFilledAt
+				}
+			}
 			if order.SubmittedAt == nil {
 				submittedAt := time.Now().UTC()
 				if order.FilledAt != nil {
@@ -322,6 +336,10 @@ func (m *OptionsOrderManager) durableOptionFillQuantity(ctx context.Context, ord
 			return total, nil
 		}
 	}
+}
+
+func canonicalOptionQuantity(quantity float64) int64 {
+	return int64(math.Round(quantity * 1e8))
 }
 
 func recoveredSpread(orders []*domain.Order) (*domain.OptionSpread, float64, error) {
@@ -880,7 +898,7 @@ func (m *OptionsOrderManager) closeOptionPosition(ctx context.Context, scope Exe
 	if position.ClosedAt != nil || position.Quantity <= 0 {
 		return errors.New("options_manager: position is not open")
 	}
-	if position.ID == uuid.Nil || position.AssetClass != domain.AssetClassOption || strings.TrimSpace(position.Ticker) == "" || strings.TrimSpace(position.UnderlyingTicker) == "" || position.OptionType == nil || position.Strike == nil || position.Expiry == nil || position.StrategyID == nil {
+	if position.ID == uuid.Nil || position.AssetClass != domain.AssetClassOption || position.MarketType.Normalize() != domain.MarketTypeOptions || strings.TrimSpace(position.Ticker) == "" || strings.TrimSpace(position.UnderlyingTicker) == "" || position.OptionType == nil || position.Strike == nil || position.Expiry == nil || position.StrategyID == nil || position.ContractMultiplier <= 0 || math.IsNaN(position.ContractMultiplier) || math.IsInf(position.ContractMultiplier, 0) {
 		return errors.New("options_manager: complete persisted option contract metadata is required")
 	}
 	if position.Side != domain.PositionSideLong && position.Side != domain.PositionSideShort {
@@ -906,9 +924,6 @@ func (m *OptionsOrderManager) closeOptionPosition(ctx context.Context, scope Exe
 	}
 	now := time.Now().UTC()
 	multiplier := position.ContractMultiplier
-	if multiplier <= 0 {
-		multiplier = 100
-	}
 	orderID := uuid.NewSHA1(uuid.NameSpaceURL, []byte(fmt.Sprintf("option-close-effect:v1:%s:%s:%s:%s", scope.AccountID(), scope.Environment(), position.ID, runID)))
 	order := &domain.Order{
 		ID: orderID, AccountID: scope.AccountID(), Environment: scope.Environment(), StrategyID: position.StrategyID, PipelineRunID: &runID,
@@ -1381,7 +1396,9 @@ func (m *OptionsOrderManager) resumeOptionEffect(ctx context.Context, scope Exec
 		}
 		intentMismatch := got.PositionIntent == nil || want.PositionIntent == nil || *got.PositionIntent != *want.PositionIntent
 		groupMismatch := (got.LegGroupID == nil) != (want.LegGroupID == nil) || got.LegGroupID != nil && *got.LegGroupID != *want.LegGroupID
-		if got.AccountID != want.AccountID || got.Environment != want.Environment || got.OriginType != want.OriginType || got.OriginID != want.OriginID || got.MarketType.Normalize() != domain.MarketTypeOptions || got.Ticker != want.Ticker || got.Side != want.Side || got.OrderType != want.OrderType || got.Quantity != want.Quantity || got.ClientOrderID != want.ClientOrderID || !sameOptionalFloat(got.LimitPrice, want.LimitPrice) || intentMismatch || groupMismatch {
+		closeMismatch := len(got.ClosePositionIDs) > 0 && (len(got.ClosePositionIDs) != len(want.ClosePositionIDs) || got.ClosePositionIDs[0] != want.ClosePositionIDs[0])
+		contractMismatch := got.AssetClass != want.AssetClass || got.UnderlyingTicker != want.UnderlyingTicker || !sameOptionType(got.OptionType, want.OptionType) || !sameOptionalFloat(got.Strike, want.Strike) || !sameOptionalTime(got.Expiry, want.Expiry) || canonicalOptionQuantity(got.ContractMultiplier) != canonicalOptionQuantity(want.ContractMultiplier)
+		if got.AccountID != want.AccountID || got.Environment != want.Environment || got.OriginType != want.OriginType || got.OriginID != want.OriginID || got.MarketType.Normalize() != domain.MarketTypeOptions || got.Ticker != want.Ticker || got.Side != want.Side || got.OrderType != want.OrderType || canonicalOptionQuantity(got.Quantity) != canonicalOptionQuantity(want.Quantity) || got.ClientOrderID != want.ClientOrderID || got.Broker != want.Broker || !sameOptionalFloat(got.LimitPrice, want.LimitPrice) || intentMismatch || groupMismatch || closeMismatch || contractMismatch {
 			return true, fmt.Errorf("options_manager: durable option effect conflicts with persisted order %s", got.ID)
 		}
 		matched = append(matched, got)
@@ -1407,6 +1424,14 @@ func (m *OptionsOrderManager) resumeOptionEffect(ctx context.Context, scope Exec
 		return true, err
 	}
 	return true, m.ReconcilePendingOptionOrdersWithAccountLockHeld(ctx, binding, matched, positions)
+}
+
+func sameOptionType(left, right *domain.OptionType) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func sameOptionalTime(left, right *time.Time) bool {
+	return left == nil && right == nil || left != nil && right != nil && left.UTC().Truncate(time.Microsecond).Equal(right.UTC().Truncate(time.Microsecond))
 }
 
 func optionSpreadParentClientID(orders []*domain.Order) string {

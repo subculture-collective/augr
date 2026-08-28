@@ -137,6 +137,33 @@ func TestBuildOrderScopedListQuery_CopyOriginRequiresMatchingAccountAndSubscript
 	}
 }
 
+func TestCloseCommandsMatchFullLockedPositions(t *testing.T) {
+	accountID, strategyID, positionID := uuid.New(), uuid.New(), uuid.New()
+	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
+	optionType, strike, closeIntent := domain.OptionTypeCall, 150.0, domain.PositionIntentSellToClose
+	position := &domain.Position{ID: positionID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, MarketType: domain.MarketTypeOptions, Ticker: "AAPL271217C00150000", Side: domain.PositionSideLong, Quantity: 2, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100}
+	order := &domain.Order{AccountID: accountID, Environment: position.Environment, OriginType: position.OriginType, OriginID: position.OriginID, StrategyID: &strategyID, MarketType: domain.MarketTypeOptions, Ticker: position.Ticker, Side: domain.OrderSideSell, Quantity: position.Quantity, AssetClass: position.AssetClass, UnderlyingTicker: position.UnderlyingTicker, OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100, PositionIntent: &closeIntent, ClosePositionIDs: []uuid.UUID{positionID}}
+	if err := validateOptionCloseCommand(order, position); err != nil {
+		t.Fatal(err)
+	}
+	tampered := *order
+	tampered.ContractMultiplier = 50
+	if validateOptionCloseCommand(&tampered, position) == nil {
+		t.Fatal("tampered option contract accepted")
+	}
+
+	predictionPosition := &domain.Position{ID: uuid.New(), AccountID: accountID, Environment: position.Environment, OriginType: position.OriginType, OriginID: position.OriginID, MarketType: domain.MarketTypePolymarket, Ticker: "event:YES", Side: domain.PositionSideLong, Quantity: .2}
+	predictionOrder := &domain.Order{AccountID: accountID, Environment: position.Environment, OriginType: position.OriginType, OriginID: position.OriginID, MarketType: domain.MarketTypePolymarket, Ticker: "event", PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: .2, PositionIntent: &closeIntent, ClosePositionIDs: []uuid.UUID{predictionPosition.ID}}
+	if err := validatePredictionExitCommand(predictionOrder, predictionPosition); err != nil {
+		t.Fatal(err)
+	}
+	tamperedPrediction := *predictionOrder
+	tamperedPrediction.PredictionSide = "NO"
+	if validatePredictionExitCommand(&tamperedPrediction, predictionPosition) == nil {
+		t.Fatal("tampered prediction contract accepted")
+	}
+}
+
 func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	t.Helper()
 

@@ -500,6 +500,19 @@ func TestValidateRecoveredStopReservationComparesCanonicalFractionalRemainder(t 
 	}
 }
 
+func TestResolveStopReservationComparesCanonicalFractionalRemainder(t *testing.T) {
+	intent := domain.PositionIntentSellToClose
+	want := &domain.Order{ID: uuid.New(), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: .3, FilledQuantity: .1, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG"}
+	got := *want
+	got.Quantity, got.FilledQuantity = .2, 0
+	claims := &sharedExitClaims{reservedOrder: &got}
+	guard := &StopGuard{exitRepo: claims}
+	entry := &guardEntry{order: want}
+	if _, err := guard.resolveStopReservation(context.Background(), entry, uuid.New()); err != nil {
+		t.Fatalf("canonical adoption quantity rejected: %v", err)
+	}
+}
+
 func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
 	positionID := uuid.New()
 	stop := 0.40
