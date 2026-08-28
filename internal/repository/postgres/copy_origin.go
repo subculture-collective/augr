@@ -118,10 +118,12 @@ func (r *CopyOriginRepo) RegisterPlannedRun(ctx context.Context, run *copyorigin
 	var environment domain.AccountEnvironment
 	var subscriptionOriginType string
 	var subscriptionOriginID uuid.UUID
-	if err = tx.QueryRow(ctx, `SELECT account_id,environment,origin_type,origin_id FROM copy_subscriptions WHERE id=$1 FOR SHARE`, envelope.SubscriptionID).Scan(&accountID, &environment, &subscriptionOriginType, &subscriptionOriginID); err != nil {
+	var subscriptionStatus domain.CopySubscriptionStatus
+	var isPaper bool
+	if err = tx.QueryRow(ctx, `SELECT account_id,environment,origin_type,origin_id,status,is_paper FROM copy_subscriptions WHERE id=$1 FOR UPDATE`, envelope.SubscriptionID).Scan(&accountID, &environment, &subscriptionOriginType, &subscriptionOriginID, &subscriptionStatus, &isPaper); err != nil {
 		return nil, nil, fmt.Errorf("postgres: lock copy subscription scope: %w", err)
 	}
-	if accountID == uuid.Nil || !environment.IsValid() || subscriptionOriginType != envelope.OriginType || subscriptionOriginID.String() != envelope.OriginID {
+	if accountID == uuid.Nil || !environment.IsValid() || subscriptionOriginType != envelope.OriginType || subscriptionOriginID.String() != envelope.OriginID || subscriptionStatus != domain.CopySubscriptionPaperActive || !isPaper {
 		return nil, nil, fmt.Errorf("postgres: copy subscription scope is invalid")
 	}
 
@@ -250,6 +252,50 @@ func (r *CopyOriginRepo) GetRun(ctx context.Context, id uuid.UUID) (*copyorigin.
 		return nil, fmt.Errorf("postgres: copy origin run identity is required")
 	}
 	return getCopyOriginRun(ctx, r.pool, id)
+}
+
+func (r *CopyOriginRepo) GetPlannedRun(ctx context.Context, subscriptionID, sourceObservationID uuid.UUID, calculationVersion int) (*copyorigin.Run, []copyorigin.PlannedIntent, error) {
+	if r == nil || r.pool == nil || subscriptionID == uuid.Nil || sourceObservationID == uuid.Nil || calculationVersion < 1 {
+		return nil, nil, repository.ErrNotFound
+	}
+	var runID uuid.UUID
+	err := r.pool.QueryRow(ctx, `SELECT id FROM copy_origin_rebalance_runs WHERE subscription_id=$1 AND source_observation_id=$2 AND calculation_version=$3 ORDER BY created_at DESC,id DESC LIMIT 1`, subscriptionID, sourceObservationID, calculationVersion).Scan(&runID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil, repository.ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	run, err := getCopyOriginRun(ctx, r.pool, runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	rows, err := r.pool.Query(ctx, `SELECT intent_id FROM copy_origin_rebalance_intents WHERE run_id=$1 ORDER BY sequence`, runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	intentIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var intentID uuid.UUID
+		if scanErr := rows.Scan(&intentID); scanErr != nil {
+			return nil, nil, scanErr
+		}
+		intentIDs = append(intentIDs, intentID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	rows.Close()
+	intents := make([]copyorigin.PlannedIntent, 0, len(intentIDs))
+	for _, intentID := range intentIDs {
+		intent, scanErr := scanCopyIntent(r.pool.QueryRow(ctx, copyIntentSelect+` WHERE id=$1`, intentID))
+		if scanErr != nil {
+			return nil, nil, scanErr
+		}
+		intents = append(intents, copyorigin.PlannedIntent{Intent: *intent})
+	}
+	return run, intents, nil
 }
 
 type copyOriginQuerier interface {

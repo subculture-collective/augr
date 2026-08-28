@@ -278,6 +278,7 @@ func (m *OrderManager) processSignal(
 	marketType := planMarketType(plan)
 	predictionExitMaxQuantity := 0.0
 	stockExitMaxQuantity := 0.0
+	var exitPositionIDs []uuid.UUID
 	riskReducingExit := false
 
 	// Ignore hold signals — nothing to execute.
@@ -308,7 +309,7 @@ func (m *OrderManager) processSignal(
 	// actionable trades. Non-stock markets have different SELL semantics and are
 	// intentionally left to their market-specific execution/risk paths.
 	if signal.Signal == domain.PipelineSignalSell && marketType == domain.MarketTypeStock {
-		ownedQuantity, err := m.openLongPositionQuantity(ctx, scope, plan.Ticker)
+		ownedQuantity, positionIDs, err := m.openLongPositions(ctx, scope, plan.Ticker)
 		if err != nil {
 			return err
 		}
@@ -350,11 +351,12 @@ func (m *OrderManager) processSignal(
 			return nil
 		}
 		stockExitMaxQuantity = ownedQuantity
+		exitPositionIDs = positionIDs
 		riskReducingExit = true
 	}
 
 	if signal.Signal == domain.PipelineSignalSell && isPredictionMarket(marketType) {
-		ownedQuantity, err := m.openPredictionPositionQuantity(ctx, scope, marketType, plan.Ticker, plan.Side)
+		ownedQuantity, positionIDs, err := m.openPredictionPositions(ctx, scope, marketType, plan.Ticker, plan.Side)
 		if err != nil {
 			return err
 		}
@@ -403,6 +405,7 @@ func (m *OrderManager) processSignal(
 			return nil
 		}
 		predictionExitMaxQuantity = ownedQuantity
+		exitPositionIDs = positionIDs
 		riskReducingExit = true
 	}
 
@@ -575,6 +578,7 @@ func (m *OrderManager) processSignal(
 	if riskReducingExit {
 		intent := domain.PositionIntentSellToClose
 		order.PositionIntent = &intent
+		order.ClosePositionIDs = append([]uuid.UUID(nil), exitPositionIDs...)
 	}
 
 	if plan.EntryPrice > 0 {
@@ -613,6 +617,14 @@ func (m *OrderManager) processSignal(
 
 	decision := m.newTradeDecision(scope, plan, order.MarketType, string(order.Side), quantity, quantity, domain.RiskDecisionApproved, nil, domain.TradeDecisionStatusCandidate)
 	decision.ID = recoveryTradeDecisionID(order.ID)
+	if decorator, ok := m.orderRepo.(interface{ DecorateOrder(*domain.Order) error }); ok {
+		if err := decorator.DecorateOrder(order); err != nil {
+			return fmt.Errorf("order_manager: decorate authorized order: %w", err)
+		}
+	}
+	if err := m.fenceEffect(ctx); err != nil {
+		return err
+	}
 	atomicCreated := false
 	if atomic, ok := m.decisionRecorder.(AtomicOrderDecisionRecorder); ok {
 		if err := atomic.CreateOrderWithDecision(ctx, scope, order, decision, m.liveTrading); err != nil {
@@ -642,18 +654,12 @@ func (m *OrderManager) processSignal(
 			}
 			return err
 		}
-	}
-	if err := m.fenceEffect(ctx); err != nil {
-		if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
-			return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
+		if err := m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading); err != nil {
+			if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
+				return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
+			}
+			return err
 		}
-		return err
-	}
-	if err := m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading); err != nil {
-		if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
-			return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
-		}
-		return err
 	}
 
 	// 6. Submit to broker (status = submitted).
@@ -662,6 +668,14 @@ func (m *OrderManager) processSignal(
 	}
 	externalID, err := m.broker.SubmitOrder(ctx, order)
 	if err != nil {
+		if IsDefinitiveBrokerRejection(err) {
+			order.ExternalID = strings.TrimSpace(externalID)
+			order.Status = domain.OrderStatusRejected
+			if persistErr := m.orderRepo.Update(ctx, order); persistErr != nil {
+				return fmt.Errorf("order_manager: persist definitive provider rejection: %v; provider: %w", persistErr, err)
+			}
+			return fmt.Errorf("order_manager: provider rejected order %s: %w", order.ID, errors.Join(ErrBrokerOrderRejected, err))
+		}
 		if auditErr := m.audit(ctx, "order_submission_ambiguous", "order", &order.ID, map[string]any{
 			"error": err.Error(),
 		}); auditErr != nil {
@@ -704,12 +718,10 @@ func (m *OrderManager) processSignal(
 			return err
 		}
 		if status == domain.OrderStatusCancelled || status == domain.OrderStatusRejected {
-			terminalStatus := status
-			order.Status = domain.OrderStatusPartial
+			order.Status = status
 			if err := m.handleFill(ctx, order, plan, scope, decision.ID); err != nil {
 				return err
 			}
-			order.Status = terminalStatus
 		}
 	}
 	order.Status = status
@@ -966,9 +978,14 @@ func (m *OrderManager) ensureAttachedOrderDecision(ctx context.Context, scope Ex
 }
 
 func (m *OrderManager) openLongPositionQuantity(ctx context.Context, scope ExecutionScope, ticker string) (float64, error) {
+	total, _, err := m.openLongPositions(ctx, scope, ticker)
+	return total, err
+}
+
+func (m *OrderManager) openLongPositions(ctx context.Context, scope ExecutionScope, ticker string) (float64, []uuid.UUID, error) {
 	ticker = strings.TrimSpace(ticker)
 	if ticker == "" {
-		return 0, fmt.Errorf("order_manager: open long ownership check requires ticker")
+		return 0, nil, fmt.Errorf("order_manager: open long ownership check requires ticker")
 	}
 
 	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
@@ -976,22 +993,29 @@ func (m *OrderManager) openLongPositionQuantity(ctx context.Context, scope Execu
 		Side:   domain.PositionSideLong,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("order_manager: get open long position for %s: %w", ticker, err)
+		return 0, nil, fmt.Errorf("order_manager: get open long position for %s: %w", ticker, err)
 	}
 
 	total := 0.0
+	ids := make([]uuid.UUID, 0, len(positions))
 	for _, position := range positions {
 		if position.ClosedAt == nil && position.Quantity > 0 {
 			total += position.Quantity
+			ids = append(ids, position.ID)
 		}
 	}
-	return total, nil
+	return total, ids, nil
 }
 
 func (m *OrderManager) openPredictionPositionQuantity(ctx context.Context, scope ExecutionScope, marketType domain.MarketType, slug, side string) (float64, error) {
+	total, _, err := m.openPredictionPositions(ctx, scope, marketType, slug, side)
+	return total, err
+}
+
+func (m *OrderManager) openPredictionPositions(ctx context.Context, scope ExecutionScope, marketType domain.MarketType, slug, side string) (float64, []uuid.UUID, error) {
 	slug = strings.TrimSpace(slug)
 	if slug == "" {
-		return 0, fmt.Errorf("order_manager: prediction exit ownership check requires ticker")
+		return 0, nil, fmt.Errorf("order_manager: prediction exit ownership check requires ticker")
 	}
 
 	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
@@ -999,17 +1023,19 @@ func (m *OrderManager) openPredictionPositionQuantity(ctx context.Context, scope
 		Side:   domain.PositionSideLong,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("order_manager: get open %s position for %s:%s: %w", marketType.Normalize(), slug, strings.ToUpper(strings.TrimSpace(side)), err)
+		return 0, nil, fmt.Errorf("order_manager: get open %s position for %s:%s: %w", marketType.Normalize(), slug, strings.ToUpper(strings.TrimSpace(side)), err)
 	}
 
 	total := 0.0
+	ids := make([]uuid.UUID, 0, len(positions))
 	for _, position := range positions {
 		if position.ClosedAt == nil && position.Quantity > 0 {
 			total += position.Quantity
+			ids = append(ids, position.ID)
 		}
 	}
 
-	return total, nil
+	return total, ids, nil
 }
 
 func (m *OrderManager) positionsByScope(ctx context.Context, scope ExecutionScope, filter repository.PositionFilter) ([]domain.Position, error) {
@@ -1385,7 +1411,19 @@ func (m *OrderManager) handleFill(
 		if plan.TakeProfit > 0 {
 			takeProfit = &plan.TakeProfit
 		}
-		result, err := m.financialRepo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("paper_fill:v1:%s:observed:%.8f", order.ID, order.FilledQuantity), Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade})
+		fillInput := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("paper_fill:v1:%s:observed:%.8f", order.ID, order.FilledQuantity), Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade}
+		result, err := m.financialRepo.ApplyOrderFill(ctx, fillInput)
+		if err != nil {
+			if resolver, ok := m.financialRepo.(repository.OrderFillCommitResolver); ok {
+				resolved, committed, resolveErr := resolver.ResolveOrderFillCommit(ctx, fillInput)
+				if resolveErr != nil {
+					return fmt.Errorf("order_manager: persist fill: %v; resolve ambiguous commit: %w", err, resolveErr)
+				}
+				if committed {
+					result, err = resolved, nil
+				}
+			}
+		}
 		if err != nil {
 			if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok && strings.TrimSpace(order.ExternalID) != "" {
 				if rollbackErr := compensator.RollbackOrderFill(ctx, order.ExternalID); rollbackErr != nil {

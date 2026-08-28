@@ -457,12 +457,29 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	if subscription.Status != domain.CopySubscriptionPaperActive || !subscription.IsPaper {
 		return nil, fmt.Errorf("subscription must be paper_active")
 	}
-	preview, err := s.Preview(ctx, id)
+	if s.deps.OriginRuns == nil {
+		return nil, fmt.Errorf("copy origin run repository is unavailable")
+	}
+	observation, snapshot, err := s.deps.Repo.GetLatest13FSnapshot(ctx, subscription.SourceID)
 	if err != nil {
 		return nil, err
 	}
-	if s.deps.OriginRuns == nil {
-		return nil, fmt.Errorf("copy origin run repository is unavailable")
+	if retries, ok := s.deps.OriginRuns.(copyorigin.RetryStore); ok {
+		persisted, intents, loadErr := retries.GetPlannedRun(ctx, subscription.ID, observation.ID, CalculationVersion)
+		if loadErr == nil {
+			preview := Preview{Observation: *observation, Snapshot: *snapshot, Intents: make([]domain.CopyTradeIntent, 0, len(intents))}
+			for _, intent := range intents {
+				preview.Intents = append(preview.Intents, intent.Intent)
+			}
+			return s.executePlannedRun(ctx, subscription, persisted, intents, preview)
+		}
+		if !errors.Is(loadErr, repository.ErrNotFound) {
+			return nil, loadErr
+		}
+	}
+	preview, err := s.Preview(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	planned := append([]domain.CopyTradeIntent(nil), preview.Intents...)
 	originRun, err := copyorigin.NewRun(*subscription, planned)
@@ -473,7 +490,11 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 	if err != nil {
 		return nil, err
 	}
-	result := &RebalanceResult{OriginRunID: persistedOrigin.ID(), OriginRunSHA256: persistedOrigin.Digest(), Preview: *preview, Intents: make([]domain.CopyTradeIntent, 0, len(registered))}
+	return s.executePlannedRun(ctx, subscription, persistedOrigin, registered, *preview)
+}
+
+func (s *Service) executePlannedRun(ctx context.Context, subscription *domain.CopySubscription, persistedOrigin *copyorigin.Run, registered []copyorigin.PlannedIntent, preview Preview) (*RebalanceResult, error) {
+	result := &RebalanceResult{OriginRunID: persistedOrigin.ID(), OriginRunSHA256: persistedOrigin.Digest(), Preview: preview, Intents: make([]domain.CopyTradeIntent, 0, len(registered))}
 	if s.deps.Executor == nil {
 		return result, fmt.Errorf("paper executor is unavailable")
 	}

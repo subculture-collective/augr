@@ -44,8 +44,18 @@ type claimedCopyOrderRepo struct {
 }
 
 func (r claimedCopyOrderRepo) Create(ctx context.Context, order *domain.Order) error {
-	order.CopyIntentID, order.CopyExecutionClaimID = &r.intentID, &r.claimID
+	if err := r.DecorateOrder(order); err != nil {
+		return err
+	}
 	return r.OrderRepository.Create(ctx, order)
+}
+
+func (r claimedCopyOrderRepo) DecorateOrder(order *domain.Order) error {
+	if order == nil || r.intentID == uuid.Nil || r.claimID == uuid.Nil {
+		return errors.New("copy order intent and execution claim are required")
+	}
+	order.CopyIntentID, order.CopyExecutionClaimID = &r.intentID, &r.claimID
+	return nil
 }
 
 func NewOrderManagerExecutor(deps OrderManagerExecutorDeps) *OrderManagerExecutor {
@@ -181,6 +191,15 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 		return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, nil
 	}
 	if err := manager.ProcessSignalWithAccountLockHeld(ctx, scope, execution.FinalSignal{Signal: signal, Confidence: 1}, plan); err != nil {
+		orders, reloadErr := e.deps.Orders.GetByCopyOriginRun(ctx, e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 10, 0)
+		if reloadErr != nil {
+			return PaperOrderResult{}, fmt.Errorf("%v; reload persisted copy order: %w", err, reloadErr)
+		}
+		persisted, matchErr := matchingCopyOrderResult(orders, request)
+		persisted.Scope = scope
+		if matchErr == nil || persisted.OrderID != nil {
+			return persisted, err
+		}
 		return PaperOrderResult{}, err
 	}
 	orders, err := e.deps.Orders.GetByCopyOriginRun(ctx, e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 10, 0)

@@ -233,6 +233,7 @@ func TestReconcilerIgnoresNonPolymarketLocalPositions(t *testing.T) {
 
 	reconciler, auditRepo, _ := newReconcilerTestHarness(nil, []domain.Position{
 		{MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 10},
+		{MarketType: domain.MarketTypeStock, Ticker: "CLASS:YES", Side: domain.PositionSideLong, Quantity: 2},
 		{MarketType: domain.MarketTypeCrypto, Ticker: "BTC-USD", Side: domain.PositionSideShort, Quantity: 1},
 	})
 

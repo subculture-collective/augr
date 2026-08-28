@@ -45,21 +45,26 @@ func (r *OrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid
 	if err != nil {
 		return fmt.Errorf("postgres: execution account advisory lock connect: %w", err)
 	}
-	defer func() { _ = conn.Close(ctx) }()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(cleanupCtx)
+	}()
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("postgres: execution account advisory lock begin: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanupCtx)
+	}()
 	key := sha256.Sum256([]byte("execution-account|" + accountID.String()))
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(binary.BigEndian.Uint64(key[:8])&^uint64(1<<63))); err != nil {
 		return fmt.Errorf("postgres: execution account advisory lock acquire: %w", err)
 	}
 	if err := fn(); err != nil {
 		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("postgres: execution account advisory lock release: %w", err)
 	}
 	return nil
 }
@@ -264,7 +269,7 @@ func (r *OrderRepo) ReconcileOptionCloseReservations(ctx context.Context, accoun
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.close_reservation_order_id=o.id AND p.account_id=$1 AND p.environment=$2 AND o.status IN ('filled','rejected','cancelled')`, accountID, environment); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.close_reservation_order_id=o.id AND p.account_id=$1 AND p.environment=$2 AND o.status IN ('filled','rejected','cancelled') AND o.filled_quantity<=COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0)`, accountID, environment); err != nil {
 		return fmt.Errorf("postgres: release interrupted option closes: %w", err)
 	}
 	return tx.Commit(ctx)
@@ -307,7 +312,7 @@ func (r *OrderRepo) ReleasePredictionExitPosition(ctx context.Context, accountID
 	if accountID == uuid.Nil || accountID != r.accountID || positionID == uuid.Nil || orderID == uuid.Nil {
 		return fmt.Errorf("postgres: release prediction exit reservation: invalid identity")
 	}
-	_, err := r.pool.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.id=$1 AND p.account_id=$2 AND p.close_reservation_order_id=$3 AND o.id=$3 AND o.account_id=$2 AND o.status IN ('filled','rejected','cancelled')`, positionID, accountID, orderID)
+	_, err := r.pool.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.id=$1 AND p.account_id=$2 AND p.close_reservation_order_id=$3 AND o.id=$3 AND o.account_id=$2 AND o.status IN ('filled','rejected','cancelled') AND o.filled_quantity<=COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0)`, positionID, accountID, orderID)
 	return err
 }
 
@@ -350,7 +355,7 @@ func (r *OrderRepo) FinalizePredictionExit(ctx context.Context, accountID uuid.U
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	tag, err := tx.Exec(ctx, `UPDATE orders SET external_id=COALESCE(NULLIF($1,''),external_id),status=$2,submitted_at=COALESCE(submitted_at,$3) WHERE id=$4 AND account_id=$5 AND environment=$6 AND status IN ('pending','submitted','partial')`, strings.TrimSpace(externalID), status, observedAt.UTC(), orderID, accountID, environment)
+	tag, err := tx.Exec(ctx, `UPDATE orders o SET external_id=COALESCE(NULLIF($1,''),external_id),status=$2,submitted_at=COALESCE(submitted_at,$3) WHERE id=$4 AND account_id=$5 AND environment=$6 AND status IN ('pending','submitted','partial') AND o.filled_quantity<=COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0)`, strings.TrimSpace(externalID), status, observedAt.UTC(), orderID, accountID, environment)
 	if err != nil {
 		return fmt.Errorf("postgres: finalize prediction exit order: %w", err)
 	}
@@ -371,7 +376,7 @@ func (r *OrderRepo) ReconcilePredictionExitReservations(ctx context.Context, acc
 	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() {
 		return fmt.Errorf("postgres: reconcile prediction exit reservations: invalid execution account")
 	}
-	_, err := r.pool.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.close_reservation_order_id=o.id AND p.account_id=$1 AND p.environment=$2 AND o.account_id=$1 AND o.environment=$2 AND o.market_type='polymarket' AND o.status IN ('filled','rejected','cancelled')`, accountID, environment)
+	_, err := r.pool.Exec(ctx, `UPDATE positions p SET close_reservation_order_id=NULL FROM orders o WHERE p.close_reservation_order_id=o.id AND p.account_id=$1 AND p.environment=$2 AND o.account_id=$1 AND o.environment=$2 AND o.market_type IN ('stock','polymarket','kalshi') AND o.status IN ('filled','rejected','cancelled') AND o.filled_quantity<=COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0)`, accountID, environment)
 	if err != nil {
 		return fmt.Errorf("postgres: reconcile prediction exit reservations: %w", err)
 	}

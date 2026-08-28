@@ -195,8 +195,12 @@ func aggregateLocalPolymarketPositions(positions []domain.Position) map[string]r
 }
 
 func isLocalPolymarketPosition(position domain.Position) bool {
-	if position.MarketType.Normalize() == domain.MarketTypePolymarket {
+	normalized := position.MarketType.Normalize()
+	if normalized == domain.MarketTypePolymarket {
 		return true
+	}
+	if normalized != "" {
+		return false
 	}
 	_, _, ok := sideQualifiedPolymarketTicker(position.Ticker)
 	return ok

@@ -115,7 +115,7 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	if persistedAccountID != input.Order.AccountID || persistedEnvironment != string(input.Order.Environment) || persistedOriginType != input.Order.OriginType || persistedOriginID != input.Order.OriginID {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: order fill scope mismatch")
 	}
-	if persistedStatus != string(domain.OrderStatusPending) && persistedStatus != string(domain.OrderStatusSubmitted) && persistedStatus != string(domain.OrderStatusPartial) && persistedStatus != string(domain.OrderStatusFilled) {
+	if persistedStatus != string(domain.OrderStatusPending) && persistedStatus != string(domain.OrderStatusSubmitted) && persistedStatus != string(domain.OrderStatusPartial) && persistedStatus != string(domain.OrderStatusFilled) && persistedStatus != string(domain.OrderStatusCancelled) && persistedStatus != string(domain.OrderStatusRejected) {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: order %s status %s not fill-compatible", input.Order.ID, persistedStatus)
 	}
 	if input.FillIntent.Side != persistedSide {
@@ -145,7 +145,7 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	order.FilledQuantity = observedQuantity
 	now := input.Now.UTC()
 	order.FilledAt = &now
-	if order.Status != domain.OrderStatusPartial && order.Status != domain.OrderStatusFilled {
+	if order.Status != domain.OrderStatusPartial && order.Status != domain.OrderStatusFilled && order.Status != domain.OrderStatusCancelled && order.Status != domain.OrderStatusRejected {
 		order.Status = domain.OrderStatusFilled
 	}
 	if _, err := tx.Exec(ctx, `UPDATE orders SET filled_quantity=$1,filled_avg_price=$2,status=$3,filled_at=$4,external_id=COALESCE(NULLIF($6,''),external_id),broker=COALESCE(NULLIF($7,''),broker),submitted_at=COALESCE(submitted_at,$8) WHERE id=$5`, order.FilledQuantity, observedAvgPrice, order.Status, order.FilledAt, order.ID, strings.TrimSpace(order.ExternalID), strings.TrimSpace(order.Broker), order.SubmittedAt); err != nil {
@@ -227,7 +227,8 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 				matchedPosition.ClosedAt = &closedAt
 				closedIDs = append(closedIDs, matchedPosition.ID)
 			}
-			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = $1, current_price = $2, realized_pnl = $3, closed_at = $4, close_reservation_order_id=CASE WHEN close_reservation_order_id=$6 THEN NULL ELSE close_reservation_order_id END WHERE id = $5`, matchedPosition.Quantity, matchedPosition.CurrentPrice, matchedPosition.RealizedPnL, matchedPosition.ClosedAt, matchedPosition.ID, order.ID); err != nil {
+			releaseReservation := order.Status == domain.OrderStatusFilled || order.Status == domain.OrderStatusCancelled || order.Status == domain.OrderStatusRejected
+			if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = $1, current_price = $2, realized_pnl = $3, closed_at = $4, close_reservation_order_id=CASE WHEN $7 AND close_reservation_order_id=$6 THEN NULL ELSE close_reservation_order_id END WHERE id = $5`, matchedPosition.Quantity, matchedPosition.CurrentPrice, matchedPosition.RealizedPnL, matchedPosition.ClosedAt, matchedPosition.ID, order.ID, releaseReservation); err != nil {
 				return repository.OrderFillResult{}, fmt.Errorf("postgres: update polymarket position: %w", err)
 			}
 			updatedIDs = append(updatedIDs, matchedPosition.ID)
@@ -307,6 +308,39 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: commit order fill: %w", err)
 	}
 	return repository.OrderFillResult{OrderID: order.ID, PositionID: positionID, Position: position, TradeID: trade.ID, Trade: trade, CreatedAt: trade.CreatedAt}, nil
+}
+
+func (db *DB) ResolveOrderFillCommit(ctx context.Context, input repository.OrderFillInput) (repository.OrderFillResult, bool, error) {
+	if err := validateOrderFillInput(input); err != nil {
+		return repository.OrderFillResult{}, false, err
+	}
+	var result repository.OrderFillResult
+	var accountID uuid.UUID
+	var environment domain.AccountEnvironment
+	var originType, originID string
+	var quantity, price float64
+	err := db.Pool.QueryRow(ctx, `SELECT order_id,position_id,trade_id,created_at,account_id,environment,origin_type,origin_id,fill_quantity::double precision,fill_price::double precision FROM financial_fill_idempotency WHERE idempotency_key=$1`, input.IdempotencyKey).Scan(&result.OrderID, &result.PositionID, &result.TradeID, &result.CreatedAt, &accountID, &environment, &originType, &originID, &quantity, &price)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return repository.OrderFillResult{}, false, nil
+	}
+	if err != nil {
+		return repository.OrderFillResult{}, false, fmt.Errorf("postgres: resolve order fill commit: %w", err)
+	}
+	if result.OrderID != input.Order.ID || accountID != input.Order.AccountID || environment != input.Order.Environment || originType != input.Order.OriginType || originID != input.Order.OriginID || !numeric8Equal(quantity, input.FillIntent.Quantity) || !numeric8Equal(price, input.FillIntent.ExecutionPrice) {
+		return repository.OrderFillResult{}, false, fmt.Errorf("postgres: resolved order fill payload mismatch")
+	}
+	if result.PositionID != nil {
+		result.Position, err = scanPosition(db.Pool.QueryRow(ctx, positionSelectSQL+` WHERE p.id=$1 AND p.account_id=$2`, *result.PositionID, accountID))
+		if err != nil {
+			return repository.OrderFillResult{}, false, err
+		}
+	}
+	result.Trade, err = scanTrade(db.Pool.QueryRow(ctx, tradeSelectSQL+` WHERE id=$1 AND account_id=$2`, result.TradeID, accountID))
+	if err != nil {
+		return repository.OrderFillResult{}, false, err
+	}
+	result.Replayed = true
+	return result, true, nil
 }
 
 func validateOrderFillInput(input repository.OrderFillInput) error {
@@ -569,6 +603,10 @@ func applyOptionFillTx(ctx context.Context, tx pgx.Tx, input repository.OptionFi
 	}
 	switch persistedStatus {
 	case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
+	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
+		if order.Status != persistedStatus {
+			return repository.OptionFillResult{}, fmt.Errorf("postgres: terminal option order status changed")
+		}
 	default:
 		return repository.OptionFillResult{}, fmt.Errorf("postgres: option order %s status %s not fill-compatible", order.ID, persistedStatus)
 	}

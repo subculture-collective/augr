@@ -1,10 +1,30 @@
 package execution
 
 import (
+	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
+
+type statusCodeTestError int
+
+func (e statusCodeTestError) Error() string   { return http.StatusText(int(e)) }
+func (e statusCodeTestError) StatusCode() int { return int(e) }
+
+func TestIsDefinitiveBrokerRejection(t *testing.T) {
+	t.Parallel()
+	if !IsDefinitiveBrokerRejection(statusCodeTestError(http.StatusUnprocessableEntity)) {
+		t.Fatal("422 must be definitive")
+	}
+	if IsDefinitiveBrokerRejection(statusCodeTestError(http.StatusTooManyRequests)) {
+		t.Fatal("429 must remain ambiguous")
+	}
+	if !IsDefinitiveBrokerRejection(errors.Join(ErrBrokerOrderRejected, errors.New("provider declined"))) {
+		t.Fatal("typed rejection must be definitive")
+	}
+}
 
 func TestQuantizeKalshiContractsUsesWholeContracts(t *testing.T) {
 	t.Parallel()

@@ -121,6 +121,10 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 }
 
 func (g *StopGuard) RegisterEntry(pos Position) error {
+	return g.registerEntry(pos, guardArmed)
+}
+
+func (g *StopGuard) registerEntry(pos Position, initialState guardState) error {
 	if g == nil {
 		return errors.New("polymarket: stop guard is nil")
 	}
@@ -184,9 +188,11 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 		return err
 	}
 	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, order: order, receivedAt: time.Now()}
+	entry.state.Store(int32(initialState))
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if previous, exists := g.byID[positionID]; exists {
+		previous.state.Store(int32(guardFired))
 		oldEntries := g.bySlug[previous.slug]
 		for i := range oldEntries {
 			if oldEntries[i] == previous {
@@ -243,15 +249,17 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 	if pos.TakeProfit != nil {
 		entry.TakeProfitPx = *pos.TakeProfit
 	}
-	if err := g.RegisterEntry(entry); err != nil {
+	if err := g.registerEntry(entry, guardFiring); err != nil {
 		return err
 	}
 	lookup, ok := g.exitRepo.(repository.PredictionExitReservationLookup)
 	if !ok {
+		g.arm(positionID)
 		return nil
 	}
 	order, err := lookup.GetPredictionExitOrderByPosition(ctx, pos.AccountID, pos.Environment, pos.ID)
 	if errors.Is(err, repository.ErrNotFound) {
+		g.arm(positionID)
 		return nil
 	}
 	if err != nil {
@@ -272,9 +280,18 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 	if guard != nil {
 		guard.order, guard.template = order, tmpl
 		guard.claimed.Store(true)
+		guard.state.Store(int32(guardArmed))
 	}
 	g.mu.Unlock()
 	return nil
+}
+
+func (g *StopGuard) arm(positionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if entry := g.byID[positionID]; entry != nil {
+		entry.state.Store(int32(guardArmed))
+	}
 }
 
 func (g *StopGuard) Cancel(positionID string) {
@@ -384,6 +401,12 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			}
 			if g.logger != nil {
 				g.logger.Error("polymarket stop guard send failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
+			}
+			if execution.IsDefinitiveBrokerRejection(err) {
+				if !g.finalizeTerminalExit(ctx, entry, positionID, domain.OrderStatusRejected, "") {
+					entry.state.Store(int32(guardArmed))
+				}
+				continue
 			}
 			var externalID string
 			var status domain.OrderStatus

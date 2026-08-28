@@ -22,3 +22,9 @@ type PlannedIntent struct {
 	Intent  domain.CopyTradeIntent
 	Created bool
 }
+
+// RetryStore loads immutable execution evidence before callers regenerate a
+// time-sensitive preview for the same source observation.
+type RetryStore interface {
+	GetPlannedRun(context.Context, uuid.UUID, uuid.UUID, int) (*Run, []PlannedIntent, error)
+}

@@ -3,6 +3,7 @@ package execution
 import (
 	"context"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -11,6 +12,22 @@ import (
 // ErrBrokerOrderNotFound is authoritative evidence that a client order ID has
 // no broker-side order.
 var ErrBrokerOrderNotFound = errors.New("broker order not found")
+
+// ErrBrokerOrderRejected marks provider-authoritative rejection. Errors not
+// matching this value are ambiguous transport outcomes and remain pending.
+var ErrBrokerOrderRejected = errors.New("broker order rejected")
+
+func IsDefinitiveBrokerRejection(err error) bool {
+	if errors.Is(err, ErrBrokerOrderRejected) {
+		return true
+	}
+	var provider interface{ StatusCode() int }
+	if !errors.As(err, &provider) {
+		return false
+	}
+	status := provider.StatusCode()
+	return status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+}
 
 // Broker defines the market-agnostic execution contract for routing orders.
 type Broker interface {

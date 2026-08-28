@@ -22,11 +22,6 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 	if broker == nil || paperRepo == nil {
 		return fmt.Errorf("paper options account dependencies are required")
 	}
-	if len(closeRepos) > 0 && closeRepos[0] != nil {
-		if err := closeRepos[0].ReconcileOptionCloseReservations(ctx, binding.AccountID(), binding.Environment()); err != nil {
-			return fmt.Errorf("reconcile option close reservations: %w", err)
-		}
-	}
 	var allTrades []domain.Trade
 	for offset := 0; ; offset += 250 {
 		trades, err := paperRepo.ListPaperTrades(ctx, binding.AccountID(), binding.Environment(), 250, offset)
@@ -83,6 +78,13 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 	if err := broker.RestoreOrders(restorable); err != nil {
 		return err
 	}
+	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx, binding.AccountID(), binding.Environment())
+	if err != nil {
+		return err
+	}
+	if err := broker.RestoreOrderSequence(maxSeq); err != nil {
+		return err
+	}
 	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].Fills != nil {
 		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, nil, nil, nil).WithOptionFillRepo(recovery[0].Fills)
 		if err := manager.ReconcilePendingOptionOrders(ctx, binding, allOrders, allPositions); err != nil {
@@ -106,12 +108,10 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 			}
 		}
 	}
-	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx, binding.AccountID(), binding.Environment())
-	if err != nil {
-		return err
-	}
-	if err := broker.RestoreOrderSequence(maxSeq); err != nil {
-		return err
+	if len(closeRepos) > 0 && closeRepos[0] != nil {
+		if err := closeRepos[0].ReconcileOptionCloseReservations(ctx, binding.AccountID(), binding.Environment()); err != nil {
+			return fmt.Errorf("reconcile option close reservations: %w", err)
+		}
 	}
 	return nil
 }

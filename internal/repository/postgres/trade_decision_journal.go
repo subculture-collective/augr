@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -200,6 +201,9 @@ func (r *TradeDecisionJournalRepo) CreateOrderWithDecision(ctx context.Context, 
 		return fmt.Errorf("postgres: begin atomic order decision: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := reserveGenericExitPositions(ctx, tx, order); err != nil {
+		return err
+	}
 	if err := (&OrderRepo{pool: r.pool, accountID: r.accountID}).create(ctx, tx, order); err != nil {
 		return err
 	}
@@ -238,6 +242,59 @@ func (r *TradeDecisionJournalRepo) CreateOrderWithDecision(ctx context.Context, 
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("postgres: commit atomic order decision: %w", err)
+	}
+	return nil
+}
+
+func reserveGenericExitPositions(ctx context.Context, tx pgx.Tx, order *domain.Order) error {
+	if order == nil || order.PositionIntent == nil || (*order.PositionIntent != domain.PositionIntentSellToClose && *order.PositionIntent != domain.PositionIntentBuyToClose) {
+		return nil
+	}
+	if len(order.ClosePositionIDs) == 0 {
+		return fmt.Errorf("postgres: generic exit requires exact position reservation")
+	}
+	ids := append([]uuid.UUID(nil), order.ClosePositionIDs...)
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	rows, err := tx.Query(ctx, `SELECT id,ticker,side,quantity::double precision FROM positions WHERE id=ANY($1::uuid[]) AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND closed_at IS NULL AND quantity>0 AND close_reservation_order_id IS NULL ORDER BY id FOR UPDATE`, ids, order.AccountID, order.Environment, order.OriginType, order.OriginID)
+	if err != nil {
+		return fmt.Errorf("postgres: lock generic exit positions: %w", err)
+	}
+	defer rows.Close()
+	wantTicker := order.Ticker
+	if order.MarketType.Normalize() == domain.MarketTypePolymarket || order.MarketType.Normalize() == domain.MarketTypeKalshi {
+		wantTicker = normalizedPositionTicker(order.MarketType, order.Ticker, order.PredictionSide)
+	}
+	wantSide := domain.PositionSideLong
+	if *order.PositionIntent == domain.PositionIntentBuyToClose {
+		wantSide = domain.PositionSideShort
+	}
+	total, count := 0.0, 0
+	for rows.Next() {
+		var id uuid.UUID
+		var ticker string
+		var side domain.PositionSide
+		var quantity float64
+		if err := rows.Scan(&id, &ticker, &side, &quantity); err != nil {
+			return err
+		}
+		if ticker != wantTicker || side != wantSide {
+			return fmt.Errorf("postgres: generic exit position does not match order")
+		}
+		total += quantity
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if count != len(ids) || total+1e-8 < order.Quantity {
+		return fmt.Errorf("postgres: generic exit position ownership changed")
+	}
+	tag, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=$1 WHERE id=ANY($2::uuid[]) AND account_id=$3 AND close_reservation_order_id IS NULL`, order.ID, ids, order.AccountID)
+	if err != nil {
+		return fmt.Errorf("postgres: reserve generic exit positions: %w", err)
+	}
+	if int(tag.RowsAffected()) != len(ids) {
+		return fmt.Errorf("postgres: generic exit reservation changed concurrently")
 	}
 	return nil
 }

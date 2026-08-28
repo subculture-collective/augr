@@ -734,6 +734,12 @@ type OrderFillResult struct {
 	Replayed   bool
 }
 
+// OrderFillCommitResolver resolves an ambiguous ApplyOrderFill result from its
+// durable idempotency row before an in-memory venue effect is compensated.
+type OrderFillCommitResolver interface {
+	ResolveOrderFillCommit(context.Context, OrderFillInput) (OrderFillResult, bool, error)
+}
+
 // PredictionDecisionSettlementInput carries settlement persistence details.
 type PredictionDecisionSettlementInput struct {
 	IdempotencyKey string

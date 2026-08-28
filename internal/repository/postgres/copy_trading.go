@@ -427,7 +427,12 @@ func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, cl
 		WHERE i.id=$1 AND i.account_id=$4 AND s.account_id=$4 AND i.environment=s.environment
 		 AND i.origin_type='copy_subscription' AND s.origin_type='copy_subscription'
 		 AND i.origin_id=s.id AND s.origin_id=s.id AND s.status='paper_active' AND s.is_paper=true
-		 AND i.policy_status='approved' AND i.status='received' AND i.order_id IS NULL
+		 AND i.policy_status='approved' AND i.status='received'
+		 AND (i.order_id IS NULL OR EXISTS (
+			SELECT 1 FROM orders o JOIN copy_origin_rebalance_intents ri ON ri.run_id=o.copy_origin_rebalance_run_id AND ri.intent_id=i.id
+			WHERE o.id=i.order_id AND o.account_id=i.account_id AND o.environment=i.environment
+			  AND o.origin_type=i.origin_type AND o.origin_id=i.origin_id::text
+			  AND o.status IN ('pending','submitted','partial')))
 		 AND (i.execution_claim_id IS NULL OR i.execution_claimed_at < $3 - INTERVAL '5 minutes')
 		FOR UPDATE OF i,s)
 		UPDATE copy_trade_intents i SET execution_claim_id=$2,execution_claimed_at=$3,updated_at=$3 FROM locked WHERE i.id=locked.id`, intentID, claimID, now.UTC(), r.accountID)

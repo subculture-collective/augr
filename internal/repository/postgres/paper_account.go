@@ -95,7 +95,10 @@ func (r *PaperAccountRepo) ListOpenPaperOrders(ctx context.Context, accountID uu
 		o.option_type, o.strike::double precision, o.expiry, o.contract_multiplier::double precision,
 		o.position_intent, o.leg_group_id, COALESCE(o.prediction_side, ''), COALESCE(o.polymarket_intent, ''), o.allocation_opportunity_id, COALESCE(o.client_order_id, '')
 		FROM orders o
-		WHERE o.account_id=$1 AND o.environment=$2 AND o.broker = 'paper' AND o.status IN ('pending', 'submitted', 'partial')
+		WHERE o.account_id=$1 AND o.environment=$2 AND o.broker = 'paper' AND (
+			o.status IN ('pending', 'submitted', 'partial') OR
+			(o.market_type='options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0))
+		)
 		ORDER BY o.submitted_at ASC, o.id ASC LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list open paper orders: %w", err)

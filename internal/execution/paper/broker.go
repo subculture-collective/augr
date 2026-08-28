@@ -283,7 +283,7 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 	if err != nil {
 		order.Status = domain.OrderStatusRejected
 		b.orders[externalID] = cloneOrder(order)
-		return externalID, err
+		return externalID, errors.Join(execution.ErrBrokerOrderRejected, err)
 	}
 	if !shouldFill {
 		b.orders[externalID] = cloneOrder(order)

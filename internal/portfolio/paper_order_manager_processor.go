@@ -47,9 +47,19 @@ type allocationOrderRepo struct {
 }
 
 func (r allocationOrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	if err := r.DecorateOrder(order); err != nil {
+		return err
+	}
+	return r.OrderRepository.Create(ctx, order)
+}
+
+func (r allocationOrderRepo) DecorateOrder(order *domain.Order) error {
+	if order == nil || r.opportunityID == uuid.Nil || r.claimID == uuid.Nil {
+		return errors.New("portfolio: allocation opportunity and claim are required")
+	}
 	order.AllocationOpportunityID = &r.opportunityID
 	order.AllocationClaimID = &r.claimID
-	return r.OrderRepository.Create(ctx, order)
+	return nil
 }
 
 func (r allocationOrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
