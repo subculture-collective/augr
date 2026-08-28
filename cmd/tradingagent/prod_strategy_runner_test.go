@@ -696,6 +696,10 @@ func (*recordingOpportunityRepo) ListQueuedForAllocation(context.Context, time.T
 	return nil, nil
 }
 
+func (*recordingOpportunityRepo) ListSelectedForAllocation(context.Context, time.Time) ([]domain.Opportunity, error) {
+	return nil, nil
+}
+
 func (*recordingOpportunityRepo) Count(context.Context, repository.OpportunityFilter) (int, error) {
 	return 0, nil
 }
