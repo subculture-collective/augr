@@ -20,7 +20,7 @@ type NativeDecision = prediction.NativeDecision
 
 // NativeExecutor executes a strategy against a Polymarket snapshot.
 type NativeExecutor interface {
-	Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scopes ...execution.ExecutionScope) (NativeDecision, error)
+	Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scope execution.ExecutionScope) (NativeDecision, error)
 }
 
 // DeterministicNativeExecutor converts discovery metadata into a conservative
@@ -38,10 +38,11 @@ func NewDeterministicNativeExecutor() DeterministicNativeExecutor {
 
 // Execute builds a buy/hold decision from strategy discovery metadata and the
 // current YES/NO quote. It never submits orders directly.
-func (e DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scopes ...execution.ExecutionScope) (result NativeDecision, err error) {
-	if len(scopes) > 0 {
-		defer func() { result.Scope = scopes[0] }()
+func (e DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scope execution.ExecutionScope) (result NativeDecision, err error) {
+	if scope.AccountID() == [16]byte{} || !scope.Environment().IsValid() {
+		return NativeDecision{}, errors.New("polymarket native executor: valid execution scope is required")
 	}
+	defer func() { result.Scope = scope }()
 	if err := ctx.Err(); err != nil {
 		return NativeDecision{}, err
 	}

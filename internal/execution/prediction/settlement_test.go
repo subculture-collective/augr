@@ -13,6 +13,8 @@ import (
 
 var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
 
+const settlementTestOriginID = "20000000-0000-4000-8000-000000000001"
+
 func TestNewSettlerRetainsExecutionAccount(t *testing.T) {
 	settler := NewSettler(testExecutionAccountBinding, nil, nil, nil, nil, nil)
 	if settler.executionAccount != testExecutionAccountBinding {
@@ -62,7 +64,7 @@ func (s *settlementDecisionStub) List(_ context.Context, f repository.TradeDecis
 func stampSettlementDecision(decision *domain.TradeDecision) {
 	decision.AccountID, decision.Environment = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment()
 	decision.OriginType = "strategy_version"
-	decision.OriginID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("settlement-version:"+decision.ID.String())).String()
+	decision.OriginID = settlementTestOriginID
 	runID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("settlement-run:"+decision.ID.String()))
 	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	decision.PipelineRunID, decision.PipelineRunTradeDate = &runID, &tradeDate
@@ -88,6 +90,7 @@ func (s *settlementPositionStub) CreateAlpacaOwned(context.Context, *domain.Posi
 func (s *settlementPositionStub) Get(context.Context, uuid.UUID) (*domain.Position, error) {
 	if s.position.ID != uuid.Nil {
 		p := s.position
+		p.AccountID, p.Environment, p.OriginType, p.OriginID = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), "strategy_version", settlementTestOriginID
 		return &p, nil
 	}
 	return nil, nil
@@ -144,6 +147,7 @@ func (s *settlementTradeStub) GetByOrder(_ context.Context, orderID uuid.UUID, _
 	var out []domain.Trade
 	for _, trade := range s.trades {
 		if trade.OrderID != nil && *trade.OrderID == orderID {
+			trade.AccountID, trade.Environment, trade.OriginType, trade.OriginID = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), "strategy_version", settlementTestOriginID
 			out = append(out, trade)
 		}
 	}

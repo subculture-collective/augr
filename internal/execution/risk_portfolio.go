@@ -14,7 +14,7 @@ const riskSnapshotPositionLimit = 1000
 
 // BuildRiskPortfolioSnapshot captures the current portfolio exposure needed for
 // truthful pre-trade risk checks and status reporting.
-func BuildRiskPortfolioSnapshot(ctx context.Context, broker Broker, positionRepo repository.PositionRepository) (risk.Portfolio, error) {
+func BuildRiskPortfolioSnapshot(ctx context.Context, account domain.ExecutionAccountBinding, broker Broker, positionRepo repository.PositionRepository) (risk.Portfolio, error) {
 	if broker == nil {
 		return risk.Portfolio{}, fmt.Errorf("broker is required")
 	}
@@ -24,21 +24,33 @@ func BuildRiskPortfolioSnapshot(ctx context.Context, broker Broker, positionRepo
 		return risk.Portfolio{}, fmt.Errorf("get account balance: %w", err)
 	}
 
-	return BuildRiskPortfolioSnapshotFromBalance(ctx, balance, positionRepo)
+	return BuildRiskPortfolioSnapshotFromBalance(ctx, account, balance, positionRepo)
 }
 
 // BuildRiskPortfolioSnapshotFromBalance converts the current open positions into
 // the exposure shape expected by the risk engine using the provided account equity.
-func BuildRiskPortfolioSnapshotFromBalance(ctx context.Context, balance Balance, positionRepo repository.PositionRepository) (risk.Portfolio, error) {
+func BuildRiskPortfolioSnapshotFromBalance(ctx context.Context, account domain.ExecutionAccountBinding, balance Balance, positionRepo repository.PositionRepository) (risk.Portfolio, error) {
 	if positionRepo == nil {
 		return risk.Portfolio{}, fmt.Errorf("position repository is required")
 	}
 
+	if err := account.Validate(); err != nil {
+		return risk.Portfolio{}, fmt.Errorf("execution account: %w", err)
+	}
+	scoped, ok := positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return risk.Portfolio{}, fmt.Errorf("account-scoped position repository is required")
+	}
 	var positions []domain.Position
 	for offset := 0; ; offset += riskSnapshotPositionLimit {
-		page, err := positionRepo.GetOpen(ctx, repository.PositionFilter{}, riskSnapshotPositionLimit, offset)
+		page, err := scoped.GetOpenByAccount(ctx, account.AccountID(), account.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, offset)
 		if err != nil {
 			return risk.Portfolio{}, fmt.Errorf("get open positions: %w", err)
+		}
+		for _, position := range page {
+			if position.AccountID != account.AccountID() || position.Environment != account.Environment() {
+				return risk.Portfolio{}, fmt.Errorf("position %s escaped account scope", position.ID)
+			}
 		}
 		positions = append(positions, page...)
 		if len(page) < riskSnapshotPositionLimit {

@@ -362,7 +362,7 @@ func TestBuildRiskPortfolioSnapshotPaginatesAllOpenPositions(t *testing.T) {
 		}
 		return positions, nil
 	}
-	portfolio, err := execution.BuildRiskPortfolioSnapshotFromBalance(context.Background(), execution.Balance{Equity: 10_000}, repo)
+	portfolio, err := execution.BuildRiskPortfolioSnapshotFromBalance(context.Background(), testExecutionAccountBinding, execution.Balance{Equity: 10_000}, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,7 @@ func TestBuildRiskPortfolioSnapshotUsesOptionContractMultiplier(t *testing.T) {
 		}
 		return []domain.Position{{Ticker: "AAPL271217C00150000", AssetClass: domain.AssetClassOption, Quantity: 2, AvgEntry: 5, ContractMultiplier: 100}}, nil
 	}}
-	portfolio, err := execution.BuildRiskPortfolioSnapshotFromBalance(context.Background(), execution.Balance{Equity: 10_000}, repo)
+	portfolio, err := execution.BuildRiskPortfolioSnapshotFromBalance(context.Background(), testExecutionAccountBinding, execution.Balance{Equity: 10_000}, repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,9 +485,13 @@ func (r *mockPositionRepo) GetByExecutionScope(ctx context.Context, accountID uu
 	return r.GetByStrategy(ctx, strategyID, filter, limit, offset)
 }
 
-func (r *mockPositionRepo) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+func (r *mockPositionRepo) GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
 	if r.getOpenFn != nil {
-		return r.getOpenFn(ctx, filter, limit, offset)
+		positions, err := r.getOpenFn(ctx, filter, limit, offset)
+		for i := range positions {
+			positions[i].AccountID, positions[i].Environment = accountID, environment
+		}
+		return positions, err
 	}
 	return nil, nil
 }

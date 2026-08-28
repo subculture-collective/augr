@@ -128,6 +128,11 @@ func listAllOpenPositionsByAccount(ctx context.Context, repo repository.Position
 		if err != nil {
 			return nil, err
 		}
+		for _, position := range page {
+			if position.AccountID != account.AccountID() || position.Environment != account.Environment() {
+				return nil, fmt.Errorf("options lifecycle position %s escaped account scope", position.ID)
+			}
+		}
 		all = append(all, page...)
 		if len(page) < pageSize {
 			return all, nil

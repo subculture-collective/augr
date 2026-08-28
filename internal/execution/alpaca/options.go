@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -198,21 +199,34 @@ func (b *OptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Op
 	}
 
 	legs := make([]mlegLeg, 0, len(spread.Legs))
+	netLimit := 0.0
 	for _, leg := range spread.Legs {
 		ratio := leg.Ratio
 		if ratio <= 0 {
 			ratio = 1
 		}
 		legs = append(legs, mlegLeg{Symbol: domain.AlpacaSymbol(strings.TrimSpace(leg.Contract.OCCSymbol)), Side: strings.ToLower(leg.Side.String()), PositionIntent: string(leg.PositionIntent), RatioQty: strconv.Itoa(ratio)})
+		if leg.ExecutablePrice <= 0 || math.IsNaN(leg.ExecutablePrice) || math.IsInf(leg.ExecutablePrice, 0) {
+			return nil, errors.New("alpaca: spread requires executable prices for a bounded net limit")
+		}
+		if leg.Side == domain.OrderSideBuy {
+			netLimit += leg.ExecutablePrice * float64(ratio)
+		} else {
+			netLimit -= leg.ExecutablePrice * float64(ratio)
+		}
+	}
+	if netLimit == 0 || math.IsNaN(netLimit) || math.IsInf(netLimit, 0) {
+		return nil, errors.New("alpaca: spread net limit must be finite and nonzero")
 	}
 
 	req := mlegOrderRequest{
 		Qty:           formatFloat(quantity),
-		Type:          "market",
+		Type:          "limit",
 		TimeInForce:   defaultTimeInForce,
 		OrderClass:    "mleg",
 		Legs:          legs,
 		ClientOrderID: strings.TrimSpace(clientOrderID),
+		LimitPrice:    formatFloat(netLimit),
 	}
 	if req.ClientOrderID == "" {
 		return nil, errors.New("alpaca: spread client order id is required")

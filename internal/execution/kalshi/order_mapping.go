@@ -28,11 +28,15 @@ func mapCreateOrderRequest(order *domain.Order) (CreateOrderRequest, error) {
 	if err != nil {
 		return CreateOrderRequest{}, err
 	}
+	clientOrderID := strings.TrimSpace(order.ClientOrderID)
+	if clientOrderID == "" {
+		return CreateOrderRequest{}, fmt.Errorf("kalshi: client order id is required")
+	}
 
 	req := CreateOrderRequest{
 		Ticker:        ticker,
 		Side:          contractSide,
-		ClientOrderID: order.ID.String(),
+		ClientOrderID: clientOrderID,
 		Count:         count,
 	}
 

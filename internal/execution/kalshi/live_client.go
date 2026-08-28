@@ -107,9 +107,6 @@ func (c *HTTPClient) GetOrderByClientOrderID(ctx context.Context, clientOrderID 
 	for _, path := range []string{"/portfolio/orders", "/historical/orders"} {
 		body, err := c.client.Get(ctx, path, query, true)
 		if err != nil {
-			if strings.Contains(err.Error(), "status=404") {
-				continue
-			}
 			return OrderResponse{}, fmt.Errorf("kalshi: lookup client order id: %w", err)
 		}
 		var response struct {

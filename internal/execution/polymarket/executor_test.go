@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
+	"github.com/google/uuid"
 )
 
 func TestDeterministicNativeExecutor_BuysWhenKnownTemplatePassesGates(t *testing.T) {
@@ -19,7 +22,7 @@ func TestDeterministicNativeExecutor_BuysWhenKnownTemplatePassesGates(t *testing
 		BestBidYes: 0.41,
 		BestAskYes: 0.43,
 		Liquidity:  10_000,
-	})
+	}, polymarketExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -36,7 +39,7 @@ func TestDeterministicNativeExecutor_BuysWhenKnownTemplatePassesGates(t *testing
 
 func TestDeterministicNativeExecutor_HoldsUnknownTemplateSafely(t *testing.T) {
 	strategy := polymarketStrategyWithMeta(t, discoveryMeta{Template: "unknown_template", Direction: "YES", Conviction: 0.9, EntryPriceMax: 0.50})
-	decision, err := NewDeterministicNativeExecutor().Execute(context.Background(), strategy, Snapshot{Slug: strategy.Ticker, BestAskYes: 0.43, Liquidity: 10_000})
+	decision, err := NewDeterministicNativeExecutor().Execute(context.Background(), strategy, Snapshot{Slug: strategy.Ticker, BestAskYes: 0.43, Liquidity: 10_000}, polymarketExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -51,7 +54,7 @@ func TestDeterministicNativeExecutor_HoldsAboveEntryCeiling(t *testing.T) {
 		Slug:      strategy.Ticker,
 		BestAskNo: 0.55,
 		Liquidity: 10_000,
-	})
+	}, polymarketExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -73,7 +76,7 @@ func TestDeterministicNativeExecutor_HoldsWhenNoSideAskAvailable(t *testing.T) {
 		BestBidYes: 0.42,
 		NoPrice:    0.58,
 		Liquidity:  10_000,
-	})
+	}, polymarketExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -86,7 +89,7 @@ func TestDeterministicNativeExecutor_HoldsWhenNoSideAskAvailable(t *testing.T) {
 }
 
 func TestDeterministicNativeExecutor_HoldsWithoutDirection(t *testing.T) {
-	decision, err := NewDeterministicNativeExecutor().Execute(context.Background(), domain.Strategy{Ticker: "will-example-happen"}, Snapshot{Slug: "will-example-happen", YesPrice: 0.4})
+	decision, err := NewDeterministicNativeExecutor().Execute(context.Background(), domain.Strategy{Ticker: "will-example-happen"}, Snapshot{Slug: "will-example-happen", YesPrice: 0.4}, polymarketExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -100,13 +103,22 @@ func TestDeterministicNativeExecutor_HoldsWithoutDirection(t *testing.T) {
 
 func TestDeterministicNativeExecutor_HoldsWhenEvaluatorErrors(t *testing.T) {
 	exec := DeterministicNativeExecutor{Evaluator: errorEvaluator{err: errors.New("boom")}}
-	decision, err := exec.Execute(context.Background(), domain.Strategy{Ticker: "will-example-happen"}, Snapshot{Slug: "will-example-happen", BestAskYes: 0.4})
+	decision, err := exec.Execute(context.Background(), domain.Strategy{Ticker: "will-example-happen"}, Snapshot{Slug: "will-example-happen", BestAskYes: 0.4}, polymarketExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v, want safe hold", err)
 	}
 	if decision.Signal != domain.PipelineSignalHold || decision.Action != "hold" {
 		t.Fatalf("unexpected decision: %+v", decision)
 	}
+}
+
+func polymarketExecutorTestScope(t *testing.T) execution.ExecutionScope {
+	t.Helper()
+	scope, err := execution.NewNonRunExecutionScope(uuid.New(), domain.AccountEnvironmentPaperScored, ledger.ExecutionOriginOperator, "executor-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
 }
 
 type errorEvaluator struct{ err error }

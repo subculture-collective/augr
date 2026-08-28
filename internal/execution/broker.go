@@ -26,7 +26,7 @@ func IsDefinitiveBrokerRejection(err error) bool {
 		return false
 	}
 	status := provider.StatusCode()
-	return status >= 400 && status < 500 && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
+	return status >= 400 && status < 500 && status != http.StatusConflict && status != http.StatusRequestTimeout && status != http.StatusTooManyRequests
 }
 
 // Broker defines the market-agnostic execution contract for routing orders.

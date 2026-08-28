@@ -2778,7 +2778,7 @@ func (r *realStrategyRunner) setRiskPortfolioSnapshotSource(broker execution.Bro
 	}
 
 	engineImpl.SetPortfolioSnapshotFunc(func(ctx context.Context) (risk.Portfolio, error) {
-		return execution.BuildRiskPortfolioSnapshot(ctx, broker, r.positionRepo)
+		return execution.BuildRiskPortfolioSnapshot(ctx, r.executionAccount, broker, r.positionRepo)
 	})
 }
 

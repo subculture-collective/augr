@@ -15,6 +15,7 @@ func TestMapCreateOrderRequestYesLimitBuy(t *testing.T) {
 
 	req, err := mapCreateOrderRequest(&domain.Order{
 		ID:             orderID,
+		ClientOrderID:  orderID.String(),
 		Ticker:         "  KX-EXAMPLE  ",
 		Side:           domain.OrderSideBuy,
 		OrderType:      domain.OrderTypeLimit,
@@ -46,6 +47,7 @@ func TestMapCreateOrderRequestSellMarket(t *testing.T) {
 	t.Parallel()
 
 	req, err := mapCreateOrderRequest(&domain.Order{
+		ClientOrderID:  uuid.NewString(),
 		Ticker:         "KX-EXAMPLE",
 		Side:           domain.OrderSideSell,
 		OrderType:      domain.OrderTypeMarket,
@@ -65,6 +67,7 @@ func TestMapCreateOrderRequestNoLimitBuy(t *testing.T) {
 
 	price := 0.58
 	req, err := mapCreateOrderRequest(&domain.Order{
+		ClientOrderID:  uuid.NewString(),
 		Ticker:         "KX-EXAMPLE",
 		Side:           domain.OrderSideBuy,
 		OrderType:      domain.OrderTypeLimit,

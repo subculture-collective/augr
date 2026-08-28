@@ -889,7 +889,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				alpacaReconciler = automation.NewAlpacaReconciler(automation.AlpacaReconcilerDeps{
 					ExecutionAccount: executionAccount,
 					Broker:           alpacaAdapter, PLAggregate: pgrepo.NewAlpacaPLAggregateRepo(db.Pool), StrategyRepo: strategyRepo,
-					OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo, AuditLogRepo: auditLogRepo, Logger: logger,
+					OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo, AuditLogRepo: auditLogRepo, AccountLocker: orderRepo, Logger: logger,
 				})
 				return nil
 			}); err != nil {
@@ -1649,7 +1649,7 @@ func newSmokeStrategyRunner(
 	broker := paper.NewPaperBroker(100_000, 0, 0)
 	if engineImpl, ok := riskEngine.(*risk.RiskEngineImpl); ok {
 		engineImpl.SetPortfolioSnapshotFunc(func(ctx context.Context) (risk.Portfolio, error) {
-			return execution.BuildRiskPortfolioSnapshot(ctx, broker, positionRepo)
+			return execution.BuildRiskPortfolioSnapshot(ctx, executionAccount, broker, positionRepo)
 		})
 	}
 

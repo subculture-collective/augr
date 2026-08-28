@@ -45,19 +45,19 @@ func TestAlpacaPLAggregateRepo_IncludesProvenanceLegacyAndDedupes(t *testing.T) 
 	wantTrades := 4
 	wantFees := 0.50 + 0.75 + 1.25 + 1.50
 
-	open, err := repo.OpenUnrealizedPnL(ctx)
+	open, err := repo.OpenUnrealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("OpenUnrealizedPnL() error = %v", err)
 	}
-	closed, err := repo.ClosedRealizedPnL(ctx)
+	closed, err := repo.ClosedRealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("ClosedRealizedPnL() error = %v", err)
 	}
-	trades, err := repo.TradeCount(ctx)
+	trades, err := repo.TradeCount(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("TradeCount() error = %v", err)
 	}
-	fees, err := repo.FeeTotal(ctx)
+	fees, err := repo.FeeTotal(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("FeeTotal() error = %v", err)
 	}
@@ -92,19 +92,19 @@ func TestAlpacaPLAggregateRepo_ExcludesPaperAndNonAlpaca(t *testing.T) {
 	paperTrade := seedAggregatePosition(t, ctx, pool, strategyID, "IGNORED", 1, 1, 9, nil)
 	attachNonAlpacaTrade(t, ctx, pool, strategyID, paperTrade)
 
-	open, err := repo.OpenUnrealizedPnL(ctx)
+	open, err := repo.OpenUnrealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("OpenUnrealizedPnL() error = %v", err)
 	}
-	closed, err := repo.ClosedRealizedPnL(ctx)
+	closed, err := repo.ClosedRealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("ClosedRealizedPnL() error = %v", err)
 	}
-	trades, err := repo.TradeCount(ctx)
+	trades, err := repo.TradeCount(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("TradeCount() error = %v", err)
 	}
-	fees, err := repo.FeeTotal(ctx)
+	fees, err := repo.FeeTotal(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("FeeTotal() error = %v", err)
 	}

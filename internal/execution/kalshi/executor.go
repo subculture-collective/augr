@@ -3,6 +3,7 @@ package kalshi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -37,10 +38,11 @@ type DeterministicNativeExecutor struct{}
 // Execute builds a buy/hold decision from strategy discovery metadata and the
 // current YES/NO quote. Malformed or unsupported metadata is converted to a
 // safe hold decision.
-func (DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scopes ...execution.ExecutionScope) (result NativeDecision, err error) {
-	if len(scopes) > 0 {
-		defer func() { result.Scope = scopes[0] }()
+func (DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scope execution.ExecutionScope) (result NativeDecision, err error) {
+	if scope.AccountID() == [16]byte{} || !scope.Environment().IsValid() {
+		return NativeDecision{}, errors.New("kalshi native executor: valid execution scope is required")
 	}
+	defer func() { result.Scope = scope }()
 	if err := ctx.Err(); err != nil {
 		return NativeDecision{}, err
 	}

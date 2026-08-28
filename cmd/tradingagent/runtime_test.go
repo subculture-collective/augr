@@ -1833,6 +1833,9 @@ func (stubPositionRepo) Delete(context.Context, uuid.UUID) error        { return
 func (stubPositionRepo) GetOpen(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
 	return nil, nil
 }
+func (stubPositionRepo) GetOpenByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return nil, nil
+}
 
 func (stubPositionRepo) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {
 	return nil, nil
@@ -2147,9 +2150,10 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 	positionRepo := stubPositionRepo{}
 	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
 	runner := &realStrategyRunner{
-		positionRepo: positionRepo,
-		riskEngine:   engine,
-		logger:       slogDiscardLogger(),
+		executionAccount: testExecutionAccountBinding,
+		positionRepo:     positionRepo,
+		riskEngine:       engine,
+		logger:           slogDiscardLogger(),
 	}
 
 	_, err := runner.newOrderManager(

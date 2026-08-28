@@ -200,15 +200,7 @@ func aggregateLocalPolymarketPositions(positions []domain.Position) map[string]r
 }
 
 func isLocalPolymarketPosition(position domain.Position) bool {
-	normalized := position.MarketType.Normalize()
-	if normalized == domain.MarketTypePolymarket {
-		return true
-	}
-	if normalized != "" {
-		return false
-	}
-	_, _, ok := sideQualifiedPolymarketTicker(position.Ticker)
-	return ok
+	return position.MarketType == domain.MarketTypePolymarket
 }
 
 func polymarketPositionKey(position domain.Position) (key, slug, side string, ok bool) {
@@ -220,6 +212,9 @@ func polymarketPositionKey(position domain.Position) (key, slug, side string, ok
 }
 
 func polymarketPositionIdentity(position domain.Position) (slug, side string, ok bool) {
+	if position.MarketType != domain.MarketTypePolymarket {
+		return "", "", false
+	}
 	ticker := strings.TrimSpace(position.Ticker)
 	if ticker == "" {
 		return "", "", false

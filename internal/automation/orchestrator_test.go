@@ -1204,7 +1204,7 @@ func TestJobOrchestratorRegisterAllAddsPolymarketReconcile(t *testing.T) {
 
 	reconciler := polymarketexecution.NewReconciler(polymarketexecution.ReconcilerDeps{
 		ExecutionAccount: testExecutionAccountBinding,
-		Broker:           &polymarketBrokerStub{positions: []domain.Position{{Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 10}}},
+		Broker:           &polymarketBrokerStub{positions: []domain.Position{{MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 10}}},
 		PositionRepo: &polymarketPositionRepoStub{positions: []domain.Position{{
 			AccountID:   testExecutionAccountBinding.AccountID(),
 			Environment: testExecutionAccountBinding.Environment(),

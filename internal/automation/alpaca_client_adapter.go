@@ -29,6 +29,7 @@ type alpacaOrderResponse struct {
 	ID             string `json:"id"`
 	ClientOrderID  string `json:"client_order_id"`
 	Symbol         string `json:"symbol"`
+	AssetClass     string `json:"asset_class"`
 	Side           string `json:"side"`
 	Type           string `json:"type"`
 	Qty            string `json:"qty"`
@@ -211,7 +212,7 @@ func mapAlpacaOrderSnapshot(raw alpacaOrderResponse) (BrokerOrderSnapshot, error
 		return BrokerOrderSnapshot{}, err
 	}
 
-	return BrokerOrderSnapshot{
+	snapshot := BrokerOrderSnapshot{
 		ExternalID:     externalID,
 		ClientOrderID:  strings.TrimSpace(raw.ClientOrderID),
 		Ticker:         ticker,
@@ -226,7 +227,16 @@ func mapAlpacaOrderSnapshot(raw alpacaOrderResponse) (BrokerOrderSnapshot, error
 		SubmittedAt:    submittedAt,
 		FilledAt:       filledAt,
 		Broker:         "alpaca",
-	}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(raw.AssetClass), "us_option") {
+		contract, parseErr := domain.ParseOCC(ticker)
+		if parseErr != nil {
+			return BrokerOrderSnapshot{}, fmt.Errorf("alpaca: parse option order symbol: %w", parseErr)
+		}
+		snapshot.MarketType, snapshot.AssetClass = domain.MarketTypeOptions, domain.AssetClassOption
+		snapshot.UnderlyingTicker, snapshot.OptionType, snapshot.Strike, snapshot.Expiry, snapshot.ContractMultiplier = contract.Underlying, &contract.OptionType, &contract.Strike, &contract.Expiry, contract.Multiplier
+	}
+	return snapshot, nil
 }
 
 func mapAlpacaFillSnapshot(raw alpacaFillActivityResponse) (BrokerFillSnapshot, error) {

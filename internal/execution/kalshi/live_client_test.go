@@ -130,14 +130,14 @@ func TestHTTPClientGetOrderByClientOrderIDRejectsMultipleMatches(t *testing.T) {
 	}
 }
 
-func TestHTTPClientGetOrderByClientOrderIDMapsNotFound(t *testing.T) {
+func TestHTTPClientGetOrderByClientOrderIDDoesNotTreatCollection404AsAuthoritativeAbsence(t *testing.T) {
 	client := &fakeSignedClient{getErr: errors.New("kalshi: request failed (status=404): not found")}
 	adapter, err := NewLiveHTTPClient(client)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, err = adapter.GetOrderByClientOrderID(context.Background(), "missing")
-	if !errors.Is(err, execution.ErrBrokerOrderNotFound) {
+	if err == nil || errors.Is(err, execution.ErrBrokerOrderNotFound) {
 		t.Fatalf("GetOrderByClientOrderID() error = %v", err)
 	}
 }

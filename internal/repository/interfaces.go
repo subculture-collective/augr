@@ -373,10 +373,10 @@ type CopySubscriptionFilter struct {
 
 // AlpacaPLAggregateRepository provides read-only Alpaca-only P/L aggregates.
 type AlpacaPLAggregateRepository interface {
-	ClosedRealizedPnL(ctx context.Context) (float64, error)
-	OpenUnrealizedPnL(ctx context.Context) (float64, error)
-	TradeCount(ctx context.Context) (int, error)
-	FeeTotal(ctx context.Context) (float64, error)
+	ClosedRealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error)
+	OpenUnrealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error)
+	TradeCount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (int, error)
+	FeeTotal(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error)
 }
 
 // OpportunityFilter defines supported filters when listing opportunities.

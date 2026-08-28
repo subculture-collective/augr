@@ -25,8 +25,8 @@ func TestSubmitSpreadOrderSendsStableParentClientIdentity(t *testing.T) {
 	client.SetBaseURL(server.URL)
 	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
 	spread := &domain.OptionSpread{Underlying: "AAPL", Legs: []domain.SpreadLeg{
-		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00150000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 150, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1},
-		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00155000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 155, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1},
+		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00150000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 150, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, ExecutablePrice: 5},
+		{Contract: domain.OptionContract{OCCSymbol: "AAPL271217C00155000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 155, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, ExecutablePrice: 2},
 	}}
 	ids, err := NewOptionsBroker(client).SubmitSpreadOrder(context.Background(), spread, 1, "augr-option-spread-stable")
 	if err != nil {
@@ -34,6 +34,9 @@ func TestSubmitSpreadOrderSendsStableParentClientIdentity(t *testing.T) {
 	}
 	if payload["client_order_id"] != "augr-option-spread-stable" {
 		t.Fatalf("client_order_id = %v", payload["client_order_id"])
+	}
+	if payload["type"] != "limit" || payload["limit_price"] != "3" {
+		t.Fatalf("spread was not bounded by exact net limit: %#v", payload)
 	}
 	if len(ids) != 3 || ids[0] != "parent-1" {
 		t.Fatalf("spread ids = %v", ids)

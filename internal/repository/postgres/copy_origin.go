@@ -282,8 +282,9 @@ func (r *CopyOriginRepo) ListUnfinishedRuns(ctx context.Context, accountID uuid.
 		JOIN copy_origin_rebalance_intents child ON child.run_id=run.id
 		JOIN copy_trade_intents intent ON intent.id=child.intent_id
 		WHERE run.account_id=$1 AND run.environment=$2 AND subscription.account_id=$1 AND subscription.environment=$2
-		  AND subscription.status='paper_active' AND subscription.is_paper=true AND intent.account_id=$1 AND intent.environment=$2
-		  AND intent.policy_status='approved' AND (intent.status IN ('received','ordered','partial') OR (intent.status='failed' AND intent.risk_status='pending'))
+		  AND subscription.is_paper=true AND intent.account_id=$1 AND intent.environment=$2
+		  AND intent.policy_status='approved' AND ((subscription.status='paper_active' AND (intent.status='received' OR (intent.status='failed' AND intent.risk_status='pending')))
+		    OR (intent.status IN ('ordered','partial') AND intent.order_id IS NOT NULL))
 		ORDER BY run.id`, accountID, environment)
 	if err != nil {
 		return nil, err

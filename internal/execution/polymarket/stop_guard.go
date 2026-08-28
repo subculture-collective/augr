@@ -235,6 +235,9 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 	if g == nil {
 		return errors.New("polymarket: stop guard is nil")
 	}
+	if pos.MarketType != domain.MarketTypePolymarket {
+		return errors.New("polymarket: stop guard requires exact polymarket market type")
+	}
 	positionID := pos.ID.String()
 	if positionID == "" || pos.ID == uuid.Nil {
 		return errors.New("polymarket: position id is required")
@@ -313,7 +316,7 @@ func validateRecoveredStopReservation(order *domain.Order, position domain.Posit
 	}
 	wantTicker := strings.TrimSpace(expected.Slug)
 	remaining := order.Quantity - order.FilledQuantity
-	if order.FilledQuantity < 0 || remaining <= 0 || remaining != position.Quantity || order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != domain.OrderTypeMarket || strings.TrimSpace(order.Ticker) != wantTicker || !strings.EqualFold(strings.TrimSpace(order.PredictionSide), expected.OutcomeSide) || strings.TrimSpace(order.PolymarketIntent) != wantPolymarketIntent || order.Side != wantSide || *order.PositionIntent != wantIntent || position.Quantity <= 0 || position.ClosedAt != nil {
+	if order.FilledQuantity < 0 || remaining <= 0 || remaining != position.Quantity || order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType != domain.MarketTypePolymarket || position.MarketType != domain.MarketTypePolymarket || order.OrderType != domain.OrderTypeMarket || strings.TrimSpace(order.Ticker) != wantTicker || !strings.EqualFold(strings.TrimSpace(order.PredictionSide), expected.OutcomeSide) || strings.TrimSpace(order.PolymarketIntent) != wantPolymarketIntent || order.Side != wantSide || *order.PositionIntent != wantIntent || position.Quantity <= 0 || position.ClosedAt != nil {
 		return errors.New("polymarket: recovered stop reservation does not close the exact persisted position")
 	}
 	return nil

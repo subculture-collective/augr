@@ -244,10 +244,17 @@ func (r *PositionRepo) GetOpen(ctx context.Context, filter repository.PositionFi
 // ListOpenAlpacaOwned returns open positions that can be proven Alpaca-owned via
 // linked trades whose orders were recorded with broker='alpaca'.
 func (r *PositionRepo) ListOpenAlpacaOwned(ctx context.Context, limit, offset int) ([]domain.Position, error) {
+	return r.ListOpenAlpacaOwnedByAccount(ctx, r.accountID, domain.AccountEnvironmentPaperScored, limit, offset)
+}
+
+func (r *PositionRepo) ListOpenAlpacaOwnedByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error) {
+	if accountID != r.accountID || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: scoped alpaca position identity is required")
+	}
 	rows, err := r.pool.Query(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
 		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND t.account_id = p.account_id AND o.account_id = p.account_id AND o.broker = 'alpaca')
-	) ORDER BY p.opened_at ASC, p.id ASC LIMIT $1 OFFSET $2`, limit, offset, r.accountID)
+	) AND p.environment=$4 ORDER BY p.opened_at ASC, p.id ASC LIMIT $1 OFFSET $2`, limit, offset, accountID, environment)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list open alpaca-owned positions: %w", err)
 	}

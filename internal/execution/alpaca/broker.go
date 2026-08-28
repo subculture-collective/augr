@@ -53,6 +53,7 @@ type orderStatusResponse struct {
 
 type positionResponse struct {
 	Symbol        string `json:"symbol"`
+	AssetClass    string `json:"asset_class"`
 	Side          string `json:"side"`
 	Qty           string `json:"qty"`
 	AvgEntryPrice string `json:"avg_entry_price"`
@@ -419,14 +420,28 @@ func mapPosition(response positionResponse) (domain.Position, error) {
 		return domain.Position{}, err
 	}
 
-	return domain.Position{
+	position := domain.Position{
 		Ticker:        ticker,
 		Side:          side,
 		Quantity:      quantity,
 		AvgEntry:      avgEntry,
 		CurrentPrice:  currentPrice,
 		UnrealizedPnL: unrealizedPnL,
-	}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(response.AssetClass), "us_option") {
+		contract, err := domain.ParseOCC(ticker)
+		if err != nil {
+			return domain.Position{}, fmt.Errorf("alpaca: parse option position symbol: %w", err)
+		}
+		position.MarketType = domain.MarketTypeOptions
+		position.AssetClass = domain.AssetClassOption
+		position.UnderlyingTicker = contract.Underlying
+		position.OptionType = &contract.OptionType
+		position.Strike = &contract.Strike
+		position.Expiry = &contract.Expiry
+		position.ContractMultiplier = contract.Multiplier
+	}
+	return position, nil
 }
 
 func mapPositionSide(rawSide string) (domain.PositionSide, error) {

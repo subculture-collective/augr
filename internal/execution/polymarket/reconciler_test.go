@@ -29,7 +29,13 @@ func (s *reconcilerBrokerStub) GetOrderStatus(context.Context, string) (domain.O
 }
 
 func (s *reconcilerBrokerStub) GetPositions(context.Context) ([]domain.Position, error) {
-	return append([]domain.Position(nil), s.positions...), s.err
+	positions := append([]domain.Position(nil), s.positions...)
+	for i := range positions {
+		if positions[i].MarketType == "" {
+			positions[i].MarketType = domain.MarketTypePolymarket
+		}
+	}
+	return positions, s.err
 }
 
 func (s *reconcilerBrokerStub) GetAccountBalance(context.Context) (execution.Balance, error) {
@@ -85,6 +91,9 @@ func (r *reconcilerPositionRepoStub) GetOpenByAccount(ctx context.Context, accou
 	positions, err := r.GetOpen(ctx, filter, limit, offset)
 	for i := range positions {
 		positions[i].AccountID, positions[i].Environment = accountID, environment
+		if positions[i].MarketType == "" {
+			positions[i].MarketType = domain.MarketTypePolymarket
+		}
 	}
 	return positions, err
 }

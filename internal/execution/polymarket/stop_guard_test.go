@@ -444,7 +444,7 @@ func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	stop := 0.40
-	pos := domain.Position{ID: uuidFromString(t, "00000000-0000-0000-0000-000000000001"), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.New().String(), Ticker: "slug-a:NO", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
+	pos := domain.Position{ID: uuidFromString(t, "00000000-0000-0000-0000-000000000001"), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.New().String(), MarketType: domain.MarketTypePolymarket, Ticker: "slug-a:NO", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
 	if err := g.RegisterPosition(pos); err != nil {
 		t.Fatal(err)
 	}
@@ -467,7 +467,7 @@ func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 func TestStopGuardBootstrapResumesReservedOrderIdentity(t *testing.T) {
 	positionID := uuid.New()
 	stop := 0.40
-	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
+	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), MarketType: domain.MarketTypePolymarket, Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
 	intent := domain.PositionIntentSellToClose
 	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", ClientOrderID: "reserved-stop-client"}
 	repo := &sharedExitClaims{reservedOrder: reserved}
@@ -491,7 +491,7 @@ func TestStopGuardBootstrapResumesReservedOrderIdentity(t *testing.T) {
 func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
 	positionID := uuid.New()
 	stop := 0.40
-	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
+	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), MarketType: domain.MarketTypePolymarket, Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
 	intent := domain.PositionIntentSellToClose
 	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusSubmitted, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", ClientOrderID: "reserved-stop-client"}
 	price := 0.41
