@@ -406,9 +406,9 @@ func (r *CopyTradingRepo) UpdateIntent(ctx context.Context, intent *domain.CopyT
 
 func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error) {
 	tag, err := r.pool.Exec(ctx, `UPDATE copy_trade_intents
-		SET pipeline_run_id=$2,updated_at=$3
+		SET execution_claim_id=$2,execution_claimed_at=$3,updated_at=$3
 		WHERE id=$1 AND policy_status='approved' AND status='received' AND order_id IS NULL
-		  AND (pipeline_run_id IS NULL OR updated_at < $3 - INTERVAL '5 minutes')`, intentID, claimID, now.UTC())
+		  AND (execution_claim_id IS NULL OR execution_claimed_at < $3 - INTERVAL '5 minutes')`, intentID, claimID, now.UTC())
 	if err != nil {
 		return false, fmt.Errorf("postgres: claim copy intent execution: %w", err)
 	}
@@ -417,8 +417,9 @@ func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, cl
 
 func (r *CopyTradingRepo) CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, claimID uuid.UUID) (bool, error) {
 	tag, err := r.pool.Exec(ctx, `UPDATE copy_trade_intents
-		SET risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,updated_at=NOW()
-		WHERE id=$1 AND pipeline_run_id=$2 AND status='received'`, intent.ID, claimID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status)
+		SET risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,
+		    execution_claim_id=NULL,execution_claimed_at=NULL,updated_at=NOW()
+		WHERE id=$1 AND execution_claim_id=$2 AND status='received'`, intent.ID, claimID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status)
 	if err != nil {
 		return false, fmt.Errorf("postgres: complete copy intent execution: %w", err)
 	}

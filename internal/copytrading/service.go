@@ -484,7 +484,7 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 		}
 		if s.deps.Lifecycle != nil {
 			if lifecycleErr := s.deps.Lifecycle.ProposeCopyIntent(ctx, *subscription, candidate, persistedOrigin.ID()); lifecycleErr != nil {
-				candidate.Status, candidate.RiskStatus = "failed", "rejected"
+				candidate.Status, candidate.RiskStatus = "failed", "pending"
 				candidate.RiskReasons = []string{fmt.Errorf("propose copy common lifecycle: %w", lifecycleErr).Error()}
 				completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
 				if completeErr != nil || !completed {
@@ -497,10 +497,10 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
 		candidate.OrderID = executionResult.OrderID
 		if executeErr != nil {
-			candidate.Status, candidate.RiskStatus = "risk_rejected", "rejected"
+			candidate.Status, candidate.RiskStatus = "failed", "pending"
 			candidate.RiskReasons = []string{executeErr.Error()}
 		} else if err := validatePaperOrderResult(executionResult); err != nil {
-			candidate.Status, candidate.RiskStatus, candidate.OrderID = "failed", "rejected", nil
+			candidate.Status, candidate.RiskStatus, candidate.OrderID = "failed", "pending", nil
 			candidate.RiskReasons = []string{err.Error()}
 		} else {
 			candidate.RiskStatus = "approved"
@@ -512,7 +512,7 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 			case domain.OrderStatusPartial, domain.OrderStatusPending:
 				candidate.Status = "partial"
 			default:
-				candidate.Status, candidate.RiskStatus = "failed", "rejected"
+				candidate.Status, candidate.RiskStatus = "failed", "pending"
 				candidate.RiskReasons = []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
 			}
 		}

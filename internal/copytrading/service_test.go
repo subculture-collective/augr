@@ -100,6 +100,7 @@ type cancellationRaceCopyRepo struct {
 	snapshot     domain.CopyPortfolioSnapshot
 	mapping      domain.CopyInstrumentMapping
 	intentWrites int
+	completed    *domain.CopyTradeIntent
 }
 
 func (r *cancellationRaceCopyRepo) GetSubscription(context.Context, uuid.UUID) (*domain.CopySubscription, error) {
@@ -130,6 +131,8 @@ func (r *cancellationRaceCopyRepo) ClaimIntentExecution(context.Context, uuid.UU
 }
 
 func (r *cancellationRaceCopyRepo) CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, _ uuid.UUID) (bool, error) {
+	value := *intent
+	r.completed = &value
 	return true, r.UpdateIntent(ctx, intent)
 }
 
@@ -481,6 +484,19 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 		result, err := service.Rebalance(context.Background(), subscription.ID)
 		if err != nil || len(result.Intents) != 1 || executor.calls != 1 {
 			t.Fatalf("Rebalance() = (%+v, %v), executor calls=%d", result, err, executor.calls)
+		}
+	})
+
+	t.Run("infrastructure failure remains pending risk", func(t *testing.T) {
+		repo.completed = nil
+		executeErr := errors.New("executor unavailable")
+		service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: &plannedOriginStore{}, Prices: prices, Executor: &resultCopyExecutor{err: executeErr}, Now: func() time.Time { return now }})
+		result, rebalanceErr := service.Rebalance(context.Background(), subscription.ID)
+		if rebalanceErr != nil || len(result.Intents) != 1 || repo.completed == nil {
+			t.Fatalf("Rebalance() = (%+v, %v), completed=%+v", result, rebalanceErr, repo.completed)
+		}
+		if repo.completed.Status != "failed" || repo.completed.RiskStatus != "pending" || len(repo.completed.RiskReasons) != 1 || repo.completed.RiskReasons[0] != executeErr.Error() {
+			t.Fatalf("completed intent=%+v", repo.completed)
 		}
 	})
 }

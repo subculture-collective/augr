@@ -443,15 +443,16 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 		scope := scopeValue.(copyOrderScope)
 		accountParameter := nextArg(scope.accountID)
 		environmentParameter := nextArg(scope.environment)
-		originParameter := nextArg(scope.subscriptionID.String())
+		orderOriginParameter := nextArg(scope.subscriptionID.String())
 		runParameter := nextArg(scope.runID)
+		subscriptionParameter := nextArg(scope.subscriptionID)
 		conditions = append(conditions,
 			"account_id = "+accountParameter,
 			"environment = "+environmentParameter,
 			"origin_type = 'copy_subscription'",
-			"origin_id = "+originParameter,
+			"origin_id = "+orderOriginParameter,
 			"copy_origin_rebalance_run_id = "+runParameter,
-			"EXISTS (SELECT 1 FROM copy_origin_rebalance_runs r WHERE r.id = "+runParameter+" AND r.account_id = "+accountParameter+" AND r.environment = "+environmentParameter+" AND r.subscription_id = "+nextArg(scope.subscriptionID)+" AND r.origin_type = 'copy_subscription' AND r.origin_id = "+originParameter+")",
+			"EXISTS (SELECT 1 FROM copy_origin_rebalance_runs r WHERE r.id = "+runParameter+" AND r.account_id = "+accountParameter+" AND r.environment = "+environmentParameter+" AND r.subscription_id = "+subscriptionParameter+" AND r.origin_type = 'copy_subscription' AND r.origin_id = "+subscriptionParameter+")",
 		)
 	} else if scopeColumn != "" {
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))

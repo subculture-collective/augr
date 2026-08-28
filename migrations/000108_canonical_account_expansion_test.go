@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,6 +44,10 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create index idx_conversations_account_run on conversations(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
 		"create index idx_conversation_messages_account_conversation on conversation_messages(account_id,conversation_id,created_at,id) where account_id is not null",
 		"create index idx_agent_memories_account_run on agent_memories(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) where account_id is not null",
+		"add column execution_claim_id uuid",
+		"add column execution_claimed_at timestamptz",
+		"add constraint copy_intent_execution_claim_pair check ((execution_claim_id is null) = (execution_claimed_at is null))",
+		"create unique index orders_copy_origin_effect_once on orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) where origin_type='copy_subscription' and copy_origin_rebalance_run_id is not null",
 	} {
 		if !strings.Contains(up, fragment) {
 			t.Errorf("up migration missing %q", fragment)
@@ -61,6 +67,8 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"drop trigger trg_validate_account_projection_outbox_row",
 		"drop function validate_account_projection_outbox_row",
 		"drop index uq_strategies_paper_event_market_ticker",
+		"drop index orders_copy_origin_effect_once",
+		"drop constraint copy_intent_execution_claim_pair",
 		"expected_through_transaction_id uuid",
 		"order by effective_at desc, observed_at desc, id desc",
 	} {
@@ -72,6 +80,80 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 	frontierCheck := strings.Index(down, "checkpoint.projection_version is not null")
 	if ledgerLock < 0 || frontierCheck < 0 || ledgerLock > frontierCheck {
 		t.Fatal("down migration must lock ledger_transactions before checkpoint frontier safety checks")
+	}
+}
+
+func TestCanonicalAccountExpansionCopyExecutionFence(t *testing.T) {
+	ctx, pool := newCanonicalExpansionPool(t)
+	strategyID := insertCanonicalExpansionStrategy(t, ctx, pool)
+	var leaderID, sourceID, observationID uuid.UUID
+	if err := pool.QueryRow(ctx, `INSERT INTO copy_leaders(entity_type,display_name) VALUES('individual','copy fence') RETURNING id`).Scan(&leaderID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO copy_leader_sources(leader_id,provider,source_type,external_key) VALUES($1,'test','sec_13f',$2) RETURNING id`, leaderID, uuid.NewString()).Scan(&sourceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `INSERT INTO copy_source_observations(source_id,provider_observation_id,observation_kind,effective_at,published_at,content_hash) VALUES($1,$2,'portfolio_snapshot',now(),now(),'hash') RETURNING id`, sourceID, uuid.NewString()).Scan(&observationID); err != nil {
+		t.Fatal(err)
+	}
+	graph := insertLegacyPipelineCopyGraph(t, ctx, pool, strategyID, leaderID, sourceID, observationID)
+	applyCanonicalExpansion(t, ctx, pool)
+
+	if _, err := pool.Exec(ctx, `UPDATE copy_trade_intents SET execution_claim_id=$2 WHERE id=$1`, graph.intentID, uuid.New()); err == nil {
+		t.Fatal("paired-null claim constraint accepted a partial claim")
+	}
+	claimID := uuid.New()
+	if _, err := pool.Exec(ctx, `UPDATE copy_trade_intents SET execution_claim_id=$2,execution_claimed_at=now() WHERE id=$1`, graph.intentID, claimID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE copy_trade_intents SET execution_claim_id=NULL,execution_claimed_at=NULL WHERE id=$1`, graph.intentID); err != nil {
+		t.Fatal(err)
+	}
+	repo := pgrepo.NewCopyTradingRepo(pool)
+	claimedAt := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
+	firstClaim, takeoverClaim := uuid.New(), uuid.New()
+	if claimed, err := repo.ClaimIntentExecution(ctx, graph.intentID, firstClaim, claimedAt); err != nil || !claimed {
+		t.Fatalf("first claim = %t, %v", claimed, err)
+	}
+	if claimed, err := repo.ClaimIntentExecution(ctx, graph.intentID, takeoverClaim, claimedAt.Add(4*time.Minute)); err != nil || claimed {
+		t.Fatalf("contended claim = %t, %v", claimed, err)
+	}
+	if claimed, err := repo.ClaimIntentExecution(ctx, graph.intentID, takeoverClaim, claimedAt.Add(6*time.Minute)); err != nil || !claimed {
+		t.Fatalf("expired lease takeover = %t, %v", claimed, err)
+	}
+	completedIntent := &domain.CopyTradeIntent{ID: graph.intentID, Status: "failed", RiskStatus: "pending", RiskReasons: []string{"executor unavailable"}}
+	if completed, err := repo.CompleteIntentExecution(ctx, completedIntent, firstClaim); err != nil || completed {
+		t.Fatalf("stale completion = %t, %v", completed, err)
+	}
+	if completed, err := repo.CompleteIntentExecution(ctx, completedIntent, takeoverClaim); err != nil || !completed {
+		t.Fatalf("current completion = %t, %v", completed, err)
+	}
+	var pipelineRunID *uuid.UUID
+	var executionClaimID *uuid.UUID
+	var executionClaimedAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT pipeline_run_id,execution_claim_id,execution_claimed_at FROM copy_trade_intents WHERE id=$1`, graph.intentID).Scan(&pipelineRunID, &executionClaimID, &executionClaimedAt); err != nil {
+		t.Fatal(err)
+	}
+	if pipelineRunID == nil || *pipelineRunID != graph.runID || executionClaimID != nil || executionClaimedAt != nil {
+		t.Fatalf("completion changed pipeline identity or retained claim: pipeline=%v claim=%v claimed_at=%v", pipelineRunID, executionClaimID, executionClaimedAt)
+	}
+
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	runID := uuid.New()
+	canonical := `{"schema":"copy-origin-rebalance-v1"}`
+	if _, err := pool.Exec(ctx, `INSERT INTO copy_origin_rebalance_runs(id,schema_name,state,subscription_id,origin_type,origin_id,source_observation_id,calculation_version,intent_count,sha256,canonical_bytes,canonical_json,account_id,environment)
+		VALUES($1,'copy-origin-rebalance-v1','prepared',$2,'copy_subscription',$2,$3,1,1,encode(digest(convert_to($4,'UTF8'),'sha256'),'hex'),convert_to($4,'UTF8'),$4::JSONB,$5,'paper_scored')`, runID, graph.subscriptionID, observationID, canonical, accountID); err != nil {
+		t.Fatal(err)
+	}
+	insertOrder := func() error {
+		_, err := pool.Exec(ctx, `INSERT INTO orders(account_id,environment,origin_type,origin_id,copy_origin_rebalance_run_id,ticker,side,order_type,quantity) VALUES($1,'paper_scored','copy_subscription',$2,$3,'QQQ','buy','market',1)`, accountID, graph.subscriptionID.String(), runID)
+		return err
+	}
+	if err := insertOrder(); err != nil {
+		t.Fatal(err)
+	}
+	if err := insertOrder(); err == nil {
+		t.Fatal("copy-order fence accepted a duplicate account/origin effect")
 	}
 }
 
@@ -587,7 +669,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 		"idx_copy_origin_rebalance_runs_account_created", "idx_copy_origin_rebalance_intents_account_run",
 		"idx_copy_target_drift_runs_account_created", "idx_copy_target_drift_legs_account_run",
 		"idx_conversations_account_run", "idx_conversation_messages_account_conversation", "idx_agent_memories_account_run",
-		"uq_account_projection_outbox_request", "idx_account_projection_outbox_claimable",
+		"uq_account_projection_outbox_request", "idx_account_projection_outbox_claimable", "orders_copy_origin_effect_once",
 	}
 	for _, index := range indexes {
 		var found any
@@ -629,7 +711,7 @@ func canonicalExpansionColumns() map[string][]string {
 		"financial_fill_idempotency":        {"account_id", "environment", "origin_type", "origin_id"},
 		"prediction_settlement_idempotency": {"account_id", "environment", "origin_type", "origin_id"},
 		"copy_subscriptions":                {"account_id", "environment"},
-		"copy_trade_intents":                {"account_id", "environment", "pipeline_run_trade_date"},
+		"copy_trade_intents":                {"account_id", "environment", "pipeline_run_trade_date", "execution_claim_id", "execution_claimed_at"},
 		"copy_origin_rebalance_runs":        {"account_id", "environment"},
 		"copy_origin_rebalance_intents":     {"account_id", "environment", "origin_type", "origin_id"},
 		"copy_target_drift_runs":            {"account_id", "environment"},

@@ -70,7 +70,7 @@ BEGIN
        OR EXISTS(SELECT 1 FROM financial_fill_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM prediction_settlement_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_subscriptions WHERE account_id IS NOT NULL OR environment IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM copy_trade_intents WHERE account_id IS NOT NULL OR environment IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM copy_trade_intents WHERE account_id IS NOT NULL OR environment IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR execution_claim_id IS NOT NULL OR execution_claimed_at IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_origin_rebalance_runs WHERE account_id IS NOT NULL OR environment IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_origin_rebalance_intents WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_target_drift_runs WHERE account_id IS NOT NULL OR environment IS NOT NULL)
@@ -256,6 +256,7 @@ DROP INDEX idx_agent_decisions_account_run;
 DROP INDEX idx_agent_events_account_run;
 DROP INDEX idx_trade_decisions_account_created;
 DROP INDEX idx_orders_account_created;
+DROP INDEX orders_copy_origin_effect_once;
 DROP INDEX idx_positions_account_opened;
 DROP INDEX idx_trades_account_executed;
 DROP INDEX idx_portfolio_opportunities_account_created;
@@ -283,7 +284,7 @@ ALTER TABLE copy_target_drift_legs DROP COLUMN origin_id,DROP COLUMN origin_type
 ALTER TABLE copy_target_drift_runs DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE copy_origin_rebalance_intents DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE copy_origin_rebalance_runs DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE copy_trade_intents DROP COLUMN pipeline_run_trade_date,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE copy_trade_intents DROP CONSTRAINT copy_intent_execution_claim_pair,DROP COLUMN execution_claimed_at,DROP COLUMN execution_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE copy_subscriptions DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE prediction_settlement_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE financial_fill_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

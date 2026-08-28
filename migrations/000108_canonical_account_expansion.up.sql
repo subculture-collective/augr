@@ -128,7 +128,10 @@ ALTER TABLE copy_subscriptions
 ALTER TABLE copy_trade_intents
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
-    ADD COLUMN pipeline_run_trade_date DATE;
+    ADD COLUMN pipeline_run_trade_date DATE,
+    ADD COLUMN execution_claim_id UUID,
+    ADD COLUMN execution_claimed_at TIMESTAMPTZ,
+    ADD CONSTRAINT copy_intent_execution_claim_pair CHECK ((execution_claim_id IS NULL) = (execution_claimed_at IS NULL));
 ALTER TABLE copy_origin_rebalance_runs
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live'));
@@ -157,6 +160,7 @@ CREATE INDEX idx_agent_decisions_account_run ON agent_decisions(account_id,pipel
 CREATE INDEX idx_agent_events_account_run ON agent_events(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_trade_decisions_account_created ON trade_decisions(account_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_orders_account_created ON orders(account_id,created_at,id) WHERE account_id IS NOT NULL;
+CREATE UNIQUE INDEX orders_copy_origin_effect_once ON orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) WHERE origin_type='copy_subscription' AND copy_origin_rebalance_run_id IS NOT NULL;
 CREATE INDEX idx_positions_account_opened ON positions(account_id,opened_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_trades_account_executed ON trades(account_id,executed_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_portfolio_opportunities_account_created ON portfolio_opportunities(account_id,created_at,id) WHERE account_id IS NOT NULL;
