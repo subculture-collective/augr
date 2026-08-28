@@ -23,8 +23,9 @@ type CopyOriginRepo struct {
 }
 
 var (
-	_ copyorigin.Store        = (*CopyOriginRepo)(nil)
-	_ copyorigin.PlannedStore = (*CopyOriginRepo)(nil)
+	_ copyorigin.Store         = (*CopyOriginRepo)(nil)
+	_ copyorigin.PlannedStore  = (*CopyOriginRepo)(nil)
+	_ copyorigin.RecoveryStore = (*CopyOriginRepo)(nil)
 )
 
 func NewCopyOriginRepo(pool *pgxpool.Pool) *CopyOriginRepo { return &CopyOriginRepo{pool: pool} }
@@ -266,6 +267,49 @@ func (r *CopyOriginRepo) GetPlannedRun(ctx context.Context, subscriptionID, sour
 	if err != nil {
 		return nil, nil, err
 	}
+	return r.getPlannedRunByID(ctx, runID)
+}
+
+func (r *CopyOriginRepo) ListUnfinishedRuns(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) ([]copyorigin.RecoverableRun, error) {
+	if r == nil || r.pool == nil || accountID == uuid.Nil || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: unfinished copy run scope is required")
+	}
+	rows, err := r.pool.Query(ctx, `SELECT DISTINCT run.id,run.subscription_id FROM copy_origin_rebalance_runs run
+		JOIN copy_subscriptions subscription ON subscription.id=run.subscription_id
+		JOIN copy_origin_rebalance_intents child ON child.run_id=run.id
+		JOIN copy_trade_intents intent ON intent.id=child.intent_id
+		WHERE run.account_id=$1 AND run.environment=$2 AND subscription.account_id=$1 AND subscription.environment=$2
+		  AND subscription.status='paper_active' AND subscription.is_paper=true AND intent.account_id=$1 AND intent.environment=$2
+		  AND intent.policy_status='approved' AND (intent.status IN ('received','ordered','partial') OR (intent.status='failed' AND intent.risk_status='pending'))
+		ORDER BY run.id`, accountID, environment)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type identity struct{ runID, subscriptionID uuid.UUID }
+	var identities []identity
+	for rows.Next() {
+		var value identity
+		if err := rows.Scan(&value.runID, &value.subscriptionID); err != nil {
+			return nil, err
+		}
+		identities = append(identities, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]copyorigin.RecoverableRun, 0, len(identities))
+	for _, identity := range identities {
+		run, intents, err := r.getPlannedRunByID(ctx, identity.runID)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, copyorigin.RecoverableRun{Run: run, SubscriptionID: identity.subscriptionID, Intents: intents})
+	}
+	return result, nil
+}
+
+func (r *CopyOriginRepo) getPlannedRunByID(ctx context.Context, runID uuid.UUID) (*copyorigin.Run, []copyorigin.PlannedIntent, error) {
 	run, err := getCopyOriginRun(ctx, r.pool, runID)
 	if err != nil {
 		return nil, nil, err

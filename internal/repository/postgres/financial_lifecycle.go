@@ -983,12 +983,24 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: settlement position strategy linkage mismatch")
 	}
 	if reservations[0] != nil {
-		tag, err := tx.Exec(ctx, `UPDATE orders SET status='rejected' WHERE id=$1 AND account_id=$2 AND environment=$3 AND status IN ('pending','submitted') AND filled_quantity=0`, *reservations[0], input.AccountID, input.Environment)
-		if err != nil {
-			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: terminalize active prediction close: %w", err)
+		var exitStatus domain.OrderStatus
+		var externalID string
+		var filledQuantity, accountedQuantity float64
+		if err := tx.QueryRow(ctx, `SELECT status,COALESCE(external_id,''),filled_quantity::double precision,COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=orders.id AND t.account_id=orders.account_id),0)::double precision FROM orders WHERE id=$1 AND account_id=$2 AND environment=$3 FOR UPDATE`, *reservations[0], input.AccountID, input.Environment).Scan(&exitStatus, &externalID, &filledQuantity, &accountedQuantity); err != nil {
+			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: inspect active prediction close: %w", err)
 		}
-		if tag.RowsAffected() != 1 {
-			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: active prediction close cannot be safely terminalized")
+		verifiedTerminal := (exitStatus == domain.OrderStatusCancelled || exitStatus == domain.OrderStatusRejected) && filledQuantity <= accountedQuantity
+		if !verifiedTerminal && (exitStatus != domain.OrderStatusPending || strings.TrimSpace(externalID) != "") {
+			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: active effectful prediction close requires broker cancellation and verified terminal status")
+		}
+		if !verifiedTerminal {
+			tag, err := tx.Exec(ctx, `UPDATE orders SET status='rejected' WHERE id=$1 AND account_id=$2 AND environment=$3 AND status='pending' AND (external_id IS NULL OR external_id='') AND filled_quantity=0`, *reservations[0], input.AccountID, input.Environment)
+			if err != nil {
+				return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: terminalize active prediction close: %w", err)
+			}
+			if tag.RowsAffected() != 1 {
+				return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: active prediction close cannot be safely terminalized")
+			}
 		}
 	}
 	quantity := position.Quantity

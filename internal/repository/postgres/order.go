@@ -81,6 +81,9 @@ type orderRowQuerier interface {
 }
 
 func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *domain.Order) error {
+	if order == nil {
+		return fmt.Errorf("postgres: create order: order is required")
+	}
 	if (order.AllocationOpportunityID == nil) != (order.AllocationClaimID == nil) {
 		return fmt.Errorf("postgres: create order: allocation opportunity and claim must be provided together")
 	}
@@ -99,6 +102,9 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 		marketType = domain.MarketTypeStock
 	}
 	order.MarketType = marketType
+	if order.ID == uuid.Nil {
+		order.ID = uuid.New()
+	}
 
 	row := queryer.QueryRow(ctx,
 		`WITH authorized AS (
@@ -124,7 +130,7 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 			)
 		)
 		INSERT INTO orders (
-			strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
+			id, strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
 			pipeline_run_trade_date, copy_origin_rebalance_run_id, external_id, ticker, market_type, side, order_type,
 			quantity, limit_price, stop_price, filled_quantity, filled_avg_price,
 			status, broker, submitted_at, filled_at, asset_class, underlying_ticker,
@@ -132,7 +138,8 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 			prediction_side, polymarket_intent, allocation_opportunity_id, client_order_id,
 			spread_max_risk, spread_max_reward
 		)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35, $38, $39 FROM authorized,copy_authorized
+		 SELECT $40, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35, $38, $39 FROM authorized,copy_authorized
+		 ON CONFLICT (id) DO NOTHING
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
@@ -173,16 +180,58 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 		order.CopyExecutionClaimID,
 		order.SpreadMaxRisk,
 		order.SpreadMaxReward,
+		order.ID,
 	)
 
 	if err := row.Scan(&order.ID, &order.CreatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) && order.AllocationOpportunityID != nil {
-			return fmt.Errorf("postgres: create order: allocation lineage or claim ownership lost")
+		if errors.Is(err, pgx.ErrNoRows) {
+			existing, loadErr := scanOrder(queryer.QueryRow(ctx, orderSelectSQL+` WHERE id=$1 AND account_id=$2`, order.ID, r.accountID))
+			if loadErr == nil {
+				if !sameOrderCreation(existing, order) {
+					return fmt.Errorf("postgres: create order: deterministic identity reused with changed payload: %w", repository.ErrIdempotencyConflict)
+				}
+				order.CreatedAt = existing.CreatedAt
+				return nil
+			}
+			if order.AllocationOpportunityID != nil {
+				return fmt.Errorf("postgres: create order: allocation lineage or claim ownership lost")
+			}
 		}
 		return fmt.Errorf("postgres: create order: %w", err)
 	}
 
 	return nil
+}
+
+func sameOrderCreation(left, right *domain.Order) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return left.ID == right.ID && equalUUIDPointer(left.StrategyID, right.StrategyID) && equalUUIDPointer(left.PipelineRunID, right.PipelineRunID) &&
+		left.AccountID == right.AccountID && left.Environment == right.Environment && left.OriginType == right.OriginType && left.OriginID == right.OriginID &&
+		equalOrderTimePointer(left.PipelineRunTradeDate, right.PipelineRunTradeDate) && left.CopyOriginRebalanceRunID == right.CopyOriginRebalanceRunID &&
+		left.ExternalID == right.ExternalID && left.Ticker == right.Ticker && left.MarketType.Normalize() == right.MarketType.Normalize() && left.Side == right.Side && left.OrderType == right.OrderType &&
+		numeric8Equal(left.Quantity, right.Quantity) && equalOrderFloatPointer(left.LimitPrice, right.LimitPrice) && equalOrderFloatPointer(left.StopPrice, right.StopPrice) && numeric8Equal(left.FilledQuantity, right.FilledQuantity) && equalOrderFloatPointer(left.FilledAvgPrice, right.FilledAvgPrice) &&
+		left.Status == right.Status && left.Broker == right.Broker && equalOrderTimePointer(left.SubmittedAt, right.SubmittedAt) && equalOrderTimePointer(left.FilledAt, right.FilledAt) &&
+		left.AssetClass == right.AssetClass && left.UnderlyingTicker == right.UnderlyingTicker && equalOptionTypePointer(left.OptionType, right.OptionType) && equalOrderFloatPointer(left.Strike, right.Strike) && equalOrderTimePointer(left.Expiry, right.Expiry) &&
+		numeric8Equal(left.ContractMultiplier, right.ContractMultiplier) && equalPositionIntentPointer(left.PositionIntent, right.PositionIntent) && equalUUIDPointer(left.LegGroupID, right.LegGroupID) && left.PredictionSide == right.PredictionSide && left.PolymarketIntent == right.PolymarketIntent &&
+		equalUUIDPointer(left.AllocationOpportunityID, right.AllocationOpportunityID) && left.ClientOrderID == right.ClientOrderID && numeric8Equal(left.SpreadMaxRisk, right.SpreadMaxRisk) && numeric8Equal(left.SpreadMaxReward, right.SpreadMaxReward)
+}
+
+func equalOrderFloatPointer(left, right *float64) bool {
+	return left == nil && right == nil || left != nil && right != nil && numeric8Equal(*left, *right)
+}
+
+func equalOrderTimePointer(left, right *time.Time) bool {
+	return left == nil && right == nil || left != nil && right != nil && left.UTC().Truncate(time.Microsecond).Equal(right.UTC().Truncate(time.Microsecond))
+}
+
+func equalOptionTypePointer(left, right *domain.OptionType) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func equalPositionIntentPointer(left, right *domain.PositionIntent) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 func (r *OrderRepo) CreateOptionCloseOrdersAndReserve(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, positionIDs []uuid.UUID, orders []*domain.Order) error {

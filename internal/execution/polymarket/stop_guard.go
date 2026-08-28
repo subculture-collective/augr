@@ -98,6 +98,8 @@ type StopGuard struct {
 	count  atomic.Int32
 }
 
+type stopAccountLockHeldKey struct{}
+
 func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 	if cfg.Broker == nil {
 		return nil, errors.New("polymarket: stop guard broker is required")
@@ -110,6 +112,9 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 	}
 	if cfg.ExitRepo == nil {
 		return nil, errors.New("polymarket: durable stop exit repository is required")
+	}
+	if _, ok := cfg.ExitRepo.(repository.ExecutionAccountLocker); !ok {
+		return nil, errors.New("polymarket: stop exit repository must provide an execution account lock")
 	}
 	return &StopGuard{
 		executionAccount:   cfg.ExecutionAccount,
@@ -389,7 +394,18 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			positionID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(entry.positionID))
 		}
 		if entry.claimed.Load() {
-			if g.recoverClaimedExit(ctx, entry, positionID) {
+			locker, ok := g.exitRepo.(repository.ExecutionAccountLocker)
+			recovered := false
+			if ok {
+				lockErr := locker.WithExecutionAccountLock(ctx, entry.order.AccountID, func() error {
+					recovered = g.recoverClaimedExit(context.WithValue(ctx, stopAccountLockHeldKey{}, true), entry, positionID)
+					return nil
+				})
+				if lockErr != nil {
+					recovered = false
+				}
+			}
+			if recovered {
 				continue
 			}
 			entry.state.Store(int32(guardArmed))
@@ -415,84 +431,95 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			continue
 		}
 		entry.claimed.Store(true)
-		freshTemplate, err := g.broker.PrepareTemplate(entry.order)
-		if err != nil {
+		locker, ok := g.exitRepo.(repository.ExecutionAccountLocker)
+		if !ok {
 			entry.state.Store(int32(guardArmed))
 			continue
 		}
-		entry.template = freshTemplate
-		response, err := g.broker.SendTemplate(ctx, freshTemplate)
-		if err != nil {
-			if g.metrics != nil {
-				g.metrics.IncSendError(entry.slug)
-			}
-			if g.logger != nil {
-				g.logger.Error("polymarket stop guard send failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
-			}
-			if execution.IsDefinitiveBrokerRejection(err) {
-				if !g.finalizeTerminalExit(ctx, entry, positionID, domain.OrderStatusRejected, "") {
-					entry.state.Store(int32(guardArmed))
-				}
-				continue
-			}
-			var externalID string
-			var result execution.BrokerOrderStatus
-			var lookupErr error
-			if lookup, ok := g.broker.(stopOrderLookup); ok {
-				externalID, result, lookupErr = lookup.GetOrderStatusByClientOrderIDResult(ctx, entry.order.ClientOrderID)
-			} else {
-				entry.state.Store(int32(guardArmed))
-				continue
-			}
-			if lookupErr != nil {
-				entry.state.Store(int32(guardArmed))
-				continue
-			}
-			if result.Status == domain.OrderStatusCancelled || result.Status == domain.OrderStatusRejected {
-				fillResult := result
-				fillResult.Status = domain.OrderStatusPartial
-				if result.FilledQuantity > entry.order.FilledQuantity && !g.persistRecoveredExitFill(ctx, entry, externalID, fillResult) {
-					entry.state.Store(int32(guardArmed))
-					continue
-				}
-				if !g.finalizeTerminalExit(ctx, entry, positionID, result.Status, externalID) {
-					entry.state.Store(int32(guardArmed))
-				}
-				continue
-			}
-			if result.Status != domain.OrderStatusPending && result.Status != domain.OrderStatusSubmitted && result.Status != domain.OrderStatusPartial && result.Status != domain.OrderStatusFilled {
-				entry.state.Store(int32(guardArmed))
-				continue
-			}
-			if result.Status == domain.OrderStatusPartial || result.Status == domain.OrderStatusFilled {
-				if !g.persistRecoveredExitFill(ctx, entry, externalID, result) {
-					entry.state.Store(int32(guardArmed))
-					continue
-				}
-				if result.Status == domain.OrderStatusFilled {
-					g.Cancel(entry.positionID)
-					continue
-				}
-				entry.state.Store(int32(guardArmed))
-				continue
-			}
-			response = &CreateOrderResponse{ID: externalID}
-		}
-		if response == nil || strings.TrimSpace(response.ID) == "" {
+		if err := locker.WithExecutionAccountLock(ctx, entry.order.AccountID, func() error {
+			g.submitReservedStopLocked(context.WithValue(ctx, stopAccountLockHeldKey{}, true), entry, positionID)
+			return nil
+		}); err != nil {
 			entry.state.Store(int32(guardArmed))
-			continue
 		}
-		submittedAt := time.Now().UTC()
-		entry.order.ExternalID, entry.order.Status, entry.order.SubmittedAt = strings.TrimSpace(response.ID), domain.OrderStatusSubmitted, &submittedAt
-		if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, entry.order.ExternalID, submittedAt); err != nil {
-			if g.logger != nil {
-				g.logger.Error("polymarket stop guard submission persistence failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
+	}
+}
+
+func (g *StopGuard) submitReservedStopLocked(ctx context.Context, entry *guardEntry, positionID uuid.UUID) {
+	freshTemplate, err := g.broker.PrepareTemplate(entry.order)
+	if err != nil {
+		entry.state.Store(int32(guardArmed))
+		return
+	}
+	entry.template = freshTemplate
+	response, err := g.broker.SendTemplate(ctx, freshTemplate)
+	if err != nil {
+		if g.metrics != nil {
+			g.metrics.IncSendError(entry.slug)
+		}
+		if g.logger != nil {
+			g.logger.Error("polymarket stop guard send failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
+		}
+		if execution.IsDefinitiveBrokerRejection(err) {
+			if !g.finalizeTerminalExit(ctx, entry, positionID, domain.OrderStatusRejected, "") {
+				entry.state.Store(int32(guardArmed))
+			}
+			return
+		}
+		lookup, ok := g.broker.(stopOrderLookup)
+		if !ok {
+			entry.state.Store(int32(guardArmed))
+			return
+		}
+		externalID, result, lookupErr := lookup.GetOrderStatusByClientOrderIDResult(ctx, entry.order.ClientOrderID)
+		if lookupErr != nil {
+			entry.state.Store(int32(guardArmed))
+			return
+		}
+		if result.Status == domain.OrderStatusCancelled || result.Status == domain.OrderStatusRejected {
+			fillResult := result
+			fillResult.Status = domain.OrderStatusPartial
+			if result.FilledQuantity > entry.order.FilledQuantity && !g.persistRecoveredExitFill(ctx, entry, externalID, fillResult) {
+				entry.state.Store(int32(guardArmed))
+				return
+			}
+			if !g.finalizeTerminalExit(ctx, entry, positionID, result.Status, externalID) {
+				entry.state.Store(int32(guardArmed))
+			}
+			return
+		}
+		if result.Status != domain.OrderStatusPending && result.Status != domain.OrderStatusSubmitted && result.Status != domain.OrderStatusPartial && result.Status != domain.OrderStatusFilled {
+			entry.state.Store(int32(guardArmed))
+			return
+		}
+		if result.Status == domain.OrderStatusPartial || result.Status == domain.OrderStatusFilled {
+			if !g.persistRecoveredExitFill(ctx, entry, externalID, result) {
+				entry.state.Store(int32(guardArmed))
+				return
+			}
+			if result.Status == domain.OrderStatusFilled {
+				g.Cancel(entry.positionID)
+				return
 			}
 			entry.state.Store(int32(guardArmed))
-			continue
+			return
+		}
+		response = &CreateOrderResponse{ID: externalID}
+	}
+	if response == nil || strings.TrimSpace(response.ID) == "" {
+		entry.state.Store(int32(guardArmed))
+		return
+	}
+	submittedAt := time.Now().UTC()
+	if err := g.exitRepo.MarkPredictionExitSubmitted(ctx, entry.order.AccountID, entry.order.ID, strings.TrimSpace(response.ID), submittedAt); err != nil {
+		if g.logger != nil {
+			g.logger.Error("polymarket stop guard submission persistence failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
 		}
 		entry.state.Store(int32(guardArmed))
+		return
 	}
+	entry.order.ExternalID, entry.order.Status, entry.order.SubmittedAt = strings.TrimSpace(response.ID), domain.OrderStatusSubmitted, &submittedAt
+	entry.state.Store(int32(guardArmed))
 }
 
 func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, positionID uuid.UUID) bool {
@@ -561,6 +588,9 @@ func (g *StopGuard) persistRecoveredExitFill(ctx context.Context, entry *guardEn
 	locker, ok := g.financialLifecycle.(repository.ExecutionAccountLocker)
 	if !ok {
 		return false
+	}
+	if held, _ := ctx.Value(stopAccountLockHeldKey{}).(bool); held {
+		return g.persistRecoveredExitFillLocked(ctx, entry, externalID, result)
 	}
 	committed := false
 	err := locker.WithExecutionAccountLock(ctx, entry.order.AccountID, func() error {

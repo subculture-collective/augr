@@ -119,6 +119,9 @@ func (c *Client) GetMarket(ctx context.Context, ticker string) (*MarketCandidate
 		return nil, err
 	}
 	if candidate, err := decodeMarketCandidate(body); err == nil {
+		if strings.TrimSpace(candidate.Ticker) != ticker {
+			return nil, fmt.Errorf("kalshi discovery: market identity mismatch: requested %q, got %q", ticker, candidate.Ticker)
+		}
 		c.applyProvenance(&candidate)
 		return &candidate, nil
 	}
@@ -129,6 +132,9 @@ func (c *Client) GetMarket(ctx context.Context, ticker string) (*MarketCandidate
 		candidate, err := decodeMarketCandidate(wrapped.Market)
 		if err != nil {
 			return nil, err
+		}
+		if strings.TrimSpace(candidate.Ticker) != ticker {
+			return nil, fmt.Errorf("kalshi discovery: market identity mismatch: requested %q, got %q", ticker, candidate.Ticker)
 		}
 		c.applyProvenance(&candidate)
 		return &candidate, nil

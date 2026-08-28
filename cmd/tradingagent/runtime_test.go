@@ -1229,6 +1229,10 @@ func TestNewRuntimeKalshiClientsPublicCatalogWithoutLiveCredentials(t *testing.T
 
 type runtimeStopExitRepo struct{}
 
+func (runtimeStopExitRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func (runtimeStopExitRepo) CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error {
 	return nil
 }

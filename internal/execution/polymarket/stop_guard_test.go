@@ -31,6 +31,16 @@ type fakeBroker struct {
 	lookupFilledAvgPrice *float64
 	lookupFilledAt       *time.Time
 	submittedExternalID  string
+	lockDepth            atomic.Int32
+	preparedUnderLock    atomic.Bool
+	sentUnderLock        atomic.Bool
+	persistedUnderLock   atomic.Bool
+}
+
+func (f *fakeBroker) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	f.lockDepth.Add(1)
+	defer f.lockDepth.Add(-1)
+	return fn()
 }
 
 func (f *fakeBroker) GetOrderStatus(context.Context, string) (domain.OrderStatus, error) {
@@ -69,6 +79,10 @@ type sharedExitClaims struct {
 	claims         map[uuid.UUID]uuid.UUID
 	terminalStatus domain.OrderStatus
 	reservedOrder  *domain.Order
+}
+
+func (r *sharedExitClaims) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
 }
 
 func (r *sharedExitClaims) GetPredictionExitOrderByPosition(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _ uuid.UUID) (*domain.Order, error) {
@@ -133,6 +147,7 @@ func (f *fakeBroker) ReleasePredictionExitPosition(context.Context, uuid.UUID, u
 }
 
 func (f *fakeBroker) MarkPredictionExitSubmitted(_ context.Context, _ uuid.UUID, _ uuid.UUID, externalID string, _ time.Time) error {
+	f.persistedUnderLock.Store(f.lockDepth.Load() > 0)
 	f.submittedExternalID = externalID
 	return nil
 }
@@ -142,6 +157,7 @@ func (f *fakeBroker) ReconcilePredictionExitReservations(context.Context, uuid.U
 }
 
 func (f *fakeBroker) PrepareTemplate(order *domain.Order) (*OrderTemplate, error) {
+	f.preparedUnderLock.Store(f.lockDepth.Load() > 0)
 	f.mu.Lock()
 	copyOrder := *order
 	f.lastOrder = &copyOrder
@@ -153,6 +169,7 @@ func (f *fakeBroker) PrepareTemplate(order *domain.Order) (*OrderTemplate, error
 }
 
 func (f *fakeBroker) SendTemplate(_ context.Context, tmpl *OrderTemplate) (*createOrderResponse, error) {
+	f.sentUnderLock.Store(f.lockDepth.Load() > 0)
 	f.sendCalls.Add(1)
 	f.mu.Lock()
 	f.lastTmpl = tmpl
@@ -161,6 +178,21 @@ func (f *fakeBroker) SendTemplate(_ context.Context, tmpl *OrderTemplate) (*crea
 		return nil, f.sendErr
 	}
 	return &createOrderResponse{ID: "ok"}, nil
+}
+
+func TestStopGuardHoldsAccountLockAcrossBrokerEffectAndPersistence(t *testing.T) {
+	broker := &fakeBroker{}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: uuid.NewString(), Slug: "lock-test", Side: "BUY", EntryPx: .5, Size: 1, StopPx: .45})); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "lock-test", Side: "YES", Price: .4, ReceivedAt: time.Now()})
+	if !broker.preparedUnderLock.Load() || !broker.sentUnderLock.Load() || !broker.persistedUnderLock.Load() || broker.lockDepth.Load() != 0 {
+		t.Fatalf("lock coverage prepare=%v send=%v persist=%v depth=%d", broker.preparedUnderLock.Load(), broker.sentUnderLock.Load(), broker.persistedUnderLock.Load(), broker.lockDepth.Load())
+	}
 }
 
 func TestStopGuard_LongStopBelowFires(t *testing.T) {

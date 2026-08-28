@@ -92,6 +92,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"drop index if exists uq_portfolio_opportunities_execution_dedupe",
 		"drop constraint copy_intent_execution_claim_pair",
 		"spread_max_risk is not null or spread_max_reward is not null",
+		"cumulative_fee is not null or cumulative_premium is not null or cumulative_filled_at is not null or cumulative_status is not null or cumulative_exit_reason is not null",
 		"expected_through_transaction_id uuid",
 		"order by effective_at desc, observed_at desc, id desc",
 	} {
@@ -358,6 +359,26 @@ func TestCanonicalAccountExpansionCyclesAndLocksRollback(t *testing.T) {
 			defer tx.Rollback(ctx) //nolint:errcheck
 			if _, err = tx.Exec(ctx, `INSERT INTO orders(ticker,side,order_type,quantity,`+column+`) VALUES('ROLLBACK-SPREAD','buy','limit',1,25)`); err != nil {
 				t.Fatal(err)
+			}
+			if _, err = tx.Exec(ctx, readMigrationFile(t, "000108_canonical_account_expansion.down.sql")); err == nil || !strings.Contains(err.Error(), "expansion columns are populated") {
+				t.Fatalf("%s rollback error=%v", column, err)
+			}
+		})
+	}
+
+	for column, value := range map[string]string{
+		"cumulative_fee": "1", "cumulative_premium": "2", "cumulative_filled_at": "NOW()",
+		"cumulative_status": "'partial'", "cumulative_exit_reason": "'restart recovery'",
+	} {
+		t.Run(column+" blocks partial financial rollback", func(t *testing.T) {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+			tag, err := tx.Exec(ctx, `UPDATE financial_fill_idempotency SET `+column+`=`+value+` WHERE idempotency_key=(SELECT idempotency_key FROM financial_fill_idempotency ORDER BY idempotency_key LIMIT 1)`)
+			if err != nil || tag.RowsAffected() != 1 {
+				t.Fatalf("seed %s rollback fixture: rows=%d err=%v", column, tag.RowsAffected(), err)
 			}
 			if _, err = tx.Exec(ctx, readMigrationFile(t, "000108_canonical_account_expansion.down.sql")); err == nil || !strings.Contains(err.Error(), "expansion columns are populated") {
 				t.Fatalf("%s rollback error=%v", column, err)

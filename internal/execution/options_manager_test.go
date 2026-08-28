@@ -640,3 +640,35 @@ func TestReconcileOptionSpreadReloadsEveryNonterminalLegAndPersistsOneBatch(t *t
 		t.Fatalf("reloads=%d batches=%v", reloads, fillRepo.batches)
 	}
 }
+
+func TestReconcileOpeningSpreadReconstructsIntegerRatiosByGCD(t *testing.T) {
+	groupID, strategyID := uuid.New(), uuid.New()
+	optionType, expiry, intent := domain.OptionTypeCall, time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC), domain.PositionIntentBuyToOpen
+	quantities := []float64{1, 1.5}
+	orders, byID := make([]domain.Order, 2), make(map[uuid.UUID]domain.Order, 2)
+	for i := range orders {
+		strike := 150.0 + float64(i)*5
+		orders[i] = domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: strategyID.String(), StrategyID: &strategyID, ClientOrderID: fmt.Sprintf("gcd-leg-%d", i), Ticker: fmt.Sprintf("AAPL271217C00%d", 150000+i*5000), MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100, PositionIntent: &intent, LegGroupID: &groupID, Side: domain.OrderSideBuy, Quantity: quantities[i], Status: domain.OrderStatusPending, SpreadMaxRisk: 250, SpreadMaxReward: 500}
+		byID[orders[i].ID] = orders[i]
+	}
+	lookupCalls := 0
+	broker := &mockOptionsBroker{}
+	broker.spreadStatusFn = func(context.Context, string) (execution.BrokerSpreadOrderStatus, error) {
+		lookupCalls++
+		if lookupCalls == 1 {
+			return execution.BrokerSpreadOrderStatus{}, execution.ErrBrokerOrderNotFound
+		}
+		return execution.BrokerSpreadOrderStatus{Legs: []execution.BrokerSpreadLegStatus{{Ticker: orders[0].Ticker, ExternalID: "leg-1", Status: execution.BrokerOrderStatus{Status: domain.OrderStatusSubmitted}}, {Ticker: orders[1].Ticker, ExternalID: "leg-2", Status: execution.BrokerOrderStatus{Status: domain.OrderStatusSubmitted}}}}, nil
+	}
+	broker.submitSpreadOrderFn = func(_ context.Context, spread *domain.OptionSpread, quantity float64, _ string) ([]string, error) {
+		if quantity != .5 || len(spread.Legs) != 2 || spread.Legs[0].Ratio != 2 || spread.Legs[1].Ratio != 3 {
+			t.Fatalf("recovered spread quantity=%v ratios=%v/%v", quantity, spread.Legs[0].Ratio, spread.Legs[1].Ratio)
+		}
+		return []string{"leg-1", "leg-2"}, nil
+	}
+	orderRepo := &mockOrderRepo{getFn: func(_ context.Context, id uuid.UUID) (*domain.Order, error) { value := byID[id]; return &value, nil }}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, &recordingOptionFillRepo{})
+	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, orders, nil); err != nil {
+		t.Fatal(err)
+	}
+}

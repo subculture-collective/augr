@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -104,6 +105,11 @@ type cancellationRaceCopyRepo struct {
 	claimedIntentID uuid.UUID
 	stopAfterClaim  bool
 	completed       *domain.CopyTradeIntent
+	listErr         error
+}
+
+func (r *cancellationRaceCopyRepo) ListSubscriptions(context.Context, repository.CopySubscriptionFilter, int, int) ([]domain.CopySubscription, error) {
+	return nil, r.listErr
 }
 
 func (r *cancellationRaceCopyRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
@@ -277,13 +283,18 @@ func (e *resultCopyExecutor) ExecuteCopyOrder(_ context.Context, request PaperOr
 }
 
 type plannedOriginStore struct {
-	err      error
-	calls    int
-	intents  []domain.CopyTradeIntent
-	replayed bool
-	foreign  bool
-	status   string
-	risk     string
+	err         error
+	calls       int
+	intents     []domain.CopyTradeIntent
+	replayed    bool
+	foreign     bool
+	status      string
+	risk        string
+	recoverable []copyorigin.RecoverableRun
+}
+
+func (s *plannedOriginStore) ListUnfinishedRuns(context.Context, uuid.UUID, domain.AccountEnvironment) ([]copyorigin.RecoverableRun, error) {
+	return s.recoverable, nil
 }
 
 func (s *plannedOriginStore) RegisterRun(context.Context, *copyorigin.Run) (*copyorigin.Run, error) {
@@ -596,6 +607,35 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 				t.Fatalf("completed terminal intent=%+v", repo.completed)
 			}
 		})
+	}
+}
+
+func TestSyncResumesUnfinishedRunsBeforeNewFilingWork(t *testing.T) {
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	binding, _ := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	subscription := domain.DefaultCopySubscription()
+	subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
+	subscription.AccountID, subscription.Environment = binding.AccountID(), binding.Environment()
+	subscription.OriginType, subscription.OriginID, subscription.Status = "copy_subscription", subscription.ID, domain.CopySubscriptionPaperActive
+	observationID := uuid.New()
+	repo := &cancellationRaceCopyRepo{subscription: subscription, observation: domain.CopySourceObservation{ID: observationID}, mapping: domain.CopyInstrumentMapping{Ticker: "AAPL"}, listErr: errors.New("new filing scan unavailable")}
+	store := &plannedOriginStore{}
+	for i, state := range []struct{ status, risk string }{{"received", "pending"}, {"ordered", "approved"}, {"partial", "approved"}, {"failed", "pending"}} {
+		intent := domain.CopyTradeIntent{ID: uuid.New(), AccountID: binding.AccountID(), Environment: binding.Environment(), SubscriptionID: subscription.ID, OriginType: "copy_subscription", OriginID: subscription.ID, SourceObservationID: observationID, InstrumentKey: fmt.Sprintf("AAPL-%d", i), Ticker: "AAPL", Side: domain.OrderSideBuy, RequestedNotional: 100, CalculationVersion: CalculationVersion, PolicyStatus: "approved", RiskStatus: state.risk, Status: state.status}
+		run, err := copyorigin.NewRun(subscription, []domain.CopyTradeIntent{intent})
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.recoverable = append(store.recoverable, copyorigin.RecoverableRun{Run: run, SubscriptionID: subscription.ID, Intents: []copyorigin.PlannedIntent{{Intent: intent}}})
+	}
+	executor := &countingCopyExecutor{}
+	service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: store, Executor: executor, Now: func() time.Time { return now }})
+	_, err := service.Sync13FSubscriptions(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "new filing scan unavailable") {
+		t.Fatalf("Sync13FSubscriptions() error=%v", err)
+	}
+	if executor.calls != 4 {
+		t.Fatalf("resumed executions=%d, want 4 before filing scan", executor.calls)
 	}
 }
 

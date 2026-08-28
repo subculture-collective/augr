@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +14,32 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
+
+func TestOrderRepoCreatePreservesDeterministicIDAndValidatesRetry(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
+	order := domain.Order{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
+	wantID := order.ID
+	if err := repo.Create(ctx, &order); err != nil {
+		t.Fatal(err)
+	}
+	if order.ID != wantID || order.CreatedAt.IsZero() {
+		t.Fatalf("created identity=%s at=%v, want %s", order.ID, order.CreatedAt, wantID)
+	}
+	retry := domain.Order{ID: wantID, AccountID: canonicalRepositoryTestAccountID, Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
+	if err := repo.Create(ctx, &retry); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	if retry.CreatedAt != order.CreatedAt {
+		t.Fatalf("retry created_at=%v, want %v", retry.CreatedAt, order.CreatedAt)
+	}
+	retry.Quantity = 3
+	if err := repo.Create(ctx, &retry); !errors.Is(err, repository.ErrIdempotencyConflict) {
+		t.Fatalf("changed retry error=%v", err)
+	}
+}
 
 func TestBuildOrderListQuery_NoFilters(t *testing.T) {
 	query, args := buildOrderListQuery(repository.OrderFilter{}, 10, 0)

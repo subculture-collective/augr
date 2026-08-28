@@ -28,3 +28,15 @@ type PlannedIntent struct {
 type RetryStore interface {
 	GetPlannedRun(context.Context, uuid.UUID, uuid.UUID, int) (*Run, []PlannedIntent, error)
 }
+
+type RecoverableRun struct {
+	Run            *Run
+	SubscriptionID uuid.UUID
+	Intents        []PlannedIntent
+}
+
+// RecoveryStore enumerates durable, unfinished effects by execution scope.
+// Recovery is independent of source refresh and new run creation.
+type RecoveryStore interface {
+	ListUnfinishedRuns(context.Context, uuid.UUID, domain.AccountEnvironment) ([]RecoverableRun, error)
+}

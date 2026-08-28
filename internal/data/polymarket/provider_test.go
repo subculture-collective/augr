@@ -25,7 +25,7 @@ func TestGetOHLCVUsesYesTokenForPriceHistory(t *testing.T) {
 			if got := r.URL.Query().Get("market_slug"); got != slug {
 				t.Fatalf("market_slug = %q, want %q", got, slug)
 			}
-			_, _ = fmt.Fprintf(w, `{"data":[{"condition_id":"cond-1","tokens":[{"token_id":%q,"outcome":"Yes"},{"token_id":"no-token","outcome":"No"}]}]}`, yesToken)
+			_, _ = fmt.Fprintf(w, `{"data":[{"market_slug":"other","tokens":[{"token_id":"wrong","outcome":"Yes"}]},{"market_slug":%q,"condition_id":"cond-1","tokens":[{"token_id":%q,"outcome":"Yes"},{"token_id":"no-token","outcome":"No"}]}]}`, slug, yesToken)
 		case "/prices-history":
 			gotMarket = r.URL.Query().Get("market")
 			_, _ = fmt.Fprint(w, `{"history":[{"t":1700000000,"p":0.61}]}`)
@@ -48,5 +48,17 @@ func TestGetOHLCVUsesYesTokenForPriceHistory(t *testing.T) {
 	}
 	if len(bars) != 1 || bars[0].Close != 0.61 {
 		t.Fatalf("unexpected bars: %+v", bars)
+	}
+}
+
+func TestResolvePriceHistoryMarketIDRejectsNonExactListResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"market_slug":"substitute","tokens":[{"token_id":"wrong","outcome":"Yes"}]}]}`)
+	}))
+	defer server.Close()
+	provider := NewProvider(server.URL, nil)
+	provider.client = server.Client()
+	if _, err := provider.resolvePriceHistoryMarketID(context.Background(), "exact"); err == nil {
+		t.Fatal("direct market lookup accepted substituted list response")
 	}
 }

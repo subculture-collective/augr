@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -296,14 +297,26 @@ func recoveredSpread(orders []*domain.Order) (*domain.OptionSpread, float64, err
 	if len(orders) == 0 {
 		return nil, 0, errors.New("spread legs are required")
 	}
-	quantity := orders[0].Quantity
-	for _, order := range orders[1:] {
-		if order != nil && order.Quantity < quantity {
-			quantity = order.Quantity
+	units := make([]int64, len(orders))
+	for i, order := range orders {
+		if order == nil || order.Quantity <= 0 || math.IsNaN(order.Quantity) || math.IsInf(order.Quantity, 0) {
+			return nil, 0, errors.New("persisted spread quantity is invalid")
+		}
+		units[i] = int64(math.Round(order.Quantity * 1e8))
+		if units[i] <= 0 || math.Abs(float64(units[i])/1e8-order.Quantity) > 1e-9 {
+			return nil, 0, errors.New("persisted spread quantity precision is invalid")
 		}
 	}
+	divisor := units[0]
+	for _, value := range units[1:] {
+		for value != 0 {
+			divisor, value = value, divisor%value
+		}
+	}
+	quantity := float64(divisor) / 1e8
 	spread := &domain.OptionSpread{Underlying: orders[0].UnderlyingTicker, MaxRisk: orders[0].SpreadMaxRisk, MaxReward: orders[0].SpreadMaxReward, Legs: make([]domain.SpreadLeg, 0, len(orders))}
-	if spread.MaxRisk <= 0 || spread.MaxReward <= 0 {
+	opening := orders[0].PositionIntent != nil && (*orders[0].PositionIntent == domain.PositionIntentBuyToOpen || *orders[0].PositionIntent == domain.PositionIntentSellToOpen)
+	if opening && (spread.MaxRisk <= 0 || spread.MaxReward <= 0) {
 		return nil, 0, errors.New("persisted spread risk and reward are incomplete")
 	}
 	if orders[0].OptionType != nil && *orders[0].OptionType == domain.OptionTypePut {
@@ -311,17 +324,18 @@ func recoveredSpread(orders []*domain.Order) (*domain.OptionSpread, float64, err
 	} else {
 		spread.StrategyType = domain.StrategyBullCallSpread
 	}
-	for _, order := range orders {
+	for i, order := range orders {
 		if order == nil || order.OptionType == nil || order.Strike == nil || order.Expiry == nil || order.PositionIntent == nil || order.Quantity <= 0 || order.UnderlyingTicker != spread.Underlying {
 			return nil, 0, errors.New("persisted spread leg metadata is incomplete")
 		}
-		ratio := 1
-		if order.Quantity != quantity {
-			ratio = int(order.Quantity / quantity)
-			if ratio <= 0 || quantity*float64(ratio) != order.Quantity {
-				return nil, 0, errors.New("persisted spread ratio is invalid")
-			}
+		legOpening := *order.PositionIntent == domain.PositionIntentBuyToOpen || *order.PositionIntent == domain.PositionIntentSellToOpen
+		if legOpening != opening {
+			return nil, 0, errors.New("persisted spread mixes opening and closing legs")
 		}
+		if order.SpreadMaxRisk != spread.MaxRisk || order.SpreadMaxReward != spread.MaxReward {
+			return nil, 0, errors.New("persisted spread economics are inconsistent")
+		}
+		ratio := int(units[i] / divisor)
 		price := 0.0
 		if order.LimitPrice != nil {
 			price = *order.LimitPrice

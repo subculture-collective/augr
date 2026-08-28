@@ -105,7 +105,12 @@ const listOpenPaperOrdersSQL = `SELECT o.id, o.strategy_id, o.pipeline_run_id, o
 		FROM orders o
 		WHERE o.account_id=$1 AND o.environment=$2 AND o.broker = 'paper' AND (
 			o.status IN ('pending', 'submitted', 'partial') OR
-			(o.market_type='options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0))
+			(o.market_type='options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0)) OR
+			(o.market_type='options' AND o.leg_group_id IS NOT NULL AND EXISTS (
+				SELECT 1 FROM orders sibling WHERE sibling.account_id=o.account_id AND sibling.environment=o.environment
+				AND sibling.broker='paper' AND sibling.market_type='options' AND sibling.leg_group_id=o.leg_group_id AND (sibling.status IN ('pending','submitted','partial') OR
+				(sibling.status IN ('cancelled','rejected') AND sibling.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=sibling.id AND t.account_id=sibling.account_id),0)))
+			))
 		)
 		ORDER BY o.submitted_at ASC, o.id ASC LIMIT $3 OFFSET $4`
 

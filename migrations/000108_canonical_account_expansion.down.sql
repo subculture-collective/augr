@@ -67,7 +67,7 @@ BEGIN
        OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR allocation_claim_id IS NOT NULL OR allocation_claimed_at IS NOT NULL OR allocation_claim_expires_at IS NOT NULL)
        OR EXISTS(SELECT 1 FROM allocation_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM replay_events WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM financial_fill_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM financial_fill_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR cumulative_fee IS NOT NULL OR cumulative_premium IS NOT NULL OR cumulative_filled_at IS NOT NULL OR cumulative_status IS NOT NULL OR cumulative_exit_reason IS NOT NULL)
        OR EXISTS(SELECT 1 FROM prediction_settlement_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM option_settlement_idempotency)
        OR EXISTS(SELECT 1 FROM option_status_idempotency)

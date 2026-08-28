@@ -449,6 +449,9 @@ type SyncSummary struct {
 // immutable observation. Paused subscriptions continue collecting filings.
 func (s *Service) Sync13FSubscriptions(ctx context.Context) (SyncSummary, error) {
 	var summary SyncSummary
+	if err := s.resumeUnfinishedRuns(ctx, &summary); err != nil {
+		return summary, err
+	}
 	subscriptions := make([]domain.CopySubscription, 0)
 	for offset := 0; ; offset += 100 {
 		page, err := s.deps.Repo.ListSubscriptions(ctx, repository.CopySubscriptionFilter{}, 100, offset)
@@ -489,6 +492,44 @@ func (s *Service) Sync13FSubscriptions(ctx context.Context) (SyncSummary, error)
 		summary.Rebalanced++
 	}
 	return summary, nil
+}
+
+func (s *Service) resumeUnfinishedRuns(ctx context.Context, summary *SyncSummary) error {
+	store, ok := s.deps.OriginRuns.(copyorigin.RecoveryStore)
+	if !ok {
+		return nil
+	}
+	account := s.deps.ExecutionAccount
+	if err := account.Validate(); err != nil {
+		return fmt.Errorf("resume copy runs: %w", err)
+	}
+	runs, err := store.ListUnfinishedRuns(ctx, account.AccountID(), account.Environment())
+	if err != nil {
+		return fmt.Errorf("list unfinished copy runs: %w", err)
+	}
+	for _, recoverable := range runs {
+		if recoverable.Run == nil || recoverable.SubscriptionID == uuid.Nil {
+			return fmt.Errorf("resume copy runs: incomplete persisted run identity")
+		}
+		subscription, err := s.deps.Repo.GetSubscription(ctx, recoverable.SubscriptionID)
+		if err != nil {
+			return err
+		}
+		if err := s.validateSubscriptionBinding(subscription); err != nil {
+			return err
+		}
+		preview := Preview{Intents: make([]domain.CopyTradeIntent, 0, len(recoverable.Intents))}
+		for _, intent := range recoverable.Intents {
+			preview.Intents = append(preview.Intents, intent.Intent)
+		}
+		if _, err := s.executePlannedRun(ctx, subscription, recoverable.Run, recoverable.Intents, preview); err != nil {
+			return fmt.Errorf("resume copy run %s: %w", recoverable.Run.ID(), err)
+		}
+		if summary != nil {
+			summary.Rebalanced++
+		}
+	}
+	return nil
 }
 
 func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult, error) {

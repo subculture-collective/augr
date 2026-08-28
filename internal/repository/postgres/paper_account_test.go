@@ -83,6 +83,11 @@ func TestListOpenPaperOrdersSQLMatchesScanOrder(t *testing.T) {
 	if !strings.Contains(normalized, wantTail) {
 		t.Fatalf("ListOpenPaperOrders select tail does not match scanOrder: %s", normalized)
 	}
+	for _, required := range []string{"o.leg_group_id IS NOT NULL", "sibling.leg_group_id=o.leg_group_id", "sibling.status IN ('pending','submitted','partial')"} {
+		if !strings.Contains(normalized, required) {
+			t.Fatalf("ListOpenPaperOrders does not recover every leg in an unfinished group; missing %q", required)
+		}
+	}
 }
 
 func TestPaperAccountRestoreParityWithRealDB(t *testing.T) {
