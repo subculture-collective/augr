@@ -601,6 +601,9 @@ func buildTradeDecisionFilteredQuery(accountID uuid.UUID, base string, filter re
 		return fmt.Sprintf("$%d", argIdx)
 	}
 	conditions = append(conditions, "account_id = "+nextArg(accountID))
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
+	}
 
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))

@@ -972,7 +972,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if _, persistent := paperAccountRepo.(*pgrepo.PaperAccountRepo); persistent {
 			optionCloseRepos = append(optionCloseRepos, orderRepo)
 		}
-		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos...); err != nil {
+		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, Fills: db}); err != nil {
 			return nil, nil, nil, err
 		}
 		strategyRunner.portfolioAllocatorMode = portfolioAllocatorMode

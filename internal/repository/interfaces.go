@@ -349,6 +349,7 @@ type TradeFilter struct {
 
 // TradeDecisionFilter defines supported filters when listing trade decisions.
 type TradeDecisionFilter struct {
+	Environment   domain.AccountEnvironment
 	StrategyID    *uuid.UUID
 	InstrumentKey string
 	MarketType    domain.MarketType

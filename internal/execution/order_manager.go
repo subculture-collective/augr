@@ -246,15 +246,12 @@ func (m *OrderManager) ProcessSignal(
 	signal FinalSignal,
 	plan TradingPlan,
 ) error {
-	if planMarketType(plan).Normalize() == domain.MarketTypeKalshi {
-		if m.accountLocker == nil {
-			return fmt.Errorf("order_manager: PostgreSQL execution account locker is required for Kalshi")
-		}
-		return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
-			return m.processSignal(ctx, scope, signal, plan)
-		})
+	if m.accountLocker == nil {
+		return fmt.Errorf("order_manager: PostgreSQL execution account locker is required")
 	}
-	return m.processSignal(ctx, scope, signal, plan)
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.processSignal(ctx, scope, signal, plan)
+	})
 }
 
 func (m *OrderManager) processSignal(
@@ -661,20 +658,12 @@ func (m *OrderManager) processSignal(
 	}
 	externalID, err := m.broker.SubmitOrder(ctx, order)
 	if err != nil {
-		order.Status = domain.OrderStatusRejected
-		if updateErr := m.orderRepo.Update(ctx, order); updateErr != nil {
-			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
-		}
-		m.recordOrderMetric(order.Side, order.Status)
-		if auditErr := m.audit(ctx, "order_rejected", "order", &order.ID, map[string]any{
+		if auditErr := m.audit(ctx, "order_submission_ambiguous", "order", &order.ID, map[string]any{
 			"error": err.Error(),
 		}); auditErr != nil {
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
-
-		m.emitOrderEvent(ctx, OrderEventRejected, order, scope)
-
-		return fmt.Errorf("order_manager: submit order: %w", err)
+		return fmt.Errorf("order_manager: submit order outcome is ambiguous; pending order %s retained for provider lookup by client id %s: %w", order.ID, order.ClientOrderID, err)
 	}
 
 	submittedAt := m.currentTime()
@@ -705,7 +694,10 @@ func (m *OrderManager) processSignal(
 	}
 
 	switch status {
-	case domain.OrderStatusFilled:
+	case domain.OrderStatusFilled, domain.OrderStatusPartial:
+		if status == domain.OrderStatusPartial && (order.FilledQuantity <= 0 || order.FilledAvgPrice == nil || order.FilledAt == nil) {
+			return fmt.Errorf("order_manager: partial fill lacks observed economics")
+		}
 		return m.handleFill(ctx, order, plan, scope, decision.ID)
 	case domain.OrderStatusCancelled:
 		if err := m.orderRepo.Update(ctx, order); err != nil {
@@ -1377,7 +1369,7 @@ func (m *OrderManager) handleFill(
 		if plan.TakeProfit > 0 {
 			takeProfit = &plan.TakeProfit
 		}
-		result, err := m.financialRepo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: "paper_fill:v1:" + order.ID.String() + ":full", Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade})
+		result, err := m.financialRepo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("paper_fill:v1:%s:observed:%.8f", order.ID, order.FilledQuantity), Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade})
 		if err != nil {
 			return fmt.Errorf("order_manager: persist fill: %w", err)
 		}

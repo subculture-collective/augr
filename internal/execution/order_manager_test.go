@@ -2740,7 +2740,7 @@ func TestProcessSignal_StockSellRequiresTickerForOwnershipCheck(t *testing.T) {
 	}
 }
 
-func TestProcessSignal_BrokerSubmitError(t *testing.T) {
+func TestProcessSignal_BrokerSubmitErrorRetainsPendingRecoveryIdentity(t *testing.T) {
 	broker := &mockBroker{
 		submitOrderFn: func(_ context.Context, _ *domain.Order) (string, error) {
 			return "", errors.New("broker unavailable")
@@ -2761,18 +2761,15 @@ func TestProcessSignal_BrokerSubmitError(t *testing.T) {
 		t.Fatal("ProcessSignal() expected error on broker submit failure")
 	}
 
-	// Order should have been created then updated to rejected.
 	if len(orderRepo.orders) != 1 {
 		t.Fatalf("expected 1 order created, got %d", len(orderRepo.orders))
 	}
-
-	if len(orderRepo.updates) < 1 {
-		t.Fatalf("expected at least 1 order update, got %d", len(orderRepo.updates))
+	if len(orderRepo.updates) != 0 {
+		t.Fatalf("ambiguous submit updated pending order: %+v", orderRepo.updates)
 	}
-
-	lastUpdate := orderRepo.updates[len(orderRepo.updates)-1]
-	if lastUpdate.Status != domain.OrderStatusRejected {
-		t.Errorf("expected rejected status, got %s", lastUpdate.Status)
+	created := orderRepo.orders[0]
+	if created.Status != domain.OrderStatusPending || created.ClientOrderID != "augr-"+created.ID.String() {
+		t.Fatalf("pending recovery identity not retained: %+v", created)
 	}
 	if len(recorder.decisions) != 1 {
 		t.Fatalf("expected 1 decision recorded, got %d", len(recorder.decisions))
@@ -2787,9 +2784,8 @@ func TestProcessSignal_BrokerSubmitError(t *testing.T) {
 		t.Fatalf("paper attachment orderID = %s, want %s", got, want)
 	}
 
-	// Verify audit log has order_created and order_rejected.
 	types := auditEventTypes(auditRepo.entries)
-	wantTypes := []string{"order_created", "order_rejected"}
+	wantTypes := []string{"order_created", "order_submission_ambiguous"}
 
 	if len(types) != len(wantTypes) {
 		t.Fatalf("expected %d audit entries, got %d: %v", len(wantTypes), len(types), types)

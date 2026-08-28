@@ -52,6 +52,10 @@ type templateSender interface {
 	SendTemplate(ctx context.Context, tmpl *OrderTemplate) (*CreateOrderResponse, error)
 }
 
+type stopOrderLookup interface {
+	GetOrderStatus(context.Context, string) (domain.OrderStatus, error)
+}
+
 type guardState int32
 
 const (
@@ -163,13 +167,12 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 		side = "SELL"
 	}
 	order := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: slug, MarketType: domain.MarketTypePolymarket, Side: domain.OrderSide(side), OrderType: domain.OrderTypeMarket, Quantity: pos.Size, Status: domain.OrderStatusPending, Broker: "polymarket", PredictionSide: outcome, PolymarketIntent: intent, CreatedAt: time.Now().UTC()}
-	order.ClientOrderID = "augr-polymarket-stop-" + order.ID.String()
-	g.mu.RLock()
-	if _, exists := g.byID[positionID]; exists {
-		g.mu.RUnlock()
-		return nil
+	positionIntent := domain.PositionIntentBuyToClose
+	if order.Side == domain.OrderSideSell {
+		positionIntent = domain.PositionIntentSellToClose
 	}
-	g.mu.RUnlock()
+	order.PositionIntent = &positionIntent
+	order.ClientOrderID = "augr-polymarket-stop-" + order.ID.String()
 	tmpl, err := g.broker.PrepareTemplate(order)
 	if err != nil {
 		return err
@@ -177,7 +180,21 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, order: order, receivedAt: time.Now()}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, exists := g.byID[positionID]; exists {
+	if previous, exists := g.byID[positionID]; exists {
+		oldEntries := g.bySlug[previous.slug]
+		for i := range oldEntries {
+			if oldEntries[i] == previous {
+				oldEntries = append(oldEntries[:i], oldEntries[i+1:]...)
+				break
+			}
+		}
+		if len(oldEntries) == 0 {
+			delete(g.bySlug, previous.slug)
+		} else {
+			g.bySlug[previous.slug] = oldEntries
+		}
+		g.byID[positionID] = entry
+		g.bySlug[slug] = append(g.bySlug[slug], entry)
 		return nil
 	}
 	g.byID[positionID] = entry
@@ -305,7 +322,13 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			entry.state.Store(int32(guardArmed))
 			continue
 		}
-		response, err := g.broker.SendTemplate(ctx, entry.template)
+		freshTemplate, err := g.broker.PrepareTemplate(entry.order)
+		if err != nil {
+			entry.state.Store(int32(guardFired))
+			continue
+		}
+		entry.template = freshTemplate
+		response, err := g.broker.SendTemplate(ctx, freshTemplate)
 		if err != nil {
 			if g.metrics != nil {
 				g.metrics.IncSendError(entry.slug)
@@ -313,8 +336,17 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			if g.logger != nil {
 				g.logger.Error("polymarket stop guard send failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
 			}
-			entry.state.Store(int32(guardFired))
-			continue
+			lookup, ok := g.broker.(stopOrderLookup)
+			if !ok {
+				entry.state.Store(int32(guardFired))
+				continue
+			}
+			status, lookupErr := lookup.GetOrderStatus(ctx, entry.order.ClientOrderID)
+			if lookupErr != nil || (status != domain.OrderStatusPending && status != domain.OrderStatusSubmitted && status != domain.OrderStatusPartial && status != domain.OrderStatusFilled) {
+				entry.state.Store(int32(guardFired))
+				continue
+			}
+			response = &CreateOrderResponse{ID: entry.order.ClientOrderID}
 		}
 		if response == nil || strings.TrimSpace(response.ID) == "" {
 			entry.state.Store(int32(guardFired))

@@ -22,6 +22,14 @@ type mockOptionsBroker struct {
 	submitOptionOrderFn func(ctx context.Context, order *domain.Order) (string, error)
 	submitSpreadOrderFn func(ctx context.Context, spread *domain.OptionSpread, quantity float64) ([]string, error)
 	optionFillReportFn  func(ctx context.Context, order *domain.Order) (execution.OptionFillReport, error)
+	getOrderStatusFn    func(context.Context, string) (execution.BrokerOrderStatus, error)
+}
+
+func (b *mockOptionsBroker) GetOrderStatusResult(ctx context.Context, id string) (execution.BrokerOrderStatus, error) {
+	if b.getOrderStatusFn != nil {
+		return b.getOrderStatusFn(ctx, id)
+	}
+	return execution.BrokerOrderStatus{}, execution.ErrBrokerOrderNotFound
 }
 
 type malformedAsyncSpreadBroker struct{}
@@ -465,5 +473,27 @@ func TestProcessOptionSignalRetainsAmbiguousSubmitForRestartReconciliation(t *te
 	order := orderRepo.orders[0]
 	if order.Status != domain.OrderStatusPending || order.ClientOrderID == "" {
 		t.Fatalf("retained order lacks durable recovery identity: %+v", order)
+	}
+}
+
+func TestReconcilePendingOptionOrderUsesClientIDAndPersistsFill(t *testing.T) {
+	price, filledAt := 2.5, time.Now().UTC()
+	clientID := "augr-option-" + uuid.NewString()
+	broker := &mockOptionsBroker{getOrderStatusFn: func(_ context.Context, got string) (execution.BrokerOrderStatus, error) {
+		if got != clientID {
+			t.Fatalf("lookup id = %q, want %q", got, clientID)
+		}
+		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
+	}}
+	fillRepo := &recordingOptionFillRepo{}
+	orderRepo := &mockOrderRepo{}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
+	strategyID := uuid.New()
+	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: clientID, Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusPending}
+	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(fillRepo.batches) != 1 || len(fillRepo.batches[0]) != 1 || fillRepo.batches[0][0].Order.ClientOrderID != clientID {
+		t.Fatalf("recovered fills = %+v", fillRepo.batches)
 	}
 }

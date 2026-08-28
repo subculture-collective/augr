@@ -143,7 +143,7 @@ func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketTy
 	if marketType != domain.MarketTypeKalshi && marketType != domain.MarketTypePolymarket {
 		return nil, fmt.Errorf("prediction settlement: unsupported market type %q", marketType)
 	}
-	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{MarketType: marketType, Status: domain.TradeDecisionStatusPaper}, pendingMarketCap+1, 0)
+	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{Environment: s.executionAccount.Environment(), MarketType: marketType, Status: domain.TradeDecisionStatusPaper}, pendingMarketCap+1, 0)
 	if err != nil {
 		return nil, fmt.Errorf("prediction settlement: list decisions: %w", err)
 	}
@@ -281,7 +281,7 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 }
 
 func (s *Settler) matchPaperDecisions(ctx context.Context, marketType domain.MarketType, instrument string) ([]domain.TradeDecision, error) {
-	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{MarketType: marketType, Status: domain.TradeDecisionStatusPaper, InstrumentKey: instrument}, marketDecisionCap+1, 0)
+	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{Environment: s.executionAccount.Environment(), MarketType: marketType, Status: domain.TradeDecisionStatusPaper, InstrumentKey: instrument}, marketDecisionCap+1, 0)
 	if err != nil {
 		return nil, fmt.Errorf("prediction settlement: list decisions: %w", err)
 	}

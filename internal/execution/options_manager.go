@@ -33,6 +33,86 @@ type OptionFillReporter interface {
 	OptionFillReport(ctx context.Context, order *domain.Order) (OptionFillReport, error)
 }
 
+// ReconcilePendingOptionOrders resolves durable pre-submit crash gaps by the
+// provider client ID. It never creates a replacement identity.
+func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, account domain.ExecutionAccountBinding, orders []domain.Order, positions []domain.Position) error {
+	if m == nil || m.accountLocker == nil || m.optionFillRepo == nil {
+		return fmt.Errorf("options_manager: locked option recovery dependencies are required")
+	}
+	provider, ok := m.broker.(BrokerOrderStatusProvider)
+	if !ok {
+		return fmt.Errorf("options_manager: broker status evidence is required for recovery")
+	}
+	if err := account.Validate(); err != nil {
+		return fmt.Errorf("options_manager: recovery account: %w", err)
+	}
+	hasPending := false
+	for i := range orders {
+		if orders[i].AccountID == account.AccountID() && orders[i].Environment == account.Environment() && orders[i].MarketType.Normalize() == domain.MarketTypeOptions && orders[i].Status == domain.OrderStatusPending && strings.TrimSpace(orders[i].ClientOrderID) != "" {
+			hasPending = true
+			break
+		}
+	}
+	if !hasPending {
+		return nil
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, account.AccountID(), func() error {
+		for i := range orders {
+			order := &orders[i]
+			if order.AccountID != account.AccountID() || order.Environment != account.Environment() || order.MarketType.Normalize() != domain.MarketTypeOptions || order.Status != domain.OrderStatusPending || strings.TrimSpace(order.ClientOrderID) == "" {
+				continue
+			}
+			result, err := provider.GetOrderStatusResult(ctx, order.ClientOrderID)
+			if err != nil {
+				if !errors.Is(err, ErrBrokerOrderNotFound) {
+					return fmt.Errorf("options_manager: recover provider status: %w", err)
+				}
+				externalID, submitErr := m.broker.SubmitOptionOrder(ctx, order)
+				if submitErr != nil {
+					return fmt.Errorf("options_manager: recover pending submit remains ambiguous: %w", submitErr)
+				}
+				if strings.TrimSpace(externalID) != order.ClientOrderID {
+					return fmt.Errorf("options_manager: recovered option client identity mismatch")
+				}
+				result, err = provider.GetOrderStatusResult(ctx, order.ClientOrderID)
+				if err != nil {
+					return fmt.Errorf("options_manager: verify recovered option: %w", err)
+				}
+			}
+			order.ExternalID, order.Status = order.ClientOrderID, result.Status
+			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = result.FilledQuantity, cloneFloatPtr(result.FilledAvgPrice), cloneTimePtr(result.FilledAt)
+			if result.Status != domain.OrderStatusFilled {
+				if err := m.orderRepo.Update(ctx, order); err != nil {
+					return fmt.Errorf("options_manager: persist recovered status: %w", err)
+				}
+				continue
+			}
+			var positionID *uuid.UUID
+			if order.PositionIntent != nil && (*order.PositionIntent == domain.PositionIntentBuyToClose || *order.PositionIntent == domain.PositionIntentSellToClose) {
+				for j := range positions {
+					candidate := &positions[j]
+					if candidate.AccountID == order.AccountID && candidate.Environment == order.Environment && candidate.OriginType == order.OriginType && candidate.OriginID == order.OriginID && candidate.Ticker == order.Ticker && candidate.ClosedAt == nil && candidate.Quantity > 0 {
+						id := candidate.ID
+						positionID = &id
+						break
+					}
+				}
+				if positionID == nil {
+					return fmt.Errorf("options_manager: recovered close %s has no locked account position", order.ID)
+				}
+			}
+			input, err := m.optionFillInput(ctx, order, positionID, "restart recovery")
+			if err != nil {
+				return err
+			}
+			if _, err := m.optionFillRepo.ApplyOptionFills(ctx, []repository.OptionFillInput{input}); err != nil {
+				return fmt.Errorf("options_manager: persist recovered fill: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
 type optionFillCompensator interface {
 	RollbackOptionOrder(ctx context.Context, externalID string) error
 	RollbackOptionSpread(ctx context.Context, externalIDs []string) error
@@ -60,6 +140,7 @@ type OptionsOrderManager struct {
 	liveTrading    bool
 	liveGate       LiveGateConfig
 	logger         *slog.Logger
+	accountLocker  repository.ExecutionAccountLocker
 }
 
 // WithOptionFillRepo wires all-or-nothing option fill persistence.
@@ -84,13 +165,14 @@ func NewOptionsOrderManager(
 		logger = slog.Default()
 	}
 	return &OptionsOrderManager{
-		broker:       broker,
-		brokerName:   "options",
-		orderRepo:    orderRepo,
-		positionRepo: positionRepo,
-		tradeRepo:    tradeRepo,
-		riskEngine:   riskEngine,
-		logger:       logger,
+		broker:        broker,
+		brokerName:    "options",
+		orderRepo:     orderRepo,
+		positionRepo:  positionRepo,
+		tradeRepo:     tradeRepo,
+		riskEngine:    riskEngine,
+		logger:        logger,
+		accountLocker: executionAccountLocker(orderRepo),
 	}
 }
 
@@ -131,6 +213,15 @@ func (m *OptionsOrderManager) ProcessOptionSignal(
 	signal FinalSignal,
 	plan TradingPlan,
 ) error {
+	if m == nil || m.accountLocker == nil {
+		return fmt.Errorf("options_manager: PostgreSQL execution account locker is required")
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.processOptionSignal(ctx, scope, signal, plan)
+	})
+}
+
+func (m *OptionsOrderManager) processOptionSignal(ctx context.Context, scope ExecutionScope, signal FinalSignal, plan TradingPlan) error {
 	if m == nil {
 		return fmt.Errorf("options_manager: manager is nil")
 	}
@@ -340,6 +431,15 @@ func (m *OptionsOrderManager) persistImmediateFill(ctx context.Context, order *d
 // CloseOptionPosition closes an entire persisted option position at an explicit
 // executable price. Partial closes and rolls require a separate atomic plan.
 func (m *OptionsOrderManager) CloseOptionPosition(ctx context.Context, scope ExecutionScope, position *domain.Position, executablePrice float64, reason string) error {
+	if m == nil || m.accountLocker == nil {
+		return fmt.Errorf("options_manager: PostgreSQL execution account locker is required")
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.closeOptionPosition(ctx, scope, position, executablePrice, reason)
+	})
+}
+
+func (m *OptionsOrderManager) closeOptionPosition(ctx context.Context, scope ExecutionScope, position *domain.Position, executablePrice float64, reason string) error {
 	if m == nil || position == nil {
 		return errors.New("options_manager: position is required")
 	}
@@ -469,6 +569,15 @@ func (m *OptionsOrderManager) ProcessSpreadSignal(
 	spread *domain.OptionSpread,
 	quantity float64,
 ) error {
+	if m == nil || m.accountLocker == nil {
+		return fmt.Errorf("options_manager: PostgreSQL execution account locker is required")
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.processSpreadSignal(ctx, scope, spread, quantity)
+	})
+}
+
+func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope ExecutionScope, spread *domain.OptionSpread, quantity float64) error {
 	if m == nil {
 		return fmt.Errorf("options_manager: manager is nil")
 	}

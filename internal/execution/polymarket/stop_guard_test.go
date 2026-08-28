@@ -16,12 +16,18 @@ import (
 )
 
 type fakeBroker struct {
-	prepareTmpl *OrderTemplate
-	sendCalls   atomic.Int32
-	sendErr     error
-	lastTmpl    *OrderTemplate
-	lastOrder   *domain.Order
-	mu          sync.Mutex
+	prepareTmpl  *OrderTemplate
+	sendCalls    atomic.Int32
+	sendErr      error
+	lastTmpl     *OrderTemplate
+	lastOrder    *domain.Order
+	mu           sync.Mutex
+	lookupStatus domain.OrderStatus
+	lookupErr    error
+}
+
+func (f *fakeBroker) GetOrderStatus(context.Context, string) (domain.OrderStatus, error) {
+	return f.lookupStatus, f.lookupErr
 }
 
 type sharedExitClaims struct {
@@ -214,6 +220,43 @@ func TestStopGuard_DuplicateRegistrationIsIdempotent(t *testing.T) {
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.56, ReceivedAt: time.Now()})
 	if got := broker.sendCalls.Load(); got != 1 {
 		t.Fatalf("expected one fire after duplicate registration, got %d", got)
+	}
+}
+
+func TestStopGuard_DuplicateRegistrationRefreshesPersistedEconomics(t *testing.T) {
+	broker := &fakeBroker{}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := scopedGuardPosition(Position{ID: "refresh", Slug: "slug-a", Side: "BUY", Size: 1, StopPx: 0.40})
+	if err := g.RegisterEntry(position); err != nil {
+		t.Fatal(err)
+	}
+	position.Size, position.StopPx = 3, 0.45
+	if err := g.RegisterEntry(position); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.44, ReceivedAt: time.Now()})
+	broker.mu.Lock()
+	defer broker.mu.Unlock()
+	if broker.lastOrder == nil || broker.lastOrder.Quantity != 3 {
+		t.Fatalf("refreshed order = %+v", broker.lastOrder)
+	}
+}
+
+func TestStopGuard_AmbiguousSendRecoversByClientIDBeforeDisarm(t *testing.T) {
+	broker := &fakeBroker{sendErr: errors.New("timeout after send"), lookupStatus: domain.OrderStatusSubmitted}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterEntry(scopedGuardPosition(Position{ID: "recover", Slug: "slug-a", Side: "BUY", Size: 1, StopPx: 0.45})); err != nil {
+		t.Fatal(err)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.44, ReceivedAt: time.Now()})
+	if g.Active() != 0 {
+		t.Fatalf("recovered submitted stop remained armed")
 	}
 }
 

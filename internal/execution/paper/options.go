@@ -74,7 +74,20 @@ func (b *PaperBroker) SubmitOptionOrder(ctx context.Context, order *domain.Order
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	now := b.currentTime().UTC()
-	externalID := b.nextExternalIDLocked()
+	externalID := strings.TrimSpace(order.ClientOrderID)
+	if externalID == "" {
+		externalID = b.nextExternalIDLocked()
+	} else if existing := b.orders[externalID]; existing != nil {
+		intentMismatch := (existing.PositionIntent == nil) != (order.PositionIntent == nil)
+		if !intentMismatch && existing.PositionIntent != nil {
+			intentMismatch = *existing.PositionIntent != *order.PositionIntent
+		}
+		if existing.Ticker != order.Ticker || existing.Side != order.Side || existing.Quantity != order.Quantity || intentMismatch {
+			return "", errors.New("paper: option client order id reused with different order")
+		}
+		*order = *cloneOrder(existing)
+		return externalID, nil
+	}
 	totalDebit := result.Premium + result.Fee
 	if order.Side == domain.OrderSideBuy && b.balance.Cash < totalDebit {
 		return "", fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalDebit, b.balance.Cash)

@@ -11,7 +11,12 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos ...repository.AtomicOptionCloseRepository) error {
+type optionRecoveryDependencies struct {
+	Orders repository.OrderRepository
+	Fills  repository.OptionFillRepository
+}
+
+func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos []repository.AtomicOptionCloseRepository, recovery ...optionRecoveryDependencies) error {
 	if broker == nil || paperRepo == nil {
 		return fmt.Errorf("paper options account dependencies are required")
 	}
@@ -67,8 +72,20 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 	if err := broker.RestorePositions(allPositions); err != nil {
 		return err
 	}
-	if err := broker.RestoreOrders(allOrders); err != nil {
+	restorable := make([]domain.Order, 0, len(allOrders))
+	for i := range allOrders {
+		if allOrders[i].ExternalID != "" {
+			restorable = append(restorable, allOrders[i])
+		}
+	}
+	if err := broker.RestoreOrders(restorable); err != nil {
 		return err
+	}
+	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].Fills != nil {
+		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, nil, nil, nil).WithOptionFillRepo(recovery[0].Fills)
+		if err := manager.ReconcilePendingOptionOrders(ctx, binding, allOrders, allPositions); err != nil {
+			return fmt.Errorf("reconcile pending option orders: %w", err)
+		}
 	}
 	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx, binding.AccountID(), binding.Environment())
 	if err != nil {

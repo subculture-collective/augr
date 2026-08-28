@@ -216,7 +216,7 @@ func (r *OrderRepo) ReconcileOptionCloseReservations(ctx context.Context, accoun
 }
 
 func (r *OrderRepo) CreatePredictionExitOrderAndReserve(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, positionID uuid.UUID, order *domain.Order) error {
-	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || strings.TrimSpace(originType) == "" || strings.TrimSpace(originID) == "" || positionID == uuid.Nil || order == nil || order.AccountID != accountID || order.Environment != environment || order.OriginType != originType || order.OriginID != originID || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.Status != domain.OrderStatusPending || order.Side != domain.OrderSideSell {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || strings.TrimSpace(originType) == "" || strings.TrimSpace(originID) == "" || positionID == uuid.Nil || order == nil || order.AccountID != accountID || order.Environment != environment || order.OriginType != originType || order.OriginID != originID || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.Status != domain.OrderStatusPending || order.PositionIntent == nil {
 		return fmt.Errorf("postgres: atomic prediction exit: complete scoped order is required")
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -224,6 +224,17 @@ func (r *OrderRepo) CreatePredictionExitOrderAndReserve(ctx context.Context, acc
 		return fmt.Errorf("postgres: atomic prediction exit begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var positionSide domain.PositionSide
+	var positionQuantity float64
+	if err := tx.QueryRow(ctx, `SELECT side,quantity::double precision FROM positions WHERE id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND closed_at IS NULL AND quantity>0 AND close_reservation_order_id IS NULL FOR UPDATE`, positionID, accountID, environment, originType, originID).Scan(&positionSide, &positionQuantity); err != nil {
+		return fmt.Errorf("postgres: lock prediction exit position: %w", err)
+	}
+	validLongExit := positionSide == domain.PositionSideLong && order.Side == domain.OrderSideSell && *order.PositionIntent == domain.PositionIntentSellToClose
+	validShortExit := positionSide == domain.PositionSideShort && order.Side == domain.OrderSideBuy && *order.PositionIntent == domain.PositionIntentBuyToClose
+	if !validLongExit && !validShortExit {
+		return fmt.Errorf("postgres: prediction exit direction and intent do not close the locked position")
+	}
+	order.Quantity = positionQuantity
 	if err := r.create(ctx, tx, order); err != nil {
 		return err
 	}

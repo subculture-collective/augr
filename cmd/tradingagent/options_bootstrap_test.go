@@ -72,7 +72,7 @@ func (f fakePaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context, uui
 func TestBootstrapPaperOptionsAccountRestoresSharedBroker(t *testing.T) {
 	broker := paper.NewPaperBroker(1000, 0, 0)
 	repo := fakePaperAccountRepo{trades: []domain.Trade{{Side: domain.OrderSideBuy, Quantity: 1, Price: 2, Fee: 1}}, positions: []domain.Position{{Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 2, CurrentPrice: floatPtr(3)}}, orders: []domain.Order{{ExternalID: "paper-9", Status: domain.OrderStatusPartial, Ticker: "AAPL", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 1, FilledQuantity: 0.5, LimitPrice: floatPtr(2)}}, max: 9}
-	if err := bootstrapPaperOptionsAccount(context.Background(), testExecutionAccountBinding, broker, repo); err != nil {
+	if err := bootstrapPaperOptionsAccount(context.Background(), testExecutionAccountBinding, broker, repo, nil); err != nil {
 		t.Fatalf("bootstrapPaperOptionsAccount() error = %v", err)
 	}
 	balance, _ := broker.GetAccountBalance(context.Background())
@@ -96,7 +96,7 @@ func TestBootstrapPaperOptionsAccountRestoresSharedBroker(t *testing.T) {
 func TestBootstrapPaperOptionsAccountStartsAtPaperOneOnEmptyDB(t *testing.T) {
 	broker := paper.NewPaperBroker(1000, 0, 0)
 	repo := fakePaperAccountRepo{}
-	if err := bootstrapPaperOptionsAccount(context.Background(), testExecutionAccountBinding, broker, repo); err != nil {
+	if err := bootstrapPaperOptionsAccount(context.Background(), testExecutionAccountBinding, broker, repo, nil); err != nil {
 		t.Fatalf("bootstrapPaperOptionsAccount() error = %v", err)
 	}
 	id, err := broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "IBM", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, StopPrice: floatPtr(100)})
