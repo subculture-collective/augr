@@ -959,3 +959,7 @@ type CopyTradingRepository interface {
 	ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error)
 	UpdateIntent(ctx context.Context, intent *domain.CopyTradeIntent) error
 }
+
+type CopyIntentExecutionClaimer interface {
+	ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error)
+}

@@ -84,6 +84,7 @@ func TestPaperExecutorRejectsInvalidPreconditions(t *testing.T) {
 		{name: "missing entry price", opportunity: func() domain.Opportunity { o := baseOpportunity; o.EntryPrice = 0; return o }(), decision: baseDecision, strategy: baseStrategy, wantReason: "missing_entry_price"},
 		{name: "missing stop loss", opportunity: func() domain.Opportunity { o := baseOpportunity; o.MaxLossPct = 0; return o }(), decision: baseDecision, strategy: baseStrategy, wantReason: "missing_stop_loss"},
 		{name: "source version mismatch", opportunity: func() domain.Opportunity { o := baseOpportunity; o.OriginID = uuid.NewString(); return o }(), decision: baseDecision, strategy: baseStrategy, wantReason: "execution_scope_mismatch"},
+		{name: "account mismatch", opportunity: func() domain.Opportunity { o := baseOpportunity; o.AccountID = uuid.New(); return o }(), decision: baseDecision, strategy: baseStrategy, wantReason: "execution_scope_mismatch"},
 	}
 
 	for _, tt := range tests {
@@ -92,7 +93,8 @@ func TestPaperExecutorRejectsInvalidPreconditions(t *testing.T) {
 			t.Parallel()
 
 			processor := &paperProcessorStub{}
-			exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor})
+			binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+			exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor, ExecutionAccount: binding})
 			result, err := exec.ExecutePaperDecision(context.Background(), tt.opportunity, tt.decision, tt.strategy)
 			if err != nil {
 				t.Fatalf("ExecutePaperDecision() error = %v", err)
@@ -117,7 +119,8 @@ func TestPaperExecutorExecutesValidPaperDecision(t *testing.T) {
 	versionID, accountID, runID := uuid.New(), uuid.New(), uuid.New()
 	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	processor := &paperProcessorStub{}
-	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor})
+	binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor, ExecutionAccount: binding})
 	opportunity := domain.Opportunity{
 		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
 		OriginType: "strategy_version", OriginID: versionID.String(),
@@ -192,7 +195,8 @@ func TestPaperExecutorConvertsProcessorErrorToExecutionRejected(t *testing.T) {
 	versionID, accountID, runID := uuid.New(), uuid.New(), uuid.New()
 	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 	processor := &paperProcessorStub{err: errors.New("boom")}
-	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor})
+	binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+	exec := NewPaperExecutor(PaperExecutorDeps{Processor: processor, ExecutionAccount: binding})
 	result, err := exec.ExecutePaperDecision(context.Background(), domain.Opportunity{
 		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored,
 		OriginType: "strategy_version", OriginID: versionID.String(),

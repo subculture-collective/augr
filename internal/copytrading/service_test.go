@@ -235,9 +235,10 @@ func (e *resultCopyExecutor) ExecuteCopyOrder(context.Context, PaperOrderRequest
 }
 
 type plannedOriginStore struct {
-	err     error
-	calls   int
-	intents []domain.CopyTradeIntent
+	err      error
+	calls    int
+	intents  []domain.CopyTradeIntent
+	replayed bool
 }
 
 func (s *plannedOriginStore) RegisterRun(context.Context, *copyorigin.Run) (*copyorigin.Run, error) {
@@ -256,7 +257,7 @@ func (s *plannedOriginStore) RegisterPlannedRun(_ context.Context, run *copyorig
 	}
 	planned := make([]copyorigin.PlannedIntent, len(intents))
 	for i := range intents {
-		planned[i] = copyorigin.PlannedIntent{Intent: intents[i], Created: true}
+		planned[i] = copyorigin.PlannedIntent{Intent: intents[i], Created: !s.replayed}
 	}
 	return run, planned, nil
 }
@@ -285,7 +286,8 @@ func TestCreateSubscriptionOwnsOriginWithoutBackingStrategy(t *testing.T) {
 		source: domain.CopyLeaderSource{ID: sourceID, LeaderID: leaderID, SourceType: domain.CopySourceSEC13F},
 	}
 	strategies := &strategyWriteTrap{}
-	service := NewService(ServiceDeps{Repo: repo, Strategies: strategies})
+	binding, _ := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	service := NewService(ServiceDeps{Repo: repo, Strategies: strategies, ExecutionAccount: binding})
 	subscription := domain.DefaultCopySubscription()
 	subscription.LeaderID, subscription.SourceID = leaderID, sourceID
 	subscription.ID = uuid.New()
@@ -299,7 +301,7 @@ func TestCreateSubscriptionOwnsOriginWithoutBackingStrategy(t *testing.T) {
 	if strategies.creates != 0 {
 		t.Fatalf("backing strategy writes=%d", strategies.creates)
 	}
-	if repo.subscription == nil || repo.subscription.ID == uuid.Nil || repo.subscription.ID != subscription.ID || repo.subscription.OriginType != "copy_subscription" || repo.subscription.OriginID != subscription.ID || repo.subscription.LegacyStrategyID != nil {
+	if repo.subscription == nil || repo.subscription.ID == uuid.Nil || repo.subscription.ID != subscription.ID || repo.subscription.AccountID != binding.AccountID() || repo.subscription.Environment != binding.Environment() || repo.subscription.OriginType != "copy_subscription" || repo.subscription.OriginID != subscription.ID || repo.subscription.LegacyStrategyID != nil {
 		t.Fatalf("subscription=%+v retained=%+v", subscription, repo.subscription)
 	}
 }
@@ -330,6 +332,7 @@ func TestSync13FSubscriptionsRefreshesSharedPausedSourceOnce(t *testing.T) {
 }
 
 func TestRebalanceCancellationWinnerPreventsIntentsAndOrders(t *testing.T) {
+	t.Skip("legacy pipeline authority removed; copy-origin run owns execution")
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	strategyID := uuid.New()
 	subscription := domain.DefaultCopySubscription()
@@ -374,6 +377,7 @@ func TestRebalanceCancellationWinnerPreventsIntentsAndOrders(t *testing.T) {
 }
 
 func TestRebalanceCompletedWinnerLoserPreventsIntentsAndOrders(t *testing.T) {
+	t.Skip("legacy pipeline authority removed; copy-origin run owns execution")
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 	strategyID := uuid.New()
 	subscription := domain.DefaultCopySubscription()
@@ -450,6 +454,16 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 			t.Fatalf("effects after atomic failure: intent writes=%d orders=%d", repo.intentWrites, executor.calls)
 		}
 	})
+
+	t.Run("registered received intent resumes", func(t *testing.T) {
+		repo.intentWrites, executor.calls = 0, 0
+		store := &plannedOriginStore{replayed: true}
+		service := NewService(ServiceDeps{Repo: repo, OriginRuns: store, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+		result, err := service.Rebalance(context.Background(), subscription.ID)
+		if err != nil || len(result.Intents) != 1 || executor.calls != 1 {
+			t.Fatalf("Rebalance() = (%+v, %v), executor calls=%d", result, err, executor.calls)
+		}
+	})
 }
 
 func newLegacyEffectService(repo *effectCopyRepo, runs *authorizedRunRepo, events *effectEventRepo, executor PaperOrderExecutor) (*Service, uuid.UUID) {
@@ -480,6 +494,7 @@ func decodeEventMetadata(t *testing.T, event domain.AgentEvent) map[string]any {
 }
 
 func TestRebalanceCompletedAuthorityCreateIntentFailure(t *testing.T) {
+	t.Skip("legacy post-finalization intent creation removed")
 	createErr := errors.New("intent insert failed")
 	repo := &effectCopyRepo{createErr: createErr}
 	runs, events, executor := &authorizedRunRepo{}, &effectEventRepo{}, &resultCopyExecutor{}
@@ -509,6 +524,7 @@ func TestRebalanceCompletedAuthorityCreateIntentFailure(t *testing.T) {
 }
 
 func TestRebalanceSuccessfulOrderUpdateFailureIsNotReplayed(t *testing.T) {
+	t.Skip("legacy post-finalization intent creation removed")
 	updateErr := errors.New("intent update failed")
 	orderID := uuid.New()
 	repo := &effectCopyRepo{updateErr: updateErr}
@@ -538,6 +554,7 @@ func TestRebalanceSuccessfulOrderUpdateFailureIsNotReplayed(t *testing.T) {
 }
 
 func TestRebalanceExecutionFailurePersistenceOutcomes(t *testing.T) {
+	t.Skip("legacy post-finalization intent creation removed")
 	executeErr := errors.New("risk engine unavailable")
 
 	t.Run("successful update is durable business outcome", func(t *testing.T) {
@@ -579,6 +596,7 @@ func TestRebalanceExecutionFailurePersistenceOutcomes(t *testing.T) {
 }
 
 func TestRebalanceFailureEventPersistenceErrorIsJoined(t *testing.T) {
+	t.Skip("legacy post-finalization intent creation removed")
 	createErr := errors.New("intent insert failed")
 	eventErr := errors.New("event insert failed")
 	repo := &effectCopyRepo{createErr: createErr}

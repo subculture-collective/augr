@@ -451,7 +451,7 @@ func (m *OrderManager) ProcessSignal(
 
 	additionalExposurePct := (quantity * plan.EntryPrice) / balance.Equity
 
-	portfolio, err := BuildRiskPortfolioSnapshotFromBalance(ctx, balance, m.positionRepo)
+	portfolio, err := m.buildRiskPortfolioSnapshot(ctx, balance, scope)
 	if err != nil {
 		return fmt.Errorf("order_manager: build risk portfolio: %w", err)
 	}
@@ -886,6 +886,33 @@ func (m *OrderManager) positionsByScope(ctx context.Context, scope ExecutionScop
 	}
 	originType, originID := scope.Origin()
 	return repo.GetByExecutionScope(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, filter, riskSnapshotPositionLimit, 0)
+}
+
+func (m *OrderManager) buildRiskPortfolioSnapshot(ctx context.Context, balance Balance, scope ExecutionScope) (risk.Portfolio, error) {
+	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{})
+	if err != nil {
+		return risk.Portfolio{}, err
+	}
+	portfolio := risk.Portfolio{ConcurrentPositions: len(positions), PositionExposureBySymbol: make(map[string]float64, len(positions)), MarketExposurePct: make(map[domain.MarketType]float64, len(positions))}
+	if len(positions) == 0 {
+		return portfolio, nil
+	}
+	if balance.Equity <= 0 {
+		return risk.Portfolio{}, fmt.Errorf("account equity must be positive")
+	}
+	for _, position := range positions {
+		notional, err := positionNotional(position)
+		if err != nil {
+			return risk.Portfolio{}, err
+		}
+		exposure := notional / balance.Equity
+		portfolio.TotalExposurePct += exposure
+		portfolio.PositionExposureBySymbol[position.Ticker] += exposure
+		if position.MarketType != "" {
+			portfolio.MarketExposurePct[position.MarketType] += exposure
+		}
+	}
+	return portfolio, nil
 }
 
 func isPredictionMarket(marketType domain.MarketType) bool {

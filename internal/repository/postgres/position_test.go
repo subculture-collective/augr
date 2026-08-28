@@ -35,6 +35,12 @@ func TestBuildPositionListQuery_NoFilters(t *testing.T) {
 	assertNotContains(t, query, "WHERE")
 }
 
+func TestPositionReloadGetsMarketTypeFromOriginatingOrder(t *testing.T) {
+	if !strings.Contains(positionSelectSQL, "SELECT o.market_type FROM trades t JOIN orders o") {
+		t.Fatal("position reload lacks originating-order market type fallback")
+	}
+}
+
 func TestBuildPositionListQuery_AllFilters(t *testing.T) {
 	openedAfter := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
 	openedBefore := time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC)

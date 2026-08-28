@@ -404,6 +404,17 @@ func (r *CopyTradingRepo) UpdateIntent(ctx context.Context, intent *domain.CopyT
 	return r.pool.QueryRow(ctx, `UPDATE copy_trade_intents SET pipeline_run_id=$2,risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,updated_at=NOW() WHERE id=$1 RETURNING updated_at`, intent.ID, intent.PipelineRunID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status).Scan(&intent.UpdatedAt)
 }
 
+func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `UPDATE copy_trade_intents
+		SET execution_claim_id=$2,execution_claimed_at=$3,updated_at=NOW()
+		WHERE id=$1 AND policy_status='approved' AND status='received' AND order_id IS NULL
+		  AND (execution_claim_id IS NULL OR execution_claimed_at < $3 - INTERVAL '5 minutes')`, intentID, claimID, now.UTC())
+	if err != nil {
+		return false, fmt.Errorf("postgres: claim copy intent execution: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 func copyRepoNotFound(entity string, err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("copy %s: %w", entity, repository.ErrNotFound)

@@ -255,7 +255,7 @@ func (r *PositionRepo) GetByExecutionScope(ctx context.Context, accountID uuid.U
 	return r.list(ctx, query, args, "get positions by execution scope")
 }
 
-const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, s.market_type, p.ticker, p.side,
+const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id AND t.position_id=p.id ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,
 		p.quantity::double precision, p.avg_entry::double precision,
 		p.current_price::double precision, p.unrealized_pnl::double precision,
 		p.realized_pnl::double precision, p.stop_loss::double precision,

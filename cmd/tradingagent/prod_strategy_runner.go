@@ -379,7 +379,10 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
+	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	if err == nil {
+		err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
+	}
 	if err != nil {
 		return canonical, err
 	}
@@ -809,7 +812,10 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
+	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	if err == nil {
+		err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
+	}
 	if err != nil {
 		return canonical, err
 	}
@@ -962,7 +968,10 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 	var positions []domain.Position
 	if r.positionRepo != nil {
-		positions, err = r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
+		positions, err = r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+		if err == nil {
+			err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
+		}
 		if err != nil {
 			return canonical, err
 		}
@@ -2266,8 +2275,7 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 			return execution.LiveGateConfig{}, fmt.Errorf("parse LIVE_TRADING_ALLOWED_STRATEGIES value %q: %w", raw, err)
 		}
 		if strategy.ExecutionStrategyVersionID != nil && strategyID == strategy.ID {
-			allowedStrategies[*strategy.ExecutionStrategyVersionID] = true
-			continue
+			return execution.LiveGateConfig{}, fmt.Errorf("LIVE_TRADING_ALLOWED_STRATEGIES must contain immutable strategy-version UUIDs, not legacy strategy ID %s", strategyID)
 		}
 		allowedStrategies[strategyID] = true
 	}
@@ -2282,6 +2290,15 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 	}
 
 	return execution.LiveGateConfig{EnableLiveTrading: true, AllowedStrategies: allowedStrategies, AllowedBrokers: allowedBrokers}, nil
+}
+
+func validatePositionOrigins(positions []domain.Position, binding domain.ExecutionAccountBinding, versionID uuid.UUID) error {
+	for _, position := range positions {
+		if position.AccountID != binding.AccountID() || position.Environment != binding.Environment() || position.OriginType != "strategy_version" || position.OriginID != versionID.String() {
+			return fmt.Errorf("position %s has mismatched execution origin", position.ID)
+		}
+	}
+	return nil
 }
 
 func (r *realStrategyRunner) recordPipelineMetrics(run domain.PipelineRun) {

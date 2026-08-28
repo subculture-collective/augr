@@ -95,7 +95,18 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if len(orders) == 0 {
 		return PaperOrderResult{Skipped: true, Reason: "paper_order_not_created"}, nil
 	}
-	order := orders[0]
+	var order domain.Order
+	found := false
+	originType, originID := request.Scope.Origin()
+	for _, candidate := range orders {
+		if candidate.AccountID == request.Scope.AccountID() && candidate.Environment == request.Scope.Environment() && candidate.OriginType == string(originType) && candidate.OriginID == originID && candidate.PipelineRunID != nil && *candidate.PipelineRunID == run.ID && candidate.PipelineRunTradeDate != nil && candidate.PipelineRunTradeDate.Equal(run.TradeDate) {
+			order, found = candidate, true
+			break
+		}
+	}
+	if !found {
+		return PaperOrderResult{Skipped: true, Reason: "paper_order_scope_mismatch"}, nil
+	}
 	return PaperOrderResult{OrderID: &order.ID, Status: order.Status, Skipped: false}, nil
 }
 

@@ -381,6 +381,12 @@ func (r *mockPositionRepo) GetByStrategy(ctx context.Context, strategyID uuid.UU
 }
 
 func (r *mockPositionRepo) GetByExecutionScope(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	if filter == (repository.PositionFilter{}) {
+		if r.getOpenFn != nil {
+			return r.getOpenFn(ctx, filter, limit, offset)
+		}
+		return nil, nil
+	}
 	if r.executionScopeFn != nil {
 		return r.executionScopeFn(ctx, accountID, environment, originType, originID, filter, limit, offset)
 	}

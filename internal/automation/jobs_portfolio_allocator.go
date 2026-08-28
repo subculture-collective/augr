@@ -250,7 +250,7 @@ func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, dec
 		return paperAllocatorRejected(decision, "missing_strategy")
 	}
 
-	executor := portfolio.NewPaperExecutor(portfolio.PaperExecutorDeps{Processor: o.deps.PortfolioPaperProcessor})
+	executor := portfolio.NewPaperExecutor(portfolio.PaperExecutorDeps{Processor: o.deps.PortfolioPaperProcessor, ExecutionAccount: o.deps.ExecutionAccount})
 	result, err := executor.ExecutePaperDecision(ctx, opportunity, decision, *strategy)
 	if err != nil {
 		return paperAllocatorRejected(decision, "paper_execution_error")

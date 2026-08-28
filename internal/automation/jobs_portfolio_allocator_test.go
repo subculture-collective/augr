@@ -530,6 +530,10 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 	processor := &portfolioPaperProcessorStub{}
 	positionRepo, accountBalance := paperAllocatorStateDeps()
 	orch := NewJobOrchestrator(OrchestratorDeps{
+		ExecutionAccount: func() domain.ExecutionAccountBinding {
+			binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+			return binding
+		}(),
 		OpportunityRepo:         opportunityRepo,
 		AllocationDecisionRepo:  decisionRepo,
 		StrategyRepo:            strategyRepo,

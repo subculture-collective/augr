@@ -34,7 +34,8 @@ type PaperOrderResult struct {
 // PaperExecutorDeps holds the minimal dependencies needed to bridge allocator
 // decisions into paper order processing.
 type PaperExecutorDeps struct {
-	Processor PaperOrderProcessor
+	Processor        PaperOrderProcessor
+	ExecutionAccount domain.ExecutionAccountBinding
 }
 
 // PaperExecutionResult describes the allocator decision after paper execution.
@@ -66,6 +67,9 @@ func (e *PaperExecutor) ExecutePaperDecision(ctx context.Context, opportunity do
 
 	if e == nil || e.deps.Processor == nil {
 		return PaperExecutionResult{Action: domain.AllocationDecisionActionExecutionRejected, Reason: "missing_paper_processor"}, nil
+	}
+	if err := e.deps.ExecutionAccount.Validate(); err != nil {
+		return e.rejected("missing_execution_account"), nil
 	}
 	if decision.Action != domain.AllocationDecisionActionShadowSelected && decision.Action != domain.AllocationDecisionActionPaperOrderIntent {
 		return e.rejected("invalid_decision_action"), nil
@@ -121,11 +125,14 @@ func (e *PaperExecutor) ExecutePaperDecision(ctx context.Context, opportunity do
 	if opportunity.AccountID == uuid.Nil || !opportunity.Environment.IsValid() || opportunity.OriginType != "strategy_version" || opportunity.OriginID == "" || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
 		return e.rejected("missing_execution_scope"), nil
 	}
+	if opportunity.AccountID != e.deps.ExecutionAccount.AccountID() || opportunity.Environment != e.deps.ExecutionAccount.Environment() {
+		return e.rejected("execution_scope_mismatch"), nil
+	}
 	versionID, err := uuid.Parse(opportunity.OriginID)
 	if err != nil || strategy.ExecutionStrategyVersionID == nil || *strategy.ExecutionStrategyVersionID != versionID {
 		return e.rejected("execution_scope_mismatch"), nil
 	}
-	scope, err := execution.NewStrategyExecutionScope(opportunity.AccountID, opportunity.Environment, versionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, strategy.ID)
+	scope, err := execution.NewStrategyExecutionScope(e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), versionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, strategy.ID)
 	if err != nil {
 		return e.rejected("invalid_execution_scope"), nil
 	}

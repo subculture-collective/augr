@@ -50,6 +50,13 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 		request.Intent.SubscriptionID != request.Subscription.ID || request.Intent.OriginType != "copy_subscription" || request.Intent.OriginID != request.Subscription.ID {
 		return PaperOrderResult{}, fmt.Errorf("copy execution attribution does not match configured account and origin")
 	}
+	existing, err := e.deps.Orders.GetByCopyOriginRun(ctx, e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 2, 0)
+	if err != nil {
+		return PaperOrderResult{}, err
+	}
+	if len(existing) > 0 {
+		return PaperOrderResult{OrderID: &existing[0].ID, Status: existing[0].Status}, nil
+	}
 	balance, err := e.deps.Broker.GetAccountBalance(ctx)
 	if err != nil {
 		return PaperOrderResult{}, err

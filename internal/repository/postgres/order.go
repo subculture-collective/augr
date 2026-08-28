@@ -120,19 +120,21 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 	order.MarketType = marketType
 
 	row := r.pool.QueryRow(ctx,
-		`UPDATE orders
-		 SET strategy_id = $1,
-		     pipeline_run_id = $2,
-		     account_id = $3, environment = $4, origin_type = $5, origin_id = $6,
-		     pipeline_run_trade_date = $7, copy_origin_rebalance_run_id = $8,
-		     external_id = $9, ticker = $10, market_type = $11, side = $12,
+		`WITH locked AS (SELECT id FROM orders WHERE id=$33 FOR UPDATE)
+		 UPDATE orders o
+		 SET external_id = $9, ticker = $10, market_type = $11, side = $12,
 		     order_type = $13, quantity = $14, limit_price = $15, stop_price = $16,
 		     filled_quantity = $17, filled_avg_price = $18, status = $19, broker = $20,
 		     submitted_at = $21, filled_at = $22, asset_class = $23, underlying_ticker = $24,
 		     option_type = $25, strike = $26, expiry = $27, contract_multiplier = $28,
 		     position_intent = $29, leg_group_id = $30, prediction_side = $31, polymarket_intent = $32
-		 WHERE id = $33
-		 RETURNING id`,
+		 FROM locked
+		 WHERE o.id = locked.id
+		   AND o.strategy_id IS NOT DISTINCT FROM $1 AND o.pipeline_run_id IS NOT DISTINCT FROM $2
+		   AND o.account_id IS NOT DISTINCT FROM $3 AND o.environment IS NOT DISTINCT FROM $4
+		   AND o.origin_type IS NOT DISTINCT FROM $5 AND o.origin_id IS NOT DISTINCT FROM $6
+		   AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $7 AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $8
+		 RETURNING o.id`,
 		order.StrategyID,
 		order.PipelineRunID,
 		nullableUUID(order.AccountID),

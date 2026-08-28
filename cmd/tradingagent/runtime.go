@@ -985,14 +985,15 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		}
 		if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 			deps.CopyTrading = copytrading.NewService(copytrading.ServiceDeps{
-				Repo:        copyTradingRepo,
-				OriginRuns:  pgrepo.NewCopyOriginRepo(db.Pool),
-				Strategies:  strategyRepo,
-				Runs:        runRepo,
-				Events:      eventRepo,
-				RunRegistry: runRegistry,
-				Positions:   positionRepo,
-				EDGAR:       edgarProvider,
+				ExecutionAccount: executionAccount,
+				Repo:             copyTradingRepo,
+				OriginRuns:       pgrepo.NewCopyOriginRepo(db.Pool),
+				Strategies:       strategyRepo,
+				Runs:             runRepo,
+				Events:           eventRepo,
+				RunRegistry:      runRegistry,
+				Positions:        positionRepo,
+				EDGAR:            edgarProvider,
 				Prices: copytrading.CanonicalQuoteProvider{
 					Instruments: instrumentRepo, Quotes: quoteSnapshotRepo,
 					Liquidity:     copytrading.OHLCVPriceProvider{Source: dataService},
@@ -1754,7 +1755,10 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, executionVersionID, repository.PositionFilter{}, 10, 0)
+	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	if err == nil {
+		err = validatePositionOrigins(positions, r.executionAccount, executionVersionID)
+	}
 	if err != nil {
 		return canonical, err
 	}
