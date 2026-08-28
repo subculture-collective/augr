@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -122,8 +123,13 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 	if len(existing) > 0 {
 		result, matchErr := matchingCopyOrderResult(existing, request)
 		result.Scope = scope
-		if matchErr != nil || result.Status != domain.OrderStatusPending {
+		if matchErr != nil {
 			return result, matchErr
+		}
+		switch result.Status {
+		case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
+		default:
+			return result, nil
 		}
 		persisted, reloadErr := e.deps.Orders.Get(ctx, existing[0].ID)
 		if reloadErr != nil {
@@ -139,6 +145,9 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 			return PaperOrderResult{}, fmt.Errorf("lookup pending copy order: %w", lookupErr)
 		}
 		if errors.Is(lookupErr, execution.ErrBrokerOrderNotFound) {
+			if order.Status != domain.OrderStatusPending || strings.TrimSpace(order.ExternalID) != "" {
+				return PaperOrderResult{}, fmt.Errorf("lookup persisted copy order: %w", lookupErr)
+			}
 			var submitErr error
 			externalID, submitErr = e.deps.Broker.SubmitOrder(ctx, &order)
 			if submitErr != nil {
@@ -156,13 +165,12 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 		if order.Status == domain.OrderStatusPending {
 			order.Status = domain.OrderStatusSubmitted
 		}
-		if err := e.deps.Orders.Update(ctx, &order); err != nil {
-			return PaperOrderResult{}, fmt.Errorf("persist resumed copy order: %w", err)
-		}
-		if order.Status == domain.OrderStatusFilled {
+		if order.FilledQuantity > persisted.FilledQuantity {
 			if err := manager.HandleFillForTest(ctx, &order, plan, scope, uuid.Nil); err != nil {
 				return PaperOrderResult{}, fmt.Errorf("persist resumed copy fill: %w", err)
 			}
+		} else if err := e.deps.Orders.Update(ctx, &order); err != nil {
+			return PaperOrderResult{}, fmt.Errorf("persist resumed copy order: %w", err)
 		}
 		return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, nil
 	}

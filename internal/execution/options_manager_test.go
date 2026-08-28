@@ -62,9 +62,22 @@ func (malformedAsyncSpreadBroker) GetAccountBalance(context.Context) (execution.
 }
 
 type recordingOptionFillRepo struct {
-	mu      sync.Mutex
-	batches [][]repository.OptionFillInput
-	err     error
+	mu               sync.Mutex
+	batches          [][]repository.OptionFillInput
+	err              error
+	resolveCommitted bool
+	resolveErr       error
+}
+
+func (r *recordingOptionFillRepo) ResolveOptionFillCommit(_ context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, bool, error) {
+	if r.resolveErr != nil || !r.resolveCommitted {
+		return nil, false, r.resolveErr
+	}
+	results := make([]repository.OptionFillResult, len(inputs))
+	for i := range inputs {
+		results[i] = repository.OptionFillResult{OrderID: inputs[i].Order.ID, PositionID: uuid.New(), TradeID: uuid.New()}
+	}
+	return results, true, nil
 }
 
 func (r *recordingOptionFillRepo) ApplyOptionFills(_ context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
@@ -105,8 +118,8 @@ func TestReconcileCancelledOptionAppliesPartialFillBeforeTerminalStatus(t *testi
 	if len(fillRepo.batches) != 1 || fillRepo.batches[0][0].FillQuantity != 1 || fillRepo.batches[0][0].Order.Status != domain.OrderStatusCancelled {
 		t.Fatalf("partial cancelled fill lifecycle = %+v", fillRepo.batches)
 	}
-	if len(orderRepo.updates) != 1 || orderRepo.updates[0].Status != domain.OrderStatusCancelled {
-		t.Fatalf("terminal status not persisted after fill: %+v", orderRepo.updates)
+	if len(orderRepo.updates) != 0 {
+		t.Fatalf("terminal status was persisted outside atomic fill: %+v", orderRepo.updates)
 	}
 }
 
@@ -333,6 +346,37 @@ func TestProcessOptionSignal_RollsBackPaperFillWhenAtomicPersistenceFails(t *tes
 	}
 }
 
+func TestProcessOptionSignalCommitAckLossKeepsConfirmedPaperFill(t *testing.T) {
+	broker := paper.NewPaperBroker(10000, 0, 0)
+	fillRepo := &recordingOptionFillRepo{err: errors.New("commit acknowledgement lost"), resolveCommitted: true}
+	orderRepo := &mockOrderRepo{}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo).WithBrokerName("paper")
+	if err := mgr.ProcessOptionSignal(context.Background(), optionExecutionScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalBuy}, execution.TradingPlan{Ticker: "AAPL271217C00150000", EntryPrice: 2.5, PositionSize: 1}); err != nil {
+		t.Fatalf("commit readback recovery error = %v", err)
+	}
+	balance, _ := broker.GetAccountBalance(context.Background())
+	positions, _ := broker.GetPositions(context.Background())
+	if balance.Cash == 10000 || len(positions) != 1 || len(orderRepo.updates) != 0 {
+		t.Fatalf("confirmed commit was compensated: balance=%+v positions=%+v updates=%+v", balance, positions, orderRepo.updates)
+	}
+}
+
+func TestProcessOptionSignalUncertainReadbackDoesNotCompensate(t *testing.T) {
+	broker := paper.NewPaperBroker(10000, 0, 0)
+	fillRepo := &recordingOptionFillRepo{err: errors.New("commit acknowledgement lost"), resolveErr: errors.New("readback unavailable")}
+	orderRepo := &mockOrderRepo{}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo).WithBrokerName("paper")
+	err := mgr.ProcessOptionSignal(context.Background(), optionExecutionScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalBuy}, execution.TradingPlan{Ticker: "AAPL271217C00150000", EntryPrice: 2.5, PositionSize: 1})
+	if err == nil || !strings.Contains(err.Error(), "uncertain") {
+		t.Fatalf("uncertain readback error = %v", err)
+	}
+	balance, _ := broker.GetAccountBalance(context.Background())
+	positions, _ := broker.GetPositions(context.Background())
+	if balance.Cash == 10000 || len(positions) != 1 || len(orderRepo.updates) != 0 {
+		t.Fatalf("uncertain effect was compensated: balance=%+v positions=%+v updates=%+v", balance, positions, orderRepo.updates)
+	}
+}
+
 func TestCloseOptionPositionPersistsLifecycle(t *testing.T) {
 	orderRepo := &mockOrderRepo{}
 	positionRepo := &mockPositionRepo{}
@@ -467,7 +511,11 @@ func TestProcessSpreadSignalAtomicallyClosesPersistedLegGroup(t *testing.T) {
 	}}
 	fillRepo := &recordingOptionFillRepo{}
 	riskEng := &mockRiskEngine{isKillSwitchActiveFn: func(context.Context) (bool, error) { return true, nil }}
-	mgr := newTestOptionsManagerWithFillRepo(paper.NewPaperBroker(100000, 0, 0), orderRepo, positionRepo, tradeRepo, riskEng, fillRepo).WithBrokerName("paper")
+	broker := paper.NewPaperBroker(100000, 0, 0)
+	if err := broker.RestorePositions(positions); err != nil {
+		t.Fatal(err)
+	}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, positionRepo, tradeRepo, riskEng, fillRepo).WithBrokerName("paper")
 	if err := mgr.ProcessSpreadSignal(context.Background(), scope, spread, 1); err != nil {
 		t.Fatalf("ProcessSpreadSignal(close) error = %v", err)
 	}

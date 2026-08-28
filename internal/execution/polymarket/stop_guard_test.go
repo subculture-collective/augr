@@ -14,6 +14,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	marketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
 type fakeBroker struct {
@@ -41,6 +42,15 @@ type sharedExitClaims struct {
 	mu             sync.Mutex
 	claims         map[uuid.UUID]uuid.UUID
 	terminalStatus domain.OrderStatus
+	reservedOrder  *domain.Order
+}
+
+func (r *sharedExitClaims) GetPredictionExitOrderByPosition(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _ uuid.UUID) (*domain.Order, error) {
+	if r.reservedOrder == nil {
+		return nil, repository.ErrNotFound
+	}
+	copy := *r.reservedOrder
+	return &copy, nil
 }
 
 func (r *sharedExitClaims) CreatePredictionExitOrderAndReserve(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ string, positionID uuid.UUID, order *domain.Order) error {
@@ -334,6 +344,30 @@ func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "NO", Price: 0.39, ReceivedAt: time.Now()})
 	if got := broker.sendCalls.Load(); got != 1 {
 		t.Fatalf("NO tick did not fire NO guard, got %d", got)
+	}
+}
+
+func TestStopGuardBootstrapResumesReservedOrderIdentity(t *testing.T) {
+	positionID := uuid.New()
+	stop := 0.40
+	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
+	intent := domain.PositionIntentSellToClose
+	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, Quantity: 2, Status: domain.OrderStatusPending, PositionIntent: &intent, ClientOrderID: "reserved-stop-client"}
+	repo := &sharedExitClaims{reservedOrder: reserved}
+	broker := &fakeBroker{lookupStatus: domain.OrderStatusSubmitted, lookupExternalID: "reserved-venue-id"}
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: repo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.RegisterPositionContext(context.Background(), pos); err != nil {
+		t.Fatal(err)
+	}
+	if broker.lastOrder == nil || broker.lastOrder.ID != reserved.ID || broker.lastOrder.ClientOrderID != reserved.ClientOrderID {
+		t.Fatalf("bootstrap prepared replacement order: %+v", broker.lastOrder)
+	}
+	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.39, ReceivedAt: time.Now()})
+	if broker.sendCalls.Load() != 0 {
+		t.Fatal("reserved order was resubmitted")
 	}
 }
 

@@ -213,6 +213,10 @@ func (g *StopGuard) RegisterEntry(pos Position) error {
 }
 
 func (g *StopGuard) RegisterPosition(pos domain.Position) error {
+	return g.RegisterPositionContext(context.Background(), pos)
+}
+
+func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Position) error {
 	if g == nil {
 		return errors.New("polymarket: stop guard is nil")
 	}
@@ -239,7 +243,38 @@ func (g *StopGuard) RegisterPosition(pos domain.Position) error {
 	if pos.TakeProfit != nil {
 		entry.TakeProfitPx = *pos.TakeProfit
 	}
-	return g.RegisterEntry(entry)
+	if err := g.RegisterEntry(entry); err != nil {
+		return err
+	}
+	lookup, ok := g.exitRepo.(repository.PredictionExitReservationLookup)
+	if !ok {
+		return nil
+	}
+	order, err := lookup.GetPredictionExitOrderByPosition(ctx, pos.AccountID, pos.Environment, pos.ID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		g.Cancel(positionID)
+		return fmt.Errorf("polymarket: load reserved stop order: %w", err)
+	}
+	if order.Status != domain.OrderStatusPending && order.Status != domain.OrderStatusSubmitted && order.Status != domain.OrderStatusPartial {
+		g.Cancel(positionID)
+		return fmt.Errorf("polymarket: reserved stop order has non-recoverable status %s", order.Status)
+	}
+	tmpl, err := g.broker.PrepareTemplate(order)
+	if err != nil {
+		g.Cancel(positionID)
+		return err
+	}
+	g.mu.Lock()
+	guard := g.byID[positionID]
+	if guard != nil {
+		guard.order, guard.template = order, tmpl
+		guard.claimed.Store(true)
+	}
+	g.mu.Unlock()
+	return nil
 }
 
 func (g *StopGuard) Cancel(positionID string) {

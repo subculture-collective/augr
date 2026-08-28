@@ -311,6 +311,20 @@ func (r *OrderRepo) ReleasePredictionExitPosition(ctx context.Context, accountID
 	return err
 }
 
+func (r *OrderRepo) GetPredictionExitOrderByPosition(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, positionID uuid.UUID) (*domain.Order, error) {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || positionID == uuid.Nil {
+		return nil, fmt.Errorf("postgres: prediction exit reservation lookup: invalid identity")
+	}
+	order, err := scanOrder(r.pool.QueryRow(ctx, orderSelectSQL+` WHERE id=(SELECT close_reservation_order_id FROM positions WHERE id=$1 AND account_id=$2 AND environment=$3) AND account_id=$2 AND environment=$3`, positionID, accountID, environment))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, repository.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: prediction exit reservation lookup: %w", err)
+	}
+	return order, nil
+}
+
 func (r *OrderRepo) MarkPredictionExitSubmitted(ctx context.Context, accountID, orderID uuid.UUID, externalID string, submittedAt time.Time) error {
 	if accountID == uuid.Nil || accountID != r.accountID || orderID == uuid.Nil || strings.TrimSpace(externalID) == "" || submittedAt.IsZero() {
 		return fmt.Errorf("postgres: mark prediction exit submitted: complete broker evidence is required")

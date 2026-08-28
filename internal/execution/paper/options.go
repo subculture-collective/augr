@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
@@ -22,6 +24,16 @@ type OptionsFillResult struct {
 	Quantity  float64
 	Premium   float64 // fillPrice * quantity * multiplier
 	Fee       float64 // per-contract fee
+}
+
+type optionPositionEffect struct {
+	ticker     string
+	side       domain.PositionSide
+	quantity   float64
+	price      float64
+	multiplier float64
+	opened     bool
+	previous   *domain.Position
 }
 
 // SimulateOptionFill calculates the fill for an explicitly priced options
@@ -92,13 +104,17 @@ func (b *PaperBroker) SubmitOptionOrder(ctx context.Context, order *domain.Order
 	if order.Side == domain.OrderSideBuy && b.balance.Cash < totalDebit {
 		return "", fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalDebit, b.balance.Cash)
 	}
+	if err := ApplyOptionFill(order, result); err != nil {
+		return "", err
+	}
+	effect, err := b.applyOptionPositionLocked(order.Ticker, order.UnderlyingTicker, order.OptionType, order.Strike, order.Expiry, order.ContractMultiplier, order.PositionIntent, result.Quantity, result.FillPrice, now)
+	if err != nil {
+		return "", err
+	}
 	if order.Side == domain.OrderSideBuy {
 		b.balance.Cash -= totalDebit
 	} else {
 		b.balance.Cash += result.Premium - result.Fee
-	}
-	if err := ApplyOptionFill(order, result); err != nil {
-		return "", err
 	}
 	order.ExternalID = externalID
 	order.SubmittedAt = timePtr(now)
@@ -106,6 +122,7 @@ func (b *PaperBroker) SubmitOptionOrder(ctx context.Context, order *domain.Order
 	b.balance.BuyingPower = b.balance.Cash
 	b.balance.Equity = b.markToMarketEquityLocked()
 	b.orders[externalID] = cloneOrder(order)
+	b.optionOrderEffects[externalID] = effect
 	return externalID, nil
 }
 
@@ -117,6 +134,13 @@ func (b *PaperBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Opti
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if existing, ok := b.optionSpreadOrders[strings.TrimSpace(clientOrderID)]; ok {
+		ids := make([]string, 0, len(existing.Legs))
+		for _, leg := range existing.Legs {
+			ids = append(ids, leg.ExternalID)
+		}
+		return ids, nil
+	}
 	var debit, fees float64
 	for _, leg := range spread.Legs {
 		premium := leg.ExecutablePrice * quantity * float64(leg.Ratio) * leg.Contract.Multiplier
@@ -131,22 +155,33 @@ func (b *PaperBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Opti
 	if b.balance.Cash < total {
 		return nil, fmt.Errorf("paper: insufficient balance for debit spread: need %.2f, have %.2f", total, b.balance.Cash)
 	}
-	b.balance.Cash -= total
-	b.balance.BuyingPower = b.balance.Cash
-	b.balance.Equity = b.markToMarketEquityLocked()
 	ids := make([]string, len(spread.Legs))
 	now := time.Now().UTC()
 	status := execution.BrokerSpreadOrderStatus{ParentExternalID: strings.TrimSpace(clientOrderID), Legs: make([]execution.BrokerSpreadLegStatus, 0, len(spread.Legs))}
+	effects := make([]optionPositionEffect, 0, len(spread.Legs))
 	for index := range spread.Legs {
 		ids[index] = b.nextExternalIDLocked()
 		price := spread.Legs[index].ExecutablePrice
 		filledAt := now
 		status.Legs = append(status.Legs, execution.BrokerSpreadLegStatus{ExternalID: ids[index], Ticker: spread.Legs[index].Contract.OCCSymbol, Status: execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: quantity * float64(spread.Legs[index].Ratio), FilledAvgPrice: &price, FilledAt: &filledAt}})
+		leg := spread.Legs[index]
+		effect, applyErr := b.applyOptionPositionLocked(leg.Contract.OCCSymbol, leg.Contract.Underlying, &leg.Contract.OptionType, &leg.Contract.Strike, &leg.Contract.Expiry, leg.Contract.Multiplier, &leg.PositionIntent, quantity*float64(leg.Ratio), price, now)
+		if applyErr != nil {
+			for rollbackIndex := len(effects) - 1; rollbackIndex >= 0; rollbackIndex-- {
+				_ = b.reverseOptionPositionLocked(effects[rollbackIndex])
+			}
+			return nil, applyErr
+		}
+		effects = append(effects, effect)
 	}
+	b.balance.Cash -= total
+	b.balance.BuyingPower = b.balance.Cash
+	b.balance.Equity = b.markToMarketEquityLocked()
 	if b.optionSpreads == nil {
 		b.optionSpreads = make(map[string]float64)
 	}
 	b.optionSpreads[strings.Join(ids, "|")] = total
+	b.optionSpreadEffects[strings.Join(ids, "|")] = effects
 	b.optionSpreadOrders[strings.TrimSpace(clientOrderID)] = status
 	return ids, nil
 }
@@ -188,7 +223,15 @@ func (b *PaperBroker) RollbackOptionOrder(ctx context.Context, externalID string
 	} else {
 		b.balance.Cash -= fill.Premium - fill.Fee
 	}
+	effect, ok := b.optionOrderEffects[externalID]
+	if !ok {
+		return errors.New("paper: option rollback position effect not found")
+	}
+	if err := b.reverseOptionPositionLocked(effect); err != nil {
+		return err
+	}
 	delete(b.orders, externalID)
+	delete(b.optionOrderEffects, externalID)
 	b.balance.BuyingPower = b.balance.Cash
 	b.balance.Equity = b.markToMarketEquityLocked()
 	return nil
@@ -211,7 +254,13 @@ func (b *PaperBroker) RollbackOptionSpread(ctx context.Context, externalIDs []st
 		return errors.New("paper: spread rollback record not found")
 	}
 	b.balance.Cash += total
+	for index := len(b.optionSpreadEffects[key]) - 1; index >= 0; index-- {
+		if err := b.reverseOptionPositionLocked(b.optionSpreadEffects[key][index]); err != nil {
+			return err
+		}
+	}
 	delete(b.optionSpreads, key)
+	delete(b.optionSpreadEffects, key)
 	b.balance.BuyingPower = b.balance.Cash
 	b.balance.Equity = b.markToMarketEquityLocked()
 	return nil
@@ -227,6 +276,60 @@ func (b *PaperBroker) FinalizeOptionSpread(externalIDs []string) error {
 	defer b.mu.Unlock()
 	key := strings.Join(externalIDs, "|")
 	delete(b.optionSpreads, key)
+	delete(b.optionSpreadEffects, key)
+	return nil
+}
+
+func isOpeningOptionIntent(intent *domain.PositionIntent) bool {
+	return intent != nil && (*intent == domain.PositionIntentBuyToOpen || *intent == domain.PositionIntentSellToOpen)
+}
+
+func optionPositionSide(intent *domain.PositionIntent) domain.PositionSide {
+	if intent != nil && (*intent == domain.PositionIntentSellToOpen || *intent == domain.PositionIntentBuyToClose) {
+		return domain.PositionSideShort
+	}
+	return domain.PositionSideLong
+}
+
+func (b *PaperBroker) applyOptionPositionLocked(ticker, underlying string, optionType *domain.OptionType, strike *float64, expiry *time.Time, multiplier float64, intent *domain.PositionIntent, quantity, price float64, now time.Time) (optionPositionEffect, error) {
+	if intent == nil || quantity <= 0 || multiplier <= 0 {
+		return optionPositionEffect{}, errors.New("paper: complete option position effect is required")
+	}
+	key := canonicalPositionKey(domain.MarketTypeOptions, ticker, "")
+	side, opening := optionPositionSide(intent), isOpeningOptionIntent(intent)
+	effect := optionPositionEffect{ticker: key, side: side, quantity: quantity, price: price, multiplier: multiplier, opened: opening, previous: clonePosition(b.positions[key])}
+	position := b.positions[key]
+	if opening {
+		if position == nil {
+			b.positions[key] = &domain.Position{ID: uuid.New(), Ticker: ticker, MarketType: domain.MarketTypeOptions, Side: side, Quantity: quantity, AvgEntry: price, CurrentPrice: floatPtr(price), OpenedAt: now, AssetClass: domain.AssetClassOption, UnderlyingTicker: underlying, OptionType: optionType, Strike: strike, Expiry: expiry, ContractMultiplier: multiplier}
+			return effect, nil
+		}
+		if position.Side != side || position.ContractMultiplier != multiplier {
+			return optionPositionEffect{}, errors.New("paper: option position metadata mismatch")
+		}
+		position.AvgEntry = (position.AvgEntry*position.Quantity + price*quantity) / (position.Quantity + quantity)
+		position.Quantity += quantity
+		position.CurrentPrice = floatPtr(price)
+		return effect, nil
+	}
+	if position == nil || position.Side != side || position.Quantity < quantity {
+		return optionPositionEffect{}, errors.New("paper: option close exceeds broker position")
+	}
+	position.RealizedPnL += realizedPnL(side, position.AvgEntry, price, quantity) * multiplier
+	position.Quantity -= quantity
+	position.CurrentPrice = floatPtr(price)
+	if position.Quantity == 0 {
+		delete(b.positions, key)
+	}
+	return effect, nil
+}
+
+func (b *PaperBroker) reverseOptionPositionLocked(effect optionPositionEffect) error {
+	if effect.previous == nil {
+		delete(b.positions, effect.ticker)
+		return nil
+	}
+	b.positions[effect.ticker] = clonePosition(effect.previous)
 	return nil
 }
 

@@ -24,18 +24,20 @@ const (
 
 // PaperBroker implements an in-memory execution.Broker for paper trading.
 type PaperBroker struct {
-	mu                 sync.RWMutex
-	nowMu              sync.RWMutex
-	orders             map[string]*domain.Order
-	positions          map[string]*domain.Position
-	optionSpreads      map[string]float64
-	optionSpreadOrders map[string]execution.BrokerSpreadOrderStatus
-	balance            execution.Balance
-	slippageBps        float64
-	feePct             float64
-	evaluation         domain.PaperEvaluationProfile
-	nextOrderID        uint64
-	now                func() time.Time
+	mu                  sync.RWMutex
+	nowMu               sync.RWMutex
+	orders              map[string]*domain.Order
+	positions           map[string]*domain.Position
+	optionSpreads       map[string]float64
+	optionSpreadEffects map[string][]optionPositionEffect
+	optionOrderEffects  map[string]optionPositionEffect
+	optionSpreadOrders  map[string]execution.BrokerSpreadOrderStatus
+	balance             execution.Balance
+	slippageBps         float64
+	feePct              float64
+	evaluation          domain.PaperEvaluationProfile
+	nextOrderID         uint64
+	now                 func() time.Time
 }
 
 // NewPaperBroker constructs an in-memory paper trading broker.
@@ -76,10 +78,12 @@ func NewPaperBrokerWithProfile(profile domain.PaperEvaluationProfile) (*PaperBro
 
 func newPaperBroker(profile domain.PaperEvaluationProfile) *PaperBroker {
 	return &PaperBroker{
-		orders:             make(map[string]*domain.Order),
-		positions:          make(map[string]*domain.Position),
-		optionSpreads:      make(map[string]float64),
-		optionSpreadOrders: make(map[string]execution.BrokerSpreadOrderStatus),
+		orders:              make(map[string]*domain.Order),
+		positions:           make(map[string]*domain.Position),
+		optionSpreads:       make(map[string]float64),
+		optionSpreadEffects: make(map[string][]optionPositionEffect),
+		optionOrderEffects:  make(map[string]optionPositionEffect),
+		optionSpreadOrders:  make(map[string]execution.BrokerSpreadOrderStatus),
 		balance: execution.Balance{
 			Currency:    "USD",
 			Cash:        profile.InitialCapital,
@@ -576,11 +580,15 @@ func (b *PaperBroker) markToMarketEquityLocked() float64 {
 		if position.CurrentPrice != nil {
 			price = *position.CurrentPrice
 		}
+		multiplier := position.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 1
+		}
 		if position.Side == domain.PositionSideLong {
-			equity += position.Quantity * price
+			equity += position.Quantity * price * multiplier
 			continue
 		}
-		equity -= position.Quantity * price
+		equity -= position.Quantity * price * multiplier
 	}
 	return equity
 }
@@ -596,7 +604,7 @@ func mergeRestoredPositions(a, b *domain.Position) (*domain.Position, error) {
 	if a == nil || b == nil {
 		return nil, errors.New("paper: restored position is required")
 	}
-	if a.Ticker != b.Ticker || a.Side != b.Side || a.AssetClass != b.AssetClass || a.MarketType != b.MarketType {
+	if a.Ticker != b.Ticker || a.Side != b.Side || a.AssetClass != b.AssetClass || a.MarketType != b.MarketType || (a.AssetClass == domain.AssetClassOption && a.ContractMultiplier != b.ContractMultiplier) {
 		return nil, fmt.Errorf("paper: irreconcilable restored positions for %s", a.Ticker)
 	}
 	a.Quantity += b.Quantity
@@ -608,9 +616,13 @@ func mergeRestoredPositions(a, b *domain.Position) (*domain.Position, error) {
 	}
 	a.UnrealizedPnL = nil
 	if a.CurrentPrice != nil {
-		pnl := (*a.CurrentPrice - a.AvgEntry) * a.Quantity
+		multiplier := a.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 1
+		}
+		pnl := (*a.CurrentPrice - a.AvgEntry) * a.Quantity * multiplier
 		if a.Side == domain.PositionSideShort {
-			pnl = (a.AvgEntry - *a.CurrentPrice) * a.Quantity
+			pnl = (a.AvgEntry - *a.CurrentPrice) * a.Quantity * multiplier
 		}
 		a.UnrealizedPnL = floatPtr(pnl)
 	}

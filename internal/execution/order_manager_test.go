@@ -1029,7 +1029,7 @@ func TestReconcilePersistedOrderResubmitsCrashBeforeSubmit(t *testing.T) {
 	}
 }
 
-func TestReconcilePersistedOrderRepairsAttachmentBeforeBrokerEffect(t *testing.T) {
+func TestReconcilePersistedOrderRequiresDurableApprovalBeforeBrokerEffect(t *testing.T) {
 	strategyVersionID, runID, strategyID := uuid.New(), uuid.New(), uuid.New()
 	scope := strategyScope(strategyVersionID, runID)
 	originType, originID := scope.Origin()
@@ -1058,23 +1058,15 @@ func TestReconcilePersistedOrderRepairsAttachmentBeforeBrokerEffect(t *testing.T
 	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { return order, nil }}
 	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
 
-	if _, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order); err == nil || !strings.Contains(err.Error(), "attachment repair unavailable") {
-		t.Fatalf("failed repair error=%v", err)
+	if _, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order); err == nil || !strings.Contains(err.Error(), "durable pretrade approval") {
+		t.Fatalf("missing approval error=%v", err)
 	}
 	if submits != 0 {
 		t.Fatalf("broker submits=%d before attachment repair, want 0", submits)
 	}
 
-	recorder.failRepair = false
-	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status != domain.OrderStatusFilled || submits != 1 || recorder.ensureCalls != 2 {
-		t.Fatalf("status/submits/repairs=%s/%d/%d, want filled/1/2", status, submits, recorder.ensureCalls)
-	}
-	if financial.input.FillIntent.ExecutionPrice != filledPrice || financial.input.FillIntent.ExecutionPrice == price {
-		t.Fatalf("recovered execution price=%v, want broker slippage price %v not limit %v", financial.input.FillIntent.ExecutionPrice, filledPrice, price)
+	if recorder.ensureCalls != 0 || financial.called != 0 {
+		t.Fatalf("fabricated approvals=%d fills=%d", recorder.ensureCalls, financial.called)
 	}
 }
 
@@ -1123,8 +1115,8 @@ func TestReconcilePersistedCancelledOrderPersistsQuantityAdvanceBeforeTerminalSt
 	if status != domain.OrderStatusCancelled || financial.called != 1 || financial.input.FillIntent.Quantity != 4 {
 		t.Fatalf("status=%s fills=%d input=%+v", status, financial.called, financial.input.FillIntent)
 	}
-	if len(orderRepo.updates) == 0 || orderRepo.updates[len(orderRepo.updates)-1].Status != domain.OrderStatusCancelled || orderRepo.updates[len(orderRepo.updates)-1].FilledQuantity != 4 {
-		t.Fatalf("terminal update=%+v", orderRepo.updates)
+	if len(orderRepo.updates) != 0 || financial.input.Order.Status != domain.OrderStatusCancelled {
+		t.Fatalf("terminal status was not part of atomic fill: updates=%+v input=%+v", orderRepo.updates, financial.input.Order)
 	}
 }
 
@@ -2446,32 +2438,11 @@ func TestProcessSignal_PreTradeRejection(t *testing.T) {
 		t.Fatal("ProcessSignal() expected error when pre-trade check rejects")
 	}
 
-	// Order should have been created (pending) then updated to rejected.
-	if len(orderRepo.orders) != 1 {
-		t.Fatalf("expected 1 order created, got %d", len(orderRepo.orders))
+	if len(orderRepo.orders) != 0 || len(orderRepo.updates) != 0 {
+		t.Fatalf("rejected pretrade persisted an order: creates=%d updates=%d", len(orderRepo.orders), len(orderRepo.updates))
 	}
-
-	if len(orderRepo.updates) < 1 {
-		t.Fatalf("expected at least 1 order update, got %d", len(orderRepo.updates))
-	}
-
-	lastUpdate := orderRepo.updates[len(orderRepo.updates)-1]
-	if lastUpdate.Status != domain.OrderStatusRejected {
-		t.Errorf("expected rejected status, got %s", lastUpdate.Status)
-	}
-
-	// Verify audit log has order_created and pre_trade_rejected.
-	types := auditEventTypes(auditRepo.entries)
-	wantTypes := []string{"order_created", "pre_trade_rejected"}
-
-	if len(types) != len(wantTypes) {
-		t.Fatalf("expected %d audit entries, got %d: %v", len(wantTypes), len(types), types)
-	}
-
-	for i, want := range wantTypes {
-		if types[i] != want {
-			t.Errorf("audit[%d] = %q, want %q", i, types[i], want)
-		}
+	if len(auditRepo.entries) != 0 {
+		t.Fatalf("rejected pretrade emitted order audit entries: %+v", auditRepo.entries)
 	}
 }
 

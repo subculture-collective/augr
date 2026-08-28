@@ -589,6 +589,28 @@ func (m *OrderManager) processSignal(
 		order.StopPrice = &plan.StopLoss
 	}
 
+	// Durable orders must never exist before their pre-trade authorization.
+	approved, reason, err = m.riskEngine.CheckPreTrade(ctx, order, portfolio)
+	if err != nil {
+		return fmt.Errorf("order_manager: pre-trade check: %w", err)
+	}
+	if !approved {
+		if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(
+			scope,
+			plan,
+			order.MarketType,
+			string(order.Side),
+			quantity,
+			0,
+			domain.RiskDecisionRejected,
+			[]string{reason},
+			domain.TradeDecisionStatusRejected,
+		)); err != nil {
+			return err
+		}
+		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
+	}
+
 	if err := m.orderRepo.Create(ctx, order); err != nil {
 		return fmt.Errorf("order_manager: create order: %w", err)
 	}
@@ -603,41 +625,6 @@ func (m *OrderManager) processSignal(
 		"run_id":      runID,
 	}); auditErr != nil {
 		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-	}
-
-	// 5. Pre-trade risk check (circuit breaker + order validation).
-	approved, reason, err = m.riskEngine.CheckPreTrade(ctx, order, portfolio)
-	if err != nil {
-		return fmt.Errorf("order_manager: pre-trade check: %w", err)
-	}
-
-	if !approved {
-		order.Status = domain.OrderStatusRejected
-		if updateErr := m.orderRepo.Update(ctx, order); updateErr != nil {
-			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
-		}
-		m.recordOrderMetric(order.Side, order.Status)
-		if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(
-			scope,
-			plan,
-			order.MarketType,
-			string(order.Side),
-			quantity,
-			0,
-			domain.RiskDecisionRejected,
-			[]string{reason},
-			domain.TradeDecisionStatusRejected,
-		)); err != nil {
-			return err
-		}
-
-		if auditErr := m.audit(ctx, "pre_trade_rejected", "order", &order.ID, map[string]any{
-			"reason": reason,
-		}); auditErr != nil {
-			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-		}
-
-		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
 	}
 
 	decision := m.newTradeDecision(
@@ -964,39 +951,9 @@ func (m *OrderManager) ensureAttachedOrderDecision(ctx context.Context, scope Ex
 	if order == nil {
 		return uuid.Nil, fmt.Errorf("order_manager: persisted order is required")
 	}
-	if decisionID, err := m.resolveAttachedOrderDecision(ctx, scope, order.ID); err == nil {
-		return decisionID, nil
-	}
-	recoverer, ok := m.decisionRecorder.(RecoverableOrderDecisionRecorder)
-	if !ok {
-		return uuid.Nil, fmt.Errorf("order_manager: recoverable decision recorder is required before broker recovery")
-	}
-	createdAt := order.CreatedAt
-	if createdAt.IsZero() {
-		createdAt = m.currentTime()
-	}
-	executablePrice := 0.0
-	if order.LimitPrice != nil {
-		executablePrice = *order.LimitPrice
-	}
-	decision := &domain.TradeDecision{
-		ID: recoveryTradeDecisionID(order.ID), AccountID: scope.AccountID(), Environment: scope.Environment(),
-		MarketType: order.MarketType.Normalize(), InstrumentKey: strings.TrimSpace(order.Ticker), Side: order.Side,
-		Outcome: strings.ToUpper(strings.TrimSpace(order.PredictionSide)), ExecutablePrice: executablePrice,
-		ProposedSize: order.Quantity, ApprovedSize: order.Quantity, RiskStatus: domain.RiskDecisionApproved,
-		Status: domain.TradeDecisionStatusCandidate, CreatedAt: createdAt, UpdatedAt: createdAt,
-	}
-	originType, originID := scope.Origin()
-	decision.OriginType, decision.OriginID = string(originType), originID
-	decision.StrategyID = order.StrategyID
-	decision.PipelineRunID = order.PipelineRunID
-	decision.PipelineRunTradeDate = order.PipelineRunTradeDate
-	decisionID, err := recoverer.EnsureOrderDecisionAttachment(ctx, scope, decision, order.ID, m.liveTrading)
+	decisionID, err := m.resolveAttachedOrderDecision(ctx, scope, order.ID)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("order_manager: repair recovered order decision attachment: %w", err)
-	}
-	if decisionID == uuid.Nil {
-		return uuid.Nil, fmt.Errorf("order_manager: repaired order decision attachment is missing")
+		return uuid.Nil, fmt.Errorf("order_manager: durable pretrade approval is required before broker recovery: %w", err)
 	}
 	return decisionID, nil
 }
@@ -1293,7 +1250,7 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		return "", err
 	}
 	switch status {
-	case domain.OrderStatusFilled:
+	case domain.OrderStatusFilled, domain.OrderStatusPartial:
 		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
 		if err := validateRecoveredFillEvidence(order); err != nil {
 			return "", err
@@ -1304,8 +1261,6 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		}
 	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
 		if brokerResult.FilledQuantity > order.FilledQuantity {
-			terminalStatus := status
-			order.Status = domain.OrderStatusPartial
 			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
 			if err := validateRecoveredFillEvidence(order); err != nil {
 				return "", err
@@ -1313,7 +1268,7 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 			if err := m.handleFill(ctx, order, recoveredOrderPlan(order), scope, decisionID); err != nil {
 				return "", err
 			}
-			order.Status = terminalStatus
+			return status, nil
 		}
 		if err := m.orderRepo.Update(ctx, order); err != nil {
 			return "", fmt.Errorf("order_manager: persist reconciled %s order: %w", status, err)
@@ -1625,6 +1580,13 @@ func fillPositionTicker(order *domain.Order) string {
 
 // HandleFillForTest exposes handleFill for focused unit coverage.
 func (m *OrderManager) HandleFillForTest(ctx context.Context, order *domain.Order, plan TradingPlan, scope ExecutionScope, decisionID uuid.UUID) error {
+	if decisionID == uuid.Nil {
+		resolved, err := m.ensureAttachedOrderDecision(ctx, scope, order)
+		if err != nil {
+			return err
+		}
+		decisionID = resolved
+	}
 	return m.handleFill(ctx, order, plan, scope, decisionID)
 }
 

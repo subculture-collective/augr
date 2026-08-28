@@ -41,12 +41,23 @@ func TestSubmitOptionOrderFillsWithoutExternalBroker(t *testing.T) {
 	if balance.Cash != wantCash {
 		t.Fatalf("cash = %.2f, want %.2f", balance.Cash, wantCash)
 	}
+	positions, err := broker.GetPositions(context.Background())
+	if err != nil || len(positions) != 1 || positions[0].Quantity != 2 || positions[0].AssetClass != domain.AssetClassOption || positions[0].ContractMultiplier != 100 {
+		t.Fatalf("option broker position = %+v, err=%v", positions, err)
+	}
+	if math.Abs(balance.Equity-(10000-2*DefaultOptionFeePerContract)) > 1e-9 {
+		t.Fatalf("option equity = %.2f, want multiplier-aware %.2f", balance.Equity, 10000-2*DefaultOptionFeePerContract)
+	}
 	if err := broker.RollbackOptionOrder(context.Background(), externalID); err != nil {
 		t.Fatalf("RollbackOptionOrder() error = %v", err)
 	}
 	balance, _ = broker.GetAccountBalance(context.Background())
 	if balance.Cash != 10000 {
 		t.Fatalf("rollback cash = %.2f, want 10000", balance.Cash)
+	}
+	positions, _ = broker.GetPositions(context.Background())
+	if len(positions) != 0 || balance.Equity != 10000 {
+		t.Fatalf("rollback accounting positions=%+v balance=%+v", positions, balance)
 	}
 	if err := broker.RollbackOptionOrder(context.Background(), externalID); err == nil {
 		t.Fatal("duplicate option rollback must fail")
@@ -75,12 +86,20 @@ func TestSubmitSpreadOrderAtomicallyDebitsVertical(t *testing.T) {
 	if math.Abs(balance.Cash-9848.70) > 1e-9 {
 		t.Fatalf("cash = %.2f, want 9848.70", balance.Cash)
 	}
+	positions, _ := broker.GetPositions(context.Background())
+	if len(positions) != 2 || math.Abs(balance.Equity-9998.70) > 1e-9 {
+		t.Fatalf("spread accounting positions=%+v balance=%+v", positions, balance)
+	}
 	if err := broker.RollbackOptionSpread(context.Background(), ids); err != nil {
 		t.Fatalf("RollbackOptionSpread() error = %v", err)
 	}
 	balance, _ = broker.GetAccountBalance(context.Background())
 	if balance.Cash != 10000 {
 		t.Fatalf("spread rollback cash = %.2f, want 10000", balance.Cash)
+	}
+	positions, _ = broker.GetPositions(context.Background())
+	if len(positions) != 0 || balance.Equity != 10000 {
+		t.Fatalf("spread rollback accounting positions=%+v balance=%+v", positions, balance)
 	}
 	if err := broker.RollbackOptionSpread(context.Background(), ids); err == nil {
 		t.Fatal("duplicate spread rollback must fail")

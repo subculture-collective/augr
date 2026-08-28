@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -53,13 +54,26 @@ func bootstrapPolymarketStopGuards(ctx context.Context, runner *realStrategyRunn
 			filtered = append(filtered, position)
 		}
 		if len(filtered) > 0 {
-			if err := runner.registerPolymarketPositions(filtered); err != nil {
+			var registerErr error
+			for i := range filtered {
+				if filtered[i].StopLoss == nil && filtered[i].TakeProfit == nil {
+					continue
+				}
+				if err := runner.polymarketStopGuard.RegisterPositionContext(ctx, filtered[i]); err != nil {
+					registerErr = errors.Join(registerErr, err)
+					continue
+				}
+				if slug, err := polymarketPositionSlugFromTicker(filtered[i].Ticker); err == nil {
+					runner.ensurePolymarketTickWorker(slug)
+				}
+			}
+			if registerErr != nil {
 				if firstErr == nil {
-					firstErr = fmt.Errorf("bootstrap polymarket stop guards: register positions: %w", err)
+					firstErr = fmt.Errorf("bootstrap polymarket stop guards: register positions: %w", registerErr)
 				}
 				logger.Warn("polymarket stop guard bootstrap encountered registration error",
 					slog.Int("page_offset", offset),
-					slog.Any("error", err),
+					slog.Any("error", registerErr),
 				)
 			}
 			totalRegistered += len(filtered)

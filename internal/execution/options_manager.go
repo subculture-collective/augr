@@ -73,16 +73,23 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 	}
 	return m.accountLocker.WithExecutionAccountLock(ctx, account.AccountID(), func() error {
 		groups := make(map[uuid.UUID][]*domain.Order)
+		recoveryGroups := make(map[uuid.UUID]bool)
+		for i := range orders {
+			candidate := orders[i]
+			if candidate.AccountID == account.AccountID() && candidate.Environment == account.Environment() && candidate.MarketType.Normalize() == domain.MarketTypeOptions && candidate.LegGroupID != nil && needsOptionRecovery(candidate) {
+				recoveryGroups[*candidate.LegGroupID] = true
+			}
+		}
 		for i := range orders {
 			candidate := &orders[i]
-			if candidate.AccountID != account.AccountID() || candidate.Environment != account.Environment() || candidate.MarketType.Normalize() != domain.MarketTypeOptions || !needsOptionRecovery(*candidate) {
+			if candidate.AccountID != account.AccountID() || candidate.Environment != account.Environment() || candidate.MarketType.Normalize() != domain.MarketTypeOptions || (!needsOptionRecovery(*candidate) && (candidate.LegGroupID == nil || !recoveryGroups[*candidate.LegGroupID])) {
 				continue
 			}
 			order, reloadErr := m.orderRepo.Get(ctx, candidate.ID)
 			if reloadErr != nil {
 				return fmt.Errorf("options_manager: reload recovery order %s: %w", candidate.ID, reloadErr)
 			}
-			if order.AccountID != account.AccountID() || order.Environment != account.Environment() || order.MarketType.Normalize() != domain.MarketTypeOptions || !needsOptionRecovery(*order) {
+			if order.AccountID != account.AccountID() || order.Environment != account.Environment() || order.MarketType.Normalize() != domain.MarketTypeOptions || (!needsOptionRecovery(*order) && (order.LegGroupID == nil || !recoveryGroups[*order.LegGroupID])) {
 				continue
 			}
 			if order.LegGroupID != nil {
@@ -121,6 +128,7 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 					return fmt.Errorf("options_manager: recovered option provider identity mismatch")
 				}
 			}
+			persistedFilled := order.FilledQuantity
 			order.ExternalID, order.Status = lookupID, result.Status
 			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = result.FilledQuantity, cloneFloatPtr(result.FilledAvgPrice), cloneTimePtr(result.FilledAt)
 			if order.SubmittedAt == nil {
@@ -130,8 +138,13 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 				}
 				order.SubmittedAt = &submittedAt
 			}
-			if result.FilledQuantity <= 0 {
-				if err := m.orderRepo.Update(ctx, order); err != nil {
+			if result.FilledQuantity <= persistedFilled {
+				if terminalOrderStatus(order.Status) {
+					statusInput := repository.OptionFillInput{IdempotencyKey: "option_status:v1:" + order.ID.String(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: order, FillQuantity: order.FilledQuantity, StatusOnly: true}
+					if _, err := m.applyOptionFills(ctx, []repository.OptionFillInput{statusInput}); err != nil {
+						return fmt.Errorf("options_manager: persist recovered terminal status: %w", err)
+					}
+				} else if err := m.orderRepo.Update(ctx, order); err != nil {
 					return fmt.Errorf("options_manager: persist recovered status: %w", err)
 				}
 				continue
@@ -149,16 +162,8 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 			if err != nil {
 				return err
 			}
-			terminalStatus := result.Status
-			order.Status = domain.OrderStatusFilled
-			if _, err := m.optionFillRepo.ApplyOptionFills(ctx, []repository.OptionFillInput{input}); err != nil {
+			if _, err := m.applyOptionFills(ctx, []repository.OptionFillInput{input}); err != nil {
 				return fmt.Errorf("options_manager: persist recovered fill: %w", err)
-			}
-			if terminalStatus == domain.OrderStatusCancelled || terminalStatus == domain.OrderStatusRejected {
-				order.Status = terminalStatus
-				if err := m.orderRepo.Update(ctx, order); err != nil {
-					return fmt.Errorf("options_manager: persist recovered terminal status: %w", err)
-				}
 			}
 		}
 		for groupID, group := range groups {
@@ -189,7 +194,9 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 				key := strings.ReplaceAll(strings.TrimSpace(leg.Ticker), " ", "")
 				legsByTicker[key] = append(legsByTicker[key], leg)
 			}
+			persistedQuantities := make(map[uuid.UUID]float64, len(group))
 			for index, order := range group {
+				persistedQuantities[order.ID] = order.FilledQuantity
 				leg := spreadResult.Legs[index]
 				key := strings.ReplaceAll(strings.TrimSpace(order.Ticker), " ", "")
 				if matches := legsByTicker[key]; len(matches) == 1 {
@@ -206,11 +213,16 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 				}
 			}
 			inputs := make([]repository.OptionFillInput, 0, len(group))
-			allFilled := true
+			allTerminal := true
 			for _, order := range group {
-				if order.FilledQuantity <= 0 || order.FilledQuantity != order.Quantity {
-					allFilled = false
-					break
+				if !terminalOrderStatus(order.Status) {
+					allTerminal = false
+				}
+				if order.FilledQuantity <= persistedQuantities[order.ID] {
+					if terminalOrderStatus(order.Status) {
+						inputs = append(inputs, repository.OptionFillInput{IdempotencyKey: "option_status:v1:" + order.ID.String(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: order, FillQuantity: order.FilledQuantity, StatusOnly: true})
+					}
+					continue
 				}
 				var positionID *uuid.UUID
 				if order.PositionIntent != nil && (*order.PositionIntent == domain.PositionIntentBuyToClose || *order.PositionIntent == domain.PositionIntentSellToClose) {
@@ -226,11 +238,13 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 				}
 				inputs = append(inputs, input)
 			}
-			if !allFilled {
-				return fmt.Errorf("options_manager: spread %s is not fully filled; durable leg group retained for recovery", groupID)
+			if len(inputs) > 0 {
+				if _, err := m.applyOptionFills(ctx, inputs); err != nil {
+					return fmt.Errorf("options_manager: persist recovered spread %s: %w", groupID, err)
+				}
 			}
-			if _, err := m.optionFillRepo.ApplyOptionFills(ctx, inputs); err != nil {
-				return fmt.Errorf("options_manager: persist recovered spread %s: %w", groupID, err)
+			if !allTerminal {
+				continue
 			}
 		}
 		return nil
@@ -301,6 +315,8 @@ type optionFillCompensator interface {
 	RollbackOptionSpread(ctx context.Context, externalIDs []string) error
 	FinalizeOptionSpread(externalIDs []string) error
 }
+
+var errOptionFillRollbackConfirmed = errors.New("option fill durable rollback confirmed")
 
 type optionsBalanceProvider interface {
 	GetAccountBalance(ctx context.Context) (Balance, error)
@@ -604,7 +620,7 @@ func (m *OptionsOrderManager) persistImmediateFill(ctx context.Context, order *d
 	if err != nil {
 		return err
 	}
-	_, err = m.optionFillRepo.ApplyOptionFills(ctx, []repository.OptionFillInput{input})
+	_, err = m.applyOptionFills(ctx, []repository.OptionFillInput{input})
 	if err != nil {
 		return fmt.Errorf("options_manager: persist atomic option fill: %w", err)
 	}
@@ -718,7 +734,7 @@ func (m *OptionsOrderManager) persistClosingFill(ctx context.Context, position *
 	if err != nil {
 		return err
 	}
-	_, err = m.optionFillRepo.ApplyOptionFills(ctx, []repository.OptionFillInput{input})
+	_, err = m.applyOptionFills(ctx, []repository.OptionFillInput{input})
 	if err != nil {
 		return fmt.Errorf("options_manager: persist atomic option close: %w", err)
 	}
@@ -745,7 +761,7 @@ func (m *OptionsOrderManager) optionFillInput(ctx context.Context, order *domain
 		reason = "strategy close"
 	}
 	originType, originID := order.OriginType, order.OriginID
-	return repository.OptionFillInput{IdempotencyKey: "option_fill:v1:" + order.AccountID.String() + ":" + order.ID.String(), AccountID: order.AccountID, Environment: order.Environment, OriginType: originType, OriginID: originID, Order: order, PositionID: positionID, FillPrice: *order.FilledAvgPrice, FillQuantity: order.FilledQuantity, Fee: report.Fee, Premium: report.Premium, FilledAt: *order.FilledAt, ExitReason: reason}, nil
+	return repository.OptionFillInput{IdempotencyKey: fmt.Sprintf("option_fill:v1:%s:%s:%.8f", order.AccountID, order.ID, order.FilledQuantity), AccountID: order.AccountID, Environment: order.Environment, OriginType: originType, OriginID: originID, Order: order, PositionID: positionID, FillPrice: *order.FilledAvgPrice, FillQuantity: order.FilledQuantity, Fee: report.Fee, Premium: report.Premium, FilledAt: *order.FilledAt, ExitReason: reason}, nil
 }
 
 // ProcessSpreadSignal handles a multi-leg spread trade: validate → risk check → submit → track.
@@ -1031,7 +1047,7 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 		}
 	}
 	if synchronous {
-		if _, err := m.optionFillRepo.ApplyOptionFills(ctx, fillInputs); err != nil {
+		if _, err := m.applyOptionFills(ctx, fillInputs); err != nil {
 			persistErr := fmt.Errorf("options_manager: persist atomic spread fills: %w", err)
 			return m.abortOptionSpread(ctx, legOrders, ids, persistErr)
 		}
@@ -1050,6 +1066,25 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 	return nil
 }
 
+func (m *OptionsOrderManager) applyOptionFills(ctx context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
+	results, err := m.optionFillRepo.ApplyOptionFills(ctx, inputs)
+	if err == nil {
+		return results, nil
+	}
+	resolver, ok := m.optionFillRepo.(repository.OptionFillCommitResolver)
+	if !ok {
+		return nil, err
+	}
+	resolved, committed, resolveErr := resolver.ResolveOptionFillCommit(ctx, inputs)
+	if resolveErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("options_manager: resolve option fill commit: %w", resolveErr))
+	}
+	if committed {
+		return resolved, nil
+	}
+	return nil, errors.Join(errOptionFillRollbackConfirmed, err)
+}
+
 func (m *OptionsOrderManager) compensateOptionOrder(ctx context.Context, externalID string) error {
 	compensator, ok := m.broker.(optionFillCompensator)
 	if !ok {
@@ -1062,6 +1097,9 @@ func (m *OptionsOrderManager) compensateOptionOrder(ctx context.Context, externa
 }
 
 func (m *OptionsOrderManager) abortOptionOrder(ctx context.Context, order *domain.Order, externalID string, cause error) error {
+	if !errors.Is(cause, errOptionFillRollbackConfirmed) {
+		return fmt.Errorf("%w; commit state remains uncertain and venue effect retained for recovery", cause)
+	}
 	rollbackErr := m.compensateOptionOrder(ctx, externalID)
 	if rollbackErr != nil {
 		return errors.Join(cause, rollbackErr)
@@ -1086,6 +1124,9 @@ func (m *OptionsOrderManager) compensateOptionSpread(ctx context.Context, extern
 }
 
 func (m *OptionsOrderManager) abortOptionSpread(ctx context.Context, orders []*domain.Order, externalIDs []string, cause error) error {
+	if !errors.Is(cause, errOptionFillRollbackConfirmed) {
+		return fmt.Errorf("%w; commit state remains uncertain and venue effects retained for recovery", cause)
+	}
 	rollbackErr := m.compensateOptionSpread(ctx, externalIDs)
 	if rollbackErr != nil {
 		return errors.Join(cause, rollbackErr)

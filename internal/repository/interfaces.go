@@ -677,6 +677,10 @@ type AtomicPredictionExitRepository interface {
 	ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error
 }
 
+type PredictionExitReservationLookup interface {
+	GetPredictionExitOrderByPosition(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID) (*domain.Order, error)
+}
+
 // TradeRepository provides access to executed trades.
 type TradeRepository interface {
 	Create(ctx context.Context, trade *domain.Trade) error
@@ -797,6 +801,7 @@ type OptionFillInput struct {
 	Premium        float64
 	FilledAt       time.Time
 	ExitReason     string
+	StatusOnly     bool
 }
 
 // OptionFillResult returns the durable identities committed for one option fill.
@@ -810,6 +815,12 @@ type OptionFillResult struct {
 // is all-or-nothing so multi-leg spreads cannot leave a partial durable graph.
 type OptionFillRepository interface {
 	ApplyOptionFills(ctx context.Context, inputs []OptionFillInput) ([]OptionFillResult, error)
+}
+
+// OptionFillCommitResolver resolves a failed commit acknowledgement from
+// durable idempotency rows without applying or rolling back any venue effect.
+type OptionFillCommitResolver interface {
+	ResolveOptionFillCommit(ctx context.Context, inputs []OptionFillInput) ([]OptionFillResult, bool, error)
 }
 
 // FinancialLifecycleRepository persists atomic fill and prediction settlement lifecycles.
