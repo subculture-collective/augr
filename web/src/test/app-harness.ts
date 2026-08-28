@@ -51,7 +51,7 @@ export class FakeWebSocket {
   }
 
   emit(type = 'pipeline_start', data?: unknown) {
-    this.onmessage?.({ data: JSON.stringify({ type, data, timestamp: fixtureDate }) })
+    this.onmessage?.({ data: JSON.stringify({ type, account_id: fixtureId(1), scope: 'account', data, timestamp: fixtureDate }) })
   }
 }
 

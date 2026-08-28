@@ -87,7 +87,7 @@ export function buildReportArtifact(overrides: Partial<ReportArtifact> = {}): Re
   return {
     id: fixtureId(60),
     strategy_id: fixtureId(10),
-    scope_label: 'legacy_unscoped',
+    scope_label: 'scoped',
     report_type: 'paper_validation',
     time_bucket: fixtureDate,
     status: 'completed',
@@ -130,6 +130,7 @@ export function buildAgentDecision(overrides: Partial<AgentDecision> = {}): Agen
   return {
     id: fixtureId(70),
     pipeline_run_id: fixtureId(20),
+    pipeline_run_trade_date: fixtureDate,
     agent_role: 'analyst',
     phase: 'signal_generation',
     round_number: 1,
@@ -172,6 +173,7 @@ export function buildAgentEvent(overrides: Partial<AgentEvent> = {}): AgentEvent
   return {
     id: fixtureId(80),
     pipeline_run_id: fixtureId(20),
+    pipeline_run_trade_date: fixtureDate,
     strategy_id: fixtureId(10),
     agent_role: 'analyst',
     event_kind: 'agent_decision',
@@ -230,6 +232,7 @@ export function buildAllocatorOpportunity(overrides: Partial<AllocatorOpportunit
     id: fixtureId(90),
     strategy_id: fixtureId(10),
     pipeline_run_id: fixtureId(20),
+    pipeline_run_trade_date: fixtureDate,
     market_type: 'stock',
     ticker: 'AUGR',
     side: 'buy',
@@ -261,6 +264,8 @@ export function buildAllocationDecision(overrides: Partial<AllocationDecision> =
     id: fixtureId(100),
     opportunity_id: fixtureId(90),
     strategy_id: fixtureId(10),
+    pipeline_run_id: fixtureId(20),
+    pipeline_run_trade_date: fixtureDate,
     mode: 'shadow',
     action: 'select',
     score: 0.74,
@@ -287,6 +292,7 @@ export function buildOrder(overrides: Partial<Order> = {}): Order {
     id: fixtureId(40),
     strategy_id: fixtureId(10),
     pipeline_run_id: fixtureId(20),
+    pipeline_run_trade_date: fixtureDate,
     external_id: 'DEV-PAPER-ORDER-1',
     ticker: 'AUGR',
     market_type: 'stock',
@@ -342,7 +348,7 @@ export function buildRiskStatus(overrides: Partial<RiskEngineStatus> = {}): Risk
 
 export function buildRiskCockpit(overrides: Partial<RiskCockpitSummary> = {}): RiskCockpitSummary {
   return {
-    scope: 'legacy_unscoped',
+    scope: 'account',
     generated_at: fixtureDate,
     kill_switch_active: false,
     circuit_breaker: false,
@@ -487,6 +493,8 @@ export function buildSettings(overrides: Partial<SettingsResponse> = {}): Settin
 export function buildWebSocketEvent(overrides: Partial<WebSocketEventEnvelope> = {}): WebSocketEventEnvelope {
   return {
     type: 'pipeline_start',
+    account_id: fixtureId(1),
+    scope: 'account',
     strategy_id: fixtureId(10),
     run_id: fixtureId(20),
     data: { fixture: true, mode: 'paper' },

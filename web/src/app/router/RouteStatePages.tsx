@@ -1,17 +1,20 @@
 import { Link, isRouteErrorResponse, useRouteError } from 'react-router-dom'
+import { useAccount } from '@/shared/account/AccountProvider'
 
 export function NotFoundPage() {
+  const { cockpitPath } = useAccount()
   return (
     <section className="panel hero-panel" role="status">
       <p className="eyebrow">404</p>
       <h1>Page not found</h1>
       <p className="muted">This route is not part of the current operator interface.</p>
-      <Link className="secondary-link" to="/cockpit">Return to cockpit</Link>
+      <Link className="secondary-link" to={cockpitPath}>Return to cockpit</Link>
     </section>
   )
 }
 
 export function RouteErrorPage() {
+  const { cockpitPath } = useAccount()
   const error = useRouteError()
   const message = isRouteErrorResponse(error) && error.status === 404
     ? 'The requested resource was not found.'
@@ -24,7 +27,7 @@ export function RouteErrorPage() {
         <p>{message}</p>
         <div className="action-row">
           <button type="button" onClick={() => window.location.reload()}>Reload application</button>
-          <Link className="secondary-link" to="/cockpit">Return to cockpit</Link>
+          <Link className="secondary-link" to={cockpitPath}>Return to cockpit</Link>
         </div>
       </section>
     </main>

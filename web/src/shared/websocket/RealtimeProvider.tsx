@@ -22,7 +22,7 @@ type RealtimeContextValue = {
 const RealtimeContext = createContext<RealtimeContextValue | null>(null)
 const maxEvents = 250
 
-export function RealtimeProvider({ authenticated, children }: { authenticated: boolean; children: ReactNode }) {
+export function RealtimeProvider({ authenticated, accountId, children }: { authenticated: boolean; accountId?: string; children: ReactNode }) {
   const socketRef = useRef<WebSocket | null>(null)
   const subscriptionsRef = useRef<WebSocketClientCommand[]>([])
   const reconnectTimerRef = useRef<number | null>(null)
@@ -70,7 +70,7 @@ export function RealtimeProvider({ authenticated, children }: { authenticated: b
   }, [])
 
   const connect = useCallback(async () => {
-    if (!authenticated) return
+    if (!authenticated || !accountId) return
     const connectionEpoch = connectionEpochRef.current + 1
     connectionEpochRef.current = connectionEpoch
     shouldReconnectRef.current = true
@@ -90,6 +90,7 @@ export function RealtimeProvider({ authenticated, children }: { authenticated: b
     if (!token) return
     const url = new URL(appConfig.wsBaseUrl, window.location.origin)
     url.searchParams.set('token', token)
+    url.searchParams.set('account_id', accountId)
     const socket = new WebSocket(url.toString())
     socketRef.current = socket
 
@@ -104,6 +105,7 @@ export function RealtimeProvider({ authenticated, children }: { authenticated: b
       if (socketRef.current !== socket || connectionEpochRef.current !== connectionEpoch) return
       try {
         const event = parseContract('WebSocket event', websocketEventEnvelopeSchema, JSON.parse(String(message.data)))
+        if (event.scope === 'account' && event.account_id !== accountId) return
         setEvents((current) => [event, ...current].slice(0, maxEvents))
       } catch {
         // Ignore malformed realtime messages; REST remains canonical.
@@ -124,13 +126,13 @@ export function RealtimeProvider({ authenticated, children }: { authenticated: b
       const delayMs = Math.min(30_000, 1000 * 2 ** Math.min(failedAttemptsRef.current - 1, 3))
       reconnectTimerRef.current = window.setTimeout(() => void connect(), delayMs)
     }
-  }, [authenticated])
+  }, [accountId, authenticated])
 
   useEffect(() => {
-    if (authenticated) void connect()
+    if (authenticated && accountId) void connect()
     else disconnect()
     return disconnect
-  }, [authenticated, connect, disconnect])
+  }, [accountId, authenticated, connect, disconnect])
 
   const value = useMemo(() => ({ status, events, failedAttempts, send, disconnect }), [disconnect, events, failedAttempts, send, status])
   return <RealtimeContext.Provider value={value}>{children}</RealtimeContext.Provider>

@@ -6,6 +6,7 @@ import { createP0RestHandlers } from '@/test/mocks/rest'
 import { createMockScenarioState } from '@/test/mocks/scenarios'
 
 const apiBaseUrl = 'http://localhost/api/v1'
+const accountPath = (path: string) => `${apiBaseUrl}/accounts/00000000-0000-4000-8000-000000000001${path}`
 const state = createMockScenarioState('success')
 const server = setupServer(...createP0RestHandlers({ apiBaseUrl, state }))
 
@@ -53,7 +54,7 @@ describe('P0 REST mock handlers', () => {
 
   it('mocks empty running runs', async () => {
     state.scenario = 'empty-data'
-    const response = await fetch(`${apiBaseUrl}/runs?status=running`, { headers: { authorization: `Bearer ${mockAccessToken}` } })
+    const response = await fetch(accountPath('/runs?status=running'), { headers: { authorization: `Bearer ${mockAccessToken}` } })
     expect(response.status).toBe(200)
     expect(await json(response)).toMatchObject({ data: [], total: 0, limit: 50, offset: 0 })
   })
@@ -67,7 +68,7 @@ describe('P0 REST mock handlers', () => {
     ['not-implemented', 501, 'ERR_NOT_IMPLEMENTED'],
   ] as const)('mocks %s errors', async (scenario, status, code) => {
     state.scenario = scenario
-    const response = await fetch(`${apiBaseUrl}/risk/status`, { headers: { authorization: `Bearer ${mockAccessToken}` } })
+    const response = await fetch(accountPath('/risk/status'), { headers: { authorization: `Bearer ${mockAccessToken}` } })
     expect(response.status).toBe(status)
     expect(await json(response)).toHaveProperty('code', code)
   })

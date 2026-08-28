@@ -5,12 +5,14 @@ import { PageHeader } from '@/components/ui/page-header'
 import { getOptionsChain } from '@/shared/api/endpoints'
 import { Breadcrumbs } from '@/shared/components/EntityLinks'
 import { EmptyState, ErrorState, LastUpdated, LoadingState } from '@/shared/components/QueryStates'
+import { useAccount } from '@/shared/account/AccountProvider'
 
 function number(value: number, digits = 2) {
   return value.toLocaleString(undefined, { maximumFractionDigits: digits })
 }
 
 export function OptionsPage() {
+  const { cockpitPath } = useAccount()
   const [searchParams, setSearchParams] = useSearchParams()
   const underlying = (searchParams.get('underlying') ?? '').trim().toUpperCase()
   const expiry = searchParams.get('expiry') ?? ''
@@ -30,7 +32,7 @@ export function OptionsPage() {
   }
   return (
     <div className="detail-stack">
-      <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Options research' }]} />
+      <Breadcrumbs items={[{ label: 'Cockpit', to: cockpitPath }, { label: 'Options research' }]} />
       <PageHeader eyebrow="Derivatives research" title="Options chain" description="Read-only contract prices, liquidity, IV, and Greeks. Paper execution is automation-driven through validated strategy rules; live and manual options orders remain disabled." actions={<span className="status-pill unknown">Research only</span>} />
       <section className="panel" aria-labelledby="options-query-heading">
         <h2 id="options-query-heading">Chain query</h2>

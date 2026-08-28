@@ -21,6 +21,7 @@ import {
   Layers3,
 } from 'lucide-react'
 import { useTheme } from '@/app/providers/theme-context'
+import { useAccount } from '@/shared/account/AccountProvider'
 
 type CommandItem = {
   id: string
@@ -32,6 +33,8 @@ type CommandItem = {
 }
 
 export function CommandPalette() {
+  const { account } = useAccount()
+  const accountPrefix = `/accounts/${account.id}`
   const [open, setOpen] = useState(false)
   const restoreFocusRef = useRef<HTMLElement | null>(null)
   const navigate = useNavigate()
@@ -67,20 +70,20 @@ export function CommandPalette() {
   }, [open])
 
   const navItems = [
-    { to: '/cockpit', label: 'Cockpit', icon: <LayoutDashboard size={16} /> },
+    { to: `${accountPrefix}/cockpit`, label: 'Cockpit', icon: <LayoutDashboard size={16} /> },
     { to: '/automation', label: 'Automation', icon: <Bot size={16} /> },
     { to: '/strategies', label: 'Strategies', icon: <Lightbulb size={16} /> },
-    { to: '/runs', label: 'Runs', icon: <Play size={16} /> },
-    { to: '/events', label: 'Events', icon: <Clock size={16} /> },
-    { to: '/orders', label: 'Orders', icon: <ShoppingCart size={16} /> },
-    { to: '/trades', label: 'Trades', icon: <ArrowLeftRight size={16} /> },
-    { to: '/portfolio', label: 'Portfolio', icon: <PieChart size={16} /> },
+    { to: `${accountPrefix}/runs`, label: 'Runs', icon: <Play size={16} /> },
+    { to: `${accountPrefix}/events`, label: 'Events', icon: <Clock size={16} /> },
+    { to: `${accountPrefix}/orders`, label: 'Orders', icon: <ShoppingCart size={16} /> },
+    { to: `${accountPrefix}/trades`, label: 'Trades', icon: <ArrowLeftRight size={16} /> },
+    { to: `${accountPrefix}/portfolio`, label: 'Portfolio', icon: <PieChart size={16} /> },
     { to: '/event-markets', label: 'Event markets', icon: <Landmark size={16} /> },
     { to: '/options', label: 'Options', icon: <ChartCandlestick size={16} /> },
     { to: '/backtests', label: 'Backtests', icon: <FlaskConical size={16} /> },
-    { to: '/journal', label: 'Decision journal', icon: <BookOpenText size={16} /> },
-    { to: '/risk', label: 'Risk', icon: <ShieldAlert size={16} /> },
-    { to: '/overhaul', label: 'Capital & evidence', icon: <Layers3 size={16} /> },
+    { to: `${accountPrefix}/journal`, label: 'Decision journal', icon: <BookOpenText size={16} /> },
+    { to: `${accountPrefix}/risk`, label: 'Risk', icon: <ShieldAlert size={16} /> },
+    { to: '/system/safety', label: 'System Safety', icon: <Layers3 size={16} /> },
     { to: '/settings', label: 'Settings', icon: <Settings size={16} /> },
   ]
 

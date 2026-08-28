@@ -7,12 +7,14 @@ import { AuthProvider, useAuth } from '@/shared/auth/AuthProvider'
 import { ThemeProvider } from '@/app/providers/ThemeProvider'
 import { createAppQueryClient } from '@/shared/query/client'
 import { RealtimeProvider } from '@/shared/websocket/RealtimeProvider'
+import { AccountProvider, useOptionalAccount } from '@/shared/account/AccountProvider'
 
 configureApiClient({ baseUrl: appConfig.apiBaseUrl })
 
 function RealtimeBridge({ children }: { children: ReactNode }) {
   const auth = useAuth()
-  return <RealtimeProvider authenticated={auth.status === 'authenticated'}>{children}</RealtimeProvider>
+  const accountContext = useOptionalAccount()
+  return <RealtimeProvider authenticated={auth.status === 'authenticated'} accountId={accountContext?.account.id}>{children}</RealtimeProvider>
 }
 
 export function AppProviders({ children }: { children: ReactNode }) {
@@ -21,7 +23,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <AuthProvider>
-          <RealtimeBridge>{children}</RealtimeBridge>
+          <AccountProvider>
+            <RealtimeBridge>{children}</RealtimeBridge>
+          </AccountProvider>
         </AuthProvider>
       </ThemeProvider>
     </QueryClientProvider>

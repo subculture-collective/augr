@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import { PageHeader } from '@/components/ui/page-header'
 import { getDecisionReplay } from '@/shared/api/endpoints'
 import { Breadcrumbs } from '@/shared/components/EntityLinks'
+import { useAccount } from '@/shared/account/AccountProvider'
 import { EmptyState, ErrorState, LoadingState } from '@/shared/components/QueryStates'
 
 function payload(value: unknown) {
@@ -12,13 +13,14 @@ function payload(value: unknown) {
 }
 
 export function ReplayPage() {
+  const { account } = useAccount()
   const { id = '' } = useParams()
-  const query = useQuery({ queryKey: ['replay', id], queryFn: ({ signal }) => getDecisionReplay(id, signal), enabled: Boolean(id) })
+  const query = useQuery({ queryKey: ['accounts', account.id, 'replay', id], queryFn: ({ signal }) => getDecisionReplay(account.id, id, signal), enabled: Boolean(id) })
   const replay = query.data
   const events = [...(replay?.events ?? [])].sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at))
   return <div className="detail-stack">
-    <Breadcrumbs items={[{ label: 'Decision journal', to: '/journal' }, { label: id || 'Replay' }]} />
-    <PageHeader eyebrow="Audit trail" title="Replay workbench" description="A deterministic, read-only timeline reconstructed from the persisted decision and replay events." actions={<Link to="/journal">Back to journal</Link>} />
+    <Breadcrumbs items={[{ label: 'Decision journal', to: `/accounts/${account.id}/journal` }, { label: id || 'Replay' }]} />
+    <PageHeader eyebrow="Audit trail" title="Replay workbench" description="A deterministic, read-only timeline reconstructed from the persisted decision and replay events." actions={<Link to={`/accounts/${account.id}/journal`}>Back to journal</Link>} />
     {query.isLoading ? <LoadingState label="Loading decision replay…" /> : null}
     {query.error ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : null}
     {replay ? <>

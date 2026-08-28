@@ -6,8 +6,23 @@ import { describe, expect, it, vi } from 'vitest'
 
 import App from '@/App'
 import { setTokenSnapshot } from '@/shared/auth/tokenStore'
-import { buildAuthResponse, buildPortfolioSummary, buildRiskBreakers, buildRiskCockpit, buildRiskStatus, buildSettings, mockRefreshToken } from '@/test/fixtures'
-import { apiBaseUrl, FakeWebSocket, installAppTestHarness, resetApp, server, state } from '@/test/app-harness'
+import {
+  buildAuthResponse,
+  buildPortfolioSummary,
+  buildRiskBreakers,
+  buildRiskCockpit,
+  buildRiskStatus,
+  buildSettings,
+  mockRefreshToken,
+} from '@/test/fixtures'
+import {
+  apiBaseUrl,
+  FakeWebSocket,
+  installAppTestHarness,
+  resetApp,
+  server,
+  state,
+} from '@/test/app-harness'
 
 describe('authentication and cockpit', () => {
   installAppTestHarness()
@@ -19,7 +34,9 @@ describe('authentication and cockpit', () => {
     await userEvent.type(screen.getByLabelText(/password/i), 'password')
     await userEvent.click(screen.getByRole('button', { name: /sign in/i }))
 
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
     expect(screen.getByText('dev-paper-operator')).toBeTruthy()
   }, 20_000)
 
@@ -28,7 +45,9 @@ describe('authentication and cockpit', () => {
     sessionStorage.setItem('augr.refresh-token.session', mockRefreshToken)
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
     expect(screen.getByText('dev-paper-operator')).toBeTruthy()
   })
 
@@ -39,7 +58,9 @@ describe('authentication and cockpit', () => {
     await userEvent.type(screen.getByLabelText(/password/i), 'password')
     await userEvent.click(screen.getByRole('button', { name: /sign in/i }))
 
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
   }, 10_000)
 
   it('does not reveal whether username exists for invalid credentials', async () => {
@@ -50,13 +71,17 @@ describe('authentication and cockpit', () => {
     await userEvent.type(screen.getByLabelText(/password/i), 'bad')
     await userEvent.click(screen.getByRole('button', { name: /sign in/i }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Invalid username or password.')
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Invalid username or password.',
+    )
   })
 
   it('redirects protected routes to login', async () => {
     resetApp('/cockpit')
     render(<App />)
-    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /sign in/i }),
+    ).toBeTruthy()
     expect(window.location.search).toContain('next=%2Fcockpit')
   })
 
@@ -65,9 +90,16 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /page not found/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /page not found/i }),
+    ).toBeTruthy()
     expect(window.location.pathname).toBe('/does-not-exist')
-    expect(screen.getByRole('link', { name: /return to cockpit/i })).toHaveAttribute('href', '/cockpit')
+    expect(
+      screen.getByRole('link', { name: /return to cockpit/i }),
+    ).toHaveAttribute(
+      'href',
+      '/accounts/00000000-0000-4000-8000-000000000001/cockpit',
+    )
   })
 
   it('renders effective settings and readiness without exposing secrets', async () => {
@@ -75,23 +107,41 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /settings & readiness/i })).toBeTruthy()
-    expect(screen.getByRole('table', { name: /broker readiness/i })).toBeTruthy()
-    expect(screen.getByRole('table', { name: /llm provider readiness/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /settings & readiness/i }),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('table', { name: /broker readiness/i }),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('table', { name: /llm provider readiness/i }),
+    ).toBeTruthy()
     expect(screen.getAllByText(/development-paper/i).length).toBeGreaterThan(0)
     expect(screen.queryByText(/dev-paper-access-token/i)).toBeNull()
-    expect(screen.getByRole('link', { name: /settings/i })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('link', { name: /settings/i })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
   })
 
   it('handles failed refresh by cleaning up the session', async () => {
     resetApp('/cockpit')
     state.scenario = 'failed-refresh'
-    setTokenSnapshot(buildAuthResponse({ access_token: 'expired-access-token' }))
+    setTokenSnapshot(
+      buildAuthResponse({ access_token: 'expired-access-token' }),
+    )
     server.use(
-      http.get(`${apiBaseUrl}/me`, () => HttpResponse.json({ error: 'expired', code: 'ERR_UNAUTHORIZED' }, { status: 401 })),
+      http.get(`${apiBaseUrl}/me`, () =>
+        HttpResponse.json(
+          { error: 'expired', code: 'ERR_UNAUTHORIZED' },
+          { status: 401 },
+        ),
+      ),
     )
     render(<App />)
-    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /sign in/i }),
+    ).toBeTruthy()
     expect(screen.getByRole('status')).toHaveTextContent(/session expired/i)
     expect(window.location.search).toContain('next=%2Fcockpit')
   })
@@ -100,9 +150,13 @@ describe('authentication and cockpit', () => {
     resetApp('/cockpit')
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
     await userEvent.click(screen.getByRole('button', { name: /logout/i }))
-    expect(await screen.findByRole('heading', { name: /sign in/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /sign in/i }),
+    ).toBeTruthy()
   })
 
   it('provides keyboard-accessible shell landmarks and skip navigation', async () => {
@@ -110,7 +164,9 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
     const skip = screen.getByRole('link', { name: /skip to main content/i })
     expect(skip).toHaveAttribute('href', '#main-content')
     expect(screen.getByRole('navigation', { name: /primary/i })).toBeTruthy()
@@ -123,13 +179,15 @@ describe('authentication and cockpit', () => {
     resetApp('/cockpit')
     setTokenSnapshot(buildAuthResponse())
     server.use(
-      http.get(`${apiBaseUrl}/risk/status`, async () => {
+      http.get(`${apiBaseUrl}/accounts/:accountId/risk/status`, async () => {
         await delay(1000)
         return HttpResponse.json({})
       }),
     )
     render(<App />)
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
     expect((await screen.findAllByText(/loading/i)).length).toBeGreaterThan(0)
   })
 
@@ -138,31 +196,87 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByText(/Cockpit classification: degraded/i)).toBeTruthy()
-    expect(await screen.findByRole('heading', { name: /System health/i })).toBeTruthy()
-    expect(screen.queryByRole('table', { name: /cockpit open positions/i })).toBeNull()
-    expect(await screen.findByText(/operational decision data below is legacy_unscoped/i)).toBeTruthy()
-    expect(await screen.findByRole('table', { name: /cockpit recent orders/i })).toBeTruthy()
-    expect(await screen.findByRole('table', { name: /cockpit recent trades/i })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: /open notional exposure/i })).toBeTruthy()
-    expect(screen.getByText(/no historical equity series is available/i)).toBeTruthy()
-    expect(screen.getAllByRole('link', { name: /Order/i }).some((link) => link.getAttribute('href') === '/orders/00000000-0000-4000-8000-000000000040')).toBe(true)
-    expect(screen.getAllByRole('link', { name: /Position/i }).some((link) => link.getAttribute('href') === '/trades?position_id=00000000-0000-4000-8000-000000000030')).toBe(true)
+    expect(
+      await screen.findByText(/Cockpit classification: degraded/i),
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /System health/i }),
+    ).toBeTruthy()
+    expect(
+      screen.queryByRole('table', { name: /cockpit open positions/i }),
+    ).toBeNull()
+    expect(
+      await screen.findByText(
+        /operational decision data below belongs to the resolved execution account/i,
+      ),
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole('table', { name: /cockpit recent orders/i }),
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole('table', { name: /cockpit recent trades/i }),
+    ).toBeTruthy()
+    expect(
+      screen.getByRole('heading', { name: /open notional exposure/i }),
+    ).toBeTruthy()
+    expect(
+      screen.getByText(/no historical equity series is available/i),
+    ).toBeTruthy()
+    expect(
+      screen
+        .getAllByRole('link', { name: /Order/i })
+        .some(
+          (link) =>
+            link.getAttribute('href') ===
+            '/accounts/00000000-0000-4000-8000-000000000001/orders/00000000-0000-4000-8000-000000000040',
+        ),
+    ).toBe(true)
+    expect(
+      screen
+        .getAllByRole('link', { name: /Position/i })
+        .some(
+          (link) =>
+            link.getAttribute('href') ===
+            '/accounts/00000000-0000-4000-8000-000000000001/trades?position_id=00000000-0000-4000-8000-000000000030',
+        ),
+    ).toBe(true)
   })
 
   it('reports mixed broker mode and keeps realtime activity reachable', async () => {
     resetApp('/cockpit')
     setTokenSnapshot(buildAuthResponse())
     const settings = buildSettings()
-    server.use(http.get(`${apiBaseUrl}/settings`, () => HttpResponse.json(buildSettings({ system: { ...settings.system, connected_brokers: [{ name: 'paper-broker', paper_mode: true, configured: true }, { name: 'live-broker', paper_mode: false, configured: true }] } }))))
+    server.use(
+      http.get(`${apiBaseUrl}/settings`, () =>
+        HttpResponse.json(
+          buildSettings({
+            system: {
+              ...settings.system,
+              connected_brokers: [
+                { name: 'paper-broker', paper_mode: true, configured: true },
+                { name: 'live-broker', paper_mode: false, configured: true },
+              ],
+            },
+          }),
+        ),
+      ),
+    )
     render(<App />)
 
-    expect(await screen.findByText(/mixed paper\/live command center/i)).toHaveAttribute('title', 'paper-broker: paper, live-broker: live')
-    const toggle = screen.getByRole('button', { name: /open realtime activity/i })
+    expect(
+      await screen.findByText(/mixed paper\/live command center/i),
+    ).toHaveAttribute('title', 'paper-broker: paper, live-broker: live')
+    const toggle = screen.getByRole('button', {
+      name: /open realtime activity/i,
+    })
     await userEvent.click(toggle)
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
-    expect(screen.getByRole('complementary', { name: /global realtime activity/i })).toHaveClass('open')
-    expect(screen.getByRole('button', { name: /close realtime activity/i })).toHaveFocus()
+    expect(
+      screen.getByRole('complementary', { name: /global realtime activity/i }),
+    ).toHaveClass('open')
+    expect(
+      screen.getByRole('button', { name: /close realtime activity/i }),
+    ).toHaveFocus()
     await userEvent.keyboard('{Escape}')
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
     expect(toggle).toHaveFocus()
@@ -174,8 +288,14 @@ describe('authentication and cockpit', () => {
       matches: query === '(max-width: 840px)',
       media: query,
       onchange: null,
-      addEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.add(listener),
-      removeEventListener: (_type: string, listener: (event: MediaQueryListEvent) => void) => listeners.delete(listener),
+      addEventListener: (
+        _type: string,
+        listener: (event: MediaQueryListEvent) => void,
+      ) => listeners.add(listener),
+      removeEventListener: (
+        _type: string,
+        listener: (event: MediaQueryListEvent) => void,
+      ) => listeners.delete(listener),
       addListener: () => undefined,
       removeListener: () => undefined,
       dispatchEvent: () => true,
@@ -184,10 +304,15 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    const open = await screen.findByRole('button', { name: /open navigation/i })
+    const open = await screen.findByRole('button', {
+      name: /open navigation/i,
+    })
     expect(open).toHaveAttribute('aria-expanded', 'false')
     expect(open).toHaveAttribute('aria-controls', 'primary-navigation')
-    expect(screen.getByLabelText(/primary navigation/i)).toHaveAttribute('aria-hidden', 'true')
+    expect(screen.getByLabelText(/primary navigation/i)).toHaveAttribute(
+      'aria-hidden',
+      'true',
+    )
     await userEvent.click(open)
     const close = screen.getByRole('button', { name: /close navigation/i })
     expect(close).toHaveAttribute('aria-expanded', 'true')
@@ -195,7 +320,9 @@ describe('authentication and cockpit', () => {
     expect(screen.getByRole('link', { name: /cockpit/i })).toHaveFocus()
     expect(document.body.style.overflow).toBe('hidden')
     await userEvent.keyboard('{Escape}')
-    const reopened = await screen.findByRole('button', { name: /open navigation/i })
+    const reopened = await screen.findByRole('button', {
+      name: /open navigation/i,
+    })
     expect(reopened).toHaveAttribute('aria-expanded', 'false')
     expect(reopened).toHaveFocus()
     expect(document.body.style.overflow).toBe('')
@@ -207,12 +334,22 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
     const navigation = screen.getByRole('navigation', { name: /primary/i })
-    expect(within(navigation).getByRole('heading', { name: 'Monitor' })).toBeTruthy()
-    expect(within(navigation).getByRole('heading', { name: 'Operate' })).toBeTruthy()
-    expect(within(navigation).getByRole('heading', { name: 'Research' })).toBeTruthy()
-    expect(within(navigation).getByRole('heading', { name: 'System' })).toBeTruthy()
+    expect(
+      within(navigation).getByRole('heading', { name: 'Monitor' }),
+    ).toBeTruthy()
+    expect(
+      within(navigation).getByRole('heading', { name: 'Operate' }),
+    ).toBeTruthy()
+    expect(
+      within(navigation).getByRole('heading', { name: 'Research' }),
+    ).toBeTruthy()
+    expect(
+      within(navigation).getByRole('heading', { name: 'System' }),
+    ).toBeTruthy()
   })
 
   it('exposes the command palette as a modal and restores keyboard context', async () => {
@@ -220,13 +357,19 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    const themeToggle = await screen.findByRole('button', { name: /switch to light theme/i })
+    const themeToggle = await screen.findByRole('button', {
+      name: /switch to light theme/i,
+    })
     themeToggle.focus()
     await userEvent.keyboard('{Control>}k{/Control}')
-    expect(screen.getByRole('dialog', { name: /command palette/i })).toHaveAttribute('aria-modal', 'true')
+    expect(
+      screen.getByRole('dialog', { name: /command palette/i }),
+    ).toHaveAttribute('aria-modal', 'true')
     expect(document.body.style.overflow).toBe('hidden')
     await userEvent.keyboard('{Escape}')
-    expect(screen.queryByRole('dialog', { name: /command palette/i })).toBeNull()
+    expect(
+      screen.queryByRole('dialog', { name: /command palette/i }),
+    ).toBeNull()
     expect(themeToggle).toHaveFocus()
     expect(document.body.style.overflow).toBe('')
   })
@@ -235,14 +378,22 @@ describe('authentication and cockpit', () => {
     resetApp('/cockpit')
     setTokenSnapshot(buildAuthResponse())
     server.use(
-      http.get(`${apiBaseUrl}/risk/status`, () => HttpResponse.json(buildRiskStatus())),
-      http.get(`${apiBaseUrl}/risk/cockpit`, () => HttpResponse.json(buildRiskCockpit({ warnings: [] }))),
-      http.get(`${apiBaseUrl}/risk/breakers`, () => HttpResponse.json(buildRiskBreakers({ tripped: [] }))),
+      http.get(`${apiBaseUrl}/accounts/:accountId/risk/status`, () =>
+        HttpResponse.json(buildRiskStatus()),
+      ),
+      http.get(`${apiBaseUrl}/accounts/:accountId/risk/cockpit`, () =>
+        HttpResponse.json(buildRiskCockpit({ warnings: [] })),
+      ),
+      http.get(`${apiBaseUrl}/risk/breakers`, () =>
+        HttpResponse.json(buildRiskBreakers({ tripped: [] })),
+      ),
     )
     render(<App />)
 
     await waitFor(() => expect(FakeWebSocket.instances[0]?.readyState).toBe(1))
-    expect(await screen.findByText(/Cockpit classification: safe/i)).toBeTruthy()
+    expect(
+      await screen.findByText(/Cockpit classification: safe/i),
+    ).toBeTruthy()
   })
 
   it('degrades without a server-authorized canonical valuation and does not send URL account IDs', async () => {
@@ -250,15 +401,31 @@ describe('authentication and cockpit', () => {
     setTokenSnapshot(buildAuthResponse())
     let requestedAccount = ''
     server.use(
-      http.get(`${apiBaseUrl}/portfolio/summary`, ({ request }) => {
-        requestedAccount = new URL(request.url).searchParams.get('account_id') ?? ''
-        return HttpResponse.json(buildPortfolioSummary({ account_id: null, as_of: null, reconciliation_passed: false, total_pnl: null, unavailable_reasons: ['server_account_binding_unavailable'] }))
-      }),
+      http.get(
+        `${apiBaseUrl}/accounts/:accountId/portfolio/summary`,
+        ({ request }) => {
+          requestedAccount =
+            new URL(request.url).searchParams.get('account_id') ?? ''
+          return HttpResponse.json(
+            buildPortfolioSummary({
+              account_id: null,
+              as_of: null,
+              reconciliation_passed: false,
+              total_pnl: null,
+              unavailable_reasons: ['server_account_binding_unavailable'],
+            }),
+          )
+        },
+      ),
     )
     render(<App />)
 
-    expect(await screen.findByText(/Cockpit classification: degraded/i)).toBeTruthy()
-    expect(await screen.findByText(/server_account_binding_unavailable/i)).toBeTruthy()
+    expect(
+      await screen.findByText(/Cockpit classification: degraded/i),
+    ).toBeTruthy()
+    expect(
+      await screen.findByText(/server_account_binding_unavailable/i),
+    ).toBeTruthy()
     expect(requestedAccount).toBe('')
   })
 
@@ -283,25 +450,50 @@ describe('authentication and cockpit', () => {
     resetApp('/cockpit')
     setTokenSnapshot(buildAuthResponse())
     server.use(
-      http.get(`${apiBaseUrl}/automation/health`, () => HttpResponse.json({ error: 'not configured', code: 'ERR_NOT_IMPLEMENTED' }, { status: 501 })),
+      http.get(`${apiBaseUrl}/automation/health`, () =>
+        HttpResponse.json(
+          { error: 'not configured', code: 'ERR_NOT_IMPLEMENTED' },
+          { status: 501 },
+        ),
+      ),
     )
     render(<App />)
-    const panel = await screen.findByRole('heading', { name: /System health/i })
-    expect(await within(panel.closest('section') as HTMLElement).findByText(/feature unavailable/i)).toBeTruthy()
+    const panel = await screen.findByRole('heading', {
+      name: /System health/i,
+    })
+    expect(
+      await within(panel.closest('section') as HTMLElement).findByText(
+        /feature unavailable/i,
+      ),
+    ).toBeTruthy()
   })
 
   it('keeps other cockpit data visible when one service returns 500', async () => {
     resetApp('/cockpit')
     setTokenSnapshot(buildAuthResponse())
     server.use(
-      http.get(`${apiBaseUrl}/automation/health`, () => HttpResponse.json({ error: 'automation exploded', code: 'ERR_INTERNAL' }, { status: 500 })),
+      http.get(`${apiBaseUrl}/automation/health`, () =>
+        HttpResponse.json(
+          { error: 'automation exploded', code: 'ERR_INTERNAL' },
+          { status: 500 },
+        ),
+      ),
     )
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /system overview/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /system overview/i }),
+    ).toBeTruthy()
     expect(await screen.findByText('normal')).toBeTruthy()
-    const panel = await screen.findByRole('heading', { name: /System health/i })
-    expect((await within(panel.closest('section') as HTMLElement).findByRole('alert')).textContent).toContain('automation exploded')
+    const panel = await screen.findByRole('heading', {
+      name: /System health/i,
+    })
+    expect(
+      (
+        await within(panel.closest('section') as HTMLElement).findByRole(
+          'alert',
+        )
+      ).textContent,
+    ).toContain('automation exploded')
   })
-
 })

@@ -5,6 +5,7 @@ import { useSearchParams } from 'react-router-dom'
 import { getTrades } from '@/shared/api/endpoints'
 import { PageHeader } from '@/components/ui/page-header'
 import { Breadcrumbs, EntityId, EntityLink } from '@/shared/components/EntityLinks'
+import { useAccount } from '@/shared/account/AccountProvider'
 import { EmptyState, ErrorState, LastUpdated, LoadingState, StaleBanner } from '@/shared/components/QueryStates'
 import { queryKeys } from '@/shared/query/keys'
 import type { Trade } from '@/shared/types/domain'
@@ -67,6 +68,7 @@ function TradesRows({ trades }: { trades: Trade[] }) {
 }
 
 export function TradesListPage() {
+  const { account } = useAccount()
   const [searchParams, setSearchParams] = useSearchParams()
   const realtime = useRealtime()
   const [realtimeStale, setRealtimeStale] = useState(false)
@@ -83,8 +85,8 @@ export function TradesListPage() {
     offset: Number.isFinite(offset) && offset > 0 ? offset : 0,
   }), [offset, searchParams])
   const query = useQuery({
-    queryKey: queryKeys.tradesListFiltered(filters),
-    queryFn: ({ signal }) => getTrades(filters, signal),
+    queryKey: queryKeys.tradesListFiltered(account.id, filters),
+    queryFn: ({ signal }) => getTrades(account.id, filters, signal),
     enabled: !scopeConflict,
   })
   const trades = query.data?.data ?? []
@@ -120,7 +122,7 @@ export function TradesListPage() {
 
   return (
     <div className="detail-stack">
-      <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Trades' }]} />
+      <Breadcrumbs items={[{ label: 'Cockpit', to: `/accounts/${account.id}/cockpit` }, { label: 'Trades' }]} />
       <PageHeader eyebrow="Read-only execution evidence" title="Trades" description="Browse fills/executions and trace them back to orders and positions. Trade detail and broker actions are excluded." actions={<span className="status-pill active">Read-only</span>} />
       <StaleBanner show={realtimeStale || realtime.status === 'disconnected' || realtime.status === 'degraded'} message="Trade rows are read-only and may be stale after realtime order fills." />
       <section className="panel" aria-labelledby="trades-heading">

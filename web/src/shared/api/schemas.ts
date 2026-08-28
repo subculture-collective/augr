@@ -36,6 +36,21 @@ export const economicAccountSchema = z.object({
   created_at: isoDateSchema,
 }).passthrough()
 
+export const accountSchema = economicAccountSchema
+
+export const paperEvaluationScopeSchema = z.object({
+  id: uuidSchema,
+  account_id: uuidSchema,
+  label: z.string().min(1),
+  start_date: z.string().min(1),
+  end_date: z.string().min(1),
+  account_config_digest: z.string().min(1),
+  strategy_set_digest: z.string().min(1),
+  market_data_snapshot_digest: z.string().min(1),
+  execution_policy_digest: z.string().min(1),
+  created_at: isoDateSchema,
+}).passthrough()
+
 export const economicCapitalFlowSchema = z.object({
   id: uuidSchema,
   account_id: uuidSchema,
@@ -229,7 +244,7 @@ export const reportArtifactSchema = z
     id: uuidSchema,
     strategy_id: uuidSchema,
     scope_id: uuidSchema.optional(),
-    scope_label: z.enum(['scoped', 'legacy_unscoped']),
+    scope_label: z.string().min(1),
     account_id: uuidSchema.optional(),
     backtest_run_id: uuidSchema.optional(),
     report_type: z.string().min(1),
@@ -272,6 +287,7 @@ export const agentDecisionSchema = z
   .object({
     id: uuidSchema,
     pipeline_run_id: uuidSchema,
+    pipeline_run_trade_date: isoDateSchema.optional(),
     agent_role: z.string().min(1),
     phase: z.string().min(1),
     round_number: z.number().int().optional(),
@@ -295,6 +311,7 @@ export const agentEventSchema = z
   .object({
     id: uuidSchema,
     pipeline_run_id: uuidSchema.optional(),
+    pipeline_run_trade_date: isoDateSchema.optional(),
     strategy_id: uuidSchema.optional(),
     agent_role: z.string().optional(),
     event_kind: z.string().min(1),
@@ -336,6 +353,7 @@ export const allocatorOpportunitySchema = z
     id: uuidSchema,
     strategy_id: uuidSchema,
     pipeline_run_id: uuidSchema.optional(),
+    pipeline_run_trade_date: isoDateSchema.optional(),
     market_type: forwardCompatibleEnumSchema,
     ticker: z.string().min(1),
     side: z.string().min(1),
@@ -368,6 +386,8 @@ export const allocationDecisionSchema = z
     id: uuidSchema,
     opportunity_id: uuidSchema.optional(),
     strategy_id: uuidSchema.optional(),
+    pipeline_run_id: uuidSchema.optional(),
+    pipeline_run_trade_date: isoDateSchema.optional(),
     mode: z.string().min(1),
     action: z.string().min(1),
     score: z.number(),
@@ -412,6 +432,7 @@ export const orderSchema = z
     id: uuidSchema,
     strategy_id: uuidSchema.optional(),
     pipeline_run_id: uuidSchema.optional(),
+    pipeline_run_trade_date: isoDateSchema.optional(),
     external_id: z.string().optional(),
     ticker: z.string().min(1),
     market_type: forwardCompatibleEnumSchema.optional(),
@@ -519,7 +540,7 @@ export const riskBreakersResponseSchema = z
 
 export const riskCockpitSummarySchema = z
   .object({
-    scope: z.literal('legacy_unscoped'),
+    scope: z.string().min(1),
     generated_at: isoDateSchema,
     kill_switch_active: z.boolean(),
     circuit_breaker: z.boolean(),
@@ -769,7 +790,7 @@ export const backtestRunSchema = z.object({
 }).passthrough()
 
 export const tradeDecisionSchema = z.object({
-  id: uuidSchema, strategy_id: uuidSchema.optional(), pipeline_run_id: uuidSchema.optional(), market_type: z.string(), instrument_key: z.string(), external_market_id: z.string().optional(), side: z.string(), outcome: z.string().optional(),
+  id: uuidSchema, strategy_id: uuidSchema.optional(), pipeline_run_id: uuidSchema.optional(), pipeline_run_trade_date: isoDateSchema.optional(), market_type: z.string(), instrument_key: z.string(), external_market_id: z.string().optional(), side: z.string(), outcome: z.string().optional(),
   fair_value: z.number(), executable_price: z.number(), spread: z.number(), depth: z.number(), gross_ev: z.number(), net_ev: z.number(), kelly_fraction: z.number(), proposed_size: z.number(), approved_size: z.number(),
   risk_status: z.string(), risk_reasons: z.array(z.string()), evidence: rawJsonSchema.optional(), features: rawJsonSchema.optional(), regime_tags: z.array(z.string()), prompt_text: z.string().optional(), llm_provider: z.string().optional(), llm_model: z.string().optional(), prompt_tokens: z.number().optional(), completion_tokens: z.number().optional(), latency_ms: z.number().optional(), cost_usd: z.number().optional(), paper_order_id: uuidSchema.optional(), live_order_id: uuidSchema.optional(), status: z.string(), created_at: isoDateSchema, updated_at: isoDateSchema,
 }).passthrough()
@@ -803,7 +824,7 @@ export const copySubscriptionSchema = z.object({
 }).passthrough()
 
 export const copyTradeIntentSchema = z.object({
-  id: uuidSchema, subscription_id: uuidSchema, source_observation_id: uuidSchema, pipeline_run_id: uuidSchema.optional(), instrument_key: z.string(), ticker: z.string(), side: z.string(), target_weight: z.number(), target_value: z.number(), attributed_current_value: z.number(), requested_notional: z.number(), executable_price: z.number().optional(), calculation_version: z.number().int(), calculation: rawJsonSchema.optional(), policy_status: z.string(), policy_reasons: z.array(z.string()), risk_status: z.string(), risk_reasons: z.array(z.string()), order_id: uuidSchema.optional(), status: z.string(), created_at: isoDateSchema, updated_at: isoDateSchema,
+  id: uuidSchema, subscription_id: uuidSchema, source_observation_id: uuidSchema, pipeline_run_id: uuidSchema.optional(), pipeline_run_trade_date: isoDateSchema.optional(), instrument_key: z.string(), ticker: z.string(), side: z.string(), target_weight: z.number(), target_value: z.number(), attributed_current_value: z.number(), requested_notional: z.number(), executable_price: z.number().optional(), calculation_version: z.number().int(), calculation: rawJsonSchema.optional(), policy_status: z.string(), policy_reasons: z.array(z.string()), risk_status: z.string(), risk_reasons: z.array(z.string()), order_id: uuidSchema.optional(), status: z.string(), created_at: isoDateSchema, updated_at: isoDateSchema,
 }).passthrough()
 
 export const copyPreviewSchema = z.object({
@@ -829,6 +850,8 @@ export const websocketCommandSchema = z
 export const websocketEventEnvelopeSchema = z
   .object({
     type: forwardCompatibleEnumSchema,
+    account_id: uuidSchema.optional(),
+    scope: forwardCompatibleEnumSchema,
     strategy_id: uuidSchema.optional(),
     run_id: uuidSchema.optional(),
     data: rawJsonSchema.optional(),

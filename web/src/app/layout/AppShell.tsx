@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react'
+import { NavLink, Outlet } from 'react-router-dom'
 import {
   ChevronLeft,
   LayoutDashboard,
@@ -22,205 +22,240 @@ import {
   BookOpenText,
   UsersRound,
   Layers3,
-} from 'lucide-react';
+} from 'lucide-react'
 
-import { useTheme } from '@/app/providers/theme-context';
-import { CommandPalette } from '@/components/CommandPalette';
-import { getSettings } from '@/shared/api/endpoints';
-import { useAuth } from '@/shared/auth/AuthProvider';
-import { EntityLink } from '@/shared/components/EntityLinks';
-import { queryKeys } from '@/shared/query/keys';
-import { useRealtime } from '@/shared/websocket/RealtimeProvider';
-import { useQuery } from '@tanstack/react-query';
+import { useTheme } from '@/app/providers/theme-context'
+import { CommandPalette } from '@/components/CommandPalette'
+import { getSettings } from '@/shared/api/endpoints'
+import { useAuth } from '@/shared/auth/AuthProvider'
+import { EntityLink } from '@/shared/components/EntityLinks'
+import { queryKeys } from '@/shared/query/keys'
+import { useRealtime } from '@/shared/websocket/RealtimeProvider'
+import { useQuery } from '@tanstack/react-query'
+import { useAccount } from '@/shared/account/AccountProvider'
 
-const STORAGE_KEY = 'augr-sidebar-collapsed';
+const STORAGE_KEY = 'augr-sidebar-collapsed'
 
 const navGroups = [
-  { label: 'Monitor', items: [
-    { to: '/cockpit', label: 'Cockpit', icon: LayoutDashboard },
-    { to: '/portfolio', label: 'Portfolio', icon: PieChart },
-    { to: '/risk', label: 'Risk', icon: ShieldAlert },
-  ] },
-  { label: 'Operate', items: [
-    { to: '/automation', label: 'Automation', icon: Bot },
-    { to: '/strategies', label: 'Strategies', icon: Lightbulb },
-    { to: '/copy-trading', label: 'Copy trading', icon: UsersRound },
-    { to: '/runs', label: 'Runs', icon: Play },
-    { to: '/orders', label: 'Orders', icon: ShoppingCart },
-    { to: '/trades', label: 'Trades', icon: ArrowLeftRight },
-  ] },
-  { label: 'Research', items: [
-    { to: '/event-markets', label: 'Event markets', icon: Landmark },
-    { to: '/options', label: 'Options', icon: ChartCandlestick },
-    { to: '/backtests', label: 'Backtests', icon: FlaskConical },
-    { to: '/journal', label: 'Journal', icon: BookOpenText },
-    { to: '/events', label: 'Events', icon: Clock },
-  ] },
-  { label: 'System', items: [
-    { to: '/overhaul', label: 'Capital & evidence', icon: Layers3 },
-    { to: '/settings', label: 'Settings', icon: Settings },
-  ] },
-];
+  {
+    label: 'Monitor',
+    items: [
+      { to: '/cockpit', label: 'Cockpit', icon: LayoutDashboard },
+      { to: '/portfolio', label: 'Portfolio', icon: PieChart },
+      { to: '/risk', label: 'Risk', icon: ShieldAlert },
+    ],
+  },
+  {
+    label: 'Operate',
+    items: [
+      { to: '/automation', label: 'Automation', icon: Bot },
+      { to: '/strategies', label: 'Strategies', icon: Lightbulb },
+      { to: '/copy-trading', label: 'Copy trading', icon: UsersRound },
+      { to: '/runs', label: 'Runs', icon: Play },
+      { to: '/orders', label: 'Orders', icon: ShoppingCart },
+      { to: '/trades', label: 'Trades', icon: ArrowLeftRight },
+    ],
+  },
+  {
+    label: 'Research',
+    items: [
+      { to: '/event-markets', label: 'Event markets', icon: Landmark },
+      { to: '/options', label: 'Options', icon: ChartCandlestick },
+      { to: '/backtests', label: 'Backtests', icon: FlaskConical },
+      { to: '/journal', label: 'Journal', icon: BookOpenText },
+      { to: '/events', label: 'Events', icon: Clock },
+    ],
+  },
+  {
+    label: 'System',
+    items: [
+      { to: '/system/safety', label: 'System Safety', icon: Layers3 },
+      { to: '/settings', label: 'Settings', icon: Settings },
+    ],
+  },
+]
 
-const MOBILE_QUERY = '(max-width: 840px)';
+const MOBILE_QUERY = '(max-width: 840px)'
 
 function getInitialCollapsedState(): boolean {
-  if (typeof window === 'undefined') return false;
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored !== null) return stored === 'true';
+  if (typeof window === 'undefined') return false
+  const stored = localStorage.getItem(STORAGE_KEY)
+  if (stored !== null) return stored === 'true'
   // Auto-collapse on mobile by default
-  return window.innerWidth <= 840;
+  return window.innerWidth <= 840
 }
 
 function getInitialMobileState(): boolean {
-  if (typeof window === 'undefined') return false;
-  if (typeof window.matchMedia !== 'function') return window.innerWidth <= 840;
-  return window.matchMedia(MOBILE_QUERY).matches;
+  if (typeof window === 'undefined') return false
+  if (typeof window.matchMedia !== 'function') return window.innerWidth <= 840
+  return window.matchMedia(MOBILE_QUERY).matches
 }
 
 export function AppShell() {
-  const auth = useAuth();
-  const realtime = useRealtime();
-  const { theme, toggleTheme } = useTheme();
+  const { account } = useAccount()
+  const accountPrefix = `/accounts/${account.id}`
+  const auth = useAuth()
+  const realtime = useRealtime()
+  const { theme, toggleTheme } = useTheme()
   const settings = useQuery({
     queryKey: queryKeys.settings,
     queryFn: ({ signal }) => getSettings(signal),
     enabled: auth.status === 'authenticated',
-  });
-  const configuredBrokers = settings.data?.system.connected_brokers.filter((item) => item.configured) ?? [];
-  const brokerModes = new Set(configuredBrokers.map((broker) => broker.paper_mode === false ? 'live' : 'paper'));
-  const mode = configuredBrokers.length === 0 ? 'Mode unknown' : brokerModes.size > 1 ? 'Mixed paper/live' : brokerModes.has('live') ? 'Live' : 'Paper';
-  const kalshiFeed = settings.data?.system.connected_brokers.find((broker) => broker.name === 'kalshi');
+  })
+  const configuredBrokers =
+    settings.data?.system.connected_brokers.filter((item) => item.configured) ?? []
+  const brokerModes = new Set(
+    configuredBrokers.map((broker) => (broker.paper_mode === false ? 'live' : 'paper')),
+  )
+  const mode =
+    configuredBrokers.length === 0
+      ? 'Mode unknown'
+      : brokerModes.size > 1
+        ? 'Mixed paper/live'
+        : brokerModes.has('live')
+          ? 'Live'
+          : 'Paper'
+  const kalshiFeed = settings.data?.system.connected_brokers.find(
+    (broker) => broker.name === 'kalshi',
+  )
 
-  const [isCollapsed, setIsCollapsed] = useState(getInitialCollapsedState);
-  const [isMobileOpen, setIsMobileOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(getInitialMobileState);
-  const [isActivityOpen, setIsActivityOpen] = useState(false);
-  const navigationToggleRef = useRef<HTMLButtonElement>(null);
-  const navigationRef = useRef<HTMLElement>(null);
-  const navigationWasOpen = useRef(false);
-  const activityToggleRef = useRef<HTMLButtonElement>(null);
-  const activityCloseRef = useRef<HTMLButtonElement>(null);
-  const activityDrawerRef = useRef<HTMLElement>(null);
-  const activityWasOpen = useRef(false);
+  const [isCollapsed, setIsCollapsed] = useState(getInitialCollapsedState)
+  const [isMobileOpen, setIsMobileOpen] = useState(false)
+  const [isMobile, setIsMobile] = useState(getInitialMobileState)
+  const [isActivityOpen, setIsActivityOpen] = useState(false)
+  const navigationToggleRef = useRef<HTMLButtonElement>(null)
+  const navigationRef = useRef<HTMLElement>(null)
+  const navigationWasOpen = useRef(false)
+  const activityToggleRef = useRef<HTMLButtonElement>(null)
+  const activityCloseRef = useRef<HTMLButtonElement>(null)
+  const activityDrawerRef = useRef<HTMLElement>(null)
+  const activityWasOpen = useRef(false)
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, String(isCollapsed));
-  }, [isCollapsed]);
+    localStorage.setItem(STORAGE_KEY, String(isCollapsed))
+  }, [isCollapsed])
 
   useEffect(() => {
     const closeOverlays = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setIsMobileOpen(false);
-      setIsActivityOpen(false);
-    };
-    window.addEventListener('keydown', closeOverlays);
-    return () => window.removeEventListener('keydown', closeOverlays);
-  }, []);
+      if (event.key !== 'Escape') return
+      setIsMobileOpen(false)
+      setIsActivityOpen(false)
+    }
+    window.addEventListener('keydown', closeOverlays)
+    return () => window.removeEventListener('keydown', closeOverlays)
+  }, [])
 
   useEffect(() => {
     if (isActivityOpen) {
-      activityWasOpen.current = true;
-      activityCloseRef.current?.focus();
+      activityWasOpen.current = true
+      activityCloseRef.current?.focus()
     } else if (activityWasOpen.current) {
-      activityWasOpen.current = false;
-      activityToggleRef.current?.focus();
+      activityWasOpen.current = false
+      activityToggleRef.current?.focus()
     }
-  }, [isActivityOpen]);
+  }, [isActivityOpen])
 
   useEffect(() => {
-    if (!isMobile) return;
+    if (!isMobile) return
     if (isMobileOpen) {
-      navigationWasOpen.current = true;
-      navigationRef.current?.querySelector<HTMLElement>('a[href]')?.focus();
+      navigationWasOpen.current = true
+      navigationRef.current?.querySelector<HTMLElement>('a[href]')?.focus()
     } else if (navigationWasOpen.current) {
-      navigationWasOpen.current = false;
-      navigationToggleRef.current?.focus();
+      navigationWasOpen.current = false
+      navigationToggleRef.current?.focus()
     }
-  }, [isMobile, isMobileOpen]);
+  }, [isMobile, isMobileOpen])
 
   useEffect(() => {
-    if (!isMobile || (!isMobileOpen && !isActivityOpen)) return;
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = previousOverflow };
-  }, [isActivityOpen, isMobile, isMobileOpen]);
+    if (!isMobile || (!isMobileOpen && !isActivityOpen)) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [isActivityOpen, isMobile, isMobileOpen])
 
   const trapNavigationFocus = (event: React.KeyboardEvent<HTMLElement>) => {
-    if (!isMobileOpen || event.key !== 'Tab') return;
-    const focusable = Array.from(navigationRef.current?.querySelectorAll<HTMLElement>('a[href], button:not(:disabled)') ?? []);
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable.at(-1)!;
+    if (!isMobileOpen || event.key !== 'Tab') return
+    const focusable = Array.from(
+      navigationRef.current?.querySelectorAll<HTMLElement>('a[href], button:not(:disabled)') ?? [],
+    )
+    if (focusable.length === 0) return
+    const first = focusable[0]
+    const last = focusable.at(-1)!
     if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
+      event.preventDefault()
+      last.focus()
     } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
+      event.preventDefault()
+      first.focus()
     }
-  };
+  }
 
   const trapActivityFocus = (event: React.KeyboardEvent<HTMLElement>) => {
-    if (!isActivityOpen || event.key !== 'Tab') return;
-    const focusable = Array.from(activityDrawerRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])') ?? []);
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable.at(-1)!;
+    if (!isActivityOpen || event.key !== 'Tab') return
+    const focusable = Array.from(
+      activityDrawerRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    )
+    if (focusable.length === 0) return
+    const first = focusable[0]
+    const last = focusable.at(-1)!
     if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
+      event.preventDefault()
+      last.focus()
     } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
+      event.preventDefault()
+      first.focus()
     }
-  };
+  }
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') {
       const handleResize = () => {
-        const nextIsMobile = window.innerWidth <= 840;
-        setIsMobile(nextIsMobile);
+        const nextIsMobile = window.innerWidth <= 840
+        setIsMobile(nextIsMobile)
         if (nextIsMobile && !isCollapsed) {
-          setIsCollapsed(true);
+          setIsCollapsed(true)
         }
         if (!nextIsMobile) {
-          setIsMobileOpen(false);
+          setIsMobileOpen(false)
         }
-      };
-      handleResize();
-      window.addEventListener('resize', handleResize);
-      return () => window.removeEventListener('resize', handleResize);
+      }
+      handleResize()
+      window.addEventListener('resize', handleResize)
+      return () => window.removeEventListener('resize', handleResize)
     }
 
-    const media = window.matchMedia(MOBILE_QUERY);
+    const media = window.matchMedia(MOBILE_QUERY)
     const handleResize = () => {
-      setIsMobile(media.matches);
+      setIsMobile(media.matches)
       if (media.matches && !isCollapsed) {
-        setIsCollapsed(true);
+        setIsCollapsed(true)
       }
       if (!media.matches) {
-        setIsMobileOpen(false);
+        setIsMobileOpen(false)
       }
-    };
-    handleResize();
-    media.addEventListener('change', handleResize);
-    return () => media.removeEventListener('change', handleResize);
-  }, [isCollapsed]);
+    }
+    handleResize()
+    media.addEventListener('change', handleResize)
+    return () => media.removeEventListener('change', handleResize)
+  }, [isCollapsed])
 
   const toggleSidebar = () => {
     if (isMobile) {
-      setIsMobileOpen(!isMobileOpen);
+      setIsMobileOpen(!isMobileOpen)
     } else {
-      setIsCollapsed(!isCollapsed);
+      setIsCollapsed(!isCollapsed)
     }
-  };
+  }
 
   const handleSidebarClose = () => {
-    setIsMobileOpen(false);
-  };
+    setIsMobileOpen(false)
+  }
 
-  const sidebarCollapsed = isMobile ? false : isCollapsed;
+  const sidebarCollapsed = isMobile ? false : isCollapsed
 
   return (
     <div className="app-layout" data-sidebar-collapsed={String(sidebarCollapsed)}>
@@ -231,7 +266,12 @@ export function AppShell() {
 
       {/* Mobile backdrop */}
       {isMobile && isMobileOpen && (
-        <button type="button" className="sidebar-backdrop" onClick={handleSidebarClose} aria-label="Dismiss navigation overlay" />
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          onClick={handleSidebarClose}
+          aria-label="Dismiss navigation overlay"
+        />
       )}
 
       <aside
@@ -246,14 +286,37 @@ export function AppShell() {
         <div className="brand">{sidebarCollapsed ? '' : 'Augr'}</div>
         <nav aria-label="Primary">
           {navGroups.map((group) => (
-            <section className="nav-group" aria-labelledby={`nav-${group.label.toLowerCase()}`} key={group.label}>
+            <section
+              className="nav-group"
+              aria-labelledby={`nav-${group.label.toLowerCase()}`}
+              key={group.label}
+            >
               <h2 id={`nav-${group.label.toLowerCase()}`}>{group.label}</h2>
-              {group.items.map(({ to, label, icon: Icon }) => (
-                <NavLink key={to} to={to} data-label={label} onClick={isMobile ? handleSidebarClose : undefined}>
-                  <Icon size={18} aria-hidden="true" />
-                  <span className="nav-label">{label}</span>
-                </NavLink>
-              ))}
+              {group.items.map(({ to, label, icon: Icon }) => {
+                const accountRoutes = new Set([
+                  '/cockpit',
+                  '/portfolio',
+                  '/risk',
+                  '/copy-trading',
+                  '/runs',
+                  '/orders',
+                  '/trades',
+                  '/journal',
+                  '/events',
+                ])
+                const resolvedTo = accountRoutes.has(to) ? `${accountPrefix}${to}` : to
+                return (
+                  <NavLink
+                    key={resolvedTo}
+                    to={resolvedTo}
+                    data-label={label}
+                    onClick={isMobile ? handleSidebarClose : undefined}
+                  >
+                    <Icon size={18} aria-hidden="true" />
+                    <span className="nav-label">{label}</span>
+                  </NavLink>
+                )
+              })}
             </section>
           ))}
         </nav>
@@ -269,7 +332,9 @@ export function AppShell() {
               onClick={toggleSidebar}
               aria-label={
                 isMobile
-                  ? isMobileOpen ? 'Close navigation' : 'Open navigation'
+                  ? isMobileOpen
+                    ? 'Close navigation'
+                    : 'Open navigation'
                   : sidebarCollapsed
                     ? 'Expand sidebar'
                     : 'Collapse sidebar'
@@ -293,11 +358,26 @@ export function AppShell() {
               <p className="eyebrow">
                 ~/augr/{settings.data?.system.environment ?? 'environment-unknown'}
               </p>
-              <strong title={configuredBrokers.map((broker) => `${broker.name}: ${broker.paper_mode === false ? 'live' : 'paper'}`).join(', ')}>{mode} command center</strong>
+              <strong
+                title={configuredBrokers
+                  .map(
+                    (broker) => `${broker.name}: ${broker.paper_mode === false ? 'live' : 'paper'}`,
+                  )
+                  .join(', ')}
+              >
+                {mode} command center
+              </strong>
             </div>
           </div>
           <div className="header-cluster">
-            {kalshiFeed?.configured ? <span className={`status-pill ${kalshiFeed.data_environment === 'live' ? 'success' : 'warning'}`} title={kalshiFeed.data_source_url}>Kalshi {kalshiFeed.data_environment ?? 'unknown'}</span> : null}
+            {kalshiFeed?.configured ? (
+              <span
+                className={`status-pill ${kalshiFeed.data_environment === 'live' ? 'success' : 'warning'}`}
+                title={kalshiFeed.data_source_url}
+              >
+                Kalshi {kalshiFeed.data_environment ?? 'unknown'}
+              </span>
+            ) : null}
             <span className={`status-pill ${realtime.status}`}>Realtime {realtime.status}</span>
             <button
               ref={activityToggleRef}
@@ -319,8 +399,14 @@ export function AppShell() {
             >
               {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
             </button>
-            <span className="session-user" title={auth.session?.user.username}>Signed in as <span>{auth.session?.user.username}</span></span>
-            <button type="button" onClick={auth.logout} aria-label={`Logout ${auth.session?.user.username ?? ''}`.trim()}>
+            <span className="session-user" title={auth.session?.user.username}>
+              Signed in as <span>{auth.session?.user.username}</span>
+            </span>
+            <button
+              type="button"
+              onClick={auth.logout}
+              aria-label={`Logout ${auth.session?.user.username ?? ''}`.trim()}
+            >
               Logout
             </button>
           </div>
@@ -328,11 +414,34 @@ export function AppShell() {
         <main className="content" id="main-content" tabIndex={-1}>
           <Outlet />
         </main>
-        {isActivityOpen ? <button type="button" className="activity-backdrop" onClick={() => setIsActivityOpen(false)} aria-label="Dismiss realtime activity overlay" /> : null}
-        <aside ref={activityDrawerRef} id="global-activity-drawer" className={`activity-drawer ${isActivityOpen ? 'open' : ''}`} aria-label="Global realtime activity" onKeyDown={trapActivityFocus}>
+        {isActivityOpen ? (
+          <button
+            type="button"
+            className="activity-backdrop"
+            onClick={() => setIsActivityOpen(false)}
+            aria-label="Dismiss realtime activity overlay"
+          />
+        ) : null}
+        <aside
+          ref={activityDrawerRef}
+          id="global-activity-drawer"
+          className={`activity-drawer ${isActivityOpen ? 'open' : ''}`}
+          aria-label="Global realtime activity"
+          onKeyDown={trapActivityFocus}
+        >
           <div className="panel-header">
             <h2>Activity</h2>
-            {isActivityOpen ? <button ref={activityCloseRef} type="button" className="btn-icon" onClick={() => setIsActivityOpen(false)} aria-label="Close realtime activity"><ChevronRight size={16} /></button> : null}
+            {isActivityOpen ? (
+              <button
+                ref={activityCloseRef}
+                type="button"
+                className="btn-icon"
+                onClick={() => setIsActivityOpen(false)}
+                aria-label="Close realtime activity"
+              >
+                <ChevronRight size={16} />
+              </button>
+            ) : null}
           </div>
           {realtime.events.length === 0 ? <p>No realtime events yet.</p> : null}
           <ul aria-live="polite">
@@ -344,7 +453,7 @@ export function AppShell() {
                   {event.strategy_id ? (
                     <EntityLink kind="strategy" id={event.strategy_id} copy={false} />
                   ) : null}
-                  {event.run_id ? <EntityLink kind="run" id={event.run_id} copy={false} /> : null}
+                  {event.run_id ? <EntityLink kind="run" id={event.run_id} tradeDate={event.run_trade_date?.slice(0, 10)} copy={false} /> : null}
                 </div>
               </li>
             ))}
@@ -352,5 +461,5 @@ export function AppShell() {
         </aside>
       </div>
     </div>
-  );
+  )
 }

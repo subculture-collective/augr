@@ -6,7 +6,13 @@ import { describe, expect, it } from 'vitest'
 import App from '@/App'
 import { setTokenSnapshot } from '@/shared/auth/tokenStore'
 import { buildAuthResponse } from '@/test/fixtures'
-import { apiBaseUrl, installAppTestHarness, resetApp, server, state } from '@/test/app-harness'
+import {
+  apiBaseUrl,
+  installAppTestHarness,
+  resetApp,
+  server,
+  state,
+} from '@/test/app-harness'
 
 describe('recovered product surfaces', () => {
   installAppTestHarness()
@@ -16,8 +22,12 @@ describe('recovered product surfaces', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /^event markets$/i })).toBeTruthy()
-    expect(await screen.findByRole('table', { name: /event market providers/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /^event markets$/i }),
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole('table', { name: /event market providers/i }),
+    ).toBeTruthy()
     expect(await screen.findByText('kalshi')).toBeTruthy()
     expect(screen.queryByText('polymarket')).toBeNull()
     expect(screen.getAllByText(/not ready/i)).toHaveLength(1)
@@ -28,13 +38,25 @@ describe('recovered product surfaces', () => {
     state.scenario = 'empty-data'
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
-    expect(await screen.findByText(/no event-market providers are configured/i)).toBeTruthy()
+    expect(
+      await screen.findByText(/no event-market providers are configured/i),
+    ).toBeTruthy()
   })
 
   it('shows the shared Kalshi summary unavailable state', async () => {
     resetApp('/event-markets')
     setTokenSnapshot(buildAuthResponse())
-    server.use(http.get(`${apiBaseUrl}/event-markets/summary`, () => HttpResponse.json({ error: 'event markets not configured', code: 'ERR_NOT_IMPLEMENTED' }, { status: 501 })))
+    server.use(
+      http.get(`${apiBaseUrl}/event-markets/summary`, () =>
+        HttpResponse.json(
+          {
+            error: 'event markets not configured',
+            code: 'ERR_NOT_IMPLEMENTED',
+          },
+          { status: 501 },
+        ),
+      ),
+    )
     render(<App />)
 
     expect(await screen.findByText(/feature unavailable/i)).toBeTruthy()
@@ -46,7 +68,9 @@ describe('recovered product surfaces', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('table', { name: /AAPL options chain/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('table', { name: /AAPL options chain/i }),
+    ).toBeTruthy()
     expect(screen.getByText('AAPL270115C00150000')).toBeTruthy()
     expect(screen.queryByText('AAPL270115P00150000')).toBeNull()
     expect(screen.getByText(/research only/i)).toBeTruthy()
@@ -70,7 +94,14 @@ describe('recovered product surfaces', () => {
   it('shows options provider unavailability explicitly', async () => {
     resetApp('/options?underlying=AAPL')
     setTokenSnapshot(buildAuthResponse())
-    server.use(http.get(`${apiBaseUrl}/options/chain/:underlying`, () => HttpResponse.json({ error: 'options not configured', code: 'ERR_NOT_IMPLEMENTED' }, { status: 501 })))
+    server.use(
+      http.get(`${apiBaseUrl}/options/chain/:underlying`, () =>
+        HttpResponse.json(
+          { error: 'options not configured', code: 'ERR_NOT_IMPLEMENTED' },
+          { status: 501 },
+        ),
+      ),
+    )
     render(<App />)
     expect(await screen.findByText(/feature unavailable/i)).toBeTruthy()
   })
@@ -80,8 +111,12 @@ describe('recovered product surfaces', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('table', { name: /backtest configurations/i })).toBeTruthy()
-    expect(await screen.findByRole('table', { name: /backtest runs/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('table', { name: /backtest configurations/i }),
+    ).toBeTruthy()
+    expect(
+      await screen.findByRole('table', { name: /backtest runs/i }),
+    ).toBeTruthy()
     expect(screen.getByText('AAPL walk-forward')).toBeTruthy()
     expect(screen.getByText('research-v1')).toBeTruthy()
     expect(screen.getByText(/evidence only/i)).toBeTruthy()
@@ -100,7 +135,17 @@ describe('recovered product surfaces', () => {
   it('keeps backtest configurations visible when run history is unavailable', async () => {
     resetApp('/backtests')
     setTokenSnapshot(buildAuthResponse())
-    server.use(http.get(`${apiBaseUrl}/backtests/runs`, () => HttpResponse.json({ error: 'backtest storage unavailable', code: 'ERR_NOT_IMPLEMENTED' }, { status: 501 })))
+    server.use(
+      http.get(`${apiBaseUrl}/backtests/runs`, () =>
+        HttpResponse.json(
+          {
+            error: 'backtest storage unavailable',
+            code: 'ERR_NOT_IMPLEMENTED',
+          },
+          { status: 501 },
+        ),
+      ),
+    )
     render(<App />)
 
     expect(await screen.findByText('AAPL walk-forward')).toBeTruthy()
@@ -112,9 +157,14 @@ describe('recovered product surfaces', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('table', { name: /trade decision journal/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('table', { name: /trade decision journal/i }),
+    ).toBeTruthy()
     expect(screen.getByText('fixture-provider / fixture-model')).toBeTruthy()
-    expect(screen.getByRole('link', { name: /open replay/i })).toHaveAttribute('href', `/replay/decisions/00000000-0000-4000-8000-000000000093`)
+    expect(screen.getByRole('link', { name: /open replay/i })).toHaveAttribute(
+      'href',
+      '/accounts/00000000-0000-4000-8000-000000000001/replay/decisions/00000000-0000-4000-8000-000000000093',
+    )
   })
 
   it('distinguishes an empty journal from an unavailable journal', async () => {
@@ -130,7 +180,9 @@ describe('recovered product surfaces', () => {
     setTokenSnapshot(buildAuthResponse())
     render(<App />)
 
-    expect(await screen.findByRole('heading', { name: /replay workbench/i })).toBeTruthy()
+    expect(
+      await screen.findByRole('heading', { name: /replay workbench/i }),
+    ).toBeTruthy()
     expect(await screen.findByText('decision_created')).toBeTruthy()
     expect(screen.getByText(/"mode": "paper"/i)).toBeTruthy()
   })
@@ -138,7 +190,14 @@ describe('recovered product surfaces', () => {
   it('shows replay dependency unavailability explicitly', async () => {
     resetApp('/replay/decisions/00000000-0000-4000-8000-000000000093')
     setTokenSnapshot(buildAuthResponse())
-    server.use(http.get(`${apiBaseUrl}/replay/decisions/:id`, () => HttpResponse.json({ error: 'replay not configured', code: 'ERR_NOT_IMPLEMENTED' }, { status: 501 })))
+    server.use(
+      http.get(`${apiBaseUrl}/accounts/:accountId/replay/decisions/:id`, () =>
+        HttpResponse.json(
+          { error: 'replay not configured', code: 'ERR_NOT_IMPLEMENTED' },
+          { status: 501 },
+        ),
+      ),
+    )
     render(<App />)
     expect(await screen.findByText(/feature unavailable/i)).toBeTruthy()
   })

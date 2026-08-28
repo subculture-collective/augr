@@ -5,8 +5,10 @@ import { PageHeader } from '@/components/ui/page-header'
 import { getBacktestConfigs, getBacktestRuns } from '@/shared/api/endpoints'
 import { Breadcrumbs, EntityLink } from '@/shared/components/EntityLinks'
 import { EmptyState, ErrorState, LastUpdated, LoadingState } from '@/shared/components/QueryStates'
+import { useAccount } from '@/shared/account/AccountProvider'
 
 export function BacktestsPage() {
+  const { cockpitPath } = useAccount()
   const [searchParams, setSearchParams] = useSearchParams()
   const strategyId = searchParams.get('strategy_id') ?? ''
   const configId = searchParams.get('backtest_config_id') ?? ''
@@ -20,7 +22,7 @@ export function BacktestsPage() {
   }
   return (
     <div className="detail-stack">
-      <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Backtests' }]} />
+      <Breadcrumbs items={[{ label: 'Cockpit', to: cockpitPath }, { label: 'Backtests' }]} />
       <PageHeader eyebrow="Research evidence" title="Backtests" description="Read-only simulation definitions with versioned input fingerprints. Runs use explicit fill assumptions and next-bar execution; paper divergence is available through the strategy-scoped API." actions={<span className="status-pill unknown">Evidence only</span>} />
       <section className="panel" aria-labelledby="backtest-configs-heading">
         <div className="panel-header"><h2 id="backtest-configs-heading">Configurations</h2>{configs.data ? <LastUpdated date={configs.dataUpdatedAt} /> : null}</div>

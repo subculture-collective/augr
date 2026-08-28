@@ -5,7 +5,14 @@ import { useSearchParams } from 'react-router-dom'
 import { getOrders } from '@/shared/api/endpoints'
 import { PageHeader } from '@/components/ui/page-header'
 import { Breadcrumbs, EntityLink } from '@/shared/components/EntityLinks'
-import { EmptyState, ErrorState, LastUpdated, LoadingState, StaleBanner } from '@/shared/components/QueryStates'
+import { useAccount } from '@/shared/account/AccountProvider'
+import {
+  EmptyState,
+  ErrorState,
+  LastUpdated,
+  LoadingState,
+  StaleBanner,
+} from '@/shared/components/QueryStates'
 import { queryKeys } from '@/shared/query/keys'
 import type { Order } from '@/shared/types/domain'
 import { useRealtime } from '@/shared/websocket/RealtimeProvider'
@@ -14,7 +21,11 @@ const pageSize = 20
 
 function money(value?: number) {
   if (value === undefined) return '—'
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(value)
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(value)
 }
 
 function numberValue(value: number) {
@@ -23,12 +34,28 @@ function numberValue(value: number) {
 
 function OrderPill({ value, known }: { value: string; known: string[] }) {
   const normalized = value.replaceAll('_', ' ')
-  return <span className={`status-pill ${known.includes(value) ? value : 'unknown'}`}>{known.includes(value) ? normalized : `Unknown: ${normalized}`}</span>
+  return (
+    <span className={`status-pill ${known.includes(value) ? value : 'unknown'}`}>
+      {known.includes(value) ? normalized : `Unknown: ${normalized}`}
+    </span>
+  )
 }
 
 function OrderInstrument({ order }: { order: Order }) {
   if (order.asset_class !== 'option') return <>{order.ticker}</>
-  return <>{order.ticker}<br /><span className="cell-detail">{order.underlying_ticker ?? 'Unknown underlying'} · {order.option_type ?? 'unknown type'} {order.strike === undefined ? 'unknown strike' : money(order.strike)} · {order.expiry ? new Date(order.expiry).toLocaleDateString() : 'unknown expiry'} · {order.contract_multiplier ?? 'unknown'}× · {order.position_intent ?? 'unknown intent'}{order.leg_group_id ? ` · leg ${order.leg_group_id.slice(0, 8)}` : ''}</span></>
+  return (
+    <>
+      {order.ticker}
+      <br />
+      <span className="cell-detail">
+        {order.underlying_ticker ?? 'Unknown underlying'} · {order.option_type ?? 'unknown type'}{' '}
+        {order.strike === undefined ? 'unknown strike' : money(order.strike)} ·{' '}
+        {order.expiry ? new Date(order.expiry).toLocaleDateString() : 'unknown expiry'} ·{' '}
+        {order.contract_multiplier ?? 'unknown'}× · {order.position_intent ?? 'unknown intent'}
+        {order.leg_group_id ? ` · leg ${order.leg_group_id.slice(0, 8)}` : ''}
+      </span>
+    </>
+  )
 }
 
 function OrdersRows({ orders }: { orders: Order[] }) {
@@ -36,32 +63,98 @@ function OrdersRows({ orders }: { orders: Order[] }) {
     <>
       <div className="table-wrap responsive-table-view">
         <table className="operations-table orders-table" aria-label="Orders">
-          <thead><tr><th>Order</th><th>Ticker</th><th>Side</th><th>Type</th><th>Status</th><th>Quantity</th><th>Filled</th><th>Limit</th><th>Broker</th><th>Created</th></tr></thead>
-          <tbody>{orders.map((order) => (
-            <tr key={order.id}>
-              <td><EntityLink kind="order" id={order.id} />{order.strategy_id ? <><br /><EntityLink kind="strategy" id={order.strategy_id} copy={false} /></> : null}{order.pipeline_run_id ? <><br /><EntityLink kind="run" id={order.pipeline_run_id} copy={false} /></> : null}</td>
-              <td><OrderInstrument order={order} /></td>
-              <td><OrderPill value={order.side} known={['buy', 'sell']} /></td>
-              <td><OrderPill value={order.order_type} known={['market', 'limit', 'stop', 'stop_limit', 'trailing_stop']} /></td>
-              <td><OrderPill value={order.status} known={['pending', 'submitted', 'partial', 'filled', 'cancelled', 'rejected']} /></td>
-              <td>{numberValue(order.quantity)}</td>
-              <td>{numberValue(order.filled_quantity)} {order.filled_avg_price !== undefined ? `@ ${money(order.filled_avg_price)}` : ''}</td>
-              <td>{money(order.limit_price)}</td>
-              <td>{order.broker}</td>
-              <td>{new Date(order.created_at).toLocaleString()}</td>
+          <thead>
+            <tr>
+              <th>Order</th>
+              <th>Ticker</th>
+              <th>Side</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Quantity</th>
+              <th>Filled</th>
+              <th>Limit</th>
+              <th>Broker</th>
+              <th>Created</th>
             </tr>
-          ))}</tbody>
+          </thead>
+          <tbody>
+            {orders.map((order) => (
+              <tr key={order.id}>
+                <td>
+                  <EntityLink kind="order" id={order.id} />
+                  {order.strategy_id ? (
+                    <>
+                      <br />
+                      <EntityLink kind="strategy" id={order.strategy_id} copy={false} />
+                    </>
+                  ) : null}
+                  {order.pipeline_run_id ? (
+                    <>
+                      <br />
+                      <EntityLink kind="run" id={order.pipeline_run_id} tradeDate={order.pipeline_run_trade_date?.slice(0, 10)} copy={false} />
+                    </>
+                  ) : null}
+                </td>
+                <td>
+                  <OrderInstrument order={order} />
+                </td>
+                <td>
+                  <OrderPill value={order.side} known={['buy', 'sell']} />
+                </td>
+                <td>
+                  <OrderPill
+                    value={order.order_type}
+                    known={['market', 'limit', 'stop', 'stop_limit', 'trailing_stop']}
+                  />
+                </td>
+                <td>
+                  <OrderPill
+                    value={order.status}
+                    known={['pending', 'submitted', 'partial', 'filled', 'cancelled', 'rejected']}
+                  />
+                </td>
+                <td>{numberValue(order.quantity)}</td>
+                <td>
+                  {numberValue(order.filled_quantity)}{' '}
+                  {order.filled_avg_price !== undefined ? `@ ${money(order.filled_avg_price)}` : ''}
+                </td>
+                <td>{money(order.limit_price)}</td>
+                <td>{order.broker}</td>
+                <td>{new Date(order.created_at).toLocaleString()}</td>
+              </tr>
+            ))}
+          </tbody>
         </table>
       </div>
       <div className="card-list responsive-card-view" aria-label="Order cards">
         {orders.map((order) => (
           <article className="strategy-card" key={order.id}>
-            <h3><OrderInstrument order={order} /></h3>
-            <p><OrderPill value={order.status} known={['pending', 'submitted', 'partial', 'filled', 'cancelled', 'rejected']} /> · {order.side} · {order.order_type}</p>
-            <p>{numberValue(order.filled_quantity)} / {numberValue(order.quantity)} filled · {order.broker}</p>
+            <h3>
+              <OrderInstrument order={order} />
+            </h3>
+            <p>
+              <OrderPill
+                value={order.status}
+                known={['pending', 'submitted', 'partial', 'filled', 'cancelled', 'rejected']}
+              />{' '}
+              · {order.side} · {order.order_type}
+            </p>
+            <p>
+              {numberValue(order.filled_quantity)} / {numberValue(order.quantity)} filled ·{' '}
+              {order.broker}
+            </p>
             <EntityLink kind="order" id={order.id} label="Open order" copy={false} />
-            {order.strategy_id ? <EntityLink kind="strategy" id={order.strategy_id} label="Open strategy" copy={false} /> : null}
-            {order.pipeline_run_id ? <EntityLink kind="run" id={order.pipeline_run_id} label="Open run" copy={false} /> : null}
+            {order.strategy_id ? (
+              <EntityLink
+                kind="strategy"
+                id={order.strategy_id}
+                label="Open strategy"
+                copy={false}
+              />
+            ) : null}
+            {order.pipeline_run_id ? (
+              <EntityLink kind="run" id={order.pipeline_run_id} tradeDate={order.pipeline_run_trade_date?.slice(0, 10)} label="Open run" copy={false} />
+            ) : null}
           </article>
         ))}
       </div>
@@ -70,29 +163,41 @@ function OrdersRows({ orders }: { orders: Order[] }) {
 }
 
 export function OrdersListPage() {
+  const { account } = useAccount()
   const [searchParams, setSearchParams] = useSearchParams()
   const realtime = useRealtime()
   const [realtimeStale, setRealtimeStale] = useState(false)
   const offset = Number(searchParams.get('offset') ?? '0')
-  const filters = useMemo(() => ({
-    ticker: searchParams.get('ticker') || undefined,
-    broker: searchParams.get('broker') || undefined,
-    market_type: searchParams.get('market_type') || undefined,
-    status: searchParams.get('status') || undefined,
-    side: searchParams.get('side') || undefined,
-    order_type: searchParams.get('order_type') || undefined,
-    limit: pageSize,
-    offset: Number.isFinite(offset) && offset > 0 ? offset : 0,
-  }), [offset, searchParams])
-  const query = useQuery({ queryKey: queryKeys.ordersListFiltered(filters), queryFn: ({ signal }) => getOrders(filters, signal) })
+  const filters = useMemo(
+    () => ({
+      ticker: searchParams.get('ticker') || undefined,
+      broker: searchParams.get('broker') || undefined,
+      market_type: searchParams.get('market_type') || undefined,
+      status: searchParams.get('status') || undefined,
+      side: searchParams.get('side') || undefined,
+      order_type: searchParams.get('order_type') || undefined,
+      limit: pageSize,
+      offset: Number.isFinite(offset) && offset > 0 ? offset : 0,
+    }),
+    [offset, searchParams],
+  )
+  const query = useQuery({
+    queryKey: queryKeys.ordersListFiltered(account.id, filters),
+    queryFn: ({ signal }) => getOrders(account.id, filters, signal),
+  })
   const orders = query.data?.data ?? []
   const total = query.data?.total
   const filledCount = orders.filter((order) => order.status === 'filled').length
-  const workingCount = orders.filter((order) => ['pending', 'submitted', 'partial'].includes(order.status)).length
-  const exceptionCount = orders.filter((order) => ['cancelled', 'rejected'].includes(order.status)).length
+  const workingCount = orders.filter((order) =>
+    ['pending', 'submitted', 'partial'].includes(order.status),
+  ).length
+  const exceptionCount = orders.filter((order) =>
+    ['cancelled', 'rejected'].includes(order.status),
+  ).length
   const brokerCount = new Set(orders.map((order) => order.broker)).size
   const currentOffset = filters.offset ?? 0
-  const hasNext = total === undefined ? orders.length === pageSize : currentOffset + pageSize < total
+  const hasNext =
+    total === undefined ? orders.length === pageSize : currentOffset + pageSize < total
 
   useEffect(() => {
     const latest = realtime.events[0]
@@ -122,27 +227,158 @@ export function OrdersListPage() {
 
   return (
     <div className="detail-stack">
-      <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Orders' }]} />
-      <PageHeader eyebrow="Paper execution ledger" title="Orders" description="Read-only evidence of what the paper brokers accepted, filled, or rejected." actions={<span className="status-pill active">Read-only</span>} />
-      <StaleBanner show={realtimeStale || realtime.status === 'disconnected' || realtime.status === 'degraded'} message="Order rows are read-only and may be stale after realtime order activity." />
+      <Breadcrumbs
+        items={[{ label: 'Cockpit', to: `/accounts/${account.id}/cockpit` }, { label: 'Orders' }]}
+      />
+      <PageHeader
+        eyebrow="Paper execution ledger"
+        title="Orders"
+        description="Read-only evidence of what the paper brokers accepted, filled, or rejected."
+        actions={<span className="status-pill active">Read-only</span>}
+      />
+      <StaleBanner
+        show={realtimeStale || realtime.status === 'disconnected' || realtime.status === 'degraded'}
+        message="Order rows are read-only and may be stale after realtime order activity."
+      />
       <section className="operations-metrics panel" aria-label="Orders on this page">
-        <div><span>Filled</span><strong>{query.data ? filledCount : '—'}</strong></div><div><span>Working</span><strong>{query.data ? workingCount : '—'}</strong></div><div><span>Exceptions</span><strong>{query.data ? exceptionCount : '—'}</strong></div><div><span>Brokers</span><strong>{query.data ? brokerCount : '—'}</strong></div>
+        <div>
+          <span>Filled</span>
+          <strong>{query.data ? filledCount : '—'}</strong>
+        </div>
+        <div>
+          <span>Working</span>
+          <strong>{query.data ? workingCount : '—'}</strong>
+        </div>
+        <div>
+          <span>Exceptions</span>
+          <strong>{query.data ? exceptionCount : '—'}</strong>
+        </div>
+        <div>
+          <span>Brokers</span>
+          <strong>{query.data ? brokerCount : '—'}</strong>
+        </div>
       </section>
       <section className="panel" aria-labelledby="orders-heading">
-        <div className="panel-header"><div><p className="eyebrow">Execution evidence</p><h2 id="orders-heading">Recent orders</h2><p className="muted">Filter by instrument or execution state, then open an order to trace its strategy and run.</p></div>{query.data ? <LastUpdated date={query.dataUpdatedAt} /> : null}</div>
-        <form className="filter-bar" aria-label="Order filters" onSubmit={(event) => event.preventDefault()}>
-          <label>Ticker<input value={searchParams.get('ticker') ?? ''} onChange={(event) => updateFilters({ ticker: event.target.value.toUpperCase() })} placeholder="AUGR" /></label>
-          <label>Status<select value={searchParams.get('status') ?? ''} onChange={(event) => updateFilters({ status: event.target.value })}><option value="">All</option><option value="pending">Pending</option><option value="submitted">Submitted</option><option value="partial">Partial</option><option value="filled">Filled</option><option value="cancelled">Cancelled</option><option value="rejected">Rejected</option></select></label>
-          <label>Side<select value={searchParams.get('side') ?? ''} onChange={(event) => updateFilters({ side: event.target.value })}><option value="">All</option><option value="buy">Buy</option><option value="sell">Sell</option></select></label>
-          <label>Order type<select value={searchParams.get('order_type') ?? ''} onChange={(event) => updateFilters({ order_type: event.target.value })}><option value="">All</option><option value="market">Market</option><option value="limit">Limit</option><option value="stop">Stop</option><option value="stop_limit">Stop limit</option><option value="trailing_stop">Trailing stop</option></select></label>
-          <label>Broker<input value={searchParams.get('broker') ?? ''} onChange={(event) => updateFilters({ broker: event.target.value })} placeholder="paper-broker" /></label>
-          <button type="button" onClick={() => updateFilters({ ticker: '', status: '', side: '', order_type: '', broker: '', market_type: '' })}>Clear filters</button>
+        <div className="panel-header">
+          <div>
+            <p className="eyebrow">Execution evidence</p>
+            <h2 id="orders-heading">Recent orders</h2>
+            <p className="muted">
+              Filter by instrument or execution state, then open an order to trace its strategy and
+              run.
+            </p>
+          </div>
+          {query.data ? <LastUpdated date={query.dataUpdatedAt} /> : null}
+        </div>
+        <form
+          className="filter-bar"
+          aria-label="Order filters"
+          onSubmit={(event) => event.preventDefault()}
+        >
+          <label>
+            Ticker
+            <input
+              value={searchParams.get('ticker') ?? ''}
+              onChange={(event) => updateFilters({ ticker: event.target.value.toUpperCase() })}
+              placeholder="AUGR"
+            />
+          </label>
+          <label>
+            Status
+            <select
+              value={searchParams.get('status') ?? ''}
+              onChange={(event) => updateFilters({ status: event.target.value })}
+            >
+              <option value="">All</option>
+              <option value="pending">Pending</option>
+              <option value="submitted">Submitted</option>
+              <option value="partial">Partial</option>
+              <option value="filled">Filled</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </label>
+          <label>
+            Side
+            <select
+              value={searchParams.get('side') ?? ''}
+              onChange={(event) => updateFilters({ side: event.target.value })}
+            >
+              <option value="">All</option>
+              <option value="buy">Buy</option>
+              <option value="sell">Sell</option>
+            </select>
+          </label>
+          <label>
+            Order type
+            <select
+              value={searchParams.get('order_type') ?? ''}
+              onChange={(event) => updateFilters({ order_type: event.target.value })}
+            >
+              <option value="">All</option>
+              <option value="market">Market</option>
+              <option value="limit">Limit</option>
+              <option value="stop">Stop</option>
+              <option value="stop_limit">Stop limit</option>
+              <option value="trailing_stop">Trailing stop</option>
+            </select>
+          </label>
+          <label>
+            Broker
+            <input
+              value={searchParams.get('broker') ?? ''}
+              onChange={(event) => updateFilters({ broker: event.target.value })}
+              placeholder="paper-broker"
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() =>
+              updateFilters({
+                ticker: '',
+                status: '',
+                side: '',
+                order_type: '',
+                broker: '',
+                market_type: '',
+              })
+            }
+          >
+            Clear filters
+          </button>
         </form>
         {query.isLoading ? <LoadingState label="Loading orders…" /> : null}
-        {query.error ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : null}
-        {query.data && orders.length === 0 ? <EmptyState title="No orders found" message="No orders match these filters." /> : null}
+        {query.error ? (
+          <ErrorState error={query.error} onRetry={() => void query.refetch()} />
+        ) : null}
+        {query.data && orders.length === 0 ? (
+          <EmptyState title="No orders found" message="No orders match these filters." />
+        ) : null}
         {orders.length > 0 ? <OrdersRows orders={orders} /> : null}
-        {orders.length > 0 ? <nav className="pagination-controls" aria-label="Order pagination"><button type="button" className="secondary-button" disabled={currentOffset === 0} onClick={() => setOffset(Math.max(0, currentOffset - pageSize))}>Previous</button><span className="muted">Showing {currentOffset + 1}–{currentOffset + orders.length} {total === undefined ? 'total unavailable' : `of ${total}`}</span><button type="button" className="secondary-button" disabled={!hasNext} onClick={() => setOffset(currentOffset + pageSize)}>Next</button></nav> : null}
+        {orders.length > 0 ? (
+          <nav className="pagination-controls" aria-label="Order pagination">
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={currentOffset === 0}
+              onClick={() => setOffset(Math.max(0, currentOffset - pageSize))}
+            >
+              Previous
+            </button>
+            <span className="muted">
+              Showing {currentOffset + 1}–{currentOffset + orders.length}{' '}
+              {total === undefined ? 'total unavailable' : `of ${total}`}
+            </span>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={!hasNext}
+              onClick={() => setOffset(currentOffset + pageSize)}
+            >
+              Next
+            </button>
+          </nav>
+        ) : null}
       </section>
     </div>
   )

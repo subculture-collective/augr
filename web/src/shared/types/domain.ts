@@ -58,6 +58,21 @@ export type EconomicAccount = {
   created_at: ISODate
 }
 
+export type Account = EconomicAccount
+
+export type PaperEvaluationScope = {
+  id: UUID
+  account_id: UUID
+  label: string
+  start_date: string
+  end_date: string
+  account_config_digest: string
+  strategy_set_digest: string
+  market_data_snapshot_digest: string
+  execution_policy_digest: string
+  created_at: ISODate
+}
+
 export type EconomicCapitalFlow = {
   id: UUID
   account_id: UUID
@@ -178,6 +193,7 @@ export type StrategyLatestRunSummary = {
   status: PipelineStatus
   signal?: PipelineSignal
   started_at: ISODate
+  trade_date?: string
   completed_at?: ISODate
 }
 
@@ -227,7 +243,7 @@ export type ReportArtifact = {
   id: UUID
   strategy_id: UUID
   scope_id?: UUID
-  scope_label: 'scoped' | 'legacy_unscoped'
+  scope_label: 'scoped' | (string & {})
   account_id?: UUID
   backtest_run_id?: UUID
   report_type: string
@@ -266,6 +282,7 @@ export type PipelineRun = {
 export type AgentDecision = {
   id: UUID
   pipeline_run_id: UUID
+  pipeline_run_trade_date?: ISODate
   agent_role: string
   phase: string
   round_number?: number
@@ -287,6 +304,7 @@ export type RunSnapshot = Record<string, RawJson>
 export type AgentEvent = {
   id: UUID
   pipeline_run_id?: UUID
+  pipeline_run_trade_date?: ISODate
   strategy_id?: UUID
   agent_role?: string
   event_kind: string
@@ -322,6 +340,7 @@ export type AllocatorOpportunity = {
   id: UUID
   strategy_id: UUID
   pipeline_run_id?: UUID
+  pipeline_run_trade_date?: ISODate
   market_type: MarketType
   ticker: string
   side: string
@@ -352,6 +371,8 @@ export type AllocationDecision = {
   id: UUID
   opportunity_id?: UUID
   strategy_id?: UUID
+  pipeline_run_id?: UUID
+  pipeline_run_trade_date?: ISODate
   mode: string
   action: string
   score: number
@@ -400,6 +421,7 @@ export type Order = {
   id: UUID
   strategy_id?: UUID
   pipeline_run_id?: UUID
+  pipeline_run_trade_date?: ISODate
   external_id?: string
   ticker: string
   market_type?: MarketType
@@ -507,7 +529,7 @@ export type RiskCockpitExposure = {
 }
 
 export type RiskCockpitSummary = {
-	scope: 'legacy_unscoped'
+	scope: string
   generated_at: ISODate
   kill_switch_active: boolean
   circuit_breaker: boolean
@@ -697,6 +719,7 @@ export type TradeDecision = {
   id: UUID
   strategy_id?: UUID
   pipeline_run_id?: UUID
+  pipeline_run_trade_date?: ISODate
   market_type: string
   instrument_key: string
   external_market_id?: string
@@ -843,6 +866,7 @@ export type CopyTradeIntent = {
   subscription_id: UUID
   source_observation_id: UUID
   pipeline_run_id?: UUID
+  pipeline_run_trade_date?: ISODate
   instrument_key: string
   ticker: string
   side: string

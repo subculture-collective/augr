@@ -58,10 +58,12 @@ import {
   milestoneAssessmentSchema,
   releaseReadinessSchema,
   cutoverStatusSchema,
+  accountSchema,
+  paperEvaluationScopeSchema,
 } from '@/shared/api/schemas'
 import type { ListResponse, PortfolioSummary } from '@/shared/types/api'
 import type { AuthResponse, LoginRequest } from '@/shared/types/auth'
-import type { AgentDecision, AgentEvent, AllocationDecision, AllocatorDiagnostics, AllocatorOpportunity, AllocatorSummary, AutomationHealthResponse, AutomationJobRun, AutomationJobStatus, BacktestConfig, BacktestRun, BreakerResetRequest, BreakerResetResponse, CopyLeader, CopyLeaderDetail, CopyLeaderSource, CopyPreview, CopyRebalanceResult, CopyRefreshResult, CopySubscription, CopyTradeIntent, CutoverStatus, EconomicAccount, EconomicCapitalFlow, EconomicCapitalSummary, EconomicLedgerTransaction, EventMarketsSummaryResponse, HealthStatusResponse, KillSwitchToggleRequest, KillSwitchToggleResponse, MarketKillSwitchRequest, MarketKillSwitchResponse, MilestoneAssessment, OptionSnapshot, Order, OrderDetailResponse, PipelineRun, PolymarketDataStatus, Position, ReleaseReadiness, ReplayDecision, ReportArtifact, ReportLatestResponse, RiskBreakersResponse, RiskCockpitSummary, RiskEngineStatus, RunSnapshot, Strategy, StrategyCreateRequest, StrategyRunAcceptedResponse, StrategyUpdateRequest, Trade, TradeDecision, User } from '@/shared/types/domain'
+import type { Account, AgentDecision, AgentEvent, AllocationDecision, AllocatorDiagnostics, AllocatorOpportunity, AllocatorSummary, AutomationHealthResponse, AutomationJobRun, AutomationJobStatus, BacktestConfig, BacktestRun, BreakerResetRequest, BreakerResetResponse, CopyLeader, CopyLeaderDetail, CopyLeaderSource, CopyPreview, CopyRebalanceResult, CopyRefreshResult, CopySubscription, CopyTradeIntent, CutoverStatus, EconomicAccount, EconomicCapitalFlow, EconomicCapitalSummary, EconomicLedgerTransaction, EventMarketsSummaryResponse, HealthStatusResponse, KillSwitchToggleRequest, KillSwitchToggleResponse, MarketKillSwitchRequest, MarketKillSwitchResponse, MilestoneAssessment, OptionSnapshot, Order, OrderDetailResponse, PaperEvaluationScope, PipelineRun, PolymarketDataStatus, Position, ReleaseReadiness, ReplayDecision, ReportArtifact, ReportLatestResponse, RiskBreakersResponse, RiskCockpitSummary, RiskEngineStatus, RunSnapshot, Strategy, StrategyCreateRequest, StrategyRunAcceptedResponse, StrategyUpdateRequest, Trade, TradeDecision, User } from '@/shared/types/domain'
 import type { SettingsResponse } from '@/shared/types/settings'
 
 export type StrategyListParams = {
@@ -73,16 +75,13 @@ export type StrategyListParams = {
   offset?: number
 }
 
-export type ReportScopeSelector =
-  | { account_id: string; scope_id: string; legacy?: never }
-  | { legacy: 'legacy_unscoped'; account_id?: never; scope_id?: never }
-
 export type StrategyReportListParams = {
+  evidence_scope_id: string
   report_type?: string
   status?: string
   limit?: number
   offset?: number
-} & ReportScopeSelector
+}
 
 export type RunListParams = {
   status?: string
@@ -186,6 +185,14 @@ export function getCurrentUser(signal?: AbortSignal): Promise<User> {
   return api.get<User>('/me', { schema: userSchema as never, signal })
 }
 
+export function getCurrentAccounts(signal?: AbortSignal): Promise<Account[]> {
+  return api.get<Account[]>('/me/accounts', { schema: accountSchema.array() as never, signal })
+}
+
+function accountPath(accountId: string, path: string) {
+  return `/accounts/${encodeURIComponent(accountId)}${path}`
+}
+
 export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
   return api.get<SettingsResponse>('/settings', { schema: settingsResponseSchema as never, signal })
 }
@@ -198,24 +205,24 @@ export function getCutoverStatus(signal?: AbortSignal): Promise<CutoverStatus> {
   return api.get<CutoverStatus>('/release/cutover-status', { schema: cutoverStatusSchema as never, signal })
 }
 
-export function getEconomicAccounts(signal?: AbortSignal): Promise<ListResponse<EconomicAccount>> {
-  return api.get<ListResponse<EconomicAccount>>('/economic/accounts?limit=100&offset=0', { schema: listResponseSchema(economicAccountSchema) as never, signal })
+export function getEconomicAccounts(accountId: string, signal?: AbortSignal): Promise<ListResponse<EconomicAccount>> {
+  return api.get<ListResponse<EconomicAccount>>(accountPath(accountId, '/economic/accounts?limit=100&offset=0'), { schema: listResponseSchema(economicAccountSchema) as never, signal })
 }
 
-export function getEconomicAccount(id: string, signal?: AbortSignal): Promise<EconomicAccount> {
-  return api.get<EconomicAccount>(`/economic/accounts/${encodeURIComponent(id)}`, { schema: economicAccountSchema as never, signal })
+export function getEconomicAccount(accountId: string, id: string, signal?: AbortSignal): Promise<EconomicAccount> {
+  return api.get<EconomicAccount>(accountPath(accountId, `/economic/accounts/${encodeURIComponent(id)}`), { schema: economicAccountSchema as never, signal })
 }
 
-export function getEconomicCapitalSummary(id: string, signal?: AbortSignal): Promise<EconomicCapitalSummary> {
-  return api.get<EconomicCapitalSummary>(`/economic/accounts/${encodeURIComponent(id)}/capital-summary`, { schema: economicCapitalSummarySchema as never, signal })
+export function getEconomicCapitalSummary(accountId: string, id: string, signal?: AbortSignal): Promise<EconomicCapitalSummary> {
+  return api.get<EconomicCapitalSummary>(accountPath(accountId, `/economic/accounts/${encodeURIComponent(id)}/capital-summary`), { schema: economicCapitalSummarySchema as never, signal })
 }
 
-export function getEconomicCapitalFlows(id: string, signal?: AbortSignal): Promise<ListResponse<EconomicCapitalFlow>> {
-  return api.get<ListResponse<EconomicCapitalFlow>>(`/economic/accounts/${encodeURIComponent(id)}/capital-flows?limit=100&offset=0`, { schema: listResponseSchema(economicCapitalFlowSchema) as never, signal })
+export function getEconomicCapitalFlows(accountId: string, id: string, signal?: AbortSignal): Promise<ListResponse<EconomicCapitalFlow>> {
+  return api.get<ListResponse<EconomicCapitalFlow>>(accountPath(accountId, `/economic/accounts/${encodeURIComponent(id)}/capital-flows?limit=100&offset=0`), { schema: listResponseSchema(economicCapitalFlowSchema) as never, signal })
 }
 
-export function getEconomicLedgerTransaction(id: string, signal?: AbortSignal): Promise<EconomicLedgerTransaction> {
-  return api.get<EconomicLedgerTransaction>(`/economic/ledger-transactions/${encodeURIComponent(id)}`, { schema: economicLedgerTransactionSchema as never, signal })
+export function getEconomicLedgerTransaction(accountId: string, id: string, signal?: AbortSignal): Promise<EconomicLedgerTransaction> {
+  return api.get<EconomicLedgerTransaction>(accountPath(accountId, `/economic/ledger-transactions/${encodeURIComponent(id)}`), { schema: economicLedgerTransactionSchema as never, signal })
 }
 
 export function getMilestoneAssessment(id: string, signal?: AbortSignal): Promise<MilestoneAssessment> {
@@ -242,20 +249,20 @@ export function getBacktestRuns(params: { backtest_config_id?: string; limit?: n
   return api.get<ListResponse<BacktestRun>>(`/backtests/runs${buildQuery(params)}`, { schema: listResponseSchema(backtestRunSchema) as never, signal })
 }
 
-export function getTradeDecisions(params: { strategy_id?: string; market_type?: string; status?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal): Promise<ListResponse<TradeDecision>> {
-  return api.get<ListResponse<TradeDecision>>(`/journal/decisions${buildQuery(params)}`, { schema: listResponseSchema(tradeDecisionSchema) as never, signal })
+export function getTradeDecisions(accountId: string, params: { strategy_id?: string; market_type?: string; status?: string; limit?: number; offset?: number } = {}, signal?: AbortSignal): Promise<ListResponse<TradeDecision>> {
+  return api.get<ListResponse<TradeDecision>>(accountPath(accountId, `/journal/decisions${buildQuery(params)}`), { schema: listResponseSchema(tradeDecisionSchema) as never, signal })
 }
 
-export function getDecisionReplay(id: string, signal?: AbortSignal): Promise<ReplayDecision> {
-  return api.get<ReplayDecision>(`/replay/decisions/${encodeURIComponent(id)}`, { schema: replayDecisionSchema as never, signal })
+export function getDecisionReplay(accountId: string, id: string, signal?: AbortSignal): Promise<ReplayDecision> {
+  return api.get<ReplayDecision>(accountPath(accountId, `/replay/decisions/${encodeURIComponent(id)}`), { schema: replayDecisionSchema as never, signal })
 }
 
-export function getRiskStatus(signal?: AbortSignal): Promise<RiskEngineStatus> {
-  return api.get<RiskEngineStatus>('/risk/status', { schema: riskEngineStatusSchema as never, signal })
+export function getRiskStatus(accountId: string, signal?: AbortSignal): Promise<RiskEngineStatus> {
+  return api.get<RiskEngineStatus>(accountPath(accountId, '/risk/status'), { schema: riskEngineStatusSchema as never, signal })
 }
 
-export function getRiskCockpit(signal?: AbortSignal): Promise<RiskCockpitSummary> {
-  return api.get<RiskCockpitSummary>('/risk/cockpit', { schema: riskCockpitSummarySchema as never, signal })
+export function getRiskCockpit(accountId: string, signal?: AbortSignal): Promise<RiskCockpitSummary> {
+  return api.get<RiskCockpitSummary>(accountPath(accountId, '/risk/cockpit'), { schema: riskCockpitSummarySchema as never, signal })
 }
 
 export function getRiskBreakers(signal?: AbortSignal): Promise<RiskBreakersResponse> {
@@ -299,68 +306,68 @@ export function resetRiskBreaker(request: BreakerResetRequest, adminKey: string,
   })
 }
 
-export function getPortfolioSummary(signal?: AbortSignal): Promise<PortfolioSummary> {
-  return api.get<PortfolioSummary>('/portfolio/summary', { schema: portfolioSummarySchema as never, signal })
+export function getPortfolioSummary(accountId: string, signal?: AbortSignal): Promise<PortfolioSummary> {
+  return api.get<PortfolioSummary>(accountPath(accountId, '/portfolio/summary'), { schema: portfolioSummarySchema as never, signal })
 }
 
-export function getPortfolioPositions(params: PortfolioPositionListParams = {}, signal?: AbortSignal): Promise<ListResponse<Position>> {
-  return api.get<ListResponse<Position>>(`/portfolio/positions${buildQuery(params)}`, { schema: listResponseSchema(positionSchema) as never, signal })
+export function getPortfolioPositions(accountId: string, params: PortfolioPositionListParams = {}, signal?: AbortSignal): Promise<ListResponse<Position>> {
+  return api.get<ListResponse<Position>>(accountPath(accountId, `/portfolio/positions${buildQuery(params)}`), { schema: listResponseSchema(positionSchema) as never, signal })
 }
 
-export function getOpenPortfolioPositions(params: PortfolioPositionListParams = {}, signal?: AbortSignal): Promise<ListResponse<Position>> {
-  return api.get<ListResponse<Position>>(`/portfolio/positions/open${buildQuery(params)}`, { schema: listResponseSchema(positionSchema) as never, signal })
+export function getOpenPortfolioPositions(accountId: string, params: PortfolioPositionListParams = {}, signal?: AbortSignal): Promise<ListResponse<Position>> {
+  return api.get<ListResponse<Position>>(accountPath(accountId, `/portfolio/positions/open${buildQuery(params)}`), { schema: listResponseSchema(positionSchema) as never, signal })
 }
 
-export function getAllocatorDiagnostics(signal?: AbortSignal): Promise<AllocatorDiagnostics> {
-  return api.get<AllocatorDiagnostics>('/portfolio/allocator/diagnostics', { schema: allocatorDiagnosticsSchema as never, signal })
+export function getAllocatorDiagnostics(accountId: string, signal?: AbortSignal): Promise<AllocatorDiagnostics> {
+  return api.get<AllocatorDiagnostics>(accountPath(accountId, '/portfolio/allocator/diagnostics'), { schema: allocatorDiagnosticsSchema as never, signal })
 }
 
-export function getAllocatorSummary(signal?: AbortSignal): Promise<AllocatorSummary> {
-  return api.get<AllocatorSummary>('/portfolio/allocator/summary', { schema: allocatorSummarySchema as never, signal })
+export function getAllocatorSummary(accountId: string, signal?: AbortSignal): Promise<AllocatorSummary> {
+  return api.get<AllocatorSummary>(accountPath(accountId, '/portfolio/allocator/summary'), { schema: allocatorSummarySchema as never, signal })
 }
 
-export function getAllocatorOpportunities(params: AllocatorOpportunityListParams = {}, signal?: AbortSignal): Promise<ListResponse<AllocatorOpportunity>> {
-  return api.get<ListResponse<AllocatorOpportunity>>(`/portfolio/allocator/opportunities${buildQuery(params)}`, { schema: listResponseSchema(allocatorOpportunitySchema) as never, signal })
+export function getAllocatorOpportunities(accountId: string, params: AllocatorOpportunityListParams = {}, signal?: AbortSignal): Promise<ListResponse<AllocatorOpportunity>> {
+  return api.get<ListResponse<AllocatorOpportunity>>(accountPath(accountId, `/portfolio/allocator/opportunities${buildQuery(params)}`), { schema: listResponseSchema(allocatorOpportunitySchema) as never, signal })
 }
 
-export function getAllocationDecisions(params: AllocationDecisionListParams = {}, signal?: AbortSignal): Promise<ListResponse<AllocationDecision>> {
-  return api.get<ListResponse<AllocationDecision>>(`/portfolio/allocator/decisions${buildQuery(params)}`, { schema: listResponseSchema(allocationDecisionSchema) as never, signal })
+export function getAllocationDecisions(accountId: string, params: AllocationDecisionListParams = {}, signal?: AbortSignal): Promise<ListResponse<AllocationDecision>> {
+  return api.get<ListResponse<AllocationDecision>>(accountPath(accountId, `/portfolio/allocator/decisions${buildQuery(params)}`), { schema: listResponseSchema(allocationDecisionSchema) as never, signal })
 }
 
-export function getRunningRuns(signal?: AbortSignal): Promise<ListResponse<PipelineRun>> {
-  return api.get<ListResponse<PipelineRun>>('/runs?status=running', { schema: listResponseSchema(pipelineRunSchema) as never, signal })
+export function getRunningRuns(accountId: string, signal?: AbortSignal): Promise<ListResponse<PipelineRun>> {
+  return api.get<ListResponse<PipelineRun>>(accountPath(accountId, '/runs?status=running'), { schema: listResponseSchema(pipelineRunSchema) as never, signal })
 }
 
-export function getRuns(params: RunListParams = {}, signal?: AbortSignal): Promise<ListResponse<PipelineRun>> {
-  return api.get<ListResponse<PipelineRun>>(`/runs${buildQuery(params)}`, { schema: listResponseSchema(pipelineRunSchema) as never, signal })
+export function getRuns(accountId: string, params: RunListParams = {}, signal?: AbortSignal): Promise<ListResponse<PipelineRun>> {
+  return api.get<ListResponse<PipelineRun>>(accountPath(accountId, `/runs${buildQuery(params)}`), { schema: listResponseSchema(pipelineRunSchema) as never, signal })
 }
 
-export function getRun(id: string, signal?: AbortSignal): Promise<PipelineRun> {
-  return api.get<PipelineRun>(`/runs/${encodeURIComponent(id)}`, { schema: pipelineRunSchema as never, signal })
+export function getRun(accountId: string, id: string, tradeDate: string, signal?: AbortSignal): Promise<PipelineRun> {
+  return api.get<PipelineRun>(accountPath(accountId, `/runs/${encodeURIComponent(id)}${buildQuery({ trade_date: tradeDate })}`), { schema: pipelineRunSchema as never, signal })
 }
 
-export function getRunDecisions(id: string, params: RunDecisionListParams = {}, signal?: AbortSignal): Promise<ListResponse<AgentDecision>> {
-  return api.get<ListResponse<AgentDecision>>(`/runs/${encodeURIComponent(id)}/decisions${buildQuery(params)}`, { schema: listResponseSchema(agentDecisionSchema) as never, signal })
+export function getRunDecisions(accountId: string, id: string, tradeDate: string, params: RunDecisionListParams = {}, signal?: AbortSignal): Promise<ListResponse<AgentDecision>> {
+  return api.get<ListResponse<AgentDecision>>(accountPath(accountId, `/runs/${encodeURIComponent(id)}/decisions${buildQuery({ trade_date: tradeDate, ...params })}`), { schema: listResponseSchema(agentDecisionSchema) as never, signal })
 }
 
-export function getRunSnapshot(id: string, signal?: AbortSignal): Promise<RunSnapshot> {
-  return api.get<RunSnapshot>(`/runs/${encodeURIComponent(id)}/snapshot`, { schema: runSnapshotSchema as never, signal })
+export function getRunSnapshot(accountId: string, id: string, tradeDate: string, signal?: AbortSignal): Promise<RunSnapshot> {
+  return api.get<RunSnapshot>(accountPath(accountId, `/runs/${encodeURIComponent(id)}/snapshot${buildQuery({ trade_date: tradeDate })}`), { schema: runSnapshotSchema as never, signal })
 }
 
-export function getEvents(params: EventListParams = {}, signal?: AbortSignal): Promise<ListResponse<AgentEvent>> {
-  return api.get<ListResponse<AgentEvent>>(`/events${buildQuery(params)}`, { schema: listResponseSchema(agentEventSchema) as never, signal })
+export function getEvents(accountId: string, params: EventListParams = {}, signal?: AbortSignal): Promise<ListResponse<AgentEvent>> {
+  return api.get<ListResponse<AgentEvent>>(accountPath(accountId, `/events${buildQuery(params)}`), { schema: listResponseSchema(agentEventSchema) as never, signal })
 }
 
-export function getOrders(params: OrderListParams = {}, signal?: AbortSignal): Promise<ListResponse<Order>> {
-  return api.get<ListResponse<Order>>(`/orders${buildQuery(params)}`, { schema: listResponseSchema(orderSchema) as never, signal })
+export function getOrders(accountId: string, params: OrderListParams = {}, signal?: AbortSignal): Promise<ListResponse<Order>> {
+  return api.get<ListResponse<Order>>(accountPath(accountId, `/orders${buildQuery(params)}`), { schema: listResponseSchema(orderSchema) as never, signal })
 }
 
-export function getOrder(id: string, signal?: AbortSignal): Promise<OrderDetailResponse> {
-  return api.get<OrderDetailResponse>(`/orders/${encodeURIComponent(id)}`, { schema: orderDetailResponseSchema as never, signal })
+export function getOrder(accountId: string, id: string, signal?: AbortSignal): Promise<OrderDetailResponse> {
+  return api.get<OrderDetailResponse>(accountPath(accountId, `/orders/${encodeURIComponent(id)}`), { schema: orderDetailResponseSchema as never, signal })
 }
 
-export function getTrades(params: TradeListParams = {}, signal?: AbortSignal): Promise<ListResponse<Trade>> {
-  return api.get<ListResponse<Trade>>(`/trades${buildQuery(params)}`, { schema: listResponseSchema(tradeSchema) as never, signal })
+export function getTrades(accountId: string, params: TradeListParams = {}, signal?: AbortSignal): Promise<ListResponse<Trade>> {
+  return api.get<ListResponse<Trade>>(accountPath(accountId, `/trades${buildQuery(params)}`), { schema: listResponseSchema(tradeSchema) as never, signal })
 }
 
 export function getAutomationHealth(signal?: AbortSignal): Promise<AutomationHealthResponse> {
@@ -387,58 +394,58 @@ export function getHealth(signal?: AbortSignal): Promise<HealthStatusResponse> {
   return api.get<HealthStatusResponse>('/health', { schema: healthStatusResponseSchema as never, signal, auth: false })
 }
 
-export function getCopyLeaders(signal?: AbortSignal): Promise<ListResponse<CopyLeader>> {
-  return api.get<ListResponse<CopyLeader>>('/copy-trading/leaders?limit=100&offset=0', { schema: listResponseSchema(copyLeaderSchema) as never, signal })
+export function getCopyLeaders(accountId: string, signal?: AbortSignal): Promise<ListResponse<CopyLeader>> {
+  return api.get<ListResponse<CopyLeader>>(accountPath(accountId, '/copy-trading/leaders?limit=100&offset=0'), { schema: listResponseSchema(copyLeaderSchema) as never, signal })
 }
 
-export function createCopyLeader(request: Pick<CopyLeader, 'entity_type' | 'display_name'> & { sec_cik?: string }, signal?: AbortSignal): Promise<CopyLeader> {
-  return api.post<CopyLeader>('/copy-trading/leaders', request, { schema: copyLeaderSchema as never, signal, retryOnUnauthorized: false })
+export function createCopyLeader(accountId: string, request: Pick<CopyLeader, 'entity_type' | 'display_name'> & { sec_cik?: string }, signal?: AbortSignal): Promise<CopyLeader> {
+  return api.post<CopyLeader>(accountPath(accountId, '/copy-trading/leaders'), request, { schema: copyLeaderSchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function getCopyLeader(id: string, signal?: AbortSignal): Promise<CopyLeaderDetail> {
-  return api.get<CopyLeaderDetail>(`/copy-trading/leaders/${encodeURIComponent(id)}`, { schema: copyLeaderDetailSchema as never, signal })
+export function getCopyLeader(accountId: string, id: string, signal?: AbortSignal): Promise<CopyLeaderDetail> {
+  return api.get<CopyLeaderDetail>(accountPath(accountId, `/copy-trading/leaders/${encodeURIComponent(id)}`), { schema: copyLeaderDetailSchema as never, signal })
 }
 
-export function addCopySource(leaderId: string, request: Pick<CopyLeaderSource, 'provider' | 'source_type' | 'external_key'>, signal?: AbortSignal): Promise<CopyLeaderSource> {
-  return api.post<CopyLeaderSource>(`/copy-trading/leaders/${encodeURIComponent(leaderId)}/sources`, request, { schema: copyLeaderSourceSchema as never, signal, retryOnUnauthorized: false })
+export function addCopySource(accountId: string, leaderId: string, request: Pick<CopyLeaderSource, 'provider' | 'source_type' | 'external_key'>, signal?: AbortSignal): Promise<CopyLeaderSource> {
+  return api.post<CopyLeaderSource>(accountPath(accountId, `/copy-trading/leaders/${encodeURIComponent(leaderId)}/sources`), request, { schema: copyLeaderSourceSchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function refreshCopySource(sourceId: string, signal?: AbortSignal): Promise<CopyRefreshResult> {
-  return api.post<CopyRefreshResult>(`/copy-trading/sources/${encodeURIComponent(sourceId)}/refresh`, undefined, { schema: copyRefreshResultSchema as never, signal, retryOnUnauthorized: false })
+export function refreshCopySource(accountId: string, sourceId: string, signal?: AbortSignal): Promise<CopyRefreshResult> {
+  return api.post<CopyRefreshResult>(accountPath(accountId, `/copy-trading/sources/${encodeURIComponent(sourceId)}/refresh`), undefined, { schema: copyRefreshResultSchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function upsertCopyMapping(request: { provider: string; identifier_type: string; identifier_value: string; instrument_key?: string; ticker: string; confidence?: string; mapping_method?: string }, signal?: AbortSignal) {
-  return api.put('/copy-trading/mappings', request, { signal, retryOnUnauthorized: false })
+export function upsertCopyMapping(accountId: string, request: { provider: string; identifier_type: string; identifier_value: string; instrument_key?: string; ticker: string; confidence?: string; mapping_method?: string }, signal?: AbortSignal) {
+  return api.put(accountPath(accountId, '/copy-trading/mappings'), request, { signal, retryOnUnauthorized: false })
 }
 
-export function getCopySubscriptions(signal?: AbortSignal): Promise<ListResponse<CopySubscription>> {
-  return api.get<ListResponse<CopySubscription>>('/copy-trading/subscriptions?limit=100&offset=0', { schema: listResponseSchema(copySubscriptionSchema) as never, signal })
+export function getCopySubscriptions(accountId: string, signal?: AbortSignal): Promise<ListResponse<CopySubscription>> {
+  return api.get<ListResponse<CopySubscription>>(accountPath(accountId, '/copy-trading/subscriptions?limit=100&offset=0'), { schema: listResponseSchema(copySubscriptionSchema) as never, signal })
 }
 
 export type CopySubscriptionCreateRequest = Pick<CopySubscription, 'leader_id' | 'source_id' | 'capital_budget' | 'cash_buffer_pct' | 'top_n' | 'min_source_weight' | 'max_position_weight' | 'max_turnover_pct' | 'min_price' | 'min_avg_dollar_volume' | 'max_spread_bps'> & { is_paper: true; method: 'target_weight'; stock_allowlist?: string[]; stock_blocklist?: string[] }
 
-export function createCopySubscription(request: CopySubscriptionCreateRequest, signal?: AbortSignal): Promise<CopySubscription> {
-  return api.post<CopySubscription>('/copy-trading/subscriptions', request, { schema: copySubscriptionSchema as never, signal, retryOnUnauthorized: false })
+export function createCopySubscription(accountId: string, request: CopySubscriptionCreateRequest, signal?: AbortSignal): Promise<CopySubscription> {
+  return api.post<CopySubscription>(accountPath(accountId, '/copy-trading/subscriptions'), request, { schema: copySubscriptionSchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function getCopySubscription(id: string, signal?: AbortSignal): Promise<CopySubscription> {
-  return api.get<CopySubscription>(`/copy-trading/subscriptions/${encodeURIComponent(id)}`, { schema: copySubscriptionSchema as never, signal })
+export function getCopySubscription(accountId: string, id: string, signal?: AbortSignal): Promise<CopySubscription> {
+  return api.get<CopySubscription>(accountPath(accountId, `/copy-trading/subscriptions/${encodeURIComponent(id)}`), { schema: copySubscriptionSchema as never, signal })
 }
 
-export function previewCopySubscription(id: string, signal?: AbortSignal): Promise<CopyPreview> {
-  return api.post<CopyPreview>(`/copy-trading/subscriptions/${encodeURIComponent(id)}/preview`, undefined, { schema: copyPreviewSchema as never, signal, retryOnUnauthorized: false })
+export function previewCopySubscription(accountId: string, id: string, signal?: AbortSignal): Promise<CopyPreview> {
+  return api.post<CopyPreview>(accountPath(accountId, `/copy-trading/subscriptions/${encodeURIComponent(id)}/preview`), undefined, { schema: copyPreviewSchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function setCopySubscriptionStatus(id: string, action: 'activate' | 'pause' | 'resume' | 'stop', signal?: AbortSignal): Promise<CopySubscription> {
-  return api.post<CopySubscription>(`/copy-trading/subscriptions/${encodeURIComponent(id)}/${action}`, undefined, { schema: copySubscriptionSchema as never, signal, retryOnUnauthorized: false })
+export function setCopySubscriptionStatus(accountId: string, id: string, action: 'activate' | 'pause' | 'resume' | 'stop', signal?: AbortSignal): Promise<CopySubscription> {
+  return api.post<CopySubscription>(accountPath(accountId, `/copy-trading/subscriptions/${encodeURIComponent(id)}/${action}`), undefined, { schema: copySubscriptionSchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function rebalanceCopySubscription(id: string, signal?: AbortSignal): Promise<CopyRebalanceResult> {
-  return api.post<CopyRebalanceResult>(`/copy-trading/subscriptions/${encodeURIComponent(id)}/rebalance`, undefined, { schema: copyRebalanceResultSchema as never, signal, retryOnUnauthorized: false })
+export function rebalanceCopySubscription(accountId: string, id: string, signal?: AbortSignal): Promise<CopyRebalanceResult> {
+  return api.post<CopyRebalanceResult>(accountPath(accountId, `/copy-trading/subscriptions/${encodeURIComponent(id)}/rebalance`), undefined, { schema: copyRebalanceResultSchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function getCopyIntents(id: string, signal?: AbortSignal): Promise<ListResponse<CopyTradeIntent>> {
-  return api.get<ListResponse<CopyTradeIntent>>(`/copy-trading/subscriptions/${encodeURIComponent(id)}/intents?limit=100&offset=0`, { schema: listResponseSchema(copyTradeIntentSchema) as never, signal })
+export function getCopyIntents(accountId: string, id: string, signal?: AbortSignal): Promise<ListResponse<CopyTradeIntent>> {
+  return api.get<ListResponse<CopyTradeIntent>>(accountPath(accountId, `/copy-trading/subscriptions/${encodeURIComponent(id)}/intents?limit=100&offset=0`), { schema: listResponseSchema(copyTradeIntentSchema) as never, signal })
 }
 
 export function getStrategy(id: string, signal?: AbortSignal): Promise<Strategy> {
@@ -463,26 +470,30 @@ export function deleteStrategy(id: string, signal?: AbortSignal): Promise<void> 
   return api.delete<void>(`/strategies/${encodeURIComponent(id)}`, { signal, retryOnUnauthorized: false })
 }
 
-export function getLatestStrategyReport(id: string, scope: ReportScopeSelector, reportType = 'paper_validation', signal?: AbortSignal): Promise<ReportLatestResponse> {
-  return api.get<ReportLatestResponse>(`/strategies/${encodeURIComponent(id)}/reports/latest${buildQuery({ report_type: reportType, ...scope })}`, { schema: reportLatestResponseSchema as never, signal })
+export function getPaperEvaluationScopes(accountId: string, signal?: AbortSignal): Promise<PaperEvaluationScope[]> {
+  return api.get<PaperEvaluationScope[]>(accountPath(accountId, '/paper-evaluation-scopes'), { schema: paperEvaluationScopeSchema.array() as never, signal })
 }
 
-export function getStrategyReports(id: string, params: StrategyReportListParams, signal?: AbortSignal): Promise<ListResponse<ReportArtifact>> {
-  return api.get<ListResponse<ReportArtifact>>(`/strategies/${encodeURIComponent(id)}/reports${buildQuery(params)}`, { schema: listResponseSchema(reportArtifactSchema) as never, signal })
+export function getLatestStrategyReport(accountId: string, id: string, evidenceScopeId: string, reportType = 'paper_validation', signal?: AbortSignal): Promise<ReportLatestResponse> {
+  return api.get<ReportLatestResponse>(accountPath(accountId, `/strategies/${encodeURIComponent(id)}/reports/latest${buildQuery({ report_type: reportType, evidence_scope_id: evidenceScopeId })}`), { schema: reportLatestResponseSchema as never, signal })
 }
 
-export function pauseStrategy(id: string, signal?: AbortSignal): Promise<Strategy> {
-  return api.post<Strategy>(`/strategies/${encodeURIComponent(id)}/pause`, undefined, { schema: strategySchema as never, signal, retryOnUnauthorized: false })
+export function getStrategyReports(accountId: string, id: string, params: StrategyReportListParams, signal?: AbortSignal): Promise<ListResponse<ReportArtifact>> {
+  return api.get<ListResponse<ReportArtifact>>(accountPath(accountId, `/strategies/${encodeURIComponent(id)}/reports${buildQuery(params)}`), { schema: listResponseSchema(reportArtifactSchema) as never, signal })
 }
 
-export function resumeStrategy(id: string, signal?: AbortSignal): Promise<Strategy> {
-  return api.post<Strategy>(`/strategies/${encodeURIComponent(id)}/resume`, undefined, { schema: strategySchema as never, signal, retryOnUnauthorized: false })
+export function pauseStrategy(accountId: string, id: string, signal?: AbortSignal): Promise<Strategy> {
+  return api.post<Strategy>(accountPath(accountId, `/strategies/${encodeURIComponent(id)}/pause`), undefined, { schema: strategySchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function skipNextStrategy(id: string, signal?: AbortSignal): Promise<Strategy> {
-  return api.post<Strategy>(`/strategies/${encodeURIComponent(id)}/skip-next`, undefined, { schema: strategySchema as never, signal, retryOnUnauthorized: false })
+export function resumeStrategy(accountId: string, id: string, signal?: AbortSignal): Promise<Strategy> {
+  return api.post<Strategy>(accountPath(accountId, `/strategies/${encodeURIComponent(id)}/resume`), undefined, { schema: strategySchema as never, signal, retryOnUnauthorized: false })
 }
 
-export function runStrategy(id: string, signal?: AbortSignal): Promise<StrategyRunAcceptedResponse> {
-  return api.post<StrategyRunAcceptedResponse>(`/strategies/${encodeURIComponent(id)}/run`, undefined, { schema: strategyRunAcceptedResponseSchema as never, signal, retryOnUnauthorized: false })
+export function skipNextStrategy(accountId: string, id: string, signal?: AbortSignal): Promise<Strategy> {
+  return api.post<Strategy>(accountPath(accountId, `/strategies/${encodeURIComponent(id)}/skip-next`), undefined, { schema: strategySchema as never, signal, retryOnUnauthorized: false })
+}
+
+export function runStrategy(accountId: string, id: string, signal?: AbortSignal): Promise<StrategyRunAcceptedResponse> {
+  return api.post<StrategyRunAcceptedResponse>(accountPath(accountId, `/strategies/${encodeURIComponent(id)}/run`), undefined, { schema: strategyRunAcceptedResponseSchema as never, signal, retryOnUnauthorized: false })
 }
