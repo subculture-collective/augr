@@ -332,6 +332,11 @@ ALTER DATABASE "$POSTGRES_DB" OWNER TO augr_db_owner;
 SQL
 
 echo "=== Applying ordered tracked migrations through isolated PostgreSQL ==="
+psql_db "$POSTGRES_DB" <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+SQL
 initialize_schema_metadata
 EXPECTED_VERSION=$(find "${ROOT_DIR}/migrations" -maxdepth 1 -type f -name '*.up.sql' -printf '%f\n' | sort -V | tail -1 | cut -d_ -f1 | sed 's/^0*//')
 apply_migrations 0 "$EXPECTED_VERSION"

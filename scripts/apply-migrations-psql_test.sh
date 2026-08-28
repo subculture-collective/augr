@@ -43,6 +43,11 @@ if [[ -n $query ]]; then
   exit 0
 fi
 input=$(sed -n '1,$p')
+if [[ $input == *"CREATE EXTENSION IF NOT EXISTS pgcrypto"* ]]; then
+  [[ $input == *"CREATE EXTENSION IF NOT EXISTS vector"* && $input == *"CREATE EXTENSION IF NOT EXISTS timescaledb"* ]] || exit 1
+  printf '%s\n' "$db" >>"$FAKE_STATE_DIR/extension_calls"
+  exit 0
+fi
 if $single; then
   [[ $input == SET\ ROLE\ augr_db_owner\;* ]] || { printf 'migration omitted SET ROLE\n' >&2; exit 1; }
   printf '%s\n' "${input%%$'\n'*}" >>"$FAKE_STATE_DIR/migration_calls"
@@ -112,11 +117,13 @@ FAKE_MISSING_VERSION=000109 expect_failure run_runner --database missing --from 
 run_runner --database full --from 0 --to 109
 grep -qx '1|109|f' "$test_root/state/full"
 [[ $(wc -l <"$test_root/state/migration_calls") -eq 109 ]]
+grep -qx 'full' "$test_root/state/extension_calls"
 
 run_runner --database full --from 109 --to 107
 grep -qx '1|107|f' "$test_root/state/full"
 run_runner --database full --from 107 --to 108
 grep -qx '1|108|f' "$test_root/state/full"
+[[ $(grep -cx 'full' "$test_root/state/extension_calls") -eq 1 ]]
 
 run_runner --database injected_failure --from 0 --to 108
 touch "$test_root/state/fail_next"
