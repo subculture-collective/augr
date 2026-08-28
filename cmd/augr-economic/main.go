@@ -107,7 +107,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-108-or-109 PostgreSQL connection URL")
+	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-109 PostgreSQL connection URL")
 	inputPath := flags.String("input", "-", "JSON input path, or - for stdin")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return fmt.Errorf("augr-economic: invalid flags")

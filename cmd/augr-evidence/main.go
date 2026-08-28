@@ -181,7 +181,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-108-or-109 PostgreSQL connection URL")
+	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-109 PostgreSQL connection URL")
 	inputPath := flags.String("input", "-", "JSON input path, or - for stdin")
 	campaignID := flags.String("campaign-id", "", "shadow campaign UUID")
 	assessmentID := flags.String("assessment-id", "", "milestone assessment UUID")

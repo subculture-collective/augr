@@ -176,7 +176,7 @@ func TestRuntimeSchemaVersionAcceptsExpansionAndEnforcement(t *testing.T) {
 	for _, tt := range []struct {
 		version int
 		want    bool
-	}{{107, false}, {108, true}, {109, true}, {110, false}} {
+	}{{107, false}, {108, false}, {109, true}, {110, false}} {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
