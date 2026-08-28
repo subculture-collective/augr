@@ -310,6 +310,13 @@ type mockPositionRepo struct {
 	executionScopeFn func(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, repository.PositionFilter, int, int) ([]domain.Position, error)
 }
 
+func (r *mockPositionRepo) ReserveOptionClosePositions(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []uuid.UUID, []uuid.UUID) error {
+	return nil
+}
+func (r *mockPositionRepo) ReleaseOptionClosePositions(context.Context, uuid.UUID, []uuid.UUID, []uuid.UUID) error {
+	return nil
+}
+
 func (r *mockPositionRepo) Create(ctx context.Context, position *domain.Position) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

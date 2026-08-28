@@ -35,14 +35,22 @@ func (o *JobOrchestrator) kalshiMarking(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("kalshi_marking: list canonical open lots: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, lot := range lots {
+		if lot.AccountID != accountID {
+			return fmt.Errorf("kalshi_marking: repository returned foreign account lot %s for configured account %s", lot.AccountID, accountID)
+		}
+	}
 	summary := map[string]int{"lots": len(lots), "marked": 0, "unavailable": 0, "accounts_rebuilt": 0}
 	defer func() { o.SetLastSummary("kalshi_marking", summary) }()
 	var accountAsOf time.Time
 	accountFailed := false
 	var failures []error
 	for _, lot := range lots {
-		if lot.AccountID != accountID {
-			return fmt.Errorf("kalshi_marking: repository returned foreign account lot %s for configured account %s", lot.AccountID, accountID)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if lot.Currency != "USD" {
 			summary["unavailable"]++
@@ -70,6 +78,9 @@ func (o *JobOrchestrator) kalshiMarking(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("%s: load snapshot: %w", lot.Ticker, loadErr))
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		evaluatedAt := o.now().UTC().Truncate(time.Microsecond)
 		mark, markErr := kalshi.NewMarkObservation(kalshi.KalshiMarkInput{
 			AccountID: accountID, InstrumentID: lot.InstrumentID, VenueContractID: lot.VenueContractID,
@@ -93,6 +104,9 @@ func (o *JobOrchestrator) kalshiMarking(ctx context.Context) error {
 		}
 	}
 	if !accountAsOf.IsZero() && !accountFailed {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := o.deps.KalshiProjectionRepo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
 			AccountID: accountID, AsOf: accountAsOf, MarkSource: kalshi.KalshiMarkSource,
 			MarkNamespace: kalshi.KalshiAccountMarkNamespace(accountID), MaxMarkAge: maxAge,

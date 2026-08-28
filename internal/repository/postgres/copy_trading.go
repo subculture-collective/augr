@@ -418,10 +418,15 @@ func (r *CopyTradingRepo) UpdateIntent(ctx context.Context, intent *domain.CopyT
 }
 
 func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error) {
-	tag, err := r.pool.Exec(ctx, `UPDATE copy_trade_intents
-		SET execution_claim_id=$2,execution_claimed_at=$3,updated_at=$3
-		WHERE id=$1 AND account_id=$4 AND policy_status='approved' AND status='received' AND order_id IS NULL
-		  AND (execution_claim_id IS NULL OR execution_claimed_at < $3 - INTERVAL '5 minutes')`, intentID, claimID, now.UTC(), r.accountID)
+	tag, err := r.pool.Exec(ctx, `WITH locked AS (
+		SELECT i.id FROM copy_trade_intents i JOIN copy_subscriptions s ON s.id=i.subscription_id
+		WHERE i.id=$1 AND i.account_id=$4 AND s.account_id=$4 AND i.environment=s.environment
+		 AND i.origin_type='copy_subscription' AND s.origin_type='copy_subscription'
+		 AND i.origin_id=s.id AND s.origin_id=s.id AND s.status='paper_active' AND s.is_paper=true
+		 AND i.policy_status='approved' AND i.status='received' AND i.order_id IS NULL
+		 AND (i.execution_claim_id IS NULL OR i.execution_claimed_at < $3 - INTERVAL '5 minutes')
+		FOR UPDATE OF i,s)
+		UPDATE copy_trade_intents i SET execution_claim_id=$2,execution_claimed_at=$3,updated_at=$3 FROM locked WHERE i.id=locked.id`, intentID, claimID, now.UTC(), r.accountID)
 	if err != nil {
 		return false, fmt.Errorf("postgres: claim copy intent execution: %w", err)
 	}

@@ -80,7 +80,10 @@ ALTER TABLE positions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT;
+    ADD COLUMN origin_id TEXT,
+    ADD COLUMN close_reservation_order_id UUID REFERENCES orders(id) ON DELETE RESTRICT;
+
+CREATE UNIQUE INDEX uq_positions_close_reservation_order ON positions(close_reservation_order_id) WHERE close_reservation_order_id IS NOT NULL;
 ALTER TABLE trades
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
@@ -121,6 +124,20 @@ ALTER TABLE prediction_settlement_idempotency
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
     ADD COLUMN origin_id TEXT;
+
+CREATE TABLE option_settlement_idempotency (
+    idempotency_key TEXT PRIMARY KEY,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+    environment TEXT NOT NULL CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+    origin_type TEXT NOT NULL CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+    origin_id TEXT NOT NULL,
+    position_id UUID NOT NULL UNIQUE REFERENCES positions(id) ON DELETE RESTRICT,
+    trade_id UUID NOT NULL UNIQUE REFERENCES trades(id) ON DELETE RESTRICT,
+    settlement_price NUMERIC(20,8) NOT NULL CHECK (settlement_price>=0),
+    settled_at TIMESTAMPTZ NOT NULL,
+    exit_reason TEXT NOT NULL CHECK (exit_reason IN ('expired_worthless','exercise_cash_settled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 ALTER TABLE conversations
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,

@@ -26,6 +26,7 @@ type ExecutionScope interface {
 	AccountID() uuid.UUID
 	Environment() domain.AccountEnvironment
 	Origin() (ledger.ExecutionOriginType, string)
+	CopyOriginRunID() uuid.UUID
 }
 
 // Result is one ordered provider interpretation plan. Initial is the exact
@@ -146,11 +147,12 @@ func validateResult(accountID uuid.UUID, result *Result) error {
 		result.Initial.Order.PolicyVersion == "" || len(result.Steps) == 0 {
 		return fmt.Errorf("matching venue lifecycle, account, order, and nonempty steps are required")
 	}
-	if result.Scope != nil && result.Scope.AccountID() != uuid.Nil {
-		originType, originID := result.Scope.Origin()
-		if result.Scope.AccountID() != accountID || result.Scope.Environment() != result.Initial.Intent.Environment || originType != result.Initial.Intent.OriginType || originID != result.Initial.Intent.OriginID {
-			return fmt.Errorf("venue result execution scope does not match persisted intent ownership")
-		}
+	if result.Scope == nil || result.Scope.AccountID() == uuid.Nil {
+		return fmt.Errorf("venue result execution scope is required")
+	}
+	originType, originID := result.Scope.Origin()
+	if result.Scope.AccountID() != accountID || result.Scope.Environment() != result.Initial.Intent.Environment || originType != result.Initial.Intent.OriginType || originID != result.Initial.Intent.OriginID || result.Scope.CopyOriginRunID() != result.Initial.Intent.CopyOriginRebalanceRunID {
+		return fmt.Errorf("venue result execution scope does not match persisted intent ownership")
 	}
 
 	current := result.Initial

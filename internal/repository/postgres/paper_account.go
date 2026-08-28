@@ -25,8 +25,9 @@ func (r *PaperAccountRepo) ListPaperTrades(ctx context.Context, accountID uuid.U
 			COALESCE(t.contract_multiplier, 100)::double precision, COALESCE(t.premium, 0)::double precision,
 			COALESCE(t.exit_reason, '')
 		FROM trades t
-		INNER JOIN orders o ON o.id = t.order_id AND o.account_id=t.account_id AND o.broker = 'paper'
+		LEFT JOIN orders o ON o.id = t.order_id AND o.account_id=t.account_id
 		WHERE t.account_id=$1 AND t.environment=$2
+		  AND (o.broker = 'paper' OR (t.order_id IS NULL AND t.origin_type='settlement'))
 		ORDER BY t.executed_at DESC, t.created_at DESC, t.id DESC LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list paper trades: %w", err)
@@ -57,14 +58,15 @@ func (r *PaperAccountRepo) GetOpenPaperPositions(ctx context.Context, accountID 
 		p.delta::double precision, p.gamma::double precision, p.theta::double precision,
 		p.vega::double precision
 		FROM positions p
-		INNER JOIN strategies s ON s.id = p.strategy_id AND s.is_paper = true
+		LEFT JOIN strategies s ON s.id = p.strategy_id
 		WHERE p.closed_at IS NULL AND p.account_id=$1 AND p.environment=$2
-		AND EXISTS (
+		AND ((p.strategy_id IS NOT NULL AND s.is_paper=true) OR p.origin_type='copy_subscription')
+		AND (p.origin_type='copy_subscription' OR EXISTS (
 			SELECT 1
 			FROM trades t
 			INNER JOIN orders o ON o.id = t.order_id
 			WHERE t.position_id = p.id AND t.account_id=p.account_id AND o.account_id=p.account_id AND o.broker = 'paper'
-		)
+		))
 		ORDER BY p.opened_at ASC, p.id ASC LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get open paper positions: %w", err)

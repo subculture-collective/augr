@@ -1146,17 +1146,30 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 	if order == nil {
 		return "", fmt.Errorf("order_manager: persisted order is required")
 	}
+	if m.accountLocker == nil {
+		return "", fmt.Errorf("order_manager: PostgreSQL execution account locker is required for restart reconciliation")
+	}
+	var status domain.OrderStatus
+	err := m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		var innerErr error
+		status, innerErr = m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
+		return innerErr
+	})
+	return status, err
+}
+
+func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope ExecutionScope, orderID uuid.UUID) (domain.OrderStatus, error) {
 	if _, _, _, err := scopeOriginIDs(scope); err != nil {
 		return "", fmt.Errorf("order_manager: reconcile execution scope: %w", err)
 	}
-	persisted, err := m.orderRepo.Get(ctx, order.ID)
+	persisted, err := m.orderRepo.Get(ctx, orderID)
 	if err != nil {
 		return "", fmt.Errorf("order_manager: lock persisted order ownership: %w", err)
 	}
 	if err := validateOrderScope(persisted, scope); err != nil {
 		return "", err
 	}
-	order = persisted
+	order := persisted
 	decisionID, err := m.ensureAttachedOrderDecision(ctx, scope, order)
 	if err != nil {
 		return "", err

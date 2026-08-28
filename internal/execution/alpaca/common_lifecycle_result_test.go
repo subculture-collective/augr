@@ -428,12 +428,22 @@ func newAlpacaLifecycleFixture(t *testing.T, quantity decimal.Decimal) alpacaLif
 	}
 	return alpacaLifecycleFixture{
 		context: CommonLifecycleContext{
+			Scope:  alpacaFixtureScope{intent: aggregate.Intent},
 			Policy: policy, Aggregate: aggregate, Account: account, Instrument: primary,
 			VenueContract: contract, ReceivedAt: now.Add(10 * time.Second),
 		},
 		now: now,
 	}
 }
+
+type alpacaFixtureScope struct{ intent lifecycle.Intent }
+
+func (s alpacaFixtureScope) AccountID() uuid.UUID                   { return s.intent.AccountID }
+func (s alpacaFixtureScope) Environment() domain.AccountEnvironment { return s.intent.Environment }
+func (s alpacaFixtureScope) Origin() (ledger.ExecutionOriginType, string) {
+	return s.intent.OriginType, s.intent.OriginID
+}
+func (s alpacaFixtureScope) CopyOriginRunID() uuid.UUID { return s.intent.CopyOriginRebalanceRunID }
 
 func (fixture alpacaLifecycleFixture) orderFact(
 	t *testing.T,

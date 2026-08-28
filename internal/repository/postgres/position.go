@@ -25,10 +25,47 @@ type PositionRepo struct {
 
 // Compile-time check that PositionRepo satisfies PositionRepository.
 var _ repository.PositionRepository = (*PositionRepo)(nil)
+var _ repository.OptionCloseReservationRepository = (*PositionRepo)(nil)
 
 // NewPositionRepo returns a PositionRepo backed by the given connection pool.
 func NewPositionRepo(pool *pgxpool.Pool, accountID uuid.UUID) *PositionRepo {
 	return &PositionRepo{pool: pool, accountID: accountID}
+}
+
+func (r *PositionRepo) ReserveOptionClosePositions(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, positionIDs, orderIDs []uuid.UUID) error {
+	if accountID == uuid.Nil || accountID != r.accountID || len(positionIDs) == 0 || len(positionIDs) != len(orderIDs) {
+		return fmt.Errorf("postgres: option close reservation: complete account-bound pairs are required")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for i := range positionIDs {
+		tag, execErr := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=$1 WHERE id=$2 AND account_id=$3 AND environment=$4 AND origin_type=$5 AND origin_id=$6 AND asset_class='option' AND closed_at IS NULL AND quantity>0 AND close_reservation_order_id IS NULL`, orderIDs[i], positionIDs[i], accountID, environment, originType, originID)
+		if execErr != nil {
+			return fmt.Errorf("postgres: reserve option close position: %w", execErr)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("postgres: option close position %s is already reserved or ownership changed", positionIDs[i])
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit option close reservation: %w", err)
+	}
+	return nil
+}
+
+func (r *PositionRepo) ReleaseOptionClosePositions(ctx context.Context, accountID uuid.UUID, positionIDs, orderIDs []uuid.UUID) error {
+	if accountID == uuid.Nil || accountID != r.accountID || len(positionIDs) != len(orderIDs) {
+		return fmt.Errorf("postgres: release option close reservation: invalid pairs")
+	}
+	for i := range positionIDs {
+		if _, err := r.pool.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE id=$1 AND account_id=$2 AND close_reservation_order_id=$3`, positionIDs[i], accountID, orderIDs[i]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Create inserts a new position and populates the generated ID and OpenedAt on

@@ -300,8 +300,14 @@ func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Previ
 		}
 	}
 	positions := []domain.Position{}
-	if s.deps.Positions != nil && subscription.LegacyStrategyID != nil {
-		positions, err = s.deps.Positions.GetByStrategy(ctx, *subscription.LegacyStrategyID, repository.PositionFilter{}, 1000, 0)
+	if s.deps.Positions != nil {
+		if scoped, ok := s.deps.Positions.(repository.ExecutionScopedPositionRepository); ok {
+			positions, err = scoped.GetByExecutionScope(ctx, subscription.AccountID, subscription.Environment, subscription.OriginType, subscription.OriginID.String(), repository.PositionFilter{}, 1000, 0)
+		} else if subscription.LegacyStrategyID != nil {
+			positions, err = s.deps.Positions.GetByStrategy(ctx, *subscription.LegacyStrategyID, repository.PositionFilter{}, 1000, 0)
+		} else {
+			return nil, fmt.Errorf("copy trading: execution-scoped position repository is required for canonical subscription")
+		}
 		if err != nil {
 			return nil, err
 		}

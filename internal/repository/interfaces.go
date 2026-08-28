@@ -653,6 +653,11 @@ type AccountScopedPositionRepository interface {
 	GetByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter PositionFilter, limit, offset int) ([]domain.Position, error)
 }
 
+type OptionCloseReservationRepository interface {
+	ReserveOptionClosePositions(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []uuid.UUID, []uuid.UUID) error
+	ReleaseOptionClosePositions(context.Context, uuid.UUID, []uuid.UUID, []uuid.UUID) error
+}
+
 // TradeRepository provides access to executed trades.
 type TradeRepository interface {
 	Create(ctx context.Context, trade *domain.Trade) error

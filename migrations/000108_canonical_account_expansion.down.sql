@@ -1,7 +1,7 @@
 LOCK TABLE pipeline_runs, pipeline_run_snapshots, agent_decisions, agent_events,
     trade_decisions, orders, positions, trades, portfolio_opportunities,
     allocation_decisions, replay_events, financial_fill_idempotency,
-    prediction_settlement_idempotency, execution_intents, execution_orders,
+    prediction_settlement_idempotency, option_settlement_idempotency, execution_intents, execution_orders,
     copy_subscriptions, copy_trade_intents, copy_origin_rebalance_runs,
     copy_origin_rebalance_intents, copy_target_drift_runs, copy_target_drift_legs,
     strategies, projection_checkpoints, ledger_transactions, account_projection_outbox,
@@ -62,13 +62,14 @@ BEGIN
        OR EXISTS(SELECT 1 FROM agent_events WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trade_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM orders WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR copy_origin_rebalance_run_id IS NOT NULL OR allocation_opportunity_id IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM positions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM positions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR close_reservation_order_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trades WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR allocation_claim_id IS NOT NULL OR allocation_claimed_at IS NOT NULL OR allocation_claim_expires_at IS NOT NULL)
        OR EXISTS(SELECT 1 FROM allocation_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM replay_events WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM financial_fill_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM prediction_settlement_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM option_settlement_idempotency)
        OR EXISTS(SELECT 1 FROM copy_subscriptions WHERE account_id IS NOT NULL OR environment IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_trade_intents WHERE account_id IS NOT NULL OR environment IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR execution_claim_id IS NOT NULL OR execution_claimed_at IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_origin_rebalance_runs WHERE account_id IS NOT NULL OR environment IS NOT NULL)
@@ -100,6 +101,7 @@ DROP TRIGGER trg_validate_account_projection_outbox_row ON account_projection_ou
 DROP FUNCTION validate_account_projection_outbox_row();
 DROP INDEX idx_account_projection_outbox_claimable;
 DROP INDEX uq_account_projection_outbox_request;
+DROP TABLE option_settlement_idempotency;
 DROP TABLE account_projection_outbox;
 
 CREATE OR REPLACE FUNCTION validate_canonical_projection_checkpoint() RETURNS TRIGGER AS $$
@@ -271,6 +273,7 @@ DROP INDEX uq_replay_events_fill_order;
 DROP INDEX uq_replay_events_position;
 DROP INDEX uq_orders_client_order_id;
 DROP INDEX idx_financial_fill_idempotency_account;
+DROP INDEX uq_positions_close_reservation_order;
 DROP INDEX idx_prediction_settlement_idempotency_account;
 DROP INDEX idx_copy_subscriptions_account_status;
 DROP INDEX idx_copy_trade_intents_account_created;
@@ -300,7 +303,7 @@ ALTER TABLE replay_events DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COL
 ALTER TABLE allocation_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN pipeline_run_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trades DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE positions DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE positions DROP COLUMN close_reservation_order_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE orders DROP COLUMN client_order_id,DROP COLUMN allocation_opportunity_id,DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trade_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE agent_events DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

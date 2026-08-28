@@ -21,14 +21,47 @@ type kalshiMarkProviderStub struct {
 	quotes map[string]kalshi.Snapshot
 	errors map[string]error
 	calls  []string
+	loadFn func(string) (kalshi.Snapshot, error)
 }
 
 func (stub *kalshiMarkProviderStub) LoadSnapshot(_ context.Context, ticker string) (kalshi.Snapshot, error) {
 	stub.calls = append(stub.calls, ticker)
+	if stub.loadFn != nil {
+		return stub.loadFn(ticker)
+	}
 	if err := stub.errors[ticker]; err != nil {
 		return kalshi.Snapshot{}, err
 	}
 	return stub.quotes[ticker], nil
+}
+
+func TestKalshiMarkingRejectsForeignInventoryBeforeProviderReads(t *testing.T) {
+	accountID := uuid.New()
+	provider := &kalshiMarkProviderStub{}
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: &kalshiProjectionStub{lots: []repository.CanonicalOpenLot{{AccountID: uuid.New()}}}, KalshiMarkMaxAge: time.Minute})
+	if err := orch.kalshiMarking(context.Background()); err == nil || !strings.Contains(err.Error(), "foreign account lot") {
+		t.Fatalf("foreign inventory error=%v", err)
+	}
+	if len(provider.calls) != 0 {
+		t.Fatalf("foreign inventory reached provider: %v", provider.calls)
+	}
+}
+
+func TestKalshiMarkingCancellationStopsBeforeMarkWrites(t *testing.T) {
+	accountID := uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	repo := &kalshiProjectionStub{lots: []repository.CanonicalOpenLot{{AccountID: accountID, InstrumentID: uuid.New(), VenueContractID: uuid.New(), Side: domain.PositionSideLong, Ticker: "KXCANCEL:YES", Currency: "USD"}}}
+	provider := &kalshiMarkProviderStub{loadFn: func(string) (kalshi.Snapshot, error) {
+		cancel()
+		return kalshi.Snapshot{Ticker: "KXCANCEL", Status: "active", BestBidYes: .4, FetchedAt: time.Now()}, nil
+	}}
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiMarkMaxAge: time.Minute})
+	if err := orch.kalshiMarking(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error=%v", err)
+	}
+	if len(repo.marks) != 0 || len(repo.rebuilds) != 0 {
+		t.Fatalf("cancellation wrote marks/rebuilds=%d/%d", len(repo.marks), len(repo.rebuilds))
+	}
 }
 
 type kalshiProjectionStub struct {
