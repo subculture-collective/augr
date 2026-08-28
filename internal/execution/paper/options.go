@@ -107,7 +107,11 @@ func (b *PaperBroker) SubmitOptionOrder(ctx context.Context, order *domain.Order
 	if err := ApplyOptionFill(order, result); err != nil {
 		return "", err
 	}
-	effect, err := b.applyOptionPositionLocked(order.Ticker, order.UnderlyingTicker, order.OptionType, order.Strike, order.Expiry, order.ContractMultiplier, order.PositionIntent, result.Quantity, result.FillPrice, now)
+	var closePositionID uuid.UUID
+	if len(order.ClosePositionIDs) == 1 {
+		closePositionID = order.ClosePositionIDs[0]
+	}
+	effect, err := b.applyOptionPositionLocked(order.Ticker, order.UnderlyingTicker, order.OptionType, order.Strike, order.Expiry, order.ContractMultiplier, order.PositionIntent, closePositionID, result.Quantity, result.FillPrice, now)
 	if err != nil {
 		return "", err
 	}
@@ -165,7 +169,7 @@ func (b *PaperBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Opti
 		filledAt := now
 		status.Legs = append(status.Legs, execution.BrokerSpreadLegStatus{ExternalID: ids[index], Ticker: spread.Legs[index].Contract.OCCSymbol, Status: execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: quantity * float64(spread.Legs[index].Ratio), FilledAvgPrice: &price, FilledAt: &filledAt}})
 		leg := spread.Legs[index]
-		effect, applyErr := b.applyOptionPositionLocked(leg.Contract.OCCSymbol, leg.Contract.Underlying, &leg.Contract.OptionType, &leg.Contract.Strike, &leg.Contract.Expiry, leg.Contract.Multiplier, &leg.PositionIntent, quantity*float64(leg.Ratio), price, now)
+		effect, applyErr := b.applyOptionPositionLocked(leg.Contract.OCCSymbol, leg.Contract.Underlying, &leg.Contract.OptionType, &leg.Contract.Strike, &leg.Contract.Expiry, leg.Contract.Multiplier, &leg.PositionIntent, leg.ClosePositionID, quantity*float64(leg.Ratio), price, now)
 		if applyErr != nil {
 			for rollbackIndex := len(effects) - 1; rollbackIndex >= 0; rollbackIndex-- {
 				_ = b.reverseOptionPositionLocked(effects[rollbackIndex])
@@ -291,7 +295,7 @@ func optionPositionSide(intent *domain.PositionIntent) domain.PositionSide {
 	return domain.PositionSideLong
 }
 
-func (b *PaperBroker) applyOptionPositionLocked(ticker, underlying string, optionType *domain.OptionType, strike *float64, expiry *time.Time, multiplier float64, intent *domain.PositionIntent, quantity, price float64, now time.Time) (optionPositionEffect, error) {
+func (b *PaperBroker) applyOptionPositionLocked(ticker, underlying string, optionType *domain.OptionType, strike *float64, expiry *time.Time, multiplier float64, intent *domain.PositionIntent, closePositionID uuid.UUID, quantity, price float64, now time.Time) (optionPositionEffect, error) {
 	if intent == nil || quantity <= 0 || multiplier <= 0 {
 		return optionPositionEffect{}, errors.New("paper: complete option position effect is required")
 	}
@@ -306,7 +310,7 @@ func (b *PaperBroker) applyOptionPositionLocked(ticker, underlying string, optio
 	}
 	remaining := quantity
 	for id, position := range b.optionLots {
-		if positionKey(position) != key || position.Side != side || remaining <= 0 {
+		if positionKey(position) != key || position.Side != side || remaining <= 0 || (closePositionID != uuid.Nil && id != closePositionID) {
 			continue
 		}
 		closed := math.Min(position.Quantity, remaining)

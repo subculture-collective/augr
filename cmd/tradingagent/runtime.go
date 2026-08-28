@@ -588,7 +588,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	polymarketAccountRepo := pgrepo.NewPolymarketAccountRepo(db.Pool)
 	polymarketWatchedRepo := pgrepo.NewPolymarketWatchedMarketsRepo(db.Pool)
 	polymarketResolvedRepo := pgrepo.NewPolymarketResolvedMarketsRepo(db.Pool)
-	copyTradingRepo := pgrepo.NewCopyTradingRepo(db.Pool, runtimeDeps.executionAccount.AccountID())
+	copyTradingRepo := pgrepo.NewCopyTradingRepo(db.Pool, runtimeDeps.executionAccount.AccountID(), runtimeDeps.executionAccount.Environment())
 	accountRepo := pgrepo.NewAccountRepo(db.Pool)
 	instrumentRepo := pgrepo.NewInstrumentRepo(db.Pool)
 	quoteSnapshotRepo := pgrepo.NewQuoteSnapshotRepo(db.Pool)
@@ -1020,7 +1020,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		}
 		if cfg.Features.EnablePolymarketAutomation {
 			if err := bootstrapPolymarketStopGuards(ctx, strategyRunner, positionRepo, logger); err != nil {
-				logger.Warn("polymarket stop guard bootstrap failed", slog.Any("error", err))
+				return nil, nil, nil, fmt.Errorf("polymarket stop guard bootstrap: %w", err)
 			}
 		}
 

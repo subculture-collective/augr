@@ -56,10 +56,12 @@ type Settler struct {
 	trades             repository.TradeRepository
 	replay             repository.ReplayEventRepository
 	now                func() time.Time
+	accountLocker      repository.ExecutionAccountLocker
 }
 
 func NewSettler(executionAccount domain.ExecutionAccountBinding, financialLifecycle repository.FinancialLifecycleRepository, decisions settlementDecisionRepository, positions repository.PositionRepository, trades repository.TradeRepository, replay repository.ReplayEventRepository) *Settler {
-	return &Settler{executionAccount: executionAccount, financialLifecycle: financialLifecycle, decisions: decisions, positions: positions, trades: trades, replay: replay, now: time.Now}
+	locker, _ := financialLifecycle.(repository.ExecutionAccountLocker)
+	return &Settler{executionAccount: executionAccount, financialLifecycle: financialLifecycle, decisions: decisions, positions: positions, trades: trades, replay: replay, now: time.Now, accountLocker: locker}
 }
 
 // SettleMarket settles every still-open paper decision for one resolved market.
@@ -93,6 +95,19 @@ func (s *Settler) SettlePreview(ctx context.Context, marketType domain.MarketTyp
 }
 
 func (s *Settler) SettleDecisions(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, decisionIDs []uuid.UUID) (int, error) {
+	if s == nil || s.accountLocker == nil {
+		return 0, fmt.Errorf("prediction settlement: execution account locker is required")
+	}
+	var settled int
+	err := s.accountLocker.WithExecutionAccountLock(ctx, s.executionAccount.AccountID(), func() error {
+		var settleErr error
+		settled, settleErr = s.settleDecisionsLocked(ctx, marketType, instrument, winningOutcome, resolvedAt, decisionIDs)
+		return settleErr
+	})
+	return settled, err
+}
+
+func (s *Settler) settleDecisionsLocked(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, decisionIDs []uuid.UUID) (int, error) {
 	if len(decisionIDs) == 0 {
 		return 0, nil
 	}
@@ -173,6 +188,22 @@ func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketTy
 }
 
 func (s *Settler) settleMarket(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, mutate bool) (int, error) {
+	if mutate {
+		if s == nil || s.accountLocker == nil {
+			return 0, fmt.Errorf("prediction settlement: execution account locker is required")
+		}
+		var settled int
+		err := s.accountLocker.WithExecutionAccountLock(ctx, s.executionAccount.AccountID(), func() error {
+			var settleErr error
+			settled, settleErr = s.settleMarketLocked(ctx, marketType, instrument, winningOutcome, resolvedAt, true)
+			return settleErr
+		})
+		return settled, err
+	}
+	return s.settleMarketLocked(ctx, marketType, instrument, winningOutcome, resolvedAt, false)
+}
+
+func (s *Settler) settleMarketLocked(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, mutate bool) (int, error) {
 	if s == nil || s.decisions == nil || (mutate && s.financialLifecycle == nil && (s.positions == nil || s.trades == nil || s.replay == nil)) {
 		return 0, fmt.Errorf("prediction settlement: repositories are required")
 	}

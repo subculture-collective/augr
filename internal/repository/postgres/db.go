@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -13,6 +14,13 @@ import (
 // all PostgreSQL repository implementations.
 type DB struct {
 	Pool *pgxpool.Pool
+}
+
+func (db *DB) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
+	if db == nil || db.Pool == nil {
+		return fmt.Errorf("postgres: execution account advisory lock database is required")
+	}
+	return (&OrderRepo{pool: db.Pool, accountID: accountID}).WithExecutionAccountLock(ctx, accountID, fn)
 }
 
 // NewDB creates a connection pool using the provided connection string and

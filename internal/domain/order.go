@@ -144,6 +144,8 @@ type Order struct {
 	PositionIntent     *PositionIntent `json:"position_intent,omitempty"`
 	LegGroupID         *uuid.UUID      `json:"leg_group_id,omitempty"`
 	OptionGreeks       *OptionGreeks   `json:"option_greeks,omitempty"`
+	SpreadMaxRisk      float64         `json:"-"`
+	SpreadMaxReward    float64         `json:"-"`
 
 	// Prediction market fields (empty for non-prediction orders).
 	PredictionSide   string `json:"prediction_side,omitempty"`

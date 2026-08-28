@@ -431,6 +431,23 @@ func TestBrokerOrderStatusResultCarriesAuthoritativePartialFillAndClientLookup(t
 	}
 }
 
+func TestBrokerOrderStatusUsesUpdatedAtForPartialFillObservation(t *testing.T) {
+	updatedAt := "2026-08-28T14:03:02.123456Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"alpaca-real-42","status":"partially_filled","filled_qty":"1","filled_avg_price":"101.25","filled_at":null,"updated_at":"` + updatedAt + `"}`))
+	}))
+	defer server.Close()
+	client := NewClient("test-key", "test-secret", true, discardLogger())
+	client.SetBaseURL(server.URL)
+	result, err := NewBroker(client).GetOrderStatusResult(context.Background(), "alpaca-real-42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FilledAt == nil || result.FilledAt.Format(time.RFC3339Nano) != updatedAt {
+		t.Fatalf("fill observation timestamp = %v, want updated_at %s", result.FilledAt, updatedAt)
+	}
+}
+
 func TestBrokerGetOrderStatus_RejectsInvalidStatus(t *testing.T) {
 	t.Parallel()
 

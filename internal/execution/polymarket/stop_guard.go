@@ -306,7 +306,8 @@ func validateRecoveredStopReservation(order *domain.Order, position domain.Posit
 		wantPolymarketIntent = "ORDER_INTENT_SELL_SHORT"
 	}
 	wantTicker := strings.TrimSpace(expected.Slug)
-	if order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != domain.OrderTypeMarket || strings.TrimSpace(order.Ticker) != wantTicker || !strings.EqualFold(strings.TrimSpace(order.PredictionSide), expected.OutcomeSide) || strings.TrimSpace(order.PolymarketIntent) != wantPolymarketIntent || order.Side != wantSide || *order.PositionIntent != wantIntent || order.Quantity != position.Quantity || position.Quantity <= 0 || position.ClosedAt != nil {
+	remaining := order.Quantity - order.FilledQuantity
+	if order.FilledQuantity < 0 || remaining <= 0 || remaining != position.Quantity || order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != domain.OrderTypeMarket || strings.TrimSpace(order.Ticker) != wantTicker || !strings.EqualFold(strings.TrimSpace(order.PredictionSide), expected.OutcomeSide) || strings.TrimSpace(order.PolymarketIntent) != wantPolymarketIntent || order.Side != wantSide || *order.PositionIntent != wantIntent || position.Quantity <= 0 || position.ClosedAt != nil {
 		return errors.New("polymarket: recovered stop reservation does not close the exact persisted position")
 	}
 	return nil
@@ -448,6 +449,12 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 				continue
 			}
 			if result.Status == domain.OrderStatusCancelled || result.Status == domain.OrderStatusRejected {
+				fillResult := result
+				fillResult.Status = domain.OrderStatusPartial
+				if result.FilledQuantity > entry.order.FilledQuantity && !g.persistRecoveredExitFill(ctx, entry, externalID, fillResult) {
+					entry.state.Store(int32(guardArmed))
+					continue
+				}
 				if !g.finalizeTerminalExit(ctx, entry, positionID, result.Status, externalID) {
 					entry.state.Store(int32(guardArmed))
 				}
@@ -515,6 +522,11 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 		return false
 	}
 	if result.Status == domain.OrderStatusCancelled || result.Status == domain.OrderStatusRejected {
+		fillResult := result
+		fillResult.Status = domain.OrderStatusPartial
+		if result.FilledQuantity > entry.order.FilledQuantity && !g.persistRecoveredExitFill(ctx, entry, externalID, fillResult) {
+			return false
+		}
 		return g.finalizeTerminalExit(ctx, entry, positionID, result.Status, externalID)
 	}
 	if result.Status != domain.OrderStatusPending && result.Status != domain.OrderStatusSubmitted && result.Status != domain.OrderStatusPartial && result.Status != domain.OrderStatusFilled {
@@ -546,6 +558,22 @@ func (g *StopGuard) persistRecoveredExitFill(ctx context.Context, entry *guardEn
 	if g.financialLifecycle == nil || result.FilledQuantity <= 0 || result.FilledAvgPrice == nil || *result.FilledAvgPrice <= 0 || result.FilledAt == nil || result.FilledAt.IsZero() {
 		return false
 	}
+	locker, ok := g.financialLifecycle.(repository.ExecutionAccountLocker)
+	if !ok {
+		return false
+	}
+	committed := false
+	err := locker.WithExecutionAccountLock(ctx, entry.order.AccountID, func() error {
+		committed = g.persistRecoveredExitFillLocked(ctx, entry, externalID, result)
+		if !committed {
+			return errors.New("polymarket: stop economic mutation failed")
+		}
+		return nil
+	})
+	return err == nil && committed
+}
+
+func (g *StopGuard) persistRecoveredExitFillLocked(ctx context.Context, entry *guardEntry, externalID string, result execution.BrokerOrderStatus) bool {
 	entry.order.ExternalID = strings.TrimSpace(externalID)
 	entry.order.Status = result.Status
 	entry.order.FilledQuantity = result.FilledQuantity
@@ -575,6 +603,22 @@ func (g *StopGuard) finalizeTerminalExit(ctx context.Context, entry *guardEntry,
 	}
 	if err := terminalizer.FinalizePredictionExit(ctx, entry.order.AccountID, entry.order.Environment, positionID, entry.order.ID, status, strings.TrimSpace(externalID), time.Now().UTC()); err != nil {
 		return false
+	}
+	remaining := entry.order.Quantity - entry.order.FilledQuantity
+	if remaining > 0 {
+		fresh := *entry.order
+		fresh.ID = uuid.New()
+		fresh.ClientOrderID = "augr-polymarket-stop-" + fresh.ID.String()
+		fresh.ExternalID, fresh.Status, fresh.Quantity = "", domain.OrderStatusPending, remaining
+		fresh.FilledQuantity, fresh.FilledAvgPrice, fresh.FilledAt, fresh.SubmittedAt = 0, nil, nil, nil
+		tmpl, err := g.broker.PrepareTemplate(&fresh)
+		if err != nil {
+			return false
+		}
+		entry.order, entry.template = &fresh, tmpl
+		entry.claimed.Store(false)
+		entry.state.Store(int32(guardArmed))
+		return true
 	}
 	entry.state.Store(int32(guardFired))
 	g.Cancel(entry.positionID)

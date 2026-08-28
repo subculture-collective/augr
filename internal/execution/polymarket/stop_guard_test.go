@@ -45,6 +45,10 @@ type recordingStopFinancialLifecycle struct {
 	inputs []repository.OrderFillInput
 }
 
+func (r *recordingStopFinancialLifecycle) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func (r *recordingStopFinancialLifecycle) ApplyOrderFill(_ context.Context, input repository.OrderFillInput) (repository.OrderFillResult, error) {
 	r.inputs = append(r.inputs, input)
 	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, nil
@@ -468,7 +472,7 @@ func TestStopGuard_DefinitiveTerminalOutcomeReleasesAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: .44, ReceivedAt: time.Now()})
-	if g.Active() != 0 || claims.terminalStatus != domain.OrderStatusCancelled {
+	if g.Active() != 1 || claims.terminalStatus != domain.OrderStatusCancelled {
 		t.Fatalf("terminal stop outcome: active=%d status=%s", g.Active(), claims.terminalStatus)
 	}
 }

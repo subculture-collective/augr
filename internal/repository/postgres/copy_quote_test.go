@@ -53,7 +53,7 @@ func TestCopyQuoteRetainedQualification(t *testing.T) {
 	if err = subscription.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	repo := NewCopyTradingRepo(pool, uuid.New())
+	repo := NewCopyTradingRepo(pool, uuid.New(), subscription.Environment)
 	if err = repo.CreateSubscription(ctx, &subscription); err != nil {
 		t.Fatal(err)
 	}

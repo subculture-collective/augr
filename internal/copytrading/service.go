@@ -492,22 +492,42 @@ func (s *Service) Sync13FSubscriptions(ctx context.Context) (SyncSummary, error)
 }
 
 func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult, error) {
-	subscription, err := s.deps.Repo.GetSubscription(ctx, id)
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy rebalance requires execution account locker")
+	}
+	var subscription *domain.CopySubscription
+	var persistedOrigin *copyorigin.Run
+	var registered []copyorigin.PlannedIntent
+	var preview Preview
+	err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), func() error {
+		var planErr error
+		subscription, persistedOrigin, registered, preview, planErr = s.planRebalanceLocked(ctx, id)
+		return planErr
+	})
 	if err != nil {
 		return nil, err
 	}
+	return s.executePlannedRun(ctx, subscription, persistedOrigin, registered, preview)
+}
+
+func (s *Service) planRebalanceLocked(ctx context.Context, id uuid.UUID) (*domain.CopySubscription, *copyorigin.Run, []copyorigin.PlannedIntent, Preview, error) {
+	subscription, err := s.deps.Repo.GetSubscription(ctx, id)
+	if err != nil {
+		return nil, nil, nil, Preview{}, err
+	}
 	if err := s.validateSubscriptionBinding(subscription); err != nil {
-		return nil, err
+		return nil, nil, nil, Preview{}, err
 	}
 	if subscription.Status != domain.CopySubscriptionPaperActive || !subscription.IsPaper {
-		return nil, fmt.Errorf("subscription must be paper_active")
+		return nil, nil, nil, Preview{}, fmt.Errorf("subscription must be paper_active")
 	}
 	if s.deps.OriginRuns == nil {
-		return nil, fmt.Errorf("copy origin run repository is unavailable")
+		return nil, nil, nil, Preview{}, fmt.Errorf("copy origin run repository is unavailable")
 	}
 	observation, snapshot, err := s.deps.Repo.GetLatest13FSnapshot(ctx, subscription.SourceID)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, Preview{}, err
 	}
 	if retries, ok := s.deps.OriginRuns.(copyorigin.RetryStore); ok {
 		persisted, intents, loadErr := retries.GetPlannedRun(ctx, subscription.ID, observation.ID, CalculationVersion)
@@ -516,26 +536,26 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 			for _, intent := range intents {
 				preview.Intents = append(preview.Intents, intent.Intent)
 			}
-			return s.executePlannedRun(ctx, subscription, persisted, intents, preview)
+			return subscription, persisted, intents, preview, nil
 		}
 		if !errors.Is(loadErr, repository.ErrNotFound) {
-			return nil, loadErr
+			return nil, nil, nil, Preview{}, loadErr
 		}
 	}
-	preview, err := s.Preview(ctx, id)
+	previewValue, err := s.previewLocked(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, Preview{}, err
 	}
-	planned := append([]domain.CopyTradeIntent(nil), preview.Intents...)
+	planned := append([]domain.CopyTradeIntent(nil), previewValue.Intents...)
 	originRun, err := copyorigin.NewRun(*subscription, planned)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, Preview{}, err
 	}
 	persistedOrigin, registered, err := s.deps.OriginRuns.RegisterPlannedRun(ctx, originRun, planned)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, Preview{}, err
 	}
-	return s.executePlannedRun(ctx, subscription, persistedOrigin, registered, *preview)
+	return subscription, persistedOrigin, registered, *previewValue, nil
 }
 
 func (s *Service) executePlannedRun(ctx context.Context, subscription *domain.CopySubscription, persistedOrigin *copyorigin.Run, registered []copyorigin.PlannedIntent, preview Preview) (*RebalanceResult, error) {

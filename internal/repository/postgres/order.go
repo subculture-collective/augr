@@ -129,9 +129,10 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 			quantity, limit_price, stop_price, filled_quantity, filled_avg_price,
 			status, broker, submitted_at, filled_at, asset_class, underlying_ticker,
 			option_type, strike, expiry, contract_multiplier, position_intent, leg_group_id,
-			prediction_side, polymarket_intent, allocation_opportunity_id, client_order_id
+			prediction_side, polymarket_intent, allocation_opportunity_id, client_order_id,
+			spread_max_risk, spread_max_reward
 		)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35 FROM authorized,copy_authorized
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35, $38, $39 FROM authorized,copy_authorized
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
@@ -170,6 +171,8 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 		nullString(order.ClientOrderID),
 		order.CopyIntentID,
 		order.CopyExecutionClaimID,
+		order.SpreadMaxRisk,
+		order.SpreadMaxReward,
 	)
 
 	if err := row.Scan(&order.ID, &order.CreatedAt); err != nil {
@@ -454,8 +457,13 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 		marketType = domain.MarketTypeStock
 	}
 	order.MarketType = marketType
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("postgres: update order begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 
-	row := r.pool.QueryRow(ctx,
+	row := tx.QueryRow(ctx,
 		`WITH locked AS (SELECT id FROM orders WHERE id=$34 AND account_id=$35 FOR UPDATE)
 		 UPDATE orders o
 		 SET external_id = $9, filled_quantity = $17, filled_avg_price = $18, status = $19,
@@ -516,8 +524,12 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 		}
 		return fmt.Errorf("postgres: update order: %w", err)
 	}
-
-	return nil
+	if terminalOrderStatusPostgres(order.Status) {
+		if _, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE account_id=$1 AND environment=$2 AND close_reservation_order_id=$3`, r.accountID, order.Environment, order.ID); err != nil {
+			return fmt.Errorf("postgres: release terminal order close reservations: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // Delete removes an order by ID. It returns ErrNotFound when no row matches.
@@ -576,7 +588,8 @@ const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, account_id, env
 		filled_at, created_at, asset_class, underlying_ticker, option_type,
 		strike::double precision, expiry, contract_multiplier::double precision,
 		position_intent, leg_group_id, COALESCE(prediction_side, ''),
-		COALESCE(polymarket_intent, ''), allocation_opportunity_id, COALESCE(client_order_id, '')
+		COALESCE(polymarket_intent, ''), allocation_opportunity_id, COALESCE(client_order_id, ''),
+		COALESCE(spread_max_risk,0)::double precision, COALESCE(spread_max_reward,0)::double precision
 	 FROM orders`
 
 func (r *OrderRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.Order, error) {
@@ -663,6 +676,8 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 		&order.PolymarketIntent,
 		&order.AllocationOpportunityID,
 		&order.ClientOrderID,
+		&order.SpreadMaxRisk,
+		&order.SpreadMaxReward,
 	)
 	if err != nil {
 		return nil, err

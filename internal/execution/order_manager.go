@@ -552,6 +552,9 @@ func (m *OrderManager) processSignal(
 	if hasRun {
 		effectIdentity += ":" + runID.String()
 	}
+	if copyRunID := scope.CopyOriginRunID(); copyRunID != uuid.Nil {
+		effectIdentity += ":copy:" + copyRunID.String()
+	}
 	order := &domain.Order{
 		ID:                       uuid.NewSHA1(uuid.NameSpaceURL, []byte(effectIdentity)),
 		AccountID:                scope.AccountID(),
@@ -1710,6 +1713,9 @@ func (m *OrderManager) audit(
 	entityID *uuid.UUID,
 	details map[string]any,
 ) error {
+	if m == nil || m.auditLogRepo == nil {
+		return nil
+	}
 	raw, err := json.Marshal(details)
 	if err != nil {
 		return fmt.Errorf("marshal audit details: %w", err)

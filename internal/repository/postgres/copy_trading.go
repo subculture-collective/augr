@@ -18,14 +18,15 @@ import (
 )
 
 type CopyTradingRepo struct {
-	pool      *pgxpool.Pool
-	accountID uuid.UUID
+	pool        *pgxpool.Pool
+	accountID   uuid.UUID
+	environment domain.AccountEnvironment
 }
 
 var _ repository.CopyTradingRepository = (*CopyTradingRepo)(nil)
 
-func NewCopyTradingRepo(pool *pgxpool.Pool, accountID uuid.UUID) *CopyTradingRepo {
-	return &CopyTradingRepo{pool: pool, accountID: accountID}
+func NewCopyTradingRepo(pool *pgxpool.Pool, accountID uuid.UUID, environment domain.AccountEnvironment) *CopyTradingRepo {
+	return &CopyTradingRepo{pool: pool, accountID: accountID, environment: environment}
 }
 
 func (r *CopyTradingRepo) CreateLeader(ctx context.Context, leader *domain.CopyLeader) error {
@@ -271,25 +272,33 @@ func scanCopySubscription(row pgx.Row) (*domain.CopySubscription, error) {
 }
 
 func (r *CopyTradingRepo) CreateSubscription(ctx context.Context, s *domain.CopySubscription) error {
-	if s.AccountID != uuid.Nil && s.AccountID != r.accountID {
+	if r.accountID == uuid.Nil || !r.environment.IsValid() {
+		return fmt.Errorf("postgres: copy repository requires account and environment binding")
+	}
+	if s.AccountID != uuid.Nil && s.AccountID != r.accountID || r.environment.IsValid() && s.Environment != "" && s.Environment != r.environment {
 		return fmt.Errorf("postgres: create copy subscription: account mismatch")
 	}
 	s.AccountID = r.accountID
+	if r.environment.IsValid() {
+		s.Environment = r.environment
+	}
 	return r.pool.QueryRow(ctx, `INSERT INTO copy_subscriptions (id,account_id,environment,leader_id,source_id,legacy_strategy_id,origin_type,origin_id,status,is_paper,method,capital_budget,cash_buffer_pct,top_n,min_source_weight,max_position_weight,max_turnover_pct,min_price,min_avg_dollar_volume,max_spread_bps,max_quote_age_seconds,allowed_sessions,stock_allowlist,stock_blocklist,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25) RETURNING created_at,updated_at`, s.ID, nullableUUID(s.AccountID), nullString(string(s.Environment)), s.LeaderID, s.SourceID, s.LegacyStrategyID, s.OriginType, s.OriginID, s.Status, s.IsPaper, s.Method, s.CapitalBudget, s.CashBufferPct, s.TopN, s.MinSourceWeight, s.MaxPositionWeight, s.MaxTurnoverPct, s.MinPrice, s.MinAvgDollarVolume, s.MaxSpreadBPS, s.MaxQuoteAgeSeconds, s.AllowedSessions, s.StockAllowlist, s.StockBlocklist, s.CreatedBy).Scan(&s.CreatedAt, &s.UpdatedAt)
 }
 
 func (r *CopyTradingRepo) GetSubscription(ctx context.Context, id uuid.UUID) (*domain.CopySubscription, error) {
-	item, err := scanCopySubscription(r.pool.QueryRow(ctx, copySubscriptionSelect+` WHERE id=$1 AND account_id=$2`, id, r.accountID))
+	item, err := scanCopySubscription(r.pool.QueryRow(ctx, copySubscriptionSelect+` WHERE id=$1 AND account_id=$2 AND environment=$3`, id, r.accountID, r.environment))
 	if err != nil {
 		return nil, copyRepoNotFound("subscription", err)
 	}
 	return item, nil
 }
 
-func copySubscriptionWhere(accountID uuid.UUID, filter repository.CopySubscriptionFilter) (string, []any) {
+func copySubscriptionWhere(accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.CopySubscriptionFilter) (string, []any) {
 	clauses := make([]string, 0, 3)
 	args := []any{accountID}
 	clauses = append(clauses, "account_id=$1")
+	args = append(args, environment)
+	clauses = append(clauses, fmt.Sprintf("environment=$%d", len(args)))
 	if filter.LeaderID != nil {
 		args = append(args, *filter.LeaderID)
 		clauses = append(clauses, fmt.Sprintf("leader_id=$%d", len(args)))
@@ -309,7 +318,7 @@ func copySubscriptionWhere(accountID uuid.UUID, filter repository.CopySubscripti
 }
 
 func (r *CopyTradingRepo) ListSubscriptions(ctx context.Context, filter repository.CopySubscriptionFilter, limit, offset int) ([]domain.CopySubscription, error) {
-	where, args := copySubscriptionWhere(r.accountID, filter)
+	where, args := copySubscriptionWhere(r.accountID, r.environment, filter)
 	args = append(args, limit, offset)
 	rows, err := r.pool.Query(ctx, copySubscriptionSelect+where+fmt.Sprintf(` ORDER BY created_at DESC,id DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args)), args...)
 	if err != nil {
@@ -328,7 +337,7 @@ func (r *CopyTradingRepo) ListSubscriptions(ctx context.Context, filter reposito
 }
 
 func (r *CopyTradingRepo) CountSubscriptions(ctx context.Context, filter repository.CopySubscriptionFilter) (int, error) {
-	where, args := copySubscriptionWhere(r.accountID, filter)
+	where, args := copySubscriptionWhere(r.accountID, r.environment, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, `SELECT COUNT(*) FROM copy_subscriptions`+where, args...).Scan(&total); err != nil {
 		return 0, err
@@ -337,7 +346,7 @@ func (r *CopyTradingRepo) CountSubscriptions(ctx context.Context, filter reposit
 }
 
 func (r *CopyTradingRepo) UpdateSubscription(ctx context.Context, s *domain.CopySubscription) error {
-	err := r.pool.QueryRow(ctx, `UPDATE copy_subscriptions SET status=$2,method=$3,capital_budget=$4,cash_buffer_pct=$5,top_n=$6,min_source_weight=$7,max_position_weight=$8,max_turnover_pct=$9,min_price=$10,min_avg_dollar_volume=$11,max_spread_bps=$12,max_quote_age_seconds=$13,allowed_sessions=$14,stock_allowlist=$15,stock_blocklist=$16,stopped_at=$17,updated_at=NOW() WHERE id=$1 AND account_id=$18 AND updated_at=$19 RETURNING updated_at`, s.ID, s.Status, s.Method, s.CapitalBudget, s.CashBufferPct, s.TopN, s.MinSourceWeight, s.MaxPositionWeight, s.MaxTurnoverPct, s.MinPrice, s.MinAvgDollarVolume, s.MaxSpreadBPS, s.MaxQuoteAgeSeconds, s.AllowedSessions, s.StockAllowlist, s.StockBlocklist, s.StoppedAt, r.accountID, s.UpdatedAt).Scan(&s.UpdatedAt)
+	err := r.pool.QueryRow(ctx, `UPDATE copy_subscriptions SET status=$2,method=$3,capital_budget=$4,cash_buffer_pct=$5,top_n=$6,min_source_weight=$7,max_position_weight=$8,max_turnover_pct=$9,min_price=$10,min_avg_dollar_volume=$11,max_spread_bps=$12,max_quote_age_seconds=$13,allowed_sessions=$14,stock_allowlist=$15,stock_blocklist=$16,stopped_at=$17,updated_at=NOW() WHERE id=$1 AND account_id=$18 AND environment=$20 AND updated_at=$19 RETURNING updated_at`, s.ID, s.Status, s.Method, s.CapitalBudget, s.CashBufferPct, s.TopN, s.MinSourceWeight, s.MaxPositionWeight, s.MaxTurnoverPct, s.MinPrice, s.MinAvgDollarVolume, s.MaxSpreadBPS, s.MaxQuoteAgeSeconds, s.AllowedSessions, s.StockAllowlist, s.StockBlocklist, s.StoppedAt, r.accountID, s.UpdatedAt, r.environment).Scan(&s.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("postgres: copy subscription changed concurrently: %w", repository.ErrIdempotencyConflict)
 	}
@@ -371,7 +380,7 @@ func scanCopyIntent(row pgx.Row) (*domain.CopyTradeIntent, error) {
 }
 
 func (r *CopyTradingRepo) CreateIntent(ctx context.Context, intent *domain.CopyTradeIntent) (bool, error) {
-	if intent.AccountID != r.accountID {
+	if intent.AccountID != r.accountID || r.environment.IsValid() && intent.Environment != r.environment {
 		return false, fmt.Errorf("postgres: create copy intent: account mismatch")
 	}
 	if intent.Calculation == nil {
@@ -385,7 +394,7 @@ func (r *CopyTradingRepo) CreateIntent(ctx context.Context, intent *domain.CopyT
 	}
 	err := r.pool.QueryRow(ctx, `INSERT INTO copy_trade_intents (id,account_id,environment,subscription_id,origin_type,origin_id,source_observation_id,pipeline_run_id,pipeline_run_trade_date,instrument_key,ticker,side,target_weight,target_value,attributed_current_value,requested_notional,executable_price,quote_gate_version,decision_quote_snapshot_id,decision_bid,decision_ask,decision_spread_bps,decision_available_at,decision_at,decision_market_status,decision_session_status,calculation_version,calculation,policy_status,policy_reasons,risk_status,risk_reasons,order_id,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34) ON CONFLICT (subscription_id,source_observation_id,instrument_key,calculation_version) DO NOTHING RETURNING created_at,updated_at`, intent.ID, nullableUUID(intent.AccountID), nullString(string(intent.Environment)), intent.SubscriptionID, intent.OriginType, intent.OriginID, intent.SourceObservationID, intent.PipelineRunID, intent.PipelineRunTradeDate, intent.InstrumentKey, intent.Ticker, intent.Side, intent.TargetWeight, intent.TargetValue, intent.AttributedCurrentValue, intent.RequestedNotional, intent.ExecutablePrice, intent.QuoteGateVersion, intent.DecisionQuoteSnapshotID, nullIfEmpty(intent.DecisionBid), nullIfEmpty(intent.DecisionAsk), nullIfEmpty(intent.DecisionSpreadBPS), intent.DecisionAvailableAt, intent.DecisionAt, nullIfEmpty(intent.DecisionMarketStatus), nullIfEmpty(intent.DecisionSessionStatus), intent.CalculationVersion, intent.Calculation, intent.PolicyStatus, intent.PolicyReasons, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status).Scan(&intent.CreatedAt, &intent.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		existing, loadErr := scanCopyIntent(r.pool.QueryRow(ctx, copyIntentSelect+` WHERE subscription_id=$1 AND source_observation_id=$2 AND instrument_key=$3 AND calculation_version=$4 AND account_id=$5`, intent.SubscriptionID, intent.SourceObservationID, intent.InstrumentKey, intent.CalculationVersion, r.accountID))
+		existing, loadErr := scanCopyIntent(r.pool.QueryRow(ctx, copyIntentSelect+` WHERE subscription_id=$1 AND source_observation_id=$2 AND instrument_key=$3 AND calculation_version=$4 AND account_id=$5 AND environment=$6`, intent.SubscriptionID, intent.SourceObservationID, intent.InstrumentKey, intent.CalculationVersion, r.accountID, r.environment))
 		if loadErr != nil {
 			return false, loadErr
 		}
@@ -401,7 +410,7 @@ func (r *CopyTradingRepo) CreateIntent(ctx context.Context, intent *domain.CopyT
 }
 
 func (r *CopyTradingRepo) ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error) {
-	rows, err := r.pool.Query(ctx, copyIntentSelect+` WHERE subscription_id=$1 AND account_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4`, subscriptionID, r.accountID, limit, offset)
+	rows, err := r.pool.Query(ctx, copyIntentSelect+` WHERE subscription_id=$1 AND account_id=$2 AND environment=$5 ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4`, subscriptionID, r.accountID, limit, offset, r.environment)
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +427,7 @@ func (r *CopyTradingRepo) ListIntents(ctx context.Context, subscriptionID uuid.U
 }
 
 func (r *CopyTradingRepo) UpdateIntent(ctx context.Context, intent *domain.CopyTradeIntent) error {
-	return r.pool.QueryRow(ctx, `UPDATE copy_trade_intents SET pipeline_run_id=$2,risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,updated_at=NOW() WHERE id=$1 AND account_id=$7 RETURNING updated_at`, intent.ID, intent.PipelineRunID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status, r.accountID).Scan(&intent.UpdatedAt)
+	return r.pool.QueryRow(ctx, `UPDATE copy_trade_intents SET pipeline_run_id=$2,risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,updated_at=NOW() WHERE id=$1 AND account_id=$7 AND environment=$8 RETURNING updated_at`, intent.ID, intent.PipelineRunID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status, r.accountID, r.environment).Scan(&intent.UpdatedAt)
 }
 
 func (r *CopyTradingRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
@@ -428,7 +437,7 @@ func (r *CopyTradingRepo) WithExecutionAccountLock(ctx context.Context, accountI
 func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error) {
 	tag, err := r.pool.Exec(ctx, `WITH locked AS (
 		SELECT i.id FROM copy_trade_intents i JOIN copy_subscriptions s ON s.id=i.subscription_id
-		WHERE i.id=$1 AND i.account_id=$4 AND s.account_id=$4 AND i.environment=s.environment
+		WHERE i.id=$1 AND i.account_id=$4 AND s.account_id=$4 AND i.environment=s.environment AND i.environment=$5
 		 AND i.origin_type='copy_subscription' AND s.origin_type='copy_subscription'
 		 AND i.origin_id=s.id AND s.origin_id=s.id AND s.status='paper_active' AND s.is_paper=true
 		 AND i.policy_status='approved' AND (i.status IN ('received','ordered','partial') OR (i.status='failed' AND i.risk_status='pending'))
@@ -440,7 +449,7 @@ func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, cl
 			  AND o.status IN ('pending','submitted','partial','filled','rejected','cancelled')))
 		 AND (i.execution_claim_id IS NULL OR i.execution_claimed_at < $3 - INTERVAL '5 minutes')
 		FOR UPDATE OF i,s)
-		UPDATE copy_trade_intents i SET status='received',execution_claim_id=$2,execution_claimed_at=$3,updated_at=$3 FROM locked WHERE i.id=locked.id`, intentID, claimID, now.UTC(), r.accountID)
+		UPDATE copy_trade_intents i SET status='received',execution_claim_id=$2,execution_claimed_at=$3,updated_at=$3 FROM locked WHERE i.id=locked.id`, intentID, claimID, now.UTC(), r.accountID, r.environment)
 	if err != nil {
 		return false, fmt.Errorf("postgres: claim copy intent execution: %w", err)
 	}
@@ -453,7 +462,7 @@ func (r *CopyTradingRepo) GetClaimedIntentExecution(ctx context.Context, intentI
 		return nil, nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	intent, err := scanCopyIntent(tx.QueryRow(ctx, copyIntentSelect+` WHERE id=$1 AND account_id=$2 AND execution_claim_id=$3 AND status='received' FOR UPDATE`, intentID, r.accountID, claimID))
+	intent, err := scanCopyIntent(tx.QueryRow(ctx, copyIntentSelect+` WHERE id=$1 AND account_id=$2 AND execution_claim_id=$3 AND status='received' AND environment=$4 FOR UPDATE`, intentID, r.accountID, claimID, r.environment))
 	if err != nil {
 		return nil, nil, copyRepoNotFound("claimed intent", err)
 	}
@@ -471,7 +480,7 @@ func (r *CopyTradingRepo) CompleteIntentExecution(ctx context.Context, intent *d
 	tag, err := r.pool.Exec(ctx, `UPDATE copy_trade_intents
 		SET risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,
 		    execution_claim_id=NULL,execution_claimed_at=NULL,updated_at=NOW()
-		WHERE id=$1 AND account_id=$7 AND execution_claim_id=$2 AND status='received'`, intent.ID, claimID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status, r.accountID)
+		WHERE id=$1 AND account_id=$7 AND execution_claim_id=$2 AND status='received' AND environment=$8`, intent.ID, claimID, intent.RiskStatus, intent.RiskReasons, intent.OrderID, intent.Status, r.accountID, r.environment)
 	if err != nil {
 		return false, fmt.Errorf("postgres: complete copy intent execution: %w", err)
 	}

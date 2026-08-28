@@ -308,7 +308,7 @@ ALTER TABLE allocation_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN
 ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trades DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE positions DROP COLUMN close_reservation_order_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE orders DROP COLUMN client_order_id,DROP COLUMN allocation_opportunity_id,DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE orders DROP COLUMN spread_max_reward,DROP COLUMN spread_max_risk,DROP COLUMN client_order_id,DROP COLUMN allocation_opportunity_id,DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trade_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE agent_events DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE agent_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

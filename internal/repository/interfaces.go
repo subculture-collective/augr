@@ -796,6 +796,10 @@ type OptionSettlementRepository interface {
 	SettleOptionPosition(ctx context.Context, input OptionPositionSettlementInput) (OptionPositionSettlementResult, error)
 }
 
+type OptionSettlementSyncRetryRepository interface {
+	ResolveOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) error
+}
+
 // OptionFillInput carries one fully accounted option fill for atomic
 // order-position-trade persistence. PositionID is required for closing fills
 // and must be nil for opening fills.

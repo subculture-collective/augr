@@ -47,6 +47,7 @@ type orderStatusResponse struct {
 	FilledQty      string                `json:"filled_qty"`
 	FilledAvgPrice *string               `json:"filled_avg_price"`
 	FilledAt       *string               `json:"filled_at"`
+	UpdatedAt      string                `json:"updated_at"`
 	Legs           []orderStatusResponse `json:"legs"`
 }
 
@@ -199,6 +200,13 @@ func mapBrokerOrderStatus(response orderStatusResponse) (execution.BrokerOrderSt
 			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid filled at: %w", parseErr)
 		}
 		result.FilledAt = &filledAt
+	}
+	if result.FilledQuantity > 0 && result.FilledAt == nil && strings.TrimSpace(response.UpdatedAt) != "" {
+		observedAt, parseErr := time.Parse(time.RFC3339Nano, response.UpdatedAt)
+		if parseErr != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid updated at: %w", parseErr)
+		}
+		result.FilledAt = &observedAt
 	}
 	return result, nil
 }

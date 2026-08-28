@@ -189,6 +189,10 @@ func TestSettlerClosesWinningPaperContractAndIsIdempotent(t *testing.T) {
 
 type atomicLifecycleStub struct{ called int }
 
+func (s *atomicLifecycleStub) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func (s *atomicLifecycleStub) ApplyOrderFill(context.Context, repository.OrderFillInput) (repository.OrderFillResult, error) {
 	s.called++
 	return repository.OrderFillResult{}, nil

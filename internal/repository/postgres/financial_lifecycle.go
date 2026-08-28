@@ -237,6 +237,11 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		if remaining > 0 {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: sell fill did not consume enough quantity")
 		}
+		if terminalOrderStatusPostgres(order.Status) {
+			if _, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE account_id=$1 AND environment=$2 AND close_reservation_order_id=$3`, order.AccountID, order.Environment, order.ID); err != nil {
+				return repository.OrderFillResult{}, fmt.Errorf("postgres: release unconsumed terminal close reservations: %w", err)
+			}
+		}
 		if len(updatedIDs) > 1 {
 			position = nil
 			positionID = nil
@@ -1031,6 +1036,14 @@ func (db *DB) RecordOptionSettlementSyncFailure(ctx context.Context, input repos
 		return fmt.Errorf("postgres: conflicting option broker sync retry evidence")
 	}
 	return nil
+}
+
+func (db *DB) ResolveOptionSettlementSyncRetries(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) error {
+	if accountID == uuid.Nil || !environment.IsValid() {
+		return fmt.Errorf("postgres: invalid option broker sync retry scope")
+	}
+	_, err := db.Pool.Exec(ctx, `UPDATE option_broker_sync_retries SET status='resolved',updated_at=NOW() WHERE account_id=$1 AND environment=$2 AND status='retry'`, accountID, environment)
+	return err
 }
 
 func numeric8Equal(left, right float64) bool {

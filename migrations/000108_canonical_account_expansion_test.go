@@ -72,7 +72,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		}
 	}
 	if !strings.Contains(up, "alter table orders add column account_id") ||
-		!strings.Contains(up, "add column allocation_opportunity_id uuid references portfolio_opportunities(id) on delete restrict, add column client_order_id text; alter table positions") {
+		!strings.Contains(up, "add column allocation_opportunity_id uuid references portfolio_opportunities(id) on delete restrict, add column client_order_id text, add column spread_max_risk numeric(20,8), add column spread_max_reward numeric(20,8); alter table positions") {
 		t.Fatal("allocation_opportunity_id must be added to orders")
 	}
 	if strings.Contains(up, "alter table positions add column account_id uuid references accounts(id) on delete restrict, add column environment text check (environment in ('paper_scored','paper_stress','shadow','live')), add column origin_type text check (origin_type in ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')), add column origin_id text, add column allocation_opportunity_id") {
@@ -155,7 +155,7 @@ func TestCanonicalAccountExpansionCopyExecutionFence(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE copy_trade_intents SET execution_claim_id=NULL,execution_claimed_at=NULL WHERE id=$1`, graph.intentID); err != nil {
 		t.Fatal(err)
 	}
-	repo := pgrepo.NewCopyTradingRepo(pool, uuid.MustParse("00000000-0000-4000-8000-000000000064"))
+	repo := pgrepo.NewCopyTradingRepo(pool, uuid.MustParse("00000000-0000-4000-8000-000000000064"), domain.AccountEnvironmentPaperScored)
 	claimedAt := time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC)
 	firstClaim, takeoverClaim := uuid.New(), uuid.New()
 	if claimed, err := repo.ClaimIntentExecution(ctx, graph.intentID, firstClaim, claimedAt); err != nil || !claimed {

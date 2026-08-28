@@ -75,7 +75,9 @@ ALTER TABLE orders
     ADD COLUMN pipeline_run_trade_date DATE,
     ADD COLUMN copy_origin_rebalance_run_id UUID REFERENCES copy_origin_rebalance_runs(id) ON DELETE RESTRICT,
     ADD COLUMN allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT,
-    ADD COLUMN client_order_id TEXT;
+    ADD COLUMN client_order_id TEXT,
+    ADD COLUMN spread_max_risk NUMERIC(20,8),
+    ADD COLUMN spread_max_reward NUMERIC(20,8);
 ALTER TABLE positions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),

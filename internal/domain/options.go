@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
 
 // OptionType identifies a contract as a call or put.
 type OptionType string
@@ -70,6 +74,7 @@ type SpreadLeg struct {
 	Quantity        float64        `json:"quantity"`
 	ExecutablePrice float64        `json:"executable_price"`
 	Greeks          OptionGreeks   `json:"greeks"`
+	ClosePositionID uuid.UUID      `json:"-"`
 }
 
 // OptionStrategyType identifies a named options strategy.

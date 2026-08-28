@@ -22,6 +22,10 @@ type cancellationSafeSettlementState struct {
 	called bool
 }
 
+func (r *recordingOptionSettlementRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func (s *cancellationSafeSettlementState) ApplyOptionSettlement(ctx context.Context, _ uuid.UUID, _ float64) error {
 	s.called = true
 	return ctx.Err()

@@ -47,6 +47,20 @@ func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, pos
 	if settlementRepo == nil {
 		return OptionsExpirySummary{}, errors.New("options expiry: atomic settlement repository is required")
 	}
+	locker, ok := settlementRepo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return OptionsExpirySummary{}, errors.New("options expiry: execution account locker is required")
+	}
+	var summary OptionsExpirySummary
+	err := locker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		var settleErr error
+		summary, settleErr = settleExpiredOptionPositionsLocked(ctx, scope, positions, underlyingPrices, now, settlementRepo, states...)
+		return settleErr
+	})
+	return summary, err
+}
+
+func settleExpiredOptionPositionsLocked(ctx context.Context, scope ExecutionScope, positions []domain.Position, underlyingPrices map[string]float64, now time.Time, settlementRepo repository.OptionSettlementRepository, states ...OptionSettlementState) (OptionsExpirySummary, error) {
 	today := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
 	settlements := make([]optionSettlement, 0)
 	for index := range positions {
@@ -123,6 +137,16 @@ func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, pos
 			summary.CashSettled++
 		} else {
 			summary.ExpiredWorthless++
+		}
+	}
+	if len(states) > 0 && states[0] != nil {
+		if retries, ok := settlementRepo.(repository.OptionSettlementSyncRetryRepository); ok {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			err := retries.ResolveOptionSettlementSyncRetries(cleanupCtx, scope.AccountID(), scope.Environment())
+			cancel()
+			if err != nil {
+				return summary, fmt.Errorf("options expiry: resolve rebuilt broker sync retries: %w", err)
+			}
 		}
 	}
 	return summary, nil

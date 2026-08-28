@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
@@ -112,8 +113,22 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 			continue
 		}
 		if order.LegGroupID != nil {
+			if order.PositionIntent != nil && (*order.PositionIntent == domain.PositionIntentBuyToClose || *order.PositionIntent == domain.PositionIntentSellToClose) {
+				position, lookupErr := m.recoveredClosePosition(ctx, order, positions)
+				if lookupErr != nil {
+					return fmt.Errorf("options_manager: recovered spread close %s reservation: %w", order.ID, lookupErr)
+				}
+				order.ClosePositionIDs = []uuid.UUID{position.ID}
+			}
 			groups[*order.LegGroupID] = append(groups[*order.LegGroupID], order)
 			continue
+		}
+		if order.PositionIntent != nil && (*order.PositionIntent == domain.PositionIntentBuyToClose || *order.PositionIntent == domain.PositionIntentSellToClose) {
+			position, lookupErr := m.recoveredClosePosition(ctx, order, positions)
+			if lookupErr != nil {
+				return fmt.Errorf("options_manager: recovered close %s reservation: %w", order.ID, lookupErr)
+			}
+			order.ClosePositionIDs = []uuid.UUID{position.ID}
 		}
 		lookupID := strings.TrimSpace(order.ExternalID)
 		var result BrokerOrderStatus
@@ -287,7 +302,10 @@ func recoveredSpread(orders []*domain.Order) (*domain.OptionSpread, float64, err
 			quantity = order.Quantity
 		}
 	}
-	spread := &domain.OptionSpread{Underlying: orders[0].UnderlyingTicker, Legs: make([]domain.SpreadLeg, 0, len(orders))}
+	spread := &domain.OptionSpread{Underlying: orders[0].UnderlyingTicker, MaxRisk: orders[0].SpreadMaxRisk, MaxReward: orders[0].SpreadMaxReward, Legs: make([]domain.SpreadLeg, 0, len(orders))}
+	if spread.MaxRisk <= 0 || spread.MaxReward <= 0 {
+		return nil, 0, errors.New("persisted spread risk and reward are incomplete")
+	}
 	if orders[0].OptionType != nil && *orders[0].OptionType == domain.OptionTypePut {
 		spread.StrategyType = domain.StrategyBearPutSpread
 	} else {
@@ -308,7 +326,11 @@ func recoveredSpread(orders []*domain.Order) (*domain.OptionSpread, float64, err
 		if order.LimitPrice != nil {
 			price = *order.LimitPrice
 		}
-		spread.Legs = append(spread.Legs, domain.SpreadLeg{Contract: domain.OptionContract{OCCSymbol: order.Ticker, Underlying: order.UnderlyingTicker, OptionType: *order.OptionType, Strike: *order.Strike, Expiry: *order.Expiry, Multiplier: order.ContractMultiplier}, Side: order.Side, PositionIntent: *order.PositionIntent, Ratio: ratio, ExecutablePrice: price})
+		var closePositionID uuid.UUID
+		if len(order.ClosePositionIDs) == 1 {
+			closePositionID = order.ClosePositionIDs[0]
+		}
+		spread.Legs = append(spread.Legs, domain.SpreadLeg{Contract: domain.OptionContract{OCCSymbol: order.Ticker, Underlying: order.UnderlyingTicker, OptionType: *order.OptionType, Strike: *order.Strike, Expiry: *order.Expiry, Multiplier: order.ContractMultiplier}, Side: order.Side, PositionIntent: *order.PositionIntent, Ratio: ratio, ExecutablePrice: price, ClosePositionID: closePositionID})
 	}
 	return spread, quantity, nil
 }
@@ -478,6 +500,9 @@ func (m *OptionsOrderManager) processOptionSignal(ctx context.Context, scope Exe
 	}
 	if plan.EntryPrice <= 0 {
 		return fmt.Errorf("options_manager: explicit executable option price is required")
+	}
+	if signal.Signal == domain.PipelineSignalSell {
+		return m.closeLegacyStrategyOptionPositions(ctx, scope, contract.OCCSymbol, plan.EntryPrice)
 	}
 	if m.riskEngine == nil {
 		return fmt.Errorf("options_manager: risk engine is required")
@@ -655,6 +680,44 @@ func (m *OptionsOrderManager) processOptionSignal(ctx context.Context, scope Exe
 	return nil
 }
 
+func (m *OptionsOrderManager) closeLegacyStrategyOptionPositions(ctx context.Context, scope ExecutionScope, ticker string, price float64) error {
+	repo, ok := m.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok || scope.LegacyStrategyID() == nil {
+		return errors.New("options_manager: account-scoped positions and legacy strategy ownership are required for sell")
+	}
+	run, ok := scope.PipelineRun()
+	if !ok {
+		return errors.New("options_manager: pipeline run is required for option sell")
+	}
+	positions, err := repo.GetOpenByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, 1000, 0)
+	if err != nil {
+		return fmt.Errorf("options_manager: load account option positions for sell: %w", err)
+	}
+	closed := 0
+	for i := range positions {
+		position := &positions[i]
+		if position.AssetClass != domain.AssetClassOption || position.Ticker != ticker || position.StrategyID == nil || *position.StrategyID != *scope.LegacyStrategyID() {
+			continue
+		}
+		versionID, parseErr := uuid.Parse(position.OriginID)
+		if position.OriginType != string(ledger.ExecutionOriginStrategyVersion) || parseErr != nil {
+			return fmt.Errorf("options_manager: option position %s lacks strategy-version ownership", position.ID)
+		}
+		positionScope, scopeErr := NewStrategyExecutionScope(position.AccountID, position.Environment, versionID, run, *position.StrategyID)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		if err := m.closeOptionPosition(ctx, positionScope, position, price, "strategy close"); err != nil {
+			return err
+		}
+		closed++
+	}
+	if closed == 0 {
+		return fmt.Errorf("options_manager: no open option position for logical strategy and contract %s", ticker)
+	}
+	return nil
+}
+
 func (m *OptionsOrderManager) persistImmediateFill(ctx context.Context, order *domain.Order) error {
 	input, err := m.optionFillInput(ctx, order, nil, "")
 	if err != nil {
@@ -738,6 +801,7 @@ func (m *OptionsOrderManager) closeOptionPosition(ctx context.Context, scope Exe
 		LegGroupID: position.LegGroupID, CreatedAt: now,
 		Broker: m.brokerName,
 	}
+	order.ClosePositionIDs = []uuid.UUID{position.ID}
 	order.ClientOrderID = "augr-option-close-" + order.ID.String()
 	stampOptionOrderScope(order, scope)
 	if resumed, resumeErr := m.resumeOptionEffect(ctx, scope, []*domain.Order{order}, []domain.Position{*position}); resumed || resumeErr != nil {
@@ -892,7 +956,8 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 				closePositions[positions[index].Ticker] = &positions[index]
 			}
 		}
-		for _, leg := range spread.Legs {
+		for legIndex := range spread.Legs {
+			leg := &spread.Legs[legIndex]
 			position := closePositions[leg.Contract.OCCSymbol]
 			if position == nil || position.Quantity != quantity*float64(leg.Ratio) || position.LegGroupID == nil {
 				return fmt.Errorf("options_manager: matching open spread position required for %s", leg.Contract.OCCSymbol)
@@ -902,6 +967,7 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 			} else if *existingGroupID != *position.LegGroupID {
 				return errors.New("options_manager: close legs do not share one persisted leg group")
 			}
+			leg.ClosePositionID = position.ID
 		}
 	}
 	preflight, ok := m.broker.(spreadPreflightBroker)
@@ -1011,6 +1077,11 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 			LegGroupID:         &legGroupID,
 			CreatedAt:          now,
 			Broker:             m.brokerName,
+			SpreadMaxRisk:      spread.MaxRisk,
+			SpreadMaxReward:    spread.MaxReward,
+		}
+		if isClosing {
+			legOrder.ClosePositionIDs = []uuid.UUID{closePositions[leg.Contract.OCCSymbol].ID}
 		}
 		legOrder.ClientOrderID = "augr-option-leg-" + legOrder.ID.String()
 		stampOptionOrderScope(legOrder, scope)

@@ -51,6 +51,37 @@ func TestOptionLotsRemainDistinctBehindAggregateExecutionView(t *testing.T) {
 	}
 }
 
+func TestOptionCloseTargetsExactDurableLot(t *testing.T) {
+	price := 2.50
+	broker := NewPaperBroker(10000, 0, 0)
+	first, second := optionOrder(&price), optionOrder(&price)
+	first.Quantity, second.Quantity = 1, 1
+	if _, err := broker.SubmitOptionOrder(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	firstID := uuid.New()
+	if err := broker.BindDurableOptionPosition(context.Background(), first.Ticker, firstID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := broker.SubmitOptionOrder(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	secondID := uuid.New()
+	if err := broker.BindDurableOptionPosition(context.Background(), second.Ticker, secondID); err != nil {
+		t.Fatal(err)
+	}
+	intent := domain.PositionIntentSellToClose
+	closeOrder := optionOrder(&price)
+	closeOrder.Side, closeOrder.Quantity, closeOrder.PositionIntent = domain.OrderSideSell, 1, &intent
+	closeOrder.ClosePositionIDs = []uuid.UUID{secondID}
+	if _, err := broker.SubmitOptionOrder(context.Background(), closeOrder); err != nil {
+		t.Fatal(err)
+	}
+	if broker.optionLots[firstID] == nil || broker.optionLots[secondID] != nil {
+		t.Fatalf("exact durable close targeted wrong lot: %+v", broker.optionLots)
+	}
+}
+
 func TestOptionInsufficientFundsIsDefinitiveBrokerRejection(t *testing.T) {
 	price := 2.50
 	broker := NewPaperBroker(1, 0, 0)
