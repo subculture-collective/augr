@@ -23,6 +23,8 @@ do
   sh -n "$shell_script"
 done
 bash -n scripts/verify-prod-build.sh
+bash scripts/update-db-targets_test.sh
+shellcheck scripts/update-db-targets.sh scripts/update-db-targets_test.sh
 go test -count=1 ./cmd/... ./internal/... ./migrations/...
 go vet ./cmd/... ./internal/... ./migrations/...
 golangci-lint run ./cmd/... ./internal/... ./migrations/...
@@ -36,6 +38,7 @@ golangci-lint run ./cmd/... ./internal/... ./migrations/...
 docker compose config --quiet
 docker compose -f docker-compose.nuc.yml config --quiet
 docker compose -f docker-compose.nuc.yml -f deploy/docker-compose.nuc.rollback.yml config --quiet
+docker compose -f docker-compose.nuc.yml -f deploy/docker-compose.nuc.scheduler-paused.yml config --quiet
 MIGRATION_DOWN_STEPS=2 docker compose -f docker-compose.nuc.yml -f deploy/docker-compose.nuc.migrate-down.yml config --quiet
 docker buildx build --check -f Dockerfile .
 docker buildx build --check -f Dockerfile.web .
