@@ -57,11 +57,11 @@ func TestCompareSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestSchemaVersionCompatibilityRequiresExpansion(t *testing.T) {
+func TestSchemaVersionCompatibilityAcceptsExpansionAndEnforcement(t *testing.T) {
 	tests := []struct {
 		version int
 		want    bool
-	}{{107, false}, {108, true}, {109, false}, {110, false}}
+	}{{107, false}, {108, true}, {109, true}, {110, false}}
 	for _, tt := range tests {
 		if got := IsSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("IsSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)

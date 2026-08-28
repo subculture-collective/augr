@@ -172,11 +172,11 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestRuntimeSchemaVersionRequiresExpansion(t *testing.T) {
+func TestRuntimeSchemaVersionAcceptsExpansionAndEnforcement(t *testing.T) {
 	for _, tt := range []struct {
 		version int
 		want    bool
-	}{{107, false}, {108, true}, {109, false}, {110, false}} {
+	}{{107, false}, {108, true}, {109, true}, {110, false}} {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
@@ -491,6 +491,31 @@ func TestRuntimeTeardownStopsAndJoinsBeforeClosingDBOnce(t *testing.T) {
 	if _, _, err := runs.Admit(context.Background()); !errors.Is(err, runcontrol.ErrDraining) {
 		t.Fatalf("post-teardown admission error = %v, want %v", err, runcontrol.ErrDraining)
 	}
+}
+
+func TestRuntimeTeardownLeavesNoRunningOrProcessingWorkAtPoolClose(t *testing.T) {
+	runs := runcontrol.NewGroup()
+	var pipelineRunning, automationRunning, projectionProcessing atomic.Int32
+	pipelineRunning.Store(1)
+	automationRunning.Store(1)
+	projectionProcessing.Store(1)
+	if err := runs.Go(context.Background(), func(ctx context.Context) {
+		<-ctx.Done()
+		pipelineRunning.Store(0) // terminal pipeline write
+	}); err != nil {
+		t.Fatal(err)
+	}
+	teardown := &runtimeTeardown{
+		runs:           runs,
+		stopAutomation: func() { automationRunning.Store(0) },
+		stopWorkers:    func() { projectionProcessing.Store(0) },
+		closePrimaryDB: func() {
+			if pipelineRunning.Load() != 0 || automationRunning.Load() != 0 || projectionProcessing.Load() != 0 {
+				t.Fatalf("pool closed with running pipeline=%d automation=%d projection=%d", pipelineRunning.Load(), automationRunning.Load(), projectionProcessing.Load())
+			}
+		},
+	}
+	teardown.Stop()
 }
 
 func TestRuntimeLifecycleWorkerStartFailureTearsDown(t *testing.T) {

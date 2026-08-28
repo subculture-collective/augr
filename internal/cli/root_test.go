@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +21,52 @@ import (
 )
 
 type rootCommandTestContextKey struct{}
+
+func TestSignalContextCapturesSIGTERMForGracefulShutdown(t *testing.T) {
+	ctx, stop, currentSignal := newSignalContext(context.Background(), syscall.SIGTERM)
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("SIGTERM did not cancel the graceful-shutdown context")
+	}
+	if currentSignal() != syscall.SIGTERM {
+		t.Fatalf("captured signal = %v, want SIGTERM", currentSignal())
+	}
+}
+
+func TestServerLifecycleWaitsForShutdownBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan struct{})
+	terminalWrite := make(chan struct{})
+	shutdownStarted := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runServerLifecycleWithHook(ctx, func() error {
+			<-serveDone
+			return http.ErrServerClosed
+		}, func(context.Context) error {
+			close(shutdownStarted)
+			<-terminalWrite
+			close(serveDone)
+			return nil
+		}, nil)
+	}()
+	cancel()
+	<-shutdownStarted
+	select {
+	case err := <-done:
+		t.Fatalf("server lifecycle returned before terminal write: %v", err)
+	default:
+	}
+	close(terminalWrite)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCommandHelp(t *testing.T) {
 	t.Parallel()
@@ -63,7 +111,7 @@ func TestCapitalLadderSchemaCompatibility(t *testing.T) {
 	for _, test := range []struct {
 		version int
 		wantErr bool
-	}{{version: 107, wantErr: true}, {version: 108}, {version: 109, wantErr: true}, {version: 110, wantErr: true}} {
+	}{{version: 107, wantErr: true}, {version: 108}, {version: 109}, {version: 110, wantErr: true}} {
 		err := validateCapitalLadderSchemaVersion(test.version)
 		if (err != nil) != test.wantErr {
 			t.Errorf("validateCapitalLadderSchemaVersion(%d) error=%v, wantErr=%t", test.version, err, test.wantErr)

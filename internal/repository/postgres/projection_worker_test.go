@@ -19,12 +19,14 @@ type projectionWorkerStoreStub struct {
 	retried    int
 	released   int
 	lastCode   string
+	processing bool
 }
 
 func (stub *projectionWorkerStoreStub) Claim(context.Context, string, time.Time, time.Duration) (*ProjectionOutboxItem, error) {
 	stub.claims++
 	item := stub.item
 	stub.item = nil
+	stub.processing = item != nil
 	return item, nil
 }
 func (stub *projectionWorkerStoreStub) Heartbeat(context.Context, uuid.UUID, string, time.Time, time.Duration) error {
@@ -33,14 +35,17 @@ func (stub *projectionWorkerStoreStub) Heartbeat(context.Context, uuid.UUID, str
 }
 func (stub *projectionWorkerStoreStub) Complete(context.Context, uuid.UUID, string, time.Time) error {
 	stub.completed++
+	stub.processing = false
 	return nil
 }
 func (stub *projectionWorkerStoreStub) Release(context.Context, uuid.UUID, string, time.Time, string) error {
 	stub.released++
+	stub.processing = false
 	return nil
 }
 func (stub *projectionWorkerStoreStub) RetryOrDegrade(_ context.Context, _ uuid.UUID, _ string, _ time.Time, _ int, code string) (string, error) {
 	stub.retried++
+	stub.processing = false
 	stub.lastCode = code
 	return "retry", nil
 }
@@ -136,5 +141,8 @@ func TestProjectionWorkerDrainTimeoutReleasesInflightClaim(t *testing.T) {
 	<-done
 	if store.released != 1 {
 		t.Fatalf("released claims = %d, want 1", store.released)
+	}
+	if store.processing {
+		t.Fatal("drain left a processing projection claim stranded")
 	}
 }
