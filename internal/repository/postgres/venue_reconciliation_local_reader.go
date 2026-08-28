@@ -53,7 +53,8 @@ func (reader *VenueReconciliationLocalReader) ReadLocalEvidenceInRepeatableRead(
 		return venuerecon.LocalSnapshotInput{}, fmt.Errorf("postgres: reconciliation checkpoint scope mismatch")
 	}
 	projectionRequest := ledger.ProjectionRequest{
-		AccountID: request.AccountID, AsOf: checkpoint.AsOf, MarkSource: checkpoint.MarkSource,
+		AccountID: request.AccountID, ThroughTransactionID: checkpoint.ThroughTransactionID,
+		AsOf: checkpoint.AsOf, MarkSource: checkpoint.MarkSource,
 		MarkNamespace: checkpoint.MarkNamespace, MaxMarkAge: checkpoint.MaxMarkAge,
 	}
 	projectionInput, err := loadProjectionInput(ctx, tx, projectionRequest)

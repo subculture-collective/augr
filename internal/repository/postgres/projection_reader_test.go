@@ -62,3 +62,33 @@ func TestProjectionReaderRejectsForeignAccountBeforeDatabaseAccess(t *testing.T)
 		t.Fatalf("GetCutoverEvidenceInventory() error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestProjectionReaderReturnsOutstandingProjectionWorkAsDegradedEvidence(t *testing.T) {
+	fixture := newVenueReconFixture(t)
+	checkpoint, err := NewProjectionRepo(fixture.pool, ProjectionCheckpointAttestor{}).GetProjectionCheckpointByID(fixture.ctx, fixture.local.CheckpointID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := fixture.pool.Begin(fixture.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enqueueEconomicProjectionTx(fixture.ctx, tx, fixture.local.AccountID(), checkpoint.ThroughTransactionID, checkpoint.AsOf); err != nil {
+		_ = tx.Rollback(fixture.ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(fixture.ctx); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := domain.NewExecutionAccountBinding(fixture.local.AccountID(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := NewProjectionReader(binding, fixture.pool).GetLatestPortfolioProjection(fixture.ctx, fixture.local.AccountID(), checkpoint.AsOf.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ProjectionWorkPending != 1 || snapshot.ProjectionWorkProcessing != 0 || snapshot.ProjectionWorkRetrying != 0 || snapshot.ProjectionWorkDegraded != 0 {
+		t.Fatalf("projection work evidence = pending:%d processing:%d retry:%d degraded:%d", snapshot.ProjectionWorkPending, snapshot.ProjectionWorkProcessing, snapshot.ProjectionWorkRetrying, snapshot.ProjectionWorkDegraded)
+	}
+}

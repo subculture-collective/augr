@@ -32,15 +32,16 @@ type AccountingEvidenceStore interface {
 }
 
 type RunRequest struct {
-	AccountID         uuid.UUID
-	AsOf              time.Time
-	ProjectionVersion string
-	MarkSource        string
-	MarkNamespace     string
-	MaxMarkAge        time.Duration
-	Generator         string
-	GeneratedAt       time.Time
-	Explanations      []ExplanationInput
+	AccountID            uuid.UUID
+	ThroughTransactionID uuid.UUID
+	AsOf                 time.Time
+	ProjectionVersion    string
+	MarkSource           string
+	MarkNamespace        string
+	MaxMarkAge           time.Duration
+	Generator            string
+	GeneratedAt          time.Time
+	Explanations         []ExplanationInput
 }
 
 type Runner struct {
@@ -58,7 +59,7 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (*Run, error)
 	if runner == nil || runner.fence == nil || runner.legacy == nil || runner.ledger == nil || runner.store == nil {
 		return nil, fmt.Errorf("accounting dual-run dependencies are required")
 	}
-	if request.AccountID == uuid.Nil || request.AsOf.IsZero() || !normalizedRequired(request.Generator, 256) {
+	if request.AccountID == uuid.Nil || request.ThroughTransactionID == uuid.Nil || request.AsOf.IsZero() || !normalizedRequired(request.Generator, 256) {
 		return nil, fmt.Errorf("accounting dual-run request is invalid")
 	}
 	lease, err := runner.fence.Acquire(ctx, request.AccountID, request.AsOf)
@@ -82,7 +83,8 @@ func (runner *Runner) Run(ctx context.Context, request RunRequest) (*Run, error)
 	}
 
 	sourceRequest := SourceRequest{
-		AccountID: request.AccountID, AsOf: request.AsOf, ProjectionVersion: request.ProjectionVersion,
+		AccountID: request.AccountID, ThroughTransactionID: request.ThroughTransactionID,
+		AsOf: request.AsOf, ProjectionVersion: request.ProjectionVersion,
 		MarkSource: request.MarkSource, MarkNamespace: request.MarkNamespace, MaxMarkAge: request.MaxMarkAge,
 	}
 	legacySnapshot, err := runner.legacy.Capture(ctx, sourceRequest, lease)

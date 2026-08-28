@@ -155,7 +155,9 @@ type OrchestratorDeps struct {
 		SettlePreview(context.Context, domain.MarketType, string) (*prediction.SettlementPreview, error)
 		PreviewMarket(context.Context, domain.MarketType, string) (int, error)
 		SettleDecisions(context.Context, domain.MarketType, string, string, time.Time, []uuid.UUID) (int, error)
+		SettleDecisionsWithEvidence(context.Context, domain.MarketType, string, string, time.Time, []uuid.UUID, prediction.ResolutionEvidence) (int, error)
 		SettleMarket(context.Context, domain.MarketType, string, string, time.Time) (int, error)
+		SettleMarketWithEvidence(context.Context, domain.MarketType, string, string, time.Time, prediction.ResolutionEvidence) (int, error)
 	} // optional; settles paper event positions from provider outcomes
 	KalshiReconciler            *kalshiexecution.Reconciler // optional; nil = skip live reconciliation job
 	PolymarketResolvedRepo      repository.PolymarketResolvedMarketsRepository
@@ -180,15 +182,16 @@ type OrchestratorDeps struct {
 	KalshiMarkProvider        interface {
 		LoadSnapshot(context.Context, string) (kalshiexecution.Snapshot, error)
 	}
-	KalshiProjectionRepo  repository.ProjectionRepository
-	KalshiMarkMaxAge      time.Duration
-	ReportArtifactRepo    *pgrepo.ReportArtifactRepo          // optional; nil = skip report jobs
-	BacktestConfigRepo    repository.BacktestConfigRepository // optional; needed by report jobs
-	BacktestRunRepo       repository.BacktestRunRepository    // optional; needed by report jobs
-	DiscoveryRunRepo      discovery.RunRepository             // required by stock discovery jobs
-	OvernightBacktestRuns repository.OvernightBacktestRunRepository
-	JobTimeout            time.Duration
-	Logger                *slog.Logger
+	KalshiProjectionRepo   repository.ProjectionRepository
+	KalshiProjectionOutbox repository.ProjectionOutboxRepository
+	KalshiMarkMaxAge       time.Duration
+	ReportArtifactRepo     *pgrepo.ReportArtifactRepo          // optional; nil = skip report jobs
+	BacktestConfigRepo     repository.BacktestConfigRepository // optional; needed by report jobs
+	BacktestRunRepo        repository.BacktestRunRepository    // optional; needed by report jobs
+	DiscoveryRunRepo       discovery.RunRepository             // required by stock discovery jobs
+	OvernightBacktestRuns  repository.OvernightBacktestRunRepository
+	JobTimeout             time.Duration
+	Logger                 *slog.Logger
 }
 
 // RegisteredJob tracks a single automated job and its runtime state.

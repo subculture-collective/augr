@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -47,7 +48,7 @@ type alpacaPLAggregateStub struct {
 
 type recordingAlpacaOptionFillRepo struct{ inputs []repository.OptionFillInput }
 
-func (r *recordingAlpacaOptionFillRepo) ApplyOptionFills(_ context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
+func (r *recordingAlpacaOptionFillRepo) ApplyAcceptedOptionFills(_ context.Context, _ execution.ExecutionScope, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
 	r.inputs = append(r.inputs, inputs...)
 	return []repository.OptionFillResult{{OrderID: inputs[0].Order.ID, PositionID: uuid.New(), TradeID: uuid.New()}}, nil
 }
@@ -796,7 +797,7 @@ func TestAlpacaReconcilerRoutesOptionFillThroughAtomicRepository(t *testing.T) {
 	fillRepo := &recordingAlpacaOptionFillRepo{}
 	broker := &alpacaReconciliationBrokerStub{fills: []BrokerFillSnapshot{{ActivityID: "option-fill", ExternalID: order.ExternalID, Ticker: order.Ticker, Side: order.Side, Quantity: 1, Price: 2, ExecutedAt: now}}}
 	trades := newRecordingTradeRepo(orders)
-	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: broker, OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: trades, OptionFillRepo: fillRepo})
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: broker, OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: trades, OptionFillWriter: fillRepo})
 	if _, err := reconciler.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}

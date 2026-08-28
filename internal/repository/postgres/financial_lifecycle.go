@@ -68,6 +68,17 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: begin order fill tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := applyOrderFillTx(ctx, tx, input)
+	if err != nil {
+		return repository.OrderFillResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return repository.OrderFillResult{}, fmt.Errorf("postgres: commit order fill: %w", err)
+	}
+	return result, nil
+}
+
+func applyOrderFillTx(ctx context.Context, tx pgx.Tx, input repository.OrderFillInput) (repository.OrderFillResult, error) {
 
 	var existingOrderID uuid.UUID
 	var existingPositionID *uuid.UUID
@@ -91,9 +102,6 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		existingTrade, err := scanTrade(tx.QueryRow(ctx, tradeSelectSQL+` WHERE id=$1 AND account_id=$2`, existingTradeID, existingAccountID))
 		if err != nil {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: load replayed fill trade: %w", err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return repository.OrderFillResult{}, fmt.Errorf("postgres: commit replayed order fill: %w", err)
 		}
 		return repository.OrderFillResult{OrderID: existingOrderID, PositionID: existingPositionID, Position: existingPosition, TradeID: existingTradeID, Trade: existingTrade, CreatedAt: existingCreatedAt, Replayed: true}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -315,9 +323,6 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	if _, err := tx.Exec(ctx, `INSERT INTO financial_fill_idempotency (idempotency_key,account_id,environment,origin_type,origin_id,order_id,position_id,trade_id,fill_quantity,fill_price) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, input.IdempotencyKey, order.AccountID, order.Environment, order.OriginType, order.OriginID, order.ID, positionID, trade.ID, input.FillIntent.Quantity, input.FillIntent.ExecutionPrice); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: finalize fill idempotency: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return repository.OrderFillResult{}, fmt.Errorf("postgres: commit order fill: %w", err)
-	}
 	return repository.OrderFillResult{OrderID: order.ID, PositionID: positionID, Position: position, TradeID: trade.ID, Trade: trade, CreatedAt: trade.CreatedAt}, nil
 }
 
@@ -365,25 +370,42 @@ func validateOrderFillInput(input repository.OrderFillInput) error {
 // of a spread. Each order receives a stable idempotency record in the existing
 // financial-fill ledger, and a mixed partial replay is rejected.
 func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
-	if len(inputs) == 0 {
-		return nil, fmt.Errorf("postgres: option fills are required")
+	if err := validateOptionFillBatch(inputs); err != nil {
+		return nil, err
 	}
-	seenOrders := make(map[uuid.UUID]struct{}, len(inputs))
-	for _, input := range inputs {
-		if err := validateOptionFillInput(input); err != nil {
-			return nil, err
-		}
-		if _, exists := seenOrders[input.Order.ID]; exists {
-			return nil, fmt.Errorf("postgres: duplicate option fill order %s", input.Order.ID)
-		}
-		seenOrders[input.Order.ID] = struct{}{}
-	}
-
 	tx, err := db.Pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: begin option fill tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	results, _, err := applyOptionFillsTx(ctx, tx, inputs)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: commit option fills: %w", err)
+	}
+	return results, nil
+}
+
+func validateOptionFillBatch(inputs []repository.OptionFillInput) error {
+	if len(inputs) == 0 {
+		return fmt.Errorf("postgres: option fills are required")
+	}
+	seenOrders := make(map[uuid.UUID]struct{}, len(inputs))
+	for _, input := range inputs {
+		if err := validateOptionFillInput(input); err != nil {
+			return err
+		}
+		if _, exists := seenOrders[input.Order.ID]; exists {
+			return fmt.Errorf("postgres: duplicate option fill order %s", input.Order.ID)
+		}
+		seenOrders[input.Order.ID] = struct{}{}
+	}
+	return nil
+}
+
+func applyOptionFillsTx(ctx context.Context, tx pgx.Tx, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, bool, error) {
 	lockKeys := make([]string, 0, len(inputs))
 	for _, input := range inputs {
 		lockKeys = append(lockKeys, input.IdempotencyKey)
@@ -391,7 +413,7 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 	sort.Strings(lockKeys)
 	for _, key := range lockKeys {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, financialLifecycleLockKey("option-fill", key)); err != nil {
-			return nil, fmt.Errorf("postgres: lock option fill idempotency: %w", err)
+			return nil, false, fmt.Errorf("postgres: lock option fill idempotency: %w", err)
 		}
 	}
 
@@ -403,19 +425,19 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 			err := tx.QueryRow(ctx, `SELECT idempotency_key,order_id,account_id,environment,origin_type,origin_id,status,filled_quantity::double precision,COALESCE(external_id,''),submitted_at FROM option_status_idempotency WHERE idempotency_key=$1 OR order_id=$2 FOR UPDATE`, input.IdempotencyKey, input.Order.ID).Scan(&existing.key, &existing.orderID, &existing.accountID, &existing.environment, &existing.originType, &existing.originID, &existing.status, &existing.quantity, &existing.externalID, &existing.submittedAt)
 			if err == nil {
 				if !optionStatusIdempotencyMatches(existing, input) {
-					return nil, fmt.Errorf("postgres: option status idempotency mismatch for order %s", input.Order.ID)
+					return nil, false, fmt.Errorf("postgres: option status idempotency mismatch for order %s", input.Order.ID)
 				}
 				results[index].OrderID = existing.orderID
 				continue
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
-				return nil, fmt.Errorf("postgres: select option status idempotency: %w", err)
+				return nil, false, fmt.Errorf("postgres: select option status idempotency: %w", err)
 			}
 			if err := applyOptionStatusTx(ctx, tx, input); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			if _, err := tx.Exec(ctx, `INSERT INTO option_status_idempotency(idempotency_key,account_id,environment,origin_type,origin_id,order_id,status,filled_quantity,external_id,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.Order.ID, input.Order.Status, input.FillQuantity, nullString(input.Order.ExternalID), input.Order.SubmittedAt); err != nil {
-				return nil, fmt.Errorf("postgres: persist option status idempotency: %w", err)
+				return nil, false, fmt.Errorf("postgres: persist option status idempotency: %w", err)
 			}
 			results[index].OrderID = input.Order.ID
 			continue
@@ -445,14 +467,14 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 		case err == nil:
 			positionMismatch := input.PositionID != nil && (existingPositionID == nil || *existingPositionID != *input.PositionID)
 			if existingOrderID != input.Order.ID || existingAccountID != input.AccountID || existingEnvironment != input.Environment || existingOriginType != input.OriginType || existingOriginID != input.OriginID || existingPositionID == nil || positionMismatch || !numeric8Equal(existingQuantity, input.FillQuantity) || !numeric8Equal(existingPrice, input.FillPrice) || !numeric8Equal(existingFee, input.Fee) || !numeric8Equal(existingPremium, input.Premium) || !existingFilledAt.Equal(input.FilledAt.UTC()) || existingExitReason != strings.TrimSpace(input.ExitReason) {
-				return nil, fmt.Errorf("postgres: option fill idempotency mismatch for order %s", input.Order.ID)
+				return nil, false, fmt.Errorf("postgres: option fill idempotency mismatch for order %s", input.Order.ID)
 			}
 			results[index] = repository.OptionFillResult{OrderID: existingOrderID, PositionID: *existingPositionID, TradeID: existingTradeID}
 			replayed++
 		case errors.Is(err, pgx.ErrNoRows):
 			// Persisted below after the batch replay state is known.
 		default:
-			return nil, fmt.Errorf("postgres: select option fill idempotency: %w", err)
+			return nil, false, fmt.Errorf("postgres: select option fill idempotency: %w", err)
 		}
 	}
 	nonStatusCount := 0
@@ -463,7 +485,7 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 	}
 	if replayed != 0 {
 		if replayed != nonStatusCount {
-			return nil, fmt.Errorf("postgres: partial option fill replay detected")
+			return nil, false, fmt.Errorf("postgres: partial option fill replay detected")
 		}
 	}
 
@@ -476,14 +498,11 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 		}
 		result, err := applyOptionFillTx(ctx, tx, input)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		results[index] = result
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("postgres: commit option fills: %w", err)
-	}
-	return results, nil
+	return results, replayed == nonStatusCount && nonStatusCount > 0, nil
 }
 
 type optionStatusIdempotencyEvidence struct {
@@ -950,6 +969,17 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: begin settlement tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := settlePredictionDecisionTx(ctx, tx, input)
+	if err != nil {
+		return repository.PredictionDecisionSettlementResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: commit settlement: %w", err)
+	}
+	return result, nil
+}
+
+func settlePredictionDecisionTx(ctx context.Context, tx pgx.Tx, input repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
 	requestedAccount, requestedEnvironment := input.AccountID, input.Environment
 	persisted := &domain.TradeDecision{ID: input.Decision.ID}
 	if err := tx.QueryRow(ctx, `SELECT strategy_id,paper_order_id,account_id,environment,origin_type,origin_id,market_type,instrument_key,outcome,status FROM trade_decisions WHERE id=$1 FOR UPDATE`, persisted.ID).Scan(
@@ -984,9 +1014,6 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	if err := tx.QueryRow(ctx, `SELECT idempotency_key,decision_id,position_id,trade_id,replay_event_id,payout,resolved_at,created_at,account_id,environment,origin_type,origin_id FROM prediction_settlement_idempotency WHERE idempotency_key=$1 OR decision_id=$2 FOR UPDATE`, input.IdempotencyKey, input.Decision.ID).Scan(&idempotencyKey, &decisionID, &positionID, &tradeID, &replayEventID, &payout, &resolvedAt, &createdAt, &existingAccountID, &existingEnvironment, &existingOriginType, &existingOriginID); err == nil {
 		if idempotencyKey != input.IdempotencyKey || decisionID != input.Decision.ID || existingAccountID != input.AccountID || existingEnvironment != input.Environment || existingOriginType != input.OriginType || existingOriginID != input.OriginID || math.IsNaN(payout) || math.IsInf(payout, 0) || !numeric8Equal(payout, input.Payout) || !resolvedAt.UTC().Equal(input.ResolvedAt.UTC()) {
 			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: idempotency mismatch for decision %s", input.Decision.ID)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: commit replayed settlement: %w", err)
 		}
 		return repository.PredictionDecisionSettlementResult{DecisionID: decisionID, PositionID: positionID, TradeID: tradeID, ReplayEventID: replayEventID, CreatedAt: createdAt, Replayed: true}, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -1070,9 +1097,6 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	}
 	if err := tx.QueryRow(ctx, `INSERT INTO prediction_settlement_idempotency(idempotency_key,account_id,environment,origin_type,origin_id,decision_id,position_id,trade_id,replay_event_id,payout,resolved_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING created_at`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.Decision.ID, position.ID, tradeID, replayEventID, input.Payout, input.ResolvedAt.UTC()).Scan(&createdAt); err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: finalize settlement idempotency: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: commit settlement: %w", err)
 	}
 	return repository.PredictionDecisionSettlementResult{DecisionID: input.Decision.ID, PositionID: &position.ID, TradeID: tradeID, ReplayEventID: replayEventID, CreatedAt: createdAt}, nil
 }

@@ -48,59 +48,6 @@ func NewProjectionRepo(pool *pgxpool.Pool, attestor ProjectionCheckpointAttestor
 	return &ProjectionRepo{pool: pool, attestor: attestor}
 }
 
-// RecordMarkObservation appends one canonical mark. Revision, price, time, or
-// metadata changes under an existing source observation identity conflict.
-func (repo *ProjectionRepo) RecordMarkObservation(ctx context.Context, mark *ledger.MarkObservation) (*ledger.MarkObservation, error) {
-	if mark == nil {
-		return nil, fmt.Errorf("postgres: record mark observation: mark is required")
-	}
-	if err := mark.Validate(); err != nil {
-		return nil, fmt.Errorf("postgres: record mark observation: %w", err)
-	}
-	var persistedID uuid.UUID
-	err := repo.pool.QueryRow(ctx, `INSERT INTO mark_observations (
-		id, unit_kind, unit, price, price_currency, source,
-		source_observation_id, effective_at, observed_at, metadata, created_at,
-		instrument_id, source_namespace, source_revision
-	) VALUES ($1,'instrument',$2,$3,$4,$5,$6,$7,$8,$9::JSONB,$10,$11,$12,$13)
-	ON CONFLICT DO NOTHING
-	RETURNING id`,
-		mark.ID,
-		mark.InstrumentID.String(),
-		mark.Price.String(),
-		mark.PriceCurrency,
-		mark.Source,
-		mark.SourceObservationID,
-		mark.EffectiveAt,
-		mark.ObservedAt,
-		jsonForStorage(mark.Metadata),
-		mark.CreatedAt,
-		mark.InstrumentID,
-		mark.SourceNamespace,
-		mark.SourceRevision,
-	).Scan(&persistedID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		existing, loadErr := repo.getMarkObservationByIdentity(
-			ctx, mark.InstrumentID, mark.PriceCurrency, mark.Source, mark.SourceNamespace, mark.SourceObservationID,
-		)
-		if loadErr != nil {
-			return nil, fmt.Errorf("postgres: load replayed mark observation: %w", loadErr)
-		}
-		if !ledger.SameMarkObservation(existing, mark) {
-			return nil, fmt.Errorf("postgres: canonical mark source identity reused with changed evidence: %w", repository.ErrIdempotencyConflict)
-		}
-		return existing, nil
-	}
-	if err != nil {
-		var postgresError *pgconn.PgError
-		if errors.As(err, &postgresError) && postgresError.Code == "23505" {
-			return nil, fmt.Errorf("postgres: canonical mark identity conflict: %v: %w", err, repository.ErrIdempotencyConflict)
-		}
-		return nil, fmt.Errorf("postgres: insert canonical mark: %w", err)
-	}
-	return repo.GetMarkObservationByID(ctx, persistedID)
-}
-
 func (repo *ProjectionRepo) GetMarkObservationByID(ctx context.Context, id uuid.UUID) (*ledger.MarkObservation, error) {
 	mark, err := scanProjectionMark(repo.pool.QueryRow(ctx, projectionMarkSelectSQL+` WHERE id = $1 AND instrument_id IS NOT NULL`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -369,6 +316,19 @@ func loadProjectionInput(ctx context.Context, tx pgx.Tx, request ledger.Projecti
 		}
 		return ledger.ProjectionInput{}, fmt.Errorf("postgres: load projection account: %w", err)
 	}
+	var frontierEffectiveAt, frontierObservedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT effective_at, observed_at
+		FROM ledger_transactions
+		WHERE id=$1 AND account_id=$2`, request.ThroughTransactionID, request.AccountID).
+		Scan(&frontierEffectiveAt, &frontierObservedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ledger.ProjectionInput{}, repository.ErrNotFound
+		}
+		return ledger.ProjectionInput{}, fmt.Errorf("postgres: load projection transaction frontier: %w", err)
+	}
+	if frontierEffectiveAt.After(request.AsOf) || frontierObservedAt.After(request.AsOf) {
+		return ledger.ProjectionInput{}, fmt.Errorf("postgres: projection transaction frontier is later than as-of")
+	}
 	transactions, err := loadProjectionTransactions(ctx, tx, request)
 	if err != nil {
 		return ledger.ProjectionInput{}, err
@@ -392,8 +352,14 @@ func loadProjectionTransactions(ctx context.Context, tx pgx.Tx, request ledger.P
 		COALESCE(reference_type, ''), COALESCE(reference_id, ''),
 		effective_at, observed_at, metadata, created_at
 	FROM ledger_transactions
-	WHERE account_id=$1 AND effective_at <= $2 AND observed_at <= $2
-	ORDER BY effective_at, observed_at, id`, request.AccountID, request.AsOf)
+	WHERE account_id=$1
+	  AND effective_at <= $3
+	  AND observed_at <= $3
+	  AND (effective_at, observed_at, id) <= (
+		SELECT effective_at, observed_at, id FROM ledger_transactions
+		WHERE id=$2 AND account_id=$1
+	  )
+	ORDER BY effective_at, observed_at, id`, request.AccountID, request.ThroughTransactionID, request.AsOf)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: load projection ledger transactions: %w", err)
 	}
@@ -454,8 +420,14 @@ func loadProjectionMechanics(ctx context.Context, tx pgx.Tx, request ledger.Proj
 	LEFT JOIN venue_contracts AS vc ON vc.id=n.venue_contract_id
 	LEFT JOIN instruments AS si ON si.id=n.secondary_instrument_id
 	LEFT JOIN option_contract_terms AS ot ON ot.id=n.option_terms_id
-	WHERE lt.account_id=$1 AND lt.effective_at <= $2 AND lt.observed_at <= $2
-	ORDER BY lt.effective_at, lt.observed_at, lt.id`, request.AccountID, request.AsOf)
+	WHERE lt.account_id=$1
+	  AND lt.effective_at <= $3
+	  AND lt.observed_at <= $3
+	  AND (lt.effective_at, lt.observed_at, lt.id) <= (
+		SELECT effective_at, observed_at, id FROM ledger_transactions
+		WHERE id=$2 AND account_id=$1
+	  )
+	ORDER BY lt.effective_at, lt.observed_at, lt.id`, request.AccountID, request.ThroughTransactionID, request.AsOf)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: load projection mechanics: %w", err)
 	}

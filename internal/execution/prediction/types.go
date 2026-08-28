@@ -6,7 +6,10 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
+
+type ResolutionEvidence = repository.PredictionResolutionEvidence
 
 // ExecutableSnapshot captures the shared executable prediction-market contract
 // proven by both Polymarket and Kalshi.

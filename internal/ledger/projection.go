@@ -27,11 +27,12 @@ const (
 
 // ProjectionRequest defines one bitemporal, source-scoped portfolio rebuild.
 type ProjectionRequest struct {
-	AccountID     uuid.UUID
-	AsOf          time.Time
-	MarkSource    string
-	MarkNamespace string
-	MaxMarkAge    time.Duration
+	AccountID            uuid.UUID
+	ThroughTransactionID uuid.UUID
+	AsOf                 time.Time
+	MarkSource           string
+	MarkNamespace        string
+	MaxMarkAge           time.Duration
 }
 
 // ProjectionInput is the complete immutable evidence visible to one rebuild.
@@ -508,6 +509,9 @@ func BuildPortfolioProjection(input ProjectionInput) (*PortfolioProjection, erro
 	sort.Slice(transactions, func(left, right int) bool {
 		return projectionTransactionLess(transactions[left], transactions[right])
 	})
+	if transactions[len(transactions)-1].ID != request.ThroughTransactionID {
+		return nil, fmt.Errorf("projection transactions do not end at the requested frontier")
+	}
 
 	mechanicsByTransaction, err := eligibleProjectionMechanics(input.Mechanics, transactions)
 	if err != nil {
@@ -705,8 +709,8 @@ func normalizeProjectionBoundary(request ProjectionRequest, baseCurrency string)
 	request.MarkSource = strings.ToLower(strings.TrimSpace(request.MarkSource))
 	request.MarkNamespace = strings.TrimSpace(request.MarkNamespace)
 	currency := strings.ToUpper(strings.TrimSpace(baseCurrency))
-	if request.AccountID == uuid.Nil || request.AsOf.IsZero() {
-		return request, currency, fmt.Errorf("projection account and as-of time are required")
+	if request.AccountID == uuid.Nil || request.ThroughTransactionID == uuid.Nil || request.AsOf.IsZero() {
+		return request, currency, fmt.Errorf("projection account, transaction frontier, and as-of time are required")
 	}
 	if !isNormalizedRequired(request.MarkSource) || request.MarkSource != strings.ToLower(request.MarkSource) ||
 		!isNormalizedRequired(request.MarkNamespace) || request.MaxMarkAge <= 0 {

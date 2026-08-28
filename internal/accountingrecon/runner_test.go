@@ -241,9 +241,10 @@ func (store *recordingEvidenceStore) RecordAccountingRun(_ context.Context, run 
 
 func validRunRequest() RunRequest {
 	return RunRequest{
-		AccountID:         uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-		AsOf:              time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC),
-		ProjectionVersion: "ledger_fifo_v1", MarkSource: "polygon", MarkNamespace: "quotes/scored", MaxMarkAge: 5 * time.Minute,
+		AccountID:            uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		ThroughTransactionID: uuid.MustParse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+		AsOf:                 time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC),
+		ProjectionVersion:    "ledger_fifo_v1", MarkSource: "polygon", MarkNamespace: "quotes/scored", MaxMarkAge: 5 * time.Minute,
 		Generator: "dual-run-worker", GeneratedAt: time.Date(2026, 8, 15, 14, 0, 0, 0, time.UTC),
 	}
 }

@@ -63,11 +63,15 @@ type recordingStopFinancialLifecycle struct {
 	resolveCommit bool
 }
 
+func (*recordingStopFinancialLifecycle) ResolvePositionExecutionScope(_ context.Context, position domain.Position) (execution.ExecutionScope, error) {
+	return testStopExecutionScope(position.AccountID, position.Environment, position.OriginID)
+}
+
 func (r *recordingStopFinancialLifecycle) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
 	return fn()
 }
 
-func (r *recordingStopFinancialLifecycle) ApplyOrderFill(_ context.Context, input repository.OrderFillInput) (repository.OrderFillResult, error) {
+func (r *recordingStopFinancialLifecycle) ApplyAcceptedOrderFill(_ context.Context, _ execution.ExecutionScope, input repository.OrderFillInput) (repository.OrderFillResult, error) {
 	r.inputs = append(r.inputs, input)
 	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, r.applyErr
 }
@@ -159,7 +163,19 @@ func scopedGuardPosition(position Position) Position {
 	position.Environment = testStopGuardBinding.Environment()
 	position.OriginType = "strategy_version"
 	position.OriginID = uuid.MustParse("10000000-0000-4000-8000-000000000001").String()
+	position.Scope, _ = testStopExecutionScope(position.AccountID, position.Environment, position.OriginID)
 	return position
+}
+
+func testStopExecutionScope(accountID uuid.UUID, environment domain.AccountEnvironment, originID string) (execution.ExecutionScope, error) {
+	strategyVersionID, err := uuid.Parse(originID)
+	if err != nil {
+		return execution.ExecutionScope{}, err
+	}
+	return execution.NewStrategyExecutionScope(accountID, environment, strategyVersionID, domain.PipelineRunRef{
+		ID:        uuid.MustParse("20000000-0000-4000-8000-000000000001"),
+		TradeDate: time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC),
+	})
 }
 
 func (f *fakeBroker) CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error {
@@ -207,7 +223,7 @@ func (f *fakeBroker) SendTemplate(_ context.Context, tmpl *OrderTemplate) (*crea
 
 func TestStopGuardHoldsAccountLockAcrossBrokerEffectAndPersistence(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, EconomicWriter: &recordingStopFinancialLifecycle{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +463,7 @@ func TestStopGuard_OtherSlugIgnored(t *testing.T) {
 
 func TestStopGuard_RegisterPositionPreservesNoOutcomeIntent(t *testing.T) {
 	broker := &fakeBroker{}
-	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, EconomicWriter: &recordingStopFinancialLifecycle{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +496,7 @@ func TestStopGuardBootstrapResumesReservedOrderIdentity(t *testing.T) {
 	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", ClientOrderID: "reserved-stop-client"}
 	repo := &sharedExitClaims{reservedOrder: reserved}
 	broker := &fakeBroker{lookupStatus: domain.OrderStatusSubmitted, lookupExternalID: "reserved-venue-id"}
-	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: repo})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: repo, EconomicWriter: &recordingStopFinancialLifecycle{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +548,7 @@ func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
 	repo := &sharedExitClaims{reservedOrder: reserved}
 	broker := &fakeBroker{lookupStatus: domain.OrderStatusFilled, lookupExternalID: "filled-venue-id", lookupFilledQuantity: 2, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt, accountLockDepth: &repo.lockDepth}
 	financial := &recordingStopFinancialLifecycle{}
-	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: repo, FinancialLifecycle: financial})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: repo, EconomicWriter: financial})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -555,8 +571,12 @@ func TestStopGuardRecoveredFillDoesNotMutateOrderBeforeConfirmedCommit(t *testin
 	price := 0.41
 	order := &domain.Order{ID: uuid.New(), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a", Side: domain.OrderSideSell, Status: domain.OrderStatusSubmitted, FilledQuantity: 0}
 	financial := &recordingStopFinancialLifecycle{applyErr: errors.New("commit unknown")}
-	g := &StopGuard{financialLifecycle: financial}
-	entry := &guardEntry{order: order}
+	g := &StopGuard{economicWriter: financial}
+	scope, err := testStopExecutionScope(order.AccountID, order.Environment, order.OriginID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := &guardEntry{order: order, scope: scope}
 	if g.persistRecoveredExitFillLocked(context.Background(), entry, "venue-fill", execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 2, FilledAvgPrice: &price, FilledAt: &filledAt}) {
 		t.Fatal("unconfirmed commit reported success")
 	}
@@ -603,7 +623,7 @@ func TestStopGuardRejectsFilledStatusWithoutFullQuantity(t *testing.T) {
 	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, ClientOrderID: "reserved", Ticker: "slug", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusSubmitted, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG"}
 	claims := &sharedExitClaims{reservedOrder: reserved}
 	broker := &fakeBroker{lookupStatus: domain.OrderStatusFilled, lookupExternalID: "venue", lookupFilledQuantity: 1, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt}
-	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims, FinancialLifecycle: &recordingStopFinancialLifecycle{}})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims, EconomicWriter: &recordingStopFinancialLifecycle{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -680,7 +700,7 @@ func TestStopGuardResolvesAmbiguousPartialFinalizationAndReservesRemainder(t *te
 	broker := &fakeBroker{sendErr: errors.New("timeout after send"), lookupStatus: domain.OrderStatusCancelled, lookupExternalID: "partial-cancel", lookupFilledQuantity: .4, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt}
 	claims := &sharedExitClaims{finalizeErrAfterCommit: true}
 	financial := &recordingStopFinancialLifecycle{}
-	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims, FinancialLifecycle: financial})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: claims, EconomicWriter: financial})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -122,6 +122,7 @@ func TestNewSnapshotRejectsInvalidBoundaryAndDuplicateFacts(t *testing.T) {
 
 	tests := map[string]func(*SnapshotInput){
 		"nil account":       func(input *SnapshotInput) { input.AccountID = uuid.Nil },
+		"nil frontier":      func(input *SnapshotInput) { input.ThroughTransactionID = uuid.Nil },
 		"non utc as of":     func(input *SnapshotInput) { input.AsOf = input.AsOf.In(time.FixedZone("offset", 3600)) },
 		"observed before":   func(input *SnapshotInput) { input.ObservedAt = input.AsOf.Add(-time.Second) },
 		"bad currency":      func(input *SnapshotInput) { input.Currency = "usd" },
@@ -157,6 +158,7 @@ func validSnapshotInput(source SnapshotSource) SnapshotInput {
 	return SnapshotInput{
 		Source:                   source,
 		AccountID:                uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+		ThroughTransactionID:     uuid.MustParse("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
 		AsOf:                     asOf,
 		ObservedAt:               asOf.Add(time.Second),
 		Currency:                 "USD",

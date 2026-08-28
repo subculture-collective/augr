@@ -85,11 +85,16 @@ func (r *recordingOptionFillRepo) ResolveOptionFillCommit(_ context.Context, inp
 	return results, true, nil
 }
 
-func (r *recordingOptionFillRepo) ApplyOptionFills(_ context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
+func (r *recordingOptionFillRepo) ApplyAcceptedOptionFills(_ context.Context, _ execution.ExecutionScope, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.err != nil {
-		return nil, r.err
+		if r.resolveErr != nil {
+			return nil, errors.Join(r.err, fmt.Errorf("commit state uncertain: %w", r.resolveErr))
+		}
+		if !r.resolveCommitted {
+			return nil, errors.Join(execution.ErrAcceptedEconomicRollbackConfirmed, r.err)
+		}
 	}
 	batch := append([]repository.OptionFillInput(nil), inputs...)
 	r.batches = append(r.batches, batch)
@@ -111,6 +116,7 @@ func TestReconcileCancelledOptionAppliesPartialFillBeforeTerminalStatus(t *testi
 	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
 	intent := domain.PositionIntentBuyToOpen
 	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "partial-cancel", ExternalID: "alpaca-partial", Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100, PositionIntent: &intent, Side: domain.OrderSideBuy, Quantity: 2, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt, Status: domain.OrderStatusCancelled, Broker: "alpaca", SubmittedAt: &filledAt}
+	bindOptionRecoveryScope(&order)
 	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusCancelled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
 	}}
@@ -167,8 +173,8 @@ func newTestOptionsManager(broker *mockOptionsBroker, orderRepo *mockOrderRepo, 
 	return newTestOptionsManagerWithFillRepo(broker, orderRepo, positionRepo, tradeRepo, riskEng, &recordingOptionFillRepo{})
 }
 
-func newTestOptionsManagerWithFillRepo(broker execution.OptionsBroker, orderRepo *mockOrderRepo, positionRepo *mockPositionRepo, tradeRepo *mockTradeRepo, riskEng *mockRiskEngine, fillRepo repository.OptionFillRepository) *execution.OptionsOrderManager {
-	return execution.NewOptionsOrderManager(broker, orderRepo, positionRepo, tradeRepo, riskEng, slog.Default()).WithOptionFillRepo(fillRepo)
+func newTestOptionsManagerWithFillRepo(broker execution.OptionsBroker, orderRepo *mockOrderRepo, positionRepo *mockPositionRepo, tradeRepo *mockTradeRepo, riskEng *mockRiskEngine, fillRepo execution.AcceptedOptionFillWriter) *execution.OptionsOrderManager {
+	return execution.NewOptionsOrderManager(broker, orderRepo, positionRepo, tradeRepo, riskEng, slog.Default()).WithAcceptedOptionFillWriter(fillRepo)
 }
 
 func optionExecutionScope(strategyID, runID uuid.UUID) execution.ExecutionScope {
@@ -648,6 +654,7 @@ func TestReconcilePendingOptionOrderUsesClientIDAndPersistsFill(t *testing.T) {
 	fillRepo := &recordingOptionFillRepo{}
 	strategyID := uuid.New()
 	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: clientID, Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusPending}
+	bindOptionRecoveryScope(&order)
 	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := order; return &copy, nil }}
 	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
 	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
@@ -663,6 +670,7 @@ func TestReconcileOptionFillUsesDurableTradeQuantity(t *testing.T) {
 	strategyID := uuid.New()
 	intent := domain.PositionIntentBuyToOpen
 	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "option-recovery", ExternalID: "alpaca-option", Broker: "alpaca", Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt, SubmittedAt: &filledAt, Status: domain.OrderStatusPartial, PositionIntent: &intent}
+	bindOptionRecoveryScope(&order)
 	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
 	}}
@@ -684,6 +692,7 @@ func TestReconcileOptionSpreadReloadsEveryNonterminalLegAndPersistsOneBatch(t *t
 	byID := make(map[uuid.UUID]domain.Order, 2)
 	for i := range orders {
 		orders[i] = domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "spread-client-" + uuid.NewString(), ExternalID: "spread-real-" + uuid.NewString(), Ticker: fmt.Sprintf("AAPL271217C00%d", 150000+i), MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusSubmitted, LegGroupID: &groupID}
+		bindOptionRecoveryScope(&orders[i])
 		byID[orders[i].ID] = orders[i]
 	}
 	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
@@ -716,6 +725,7 @@ func TestReconcileOptionSpreadUsesDurableTradeQuantity(t *testing.T) {
 	byID := make(map[uuid.UUID]domain.Order, len(orders))
 	for i := range orders {
 		orders[i] = domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: originID, StrategyID: &strategyID, ClientOrderID: fmt.Sprintf("durable-spread-%d", i), ExternalID: fmt.Sprintf("stale-leg-%d", i), Ticker: fmt.Sprintf("AAPL271217C00%d", 150000+i), MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt, SubmittedAt: &filledAt, Status: domain.OrderStatusPartial, LegGroupID: &groupID}
+		bindOptionRecoveryScope(&orders[i])
 		byID[orders[i].ID] = orders[i]
 	}
 	broker := &mockOptionsBroker{spreadStatusFn: func(context.Context, string) (execution.BrokerSpreadOrderStatus, error) {
@@ -743,6 +753,7 @@ func TestReconcileOptionOrderNeverRegressesDurableFillQuantity(t *testing.T) {
 	price, filledAt := 1.25, time.Now().UTC()
 	strategyID, originID := uuid.New(), uuid.NewString()
 	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: originID, StrategyID: &strategyID, ClientOrderID: "monotonic-option", ExternalID: "alpaca-option", Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 2, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt, SubmittedAt: &filledAt, Status: domain.OrderStatusPartial}
+	bindOptionRecoveryScope(&order)
 	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusCancelled, FilledQuantity: 0}, nil
 	}}
@@ -755,9 +766,21 @@ func TestReconcileOptionOrderNeverRegressesDurableFillQuantity(t *testing.T) {
 	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(fillRepo.batches) != 1 || len(fillRepo.batches[0]) != 1 || !fillRepo.batches[0][0].StatusOnly || fillRepo.batches[0][0].FillQuantity != 1 {
-		t.Fatalf("monotonic terminal recovery = %+v", fillRepo.batches)
+	if len(fillRepo.batches) != 0 || len(orderRepo.updates) != 1 || orderRepo.updates[0].FilledQuantity != 1 || orderRepo.updates[0].Status != domain.OrderStatusCancelled {
+		t.Fatalf("monotonic terminal recovery batches=%+v updates=%+v", fillRepo.batches, orderRepo.updates)
 	}
+}
+
+func bindOptionRecoveryScope(order *domain.Order) {
+	seed := order.ID.String()
+	if order.StrategyID != nil {
+		seed = order.StrategyID.String()
+	}
+	versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("option-recovery-version:"+seed))
+	runID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("option-recovery-run:"+seed))
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	order.OriginType, order.OriginID = "strategy_version", versionID.String()
+	order.PipelineRunID, order.PipelineRunTradeDate = &runID, &tradeDate
 }
 
 func TestReconcileOptionSpreadPersistsRecoveredSubmissionWithoutFill(t *testing.T) {

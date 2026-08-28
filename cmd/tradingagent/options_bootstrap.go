@@ -15,8 +15,8 @@ import (
 
 type optionRecoveryDependencies struct {
 	Orders    repository.OrderRepository
-	Fills     repository.OptionFillRepository
-	Financial repository.FinancialLifecycleRepository
+	OptionWriter execution.AcceptedOptionFillWriter
+	OrderWriter  execution.AcceptedOrderFillWriter
 	Trades    repository.TradeRepository
 	Decisions execution.DecisionRecorder
 }
@@ -114,15 +114,15 @@ func bootstrapPaperOptionsAccountLocked(ctx context.Context, binding domain.Exec
 	if err := broker.RestoreOrderSequence(maxSeq); err != nil {
 		return err
 	}
-	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].Fills != nil {
-		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, recovery[0].Trades, nil, nil).WithOptionFillRepo(recovery[0].Fills)
+	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].OptionWriter != nil {
+		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, recovery[0].Trades, nil, nil).WithAcceptedOptionFillWriter(recovery[0].OptionWriter)
 		if err := manager.ReconcilePendingOptionOrdersWithAccountLockHeld(ctx, binding, allOrders, allPositions); err != nil {
 			return fmt.Errorf("reconcile pending option orders: %w", err)
 		}
 	}
-	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].Financial != nil {
+	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].OrderWriter != nil {
 		manager := execution.NewOrderManager(broker, "paper", nil, nil, recovery[0].Orders, nil, nil, nil, execution.SizingConfig{}, nil).
-			WithFinancialLifecycleRepo(recovery[0].Financial).WithDecisionRecorder(recovery[0].Decisions)
+			WithAcceptedOrderFillWriter(recovery[0].OrderWriter).WithDecisionRecorder(recovery[0].Decisions)
 		for i := range allOrders {
 			order := &allOrders[i]
 			if order.MarketType.Normalize() == domain.MarketTypeOptions {

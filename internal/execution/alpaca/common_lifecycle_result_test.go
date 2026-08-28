@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/venue"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
@@ -623,6 +624,14 @@ func (store *alpacaResultStore) ApplyExecutionFill(
 	}
 	store.current = next
 	return next, nil
+}
+
+func (store *alpacaResultStore) ApplyAcceptedFill(ctx context.Context, input execution.AcceptedFillInput) (execution.AcceptedFillResult, error) {
+	if err := input.Validate(); err != nil {
+		return execution.AcceptedFillResult{}, err
+	}
+	persisted, err := store.ApplyExecutionFill(ctx, input.Scope.AccountID(), input.Transition)
+	return execution.AcceptedFillResult{Lifecycle: persisted}, err
 }
 
 func (store *alpacaResultStore) ApplyExecutionTransition(

@@ -31,6 +31,8 @@ func (o *JobOrchestrator) kalshiSettlement(ctx context.Context) error {
 	type projectedMarket struct {
 		ticker, winner, fingerprint string
 		count                       int
+		resolvedAt                  time.Time
+		evidence                    prediction.ResolutionEvidence
 	}
 	var fetched, resolved, wouldSettleMarkets, wouldSettleDecisions int
 	projected := make([]projectedMarket, 0, 8)
@@ -70,6 +72,16 @@ func (o *JobOrchestrator) kalshiSettlement(ctx context.Context) error {
 			continue
 		}
 		resolved++
+		observedAt := time.Now().UTC()
+		resolvedAt := observedAt
+		if market.CloseTime != nil && !market.CloseTime.IsZero() {
+			resolvedAt = market.CloseTime.UTC()
+		}
+		revision := strings.Join([]string{strings.TrimSpace(market.Status), winner, resolvedAt.Format(time.RFC3339Nano)}, ":")
+		evidence := prediction.ResolutionEvidence{Source: "kalshi", SourceNamespace: "markets/kalshi/resolutions", SourceEventID: strings.ToUpper(strings.TrimSpace(market.Ticker)), SourceRevision: revision, ObservedAt: observedAt, RawPayload: append([]byte(nil), market.Raw...)}
+		if len(evidence.RawPayload) == 0 {
+			return fmt.Errorf("kalshi_settlement: market %s lacks raw resolution evidence", market.Ticker)
+		}
 		preview, err := o.deps.PredictionSettler.SettlePreview(ctx, domain.MarketTypeKalshi, market.Ticker)
 		if err != nil {
 			if _, persistErr := o.kalshiSettlementRecordFailure(ctx, threshold, fetched, resolved, wouldSettleMarkets, wouldSettleDecisions, err.Error()); persistErr != nil {
@@ -83,7 +95,7 @@ func (o *JobOrchestrator) kalshiSettlement(ctx context.Context) error {
 			wouldSettleDecisions += preview.Count
 		}
 		previewFingerprint := settlementPreviewFingerprint(preview, winner)
-		projected = append(projected, projectedMarket{ticker: strings.ToUpper(strings.TrimSpace(market.Ticker)), winner: winner, count: preview.Count, fingerprint: previewFingerprint})
+		projected = append(projected, projectedMarket{ticker: strings.ToUpper(strings.TrimSpace(market.Ticker)), winner: winner, count: preview.Count, fingerprint: previewFingerprint, resolvedAt: resolvedAt, evidence: evidence})
 		projection = append(projection, previewFingerprint)
 	}
 	fingerprint := settlementProjectionFingerprint(projection)
@@ -115,7 +127,7 @@ func (o *JobOrchestrator) kalshiSettlement(ctx context.Context) error {
 				o.recordKalshiSettlementMetrics(false, false)
 				return mismatch
 			}
-			if _, err := o.deps.PredictionSettler.SettleDecisions(ctx, domain.MarketTypeKalshi, pm.ticker, pm.winner, time.Now().UTC(), preview.DecisionIDs); err != nil {
+			if _, err := o.deps.PredictionSettler.SettleDecisionsWithEvidence(ctx, domain.MarketTypeKalshi, pm.ticker, pm.winner, pm.resolvedAt, preview.DecisionIDs, pm.evidence); err != nil {
 				if _, persistErr := o.kalshiSettlementRecordFailure(ctx, threshold, fetched, resolved, wouldSettleMarkets, wouldSettleDecisions, err.Error()); persistErr != nil {
 					return persistErr
 				}

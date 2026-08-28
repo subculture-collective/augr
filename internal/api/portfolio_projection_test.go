@@ -101,6 +101,19 @@ func TestPortfolioValuationUnavailableWithoutCorrectProviderReconciliation(t *te
 	}
 }
 
+func TestPortfolioValuationFailsClosedWhileProjectionWorkIsOutstanding(t *testing.T) {
+	accountID := uuid.New()
+	reader := &stubProjectionReader{snapshot: &repository.ProjectionSnapshot{
+		Checkpoint:              &ledger.ProjectionCheckpoint{AccountID: accountID, AsOf: time.Now().UTC()},
+		Valuation:               &ledger.ProjectionValuation{Totals: ledger.ProjectionTotals{TotalPnL: decimal.NewFromInt(99)}},
+		ReconciliationAvailable: true, ReconciliationPassed: true, ProjectionWorkPending: 1,
+	}}
+	result := (&Server{projections: reader, logger: slog.Default()}).loadPortfolioValuation(context.Background(), &accountID, time.Now().UTC())
+	if result.TotalPnL != nil || len(result.UnavailableReasons) != 1 || result.UnavailableReasons[0] != "projection_update_pending" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestPortfolioSummaryFailsClosedWithoutServerAccountBinding(t *testing.T) {
 	reader := &stubProjectionReader{}
 	server := &Server{projections: reader, logger: slog.Default()}

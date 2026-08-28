@@ -95,7 +95,7 @@ type OrderManager struct {
 	positionRepo     repository.PositionRepository
 	orderRepo        repository.OrderRepository
 	tradeRepo        repository.TradeRepository
-	financialRepo    repository.FinancialLifecycleRepository
+	economicWriter   AcceptedOrderFillWriter
 	auditLogRepo     repository.AuditLogRepository
 	agentEventRepo   repository.AgentEventRepository
 	decisionRecorder DecisionRecorder
@@ -184,12 +184,12 @@ func (m *OrderManager) WithDecisionRecorder(recorder DecisionRecorder) *OrderMan
 	return m
 }
 
-// WithFinancialLifecycleRepo wires the atomic financial lifecycle repository.
-func (m *OrderManager) WithFinancialLifecycleRepo(repo repository.FinancialLifecycleRepository) *OrderManager {
+// WithAcceptedOrderFillWriter wires the raw-first canonical economic boundary.
+func (m *OrderManager) WithAcceptedOrderFillWriter(writer AcceptedOrderFillWriter) *OrderManager {
 	if m == nil {
 		return nil
 	}
-	m.financialRepo = repo
+	m.economicWriter = writer
 	return m
 }
 
@@ -644,6 +644,11 @@ func (m *OrderManager) processSignal(
 			return err
 		}
 		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
+	}
+	if checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker); ok {
+		if err := checker.RequireAcceptedOrderPrepared(ctx, scope, order); err != nil {
+			return fmt.Errorf("order_manager: canonical routed order is not prepared: %w", err)
+		}
 	}
 
 	decision := m.newTradeDecision(scope, plan, order.MarketType, string(order.Side), quantity, quantity, domain.RiskDecisionApproved, nil, domain.TradeDecisionStatusCandidate)
@@ -1461,203 +1466,56 @@ func (m *OrderManager) handleFill(
 		return fmt.Errorf("order_manager: fill price must be positive")
 	}
 
-	marketType := order.MarketType.Normalize()
 	originType, originID := scope.Origin()
-	if m.financialRepo == nil {
-		if err := m.orderRepo.Update(ctx, order); err != nil {
-			return fmt.Errorf("order_manager: update filled order: %w", err)
-		}
-		m.recordOrderMetric(order.Side, order.Status)
+	if m.economicWriter == nil {
+		return fmt.Errorf("order_manager: accepted economic writer is required")
 	}
-	var position *domain.Position
-	if m.financialRepo != nil {
-		trade := &domain.Trade{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: order.FilledQuantity, Price: fillPrice, ExecutedAt: now}
-		var stopLoss, takeProfit *float64
-		if plan.StopLoss > 0 {
-			stopLoss = &plan.StopLoss
-		}
-		if plan.TakeProfit > 0 {
-			takeProfit = &plan.TakeProfit
-		}
-		fillInput := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("paper_fill:v1:%s:observed:%.8f", order.ID, order.FilledQuantity), Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade}
-		result, err := m.financialRepo.ApplyOrderFill(ctx, fillInput)
-		if err != nil {
-			if resolver, ok := m.financialRepo.(repository.OrderFillCommitResolver); ok {
-				resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				resolved, committed, resolveErr := resolver.ResolveOrderFillCommit(resolveCtx, fillInput)
-				cancel()
-				if resolveErr != nil {
-					return fmt.Errorf("order_manager: persist fill: %v; resolve ambiguous commit: %w", err, resolveErr)
-				}
-				if committed {
-					result, err = resolved, nil
-				}
-			}
-		}
-		if err != nil {
+	trade := &domain.Trade{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: order.FilledQuantity, Price: fillPrice, ExecutedAt: now}
+	var stopLoss, takeProfit *float64
+	if plan.StopLoss > 0 {
+		stopLoss = &plan.StopLoss
+	}
+	if plan.TakeProfit > 0 {
+		takeProfit = &plan.TakeProfit
+	}
+	fillInput := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("paper_fill:v1:%s:observed:%.8f", order.ID, order.FilledQuantity), Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade}
+	result, err := m.economicWriter.ApplyAcceptedOrderFill(ctx, scope, fillInput)
+	if err != nil {
+		if errors.Is(err, ErrAcceptedEconomicRollbackConfirmed) {
 			if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok && strings.TrimSpace(order.ExternalID) != "" {
 				if rollbackErr := compensator.RollbackOrderFill(ctx, order.ExternalID); rollbackErr != nil {
 					return fmt.Errorf("order_manager: persist fill: %v; paper rollback: %w", err, rollbackErr)
 				}
 			}
-			return fmt.Errorf("order_manager: persist fill: %w", err)
+		} else {
+			return fmt.Errorf("order_manager: persist fill: %w; commit state remains uncertain and venue effect retained for recovery", err)
 		}
-		if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok {
-			compensator.CommitOrderFill(order.ExternalID)
-		}
-		if err := validateOrderFillResult(result, order, scope); err != nil {
-			return fmt.Errorf("order_manager: invalid persisted fill result: %w", err)
-		}
-		if !result.Replayed {
-			m.recordOrderMetric(order.Side, order.Status)
-		}
-		position := result.Position
-		if position == nil && result.PositionID != nil {
-			position = &domain.Position{ID: *result.PositionID}
-		}
-		if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": result.Trade.Price, "quantity": result.Trade.Quantity, "cumulative_quantity": order.FilledQuantity, "prediction_side": order.PredictionSide}); err != nil {
+		return fmt.Errorf("order_manager: persist fill: %w", err)
+	}
+	if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok {
+		compensator.CommitOrderFill(order.ExternalID)
+	}
+	if err := validateOrderFillResult(result, order, scope); err != nil {
+		return fmt.Errorf("order_manager: invalid persisted fill result: %w", err)
+	}
+	if !result.Replayed {
+		m.recordOrderMetric(order.Side, order.Status)
+	}
+	position := result.Position
+	if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": result.Trade.Price, "quantity": result.Trade.Quantity, "cumulative_quantity": order.FilledQuantity, "prediction_side": order.PredictionSide}); err != nil {
+		return err
+	}
+	if position != nil {
+		if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt}); err != nil {
 			return err
 		}
-		if position != nil {
-			if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt}); err != nil {
-				return err
-			}
-		}
-		if !result.Replayed {
-			if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{"fill_price": fillPrice, "quantity": order.FilledQuantity, "trade_id": result.TradeID, "position_id": result.PositionID}); auditErr != nil {
-				m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-			}
-		}
-		if !result.Replayed {
-			m.emitOrderEvent(ctx, OrderEventFilled, order, scope)
-		}
-		return nil
 	}
-	if isPredictionMarket(marketType) && order.Side == domain.OrderSideSell {
-		positionTicker := polymarketPositionTicker(order.Ticker, order.PredictionSide)
-		positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
-			Ticker: positionTicker,
-			Side:   domain.PositionSideLong,
-		})
-		if err != nil {
-			return fmt.Errorf("order_manager: get prediction exit position for %s: %w", positionTicker, err)
-		}
-
-		for i := range positions {
-			if positions[i].ClosedAt == nil && positions[i].Quantity > 0 {
-				position = &positions[i]
-				break
-			}
-		}
-		if position == nil {
-			return fmt.Errorf("order_manager: prediction sell fill has no open position for %s", positionTicker)
-		}
-
-		closedQuantity := math.Min(position.Quantity, order.FilledQuantity)
-		currentPrice := fillPrice
-		position.CurrentPrice = &currentPrice
-		position.RealizedPnL += realizedPnL(position.Side, position.AvgEntry, fillPrice, closedQuantity)
-		if position.Quantity > order.FilledQuantity {
-			position.Quantity -= order.FilledQuantity
-		} else {
-			position.Quantity = 0
-			closedAt := now
-			position.ClosedAt = &closedAt
-		}
-
-		if err := m.positionRepo.Update(ctx, position); err != nil {
-			return fmt.Errorf("order_manager: update prediction position: %w", err)
-		}
-	} else {
-		positionSide := domain.PositionSideLong
-
-		positionTicker := order.Ticker
-		if marketType == domain.MarketTypePolymarket || marketType == domain.MarketTypeKalshi {
-			positionTicker = polymarketPositionTicker(order.Ticker, order.PredictionSide)
-		}
-
-		position = &domain.Position{
-			ID:          uuid.New(),
-			AccountID:   scope.AccountID(),
-			Environment: scope.Environment(),
-			OriginType:  string(originType),
-			OriginID:    originID,
-			MarketType:  marketType,
-			Ticker:      positionTicker,
-			Side:        positionSide,
-			Quantity:    order.FilledQuantity,
-			AvgEntry:    fillPrice,
-			OpenedAt:    now,
-		}
-		position.StrategyID = scope.LegacyStrategyID()
-
-		if plan.StopLoss > 0 {
-			position.StopLoss = &plan.StopLoss
-		}
-
-		if plan.TakeProfit > 0 {
-			position.TakeProfit = &plan.TakeProfit
-		}
-
-		if err := m.positionRepo.Create(ctx, position); err != nil {
-			return fmt.Errorf("order_manager: create position: %w", err)
-		}
-	}
-
-	trade := &domain.Trade{
-		ID:          uuid.New(),
-		AccountID:   scope.AccountID(),
-		Environment: scope.Environment(),
-		OriginType:  string(originType),
-		OriginID:    originID,
-		OrderID:     &order.ID,
-		PositionID:  &position.ID,
-		Ticker:      order.Ticker,
-		Side:        order.Side,
-		Quantity:    order.FilledQuantity,
-		Price:       fillPrice,
-		ExecutedAt:  now,
-		CreatedAt:   now,
-	}
-
-	if err := m.tradeRepo.Create(ctx, trade); err != nil {
-		// Audit the incomplete fill so it can be reconciled later.
-		if auditErr := m.audit(ctx, "order_fill_incomplete", "order", &order.ID, map[string]any{
-			"fill_price":  fillPrice,
-			"quantity":    order.FilledQuantity,
-			"position_id": position.ID,
-			"error":       err.Error(),
-		}); auditErr != nil {
+	if !result.Replayed {
+		if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{"fill_price": fillPrice, "quantity": order.FilledQuantity, "trade_id": result.TradeID, "position_id": result.PositionID}); auditErr != nil {
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
-
-		return fmt.Errorf("order_manager: create trade: %w", err)
+		m.emitOrderEvent(ctx, OrderEventFilled, order, scope)
 	}
-
-	if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{
-		"order_id": order.ID, "trade_id": trade.ID, "price": fillPrice,
-		"quantity": trade.Quantity, "cumulative_quantity": order.FilledQuantity, "prediction_side": order.PredictionSide,
-	}); err != nil {
-		return err
-	}
-	if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{
-		"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity,
-		"realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt,
-	}); err != nil {
-		return err
-	}
-
-	if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{
-		"fill_price":  fillPrice,
-		"quantity":    order.FilledQuantity,
-		"trade_id":    trade.ID,
-		"position_id": position.ID,
-	}); auditErr != nil {
-		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-	}
-
-	m.emitOrderEvent(ctx, OrderEventFilled, order, scope)
-
 	return nil
 }
 

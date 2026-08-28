@@ -45,6 +45,7 @@ func (reader *ProjectionReader) GetLatestPortfolioProjection(ctx context.Context
 	var reconciliationProvider, reconciliationExternalAccountID pgtype.Text
 	var reconciliationGeneratedAt pgtype.Timestamptz
 	var freshMarks, staleMarks, unavailableMarks int
+	var pendingProjectionWork, processingProjectionWork, retryingProjectionWork, degradedProjectionWork int
 	err := reader.pool.QueryRow(ctx, `SELECT
 		c.id,c.account_id,c.projection_type,c.through_transaction_id,c.projection_version,c.as_of,c.fifo_method,c.base_currency,
 		c.mark_source,c.mark_namespace,c.max_mark_age_microseconds,c.transaction_count,c.mark_count,c.lot_count,c.match_count,c.position_count,
@@ -73,7 +74,11 @@ func (reader *ProjectionReader) GetLatestPortfolioProjection(ctx context.Context
 		   (SELECT max(m.effective_at) FROM mark_observations m WHERE m.instrument_id=(p->>'instrument_id')::uuid
 		     AND m.source=c.mark_source AND m.source_namespace=c.mark_namespace AND m.price_currency=c.base_currency
 		     AND m.effective_at<=c.as_of AND m.observed_at<=c.as_of)
-		   >= c.as_of-c.max_mark_age_microseconds*interval '1 microsecond',true))
+		   >= c.as_of-c.max_mark_age_microseconds*interval '1 microsecond',true)),
+		(SELECT count(*) FROM account_projection_outbox o WHERE o.account_id=c.account_id AND o.status='pending' AND o.as_of<=$3),
+		(SELECT count(*) FROM account_projection_outbox o WHERE o.account_id=c.account_id AND o.status='processing' AND o.as_of<=$3),
+		(SELECT count(*) FROM account_projection_outbox o WHERE o.account_id=c.account_id AND o.status='retry' AND o.as_of<=$3),
+		(SELECT count(*) FROM account_projection_outbox o WHERE o.account_id=c.account_id AND o.status='degraded' AND o.as_of<=$3)
 	FROM projection_checkpoints c
 	WHERE c.account_id=$1 AND c.projection_type=$2 AND c.projection_version IS NOT NULL AND c.as_of <= $3
 	ORDER BY c.as_of DESC,c.created_at DESC,c.id DESC LIMIT 1`, boundAccountID, ledger.PortfolioProjectionType, generatedAt.UTC()).Scan(
@@ -83,6 +88,7 @@ func (reader *ProjectionReader) GetLatestPortfolioProjection(ctx context.Context
 		&checkpoint.TransactionCount, &checkpoint.MarkCount, &checkpoint.LotCount, &checkpoint.MatchCount, &checkpoint.PositionCount,
 		&checkpoint.InputChecksum, &checkpoint.OutputChecksum, &checkpoint.PayloadBytes, &checkpoint.CreatedAt,
 		&checkpoint.AttestationKeyID, &checkpoint.AttestationHMAC, &reconciliation, &reconciliationAccountID, &reconciliationProvider, &reconciliationExternalAccountID, &reconciliationGeneratedAt, &freshMarks, &staleMarks, &unavailableMarks,
+		&pendingProjectionWork, &processingProjectionWork, &retryingProjectionWork, &degradedProjectionWork,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, repository.ErrNotFound
@@ -106,6 +112,8 @@ func (reader *ProjectionReader) GetLatestPortfolioProjection(ctx context.Context
 		ReconciliationExternalAccountID: reconciliationExternalAccountID.String,
 		ReconciliationGeneratedAt:       reconciliationGeneratedAt.Time.UTC(),
 		FreshMarks:                      freshMarks, StaleMarks: staleMarks, UnavailableMarks: unavailableMarks,
+		ProjectionWorkPending: pendingProjectionWork, ProjectionWorkProcessing: processingProjectionWork,
+		ProjectionWorkRetrying: retryingProjectionWork, ProjectionWorkDegraded: degradedProjectionWork,
 	}, nil
 }
 

@@ -100,7 +100,7 @@ type realStrategyRunner struct {
 	tradeRepo              repository.TradeRepository
 	opportunityRepo        repository.OpportunityRepository
 	auditLogRepo           repository.AuditLogRepository
-	financialRepo          repository.FinancialLifecycleRepository
+	economicWriter         execution.AcceptedEconomicWriter
 	riskEngine             risk.RiskEngine
 	tradeDecisionRecorder  execution.DecisionRecorder
 	metrics                *metrics.Metrics
@@ -138,7 +138,7 @@ func newRealStrategyRunner(
 	positionRepo repository.PositionRepository,
 	tradeRepo repository.TradeRepository,
 	auditLogRepo repository.AuditLogRepository,
-	financialRepo repository.FinancialLifecycleRepository,
+	economicWriter execution.AcceptedEconomicWriter,
 	riskEngine risk.RiskEngine,
 	appMetrics *metrics.Metrics,
 	notificationManager *notification.Manager,
@@ -170,7 +170,7 @@ func newRealStrategyRunner(
 		positionRepo:          positionRepo,
 		tradeRepo:             tradeRepo,
 		auditLogRepo:          auditLogRepo,
-		financialRepo:         financialRepo,
+		economicWriter:        economicWriter,
 		riskEngine:            riskEngine,
 		tradeDecisionRecorder: tradeDecisionRecorder,
 		metrics:               appMetrics,
@@ -202,7 +202,7 @@ func newRealStrategyRunner(
 		runner.polymarketMarketData = client
 		if liveAuthorized && strings.TrimSpace(pm.SecretKey) != "" {
 			exitRepo, _ := orderRepo.(repository.AtomicPredictionExitRepository)
-			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), ExitRepo: exitRepo, FinancialLifecycle: financialRepo, Logger: logger, Metrics: appMetrics}); err == nil {
+			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), ExitRepo: exitRepo, EconomicWriter: runner.economicWriter, Logger: logger, Metrics: appMetrics}); err == nil {
 				runner.polymarketStopGuard = guard
 			} else {
 				logger.Warn("polymarket stop guard disabled", slog.String("error", err.Error()))
@@ -436,8 +436,8 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, scope exe
 	}
 	manager := execution.NewOptionsOrderManager(r.localPaperBroker, r.orderRepo, r.positionRepo, r.tradeRepo, r.riskEngine, r.logger).
 		WithBrokerName("paper").WithLiveTrading(false)
-	if optionFillRepo, ok := r.financialRepo.(repository.OptionFillRepository); ok {
-		manager.WithOptionFillRepo(optionFillRepo)
+	if r.economicWriter != nil {
+		manager.WithAcceptedOptionFillWriter(r.economicWriter)
 	}
 	if signal.Signal == domain.PipelineSignalSell {
 		scoped, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
@@ -2393,12 +2393,7 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 		r.eventRepo,
 		applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope), r.cfg.Risk.Polymarket.MaxPositionUSDC),
 		r.logger,
-	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper).WithFinancialLifecycleRepo(func() repository.FinancialLifecycleRepository {
-		if strategy.IsPaper {
-			return r.financialRepo
-		}
-		return nil
-	}()), nil
+	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper).WithAcceptedOrderFillWriter(r.economicWriter), nil
 }
 
 func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, finalSignal execution.FinalSignal, plan execution.TradingPlan) error {

@@ -24,7 +24,7 @@ type PaperOrderManagerProcessor struct {
 }
 
 type PaperOrderManagerProcessorDeps struct {
-	FinancialLifecycleRepo repository.FinancialLifecycleRepository
+	EconomicWriter         execution.AcceptedOrderFillWriter
 	RiskEngine             risk.RiskEngine
 	PositionRepo           repository.PositionRepository
 	OrderRepo              repository.OrderRepository
@@ -110,7 +110,7 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		p.deps.AgentEventRepo,
 		execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: fractionPct},
 		p.deps.Logger,
-	).WithFinancialLifecycleRepo(p.deps.FinancialLifecycleRepo).WithLiveTrading(false)
+	).WithAcceptedOrderFillWriter(p.deps.EconomicWriter).WithLiveTrading(false)
 	if request.OpportunityID != uuid.Nil && request.ClaimID != uuid.Nil {
 		if p.deps.OpportunityRepo == nil {
 			return PaperOrderResult{}, errors.New("portfolio: allocation claim repository is required")
@@ -164,7 +164,7 @@ func (p *PaperOrderManagerProcessor) ReconcilePaperOrder(ctx context.Context, op
 		return PaperOrderResult{}, errors.New("portfolio: allocation claim repository is required")
 	}
 	manager := execution.NewOrderManager(p.deps.PaperBroker, "paper", p.deps.RiskEngine, p.deps.PositionRepo, p.deps.OrderRepo, p.deps.TradeRepo, p.deps.AuditLogRepo, p.deps.AgentEventRepo, execution.SizingConfig{}, p.deps.Logger).
-		WithFinancialLifecycleRepo(p.deps.FinancialLifecycleRepo).WithLiveTrading(false).
+		WithAcceptedOrderFillWriter(p.deps.EconomicWriter).WithLiveTrading(false).
 		WithEffectFence(p.claimFence(opportunity.ID, claimID)).
 		WithDecisionRecorder(p.deps.DecisionRecorder)
 	status, err := manager.ReconcilePersistedOrder(ctx, scope, order)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/venue"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
@@ -20,6 +22,19 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/marketdata"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
+
+type venueAdapterExecutionScope struct{ intent lifecycle.Intent }
+
+func (scope venueAdapterExecutionScope) AccountID() uuid.UUID { return scope.intent.AccountID }
+func (scope venueAdapterExecutionScope) Environment() domain.AccountEnvironment {
+	return scope.intent.Environment
+}
+func (scope venueAdapterExecutionScope) Origin() (ledger.ExecutionOriginType, string) {
+	return scope.intent.OriginType, scope.intent.OriginID
+}
+func (scope venueAdapterExecutionScope) CopyOriginRunID() uuid.UUID {
+	return scope.intent.CopyOriginRebalanceRunID
+}
 
 func TestVenueAdapterRepoRegistersLoadsAndReplaysExactPolicy(t *testing.T) {
 	ctx, pool := newVenueAdapterIntegrationPool(t)
@@ -306,7 +321,7 @@ func TestVenueResultPersistenceLinksRawTerminalObservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := &venue.Result{
-		Initial: fixture.aggregate, Aggregate: finalAggregate,
+		Scope: venueAdapterExecutionScope{fixture.aggregate.Intent}, Initial: fixture.aggregate, Aggregate: finalAggregate,
 		Steps: []venue.ResultStep{{Observation: observation, Transition: transition}},
 	}
 	persisted, err := venue.PersistResult(fixture.ctx, store, fixture.base.account.ID, result)
@@ -324,7 +339,7 @@ func TestVenueResultPersistenceLinksBothRawBoundariesBeforeFill(t *testing.T) {
 	working := fixture.persistAcknowledgement(t, store, "fill-ack")
 	observation, economic, transition, finalAggregate := fixture.fillResult(t, working, "fill-1", "2", "0.42")
 	result := &venue.Result{
-		Initial: working, Aggregate: finalAggregate,
+		Scope: venueAdapterExecutionScope{working.Intent}, Initial: working, Aggregate: finalAggregate,
 		Steps: []venue.ResultStep{{
 			Observation: observation, EconomicSourceEvent: economic, Transition: transition,
 		}},
@@ -336,18 +351,53 @@ func TestVenueResultPersistenceLinksBothRawBoundariesBeforeFill(t *testing.T) {
 	if persisted.State != lifecycle.StatePartiallyFilled || len(persisted.Fills) != 1 {
 		t.Fatalf("fill result = state:%s fills:%d", persisted.State, len(persisted.Fills))
 	}
-	var observations, economicEvents, fills, normalizations int
+	var observations, economicEvents, fills, normalizations, projectionRequests int
 	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT
 		(SELECT COUNT(*) FROM venue_observations WHERE id=$1),
 		(SELECT COUNT(*) FROM economic_source_events WHERE id=$2),
 		(SELECT COUNT(*) FROM execution_fills WHERE id=$3),
-		(SELECT COUNT(*) FROM economic_event_normalizations WHERE source_event_id=$2)`,
-		observation.ID, economic.ID, transition.Fill.ID,
-	).Scan(&observations, &economicEvents, &fills, &normalizations); err != nil {
+		(SELECT COUNT(*) FROM economic_event_normalizations WHERE source_event_id=$2),
+		(SELECT COUNT(*) FROM account_projection_outbox WHERE account_id=$4 AND request_kind='economic_fill' AND through_transaction_id=$5)`,
+		observation.ID, economic.ID, transition.Fill.ID, fixture.base.account.ID, transition.Normalization.Transaction.ID,
+	).Scan(&observations, &economicEvents, &fills, &normalizations, &projectionRequests); err != nil {
 		t.Fatal(err)
 	}
-	if observations != 1 || economicEvents != 1 || fills != 1 || normalizations != 1 {
-		t.Fatalf("raw-first fill graph = observation:%d economic:%d fill:%d normalization:%d", observations, economicEvents, fills, normalizations)
+	if observations != 1 || economicEvents != 1 || fills != 1 || normalizations != 1 || projectionRequests != 1 {
+		t.Fatalf("raw-first fill graph = observation:%d economic:%d fill:%d normalization:%d projection:%d", observations, economicEvents, fills, normalizations, projectionRequests)
+	}
+}
+
+func TestVenueResultPersistenceRollsBackEconomicGraphWhenProjectionEnqueueFails(t *testing.T) {
+	fixture := newVenueAdapterRepositoryFixture(t, "outbox-rollback")
+	store := newPostgresVenueResultStore(fixture.pool)
+	working := fixture.persistAcknowledgement(t, store, "outbox-rollback-ack")
+	observation, economic, transition, finalAggregate := fixture.fillResult(t, working, "outbox-rollback-fill", "2", "0.42")
+	if _, err := fixture.pool.Exec(fixture.ctx, `CREATE FUNCTION reject_projection_enqueue_for_test() RETURNS trigger AS $$
+		BEGIN RAISE EXCEPTION 'injected projection enqueue failure'; END;
+		$$ LANGUAGE plpgsql;
+		CREATE TRIGGER reject_projection_enqueue_for_test BEFORE INSERT ON account_projection_outbox
+		FOR EACH ROW EXECUTE FUNCTION reject_projection_enqueue_for_test()`); err != nil {
+		t.Fatal(err)
+	}
+	result := &venue.Result{Scope: venueAdapterExecutionScope{working.Intent}, Initial: working, Aggregate: finalAggregate, Steps: []venue.ResultStep{{
+		Observation: observation, EconomicSourceEvent: economic, Transition: transition,
+	}}}
+	if _, err := venue.PersistResult(fixture.ctx, store, fixture.base.account.ID, result); err == nil || !strings.Contains(err.Error(), "injected projection enqueue failure") {
+		t.Fatalf("PersistResult() error = %v, want injected enqueue failure", err)
+	}
+	var rawObservations, rawEvents, fills, normalizations, projections int
+	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT
+		(SELECT count(*) FROM venue_observations WHERE id=$1),
+		(SELECT count(*) FROM economic_source_events WHERE id=$2),
+		(SELECT count(*) FROM execution_fills WHERE id=$3),
+		(SELECT count(*) FROM economic_event_normalizations WHERE source_event_id=$2),
+		(SELECT count(*) FROM account_projection_outbox WHERE through_transaction_id=$4)`,
+		observation.ID, economic.ID, transition.Fill.ID, transition.Normalization.Transaction.ID,
+	).Scan(&rawObservations, &rawEvents, &fills, &normalizations, &projections); err != nil {
+		t.Fatal(err)
+	}
+	if rawObservations != 1 || rawEvents != 1 || fills != 0 || normalizations != 0 || projections != 0 {
+		t.Fatalf("rollback graph = raw:%d/%d fill:%d normalization:%d projection:%d", rawObservations, rawEvents, fills, normalizations, projections)
 	}
 }
 
@@ -361,7 +411,7 @@ func TestVenueResultPersistenceRestartsAfterEveryRetainedChildWrite(t *testing.T
 				t, working, "restart-fill-"+failurePoint, "2", "0.42",
 			)
 			result := &venue.Result{
-				Initial: working, Aggregate: finalAggregate,
+				Scope: venueAdapterExecutionScope{working.Intent}, Initial: working, Aggregate: finalAggregate,
 				Steps: []venue.ResultStep{{
 					Observation: observation, EconomicSourceEvent: economic, Transition: transition,
 				}},
@@ -522,6 +572,9 @@ func persistVenueResultConcurrently(
 	wantState lifecycle.State,
 ) *lifecycle.Aggregate {
 	t.Helper()
+	if result.Scope == nil && result.Initial != nil {
+		result.Scope = venueAdapterExecutionScope{result.Initial.Intent}
+	}
 	const writers = 8
 	results := make(chan *lifecycle.Aggregate, writers)
 	errorsFound := make(chan error, writers)
@@ -573,6 +626,7 @@ func newVenueAdapterIntegrationPool(t *testing.T) (context.Context, *pgxpool.Poo
 	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000073_venue_adapter_observations.up.sql")); err != nil {
 		t.Fatalf("apply migration 73: %v", err)
 	}
+	applyRepositoryMigrationRange(t, ctx, pool, "000073", "000108")
 	return ctx, pool
 }
 
@@ -825,7 +879,7 @@ func (fixture venueAdapterRepositoryFixture) acknowledgementResult(
 		t.Fatal(err)
 	}
 	return &venue.Result{
-		Initial: fixture.aggregate, Aggregate: finalAggregate,
+		Scope: venueAdapterExecutionScope{fixture.aggregate.Intent}, Initial: fixture.aggregate, Aggregate: finalAggregate,
 		Steps: []venue.ResultStep{{Observation: observation, Transition: transition}},
 	}
 }
@@ -892,9 +946,10 @@ func (fixture venueAdapterRepositoryFixture) fillResult(
 }
 
 type postgresVenueResultStore struct {
-	venue     *VenueAdapterRepo
-	economic  *LedgerRepo
-	lifecycle *ExecutionLifecycleRepo
+	venue       *VenueAdapterRepo
+	economic    *LedgerRepo
+	lifecycle   *ExecutionLifecycleRepo
+	coordinator *EconomicFillCoordinator
 }
 
 type injectedCancellationPersistence struct {
@@ -962,24 +1017,20 @@ func (store *injectedPostgresVenueResultStore) RecordEconomicSourceEvent(
 	return persisted, nil
 }
 
-func (store *injectedPostgresVenueResultStore) ApplyExecutionFill(
-	ctx context.Context,
-	accountID uuid.UUID,
-	transition *lifecycle.Transition,
-) (*lifecycle.Aggregate, error) {
-	persisted, err := store.postgresVenueResultStore.ApplyExecutionFill(ctx, accountID, transition)
+func (store *injectedPostgresVenueResultStore) ApplyAcceptedFill(ctx context.Context, input execution.AcceptedFillInput) (execution.AcceptedFillResult, error) {
+	persisted, err := store.postgresVenueResultStore.ApplyAcceptedFill(ctx, input)
 	if err != nil {
-		return nil, err
+		return execution.AcceptedFillResult{}, err
 	}
 	if err := store.failAfter("fill"); err != nil {
-		return nil, err
+		return execution.AcceptedFillResult{}, err
 	}
 	return persisted, nil
 }
 
 func newPostgresVenueResultStore(pool *pgxpool.Pool) *postgresVenueResultStore {
 	return &postgresVenueResultStore{
-		venue: NewVenueAdapterRepo(pool), economic: NewLedgerRepo(pool), lifecycle: NewExecutionLifecycleRepo(pool),
+		venue: NewVenueAdapterRepo(pool), economic: NewLedgerRepo(pool), lifecycle: NewExecutionLifecycleRepo(pool), coordinator: NewEconomicFillCoordinator(pool),
 	}
 }
 
@@ -1003,6 +1054,10 @@ func (store *postgresVenueResultStore) ApplyExecutionFill(
 	transition *lifecycle.Transition,
 ) (*lifecycle.Aggregate, error) {
 	return store.lifecycle.ApplyExecutionFill(ctx, accountID, transition)
+}
+
+func (store *postgresVenueResultStore) ApplyAcceptedFill(ctx context.Context, input execution.AcceptedFillInput) (execution.AcceptedFillResult, error) {
+	return store.coordinator.ApplyAcceptedFill(ctx, input)
 }
 
 func (store *postgresVenueResultStore) ApplyExecutionTransition(

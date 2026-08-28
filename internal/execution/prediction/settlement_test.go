@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -225,19 +226,18 @@ func TestSettlerPreviewAggregatesEveryOpeningFillPage(t *testing.T) {
 	}
 }
 
-type atomicLifecycleStub struct{ called int }
+type atomicLifecycleStub struct {
+	called int
+	last   repository.PredictionDecisionSettlementInput
+}
 
 func (s *atomicLifecycleStub) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
 	return fn()
 }
 
-func (s *atomicLifecycleStub) ApplyOrderFill(context.Context, repository.OrderFillInput) (repository.OrderFillResult, error) {
+func (s *atomicLifecycleStub) SettleAcceptedPredictionDecision(_ context.Context, _ execution.ExecutionScope, input repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
 	s.called++
-	return repository.OrderFillResult{}, nil
-}
-
-func (s *atomicLifecycleStub) SettlePredictionDecision(context.Context, repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
-	s.called++
+	s.last = input
 	return repository.PredictionDecisionSettlementResult{DecisionID: uuid.New()}, nil
 }
 
@@ -251,11 +251,15 @@ func TestSettlerUsesAtomicLifecycleWhenAvailable(t *testing.T) {
 	atomicRepo := &atomicLifecycleStub{}
 	settler := NewSettler(testExecutionAccountBinding, atomicRepo, legacyDecisions, legacyPositions, legacyTrades, legacyReplay)
 	settler.now = func() time.Time { return time.Unix(0, 0) }
-	if _, err := settler.SettleMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", time.Unix(0, 0)); err != nil {
+	evidence := ResolutionEvidence{Source: "kalshi", SourceNamespace: "markets/kalshi/resolutions", SourceEventID: "KX-TEST", SourceRevision: "resolved:YES", ObservedAt: time.Unix(1, 0).UTC(), RawPayload: []byte(`{"ticker":"KX-TEST","result":"yes"}`)}
+	if _, err := settler.SettleMarketWithEvidence(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", time.Unix(0, 0), evidence); err != nil {
 		t.Fatalf("SettleMarket() error = %v", err)
 	}
 	if atomicRepo.called != 1 || len(legacyTrades.trades) != 1 || len(legacyReplay.events) != 0 || len(legacyDecisions.resolved) != 0 {
 		t.Fatalf("expected atomic path only, got atomic=%d trades=%d replay=%d resolved=%d", atomicRepo.called, len(legacyTrades.trades), len(legacyReplay.events), len(legacyDecisions.resolved))
+	}
+	if atomicRepo.last.Resolution.SourceEventID != evidence.SourceEventID || string(atomicRepo.last.Resolution.RawPayload) != string(evidence.RawPayload) {
+		t.Fatalf("settlement evidence = %+v, want exact provider payload", atomicRepo.last.Resolution)
 	}
 }
 

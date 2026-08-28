@@ -54,7 +54,7 @@ type BrokerSpreadOrderStatusProvider interface {
 // ReconcilePendingOptionOrders resolves durable pre-submit crash gaps by the
 // provider client ID. It never creates a replacement identity.
 func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, account domain.ExecutionAccountBinding, orders []domain.Order, positions []domain.Position) error {
-	if m == nil || m.accountLocker == nil || m.optionFillRepo == nil {
+	if m == nil || m.accountLocker == nil || m.optionFillWriter == nil {
 		return fmt.Errorf("options_manager: locked option recovery dependencies are required")
 	}
 	if _, ok := m.broker.(BrokerOrderStatusProvider); !ok {
@@ -79,7 +79,7 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 }
 
 func (m *OptionsOrderManager) ReconcilePendingOptionOrdersWithAccountLockHeld(ctx context.Context, account domain.ExecutionAccountBinding, orders []domain.Order, positions []domain.Position) error {
-	if m == nil || m.optionFillRepo == nil {
+	if m == nil || m.optionFillWriter == nil {
 		return fmt.Errorf("options_manager: option recovery dependencies are required")
 	}
 	if err := account.Validate(); err != nil {
@@ -186,7 +186,7 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 		if result.FilledQuantity <= durableFilled {
 			if terminalOrderStatus(order.Status) {
 				statusInput := repository.OptionFillInput{IdempotencyKey: "option_status:v1:" + order.ID.String(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: order, FillQuantity: order.FilledQuantity, StatusOnly: true}
-				if _, err := m.applyOptionFills(ctx, []repository.OptionFillInput{statusInput}); err != nil {
+				if err := m.orderRepo.Update(ctx, statusInput.Order); err != nil {
 					return fmt.Errorf("options_manager: persist recovered terminal status: %w", err)
 				}
 			} else if err := m.orderRepo.Update(ctx, order); err != nil {
@@ -431,8 +431,6 @@ type optionPositionCommitter interface {
 	BindDurableOptionPosition(context.Context, string, uuid.UUID) error
 }
 
-var errOptionFillRollbackConfirmed = errors.New("option fill durable rollback confirmed")
-
 type optionsBalanceProvider interface {
 	GetAccountBalance(ctx context.Context) (Balance, error)
 }
@@ -449,7 +447,7 @@ type OptionsOrderManager struct {
 	orderRepo      repository.OrderRepository
 	positionRepo   repository.PositionRepository
 	tradeRepo      repository.TradeRepository
-	optionFillRepo repository.OptionFillRepository
+	optionFillWriter AcceptedOptionFillWriter
 	riskEngine     risk.RiskEngine
 	liveTrading    bool
 	liveGate       LiveGateConfig
@@ -457,12 +455,12 @@ type OptionsOrderManager struct {
 	accountLocker  repository.ExecutionAccountLocker
 }
 
-// WithOptionFillRepo wires all-or-nothing option fill persistence.
-func (m *OptionsOrderManager) WithOptionFillRepo(repo repository.OptionFillRepository) *OptionsOrderManager {
+// WithAcceptedOptionFillWriter wires all-or-nothing canonical option fills.
+func (m *OptionsOrderManager) WithAcceptedOptionFillWriter(writer AcceptedOptionFillWriter) *OptionsOrderManager {
 	if m == nil {
 		return nil
 	}
-	m.optionFillRepo = repo
+	m.optionFillWriter = writer
 	return m
 }
 
@@ -579,7 +577,7 @@ func (m *OptionsOrderManager) processOptionSignal(ctx context.Context, scope Exe
 	if m.broker == nil {
 		return fmt.Errorf("options_manager: broker is required")
 	}
-	if m.optionFillRepo == nil {
+	if m.optionFillWriter == nil {
 		return fmt.Errorf("options_manager: atomic option fill repository is required")
 	}
 	if _, synchronous := m.broker.(OptionFillReporter); synchronous {
@@ -923,7 +921,7 @@ func (m *OptionsOrderManager) closeOptionPosition(ctx context.Context, scope Exe
 	if m.broker == nil || m.orderRepo == nil || m.positionRepo == nil {
 		return errors.New("options_manager: broker, order, and position repositories are required")
 	}
-	if m.optionFillRepo == nil {
+	if m.optionFillWriter == nil {
 		return errors.New("options_manager: atomic option fill repository is required")
 	}
 	if _, synchronous := m.broker.(OptionFillReporter); synchronous {
@@ -1004,7 +1002,7 @@ func (m *OptionsOrderManager) persistClosingFill(ctx context.Context, position *
 }
 
 func (m *OptionsOrderManager) optionFillInput(ctx context.Context, order *domain.Order, positionID *uuid.UUID, reason string) (repository.OptionFillInput, error) {
-	if m.optionFillRepo == nil {
+	if m.optionFillWriter == nil {
 		return repository.OptionFillInput{}, fmt.Errorf("options_manager: atomic option fill repository is required")
 	}
 	if order.FilledAvgPrice == nil || order.FilledAt == nil {
@@ -1065,7 +1063,7 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 	if m.orderRepo == nil || m.positionRepo == nil || m.riskEngine == nil || m.broker == nil {
 		return errors.New("options_manager: spread lifecycle dependencies are required")
 	}
-	if m.optionFillRepo == nil {
+	if m.optionFillWriter == nil {
 		return errors.New("options_manager: atomic option fill repository is required")
 	}
 	if _, synchronous := m.broker.(OptionFillReporter); synchronous {
@@ -1465,22 +1463,25 @@ func optionSpreadParentClientID(orders []*domain.Order) string {
 }
 
 func (m *OptionsOrderManager) applyOptionFills(ctx context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
-	results, err := m.optionFillRepo.ApplyOptionFills(ctx, inputs)
+	if m == nil || m.optionFillWriter == nil || len(inputs) == 0 || inputs[0].Order == nil {
+		return nil, fmt.Errorf("options_manager: accepted option fill writer and orders are required")
+	}
+	scope, err := ExecutionScopeFromOrder(*inputs[0].Order)
 	if err != nil {
-		resolver, ok := m.optionFillRepo.(repository.OptionFillCommitResolver)
-		if !ok {
-			return nil, err
+		return nil, fmt.Errorf("options_manager: accepted option fill scope: %w", err)
+	}
+	for index := range inputs {
+		if inputs[index].Order == nil {
+			return nil, fmt.Errorf("options_manager: option fill %d has no order", index)
 		}
-		resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		resolved, committed, resolveErr := resolver.ResolveOptionFillCommit(resolveCtx, inputs)
-		cancel()
-		if resolveErr != nil {
-			return nil, errors.Join(err, fmt.Errorf("options_manager: resolve option fill commit: %w", resolveErr))
+		candidate, scopeErr := ExecutionScopeFromOrder(*inputs[index].Order)
+		if scopeErr != nil || candidate.AccountID() != scope.AccountID() || candidate.Environment() != scope.Environment() {
+			return nil, fmt.Errorf("options_manager: option fill batch mixes execution scopes")
 		}
-		if !committed {
-			return nil, errors.Join(errOptionFillRollbackConfirmed, err)
-		}
-		results = resolved
+	}
+	results, err := m.optionFillWriter.ApplyAcceptedOptionFills(ctx, scope, inputs)
+	if err != nil {
+		return nil, err
 	}
 	committer, ok := m.broker.(optionPositionCommitter)
 	if !ok {
@@ -1512,7 +1513,7 @@ func (m *OptionsOrderManager) compensateOptionOrder(ctx context.Context, externa
 }
 
 func (m *OptionsOrderManager) abortOptionOrder(ctx context.Context, order *domain.Order, externalID string, cause error) error {
-	if !errors.Is(cause, errOptionFillRollbackConfirmed) {
+	if !errors.Is(cause, ErrAcceptedEconomicRollbackConfirmed) {
 		return fmt.Errorf("%w; commit state remains uncertain and venue effect retained for recovery", cause)
 	}
 	rollbackErr := m.compensateOptionOrder(ctx, externalID)
@@ -1539,7 +1540,7 @@ func (m *OptionsOrderManager) compensateOptionSpread(ctx context.Context, extern
 }
 
 func (m *OptionsOrderManager) abortOptionSpread(ctx context.Context, orders []*domain.Order, externalIDs []string, cause error) error {
-	if !errors.Is(cause, errOptionFillRollbackConfirmed) {
+	if !errors.Is(cause, ErrAcceptedEconomicRollbackConfirmed) {
 		return fmt.Errorf("%w; commit state remains uncertain and venue effects retained for recovery", cause)
 	}
 	rollbackErr := m.compensateOptionSpread(ctx, externalIDs)

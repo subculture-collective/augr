@@ -1111,7 +1111,7 @@ func TestNativeTerminalEventPropagatesScopeError(t *testing.T) {
 	}
 }
 
-func TestNewOrderManager_UsesFinancialLifecycleRepoForPaperOnly(t *testing.T) {
+func TestNewOrderManager_UsesAcceptedEconomicWriterForEveryExecutionMode(t *testing.T) {
 	t.Parallel()
 
 	strategyID := uuid.New()
@@ -1123,7 +1123,7 @@ func TestNewOrderManager_UsesFinancialLifecycleRepoForPaperOnly(t *testing.T) {
 			LiveTradingAllowedBrokers:    []string{"kalshi"},
 			Brokers:                      config.BrokerConfigs{Kalshi: config.KalshiConfig{APIKeyID: "kalshi-key-id", PrivateKeyPEMB64: "base64-private-key"}},
 		},
-		financialRepo:    &strategyLifecycleRepoStub{},
+		economicWriter:   &strategyLifecycleRepoStub{},
 		kalshiLiveClient: &fakeKalshiLiveClient{},
 		kalshiMarketData: staticKalshiMarketData{snapshot: kalshiexecution.Snapshot{Ticker: "KXTEST-YESNO", Status: "active", CloseTime: time.Now().UTC().Add(time.Hour), FetchedAt: time.Now().UTC()}},
 		logger:           slogDiscardLogger(),
@@ -1136,21 +1136,25 @@ func TestNewOrderManager_UsesFinancialLifecycleRepoForPaperOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newOrderManager(live) error = %v", err)
 	}
-	if reflect.ValueOf(paperMgr).Elem().FieldByName("financialRepo").IsNil() {
-		t.Fatal("paper order manager did not receive financial lifecycle repo")
+	if reflect.ValueOf(paperMgr).Elem().FieldByName("economicWriter").IsNil() {
+		t.Fatal("paper order manager did not receive accepted economic writer")
 	}
-	if !reflect.ValueOf(liveMgr).Elem().FieldByName("financialRepo").IsNil() {
-		t.Fatal("live order manager unexpectedly received financial lifecycle repo")
+	if reflect.ValueOf(liveMgr).Elem().FieldByName("economicWriter").IsNil() {
+		t.Fatal("live order manager did not receive accepted economic writer")
 	}
 }
 
 type strategyLifecycleRepoStub struct{}
 
-func (strategyLifecycleRepoStub) ApplyOrderFill(context.Context, repository.OrderFillInput) (repository.OrderFillResult, error) {
+func (strategyLifecycleRepoStub) ApplyAcceptedOrderFill(context.Context, execution.ExecutionScope, repository.OrderFillInput) (repository.OrderFillResult, error) {
 	return repository.OrderFillResult{}, nil
 }
 
-func (strategyLifecycleRepoStub) SettlePredictionDecision(context.Context, repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
+func (strategyLifecycleRepoStub) ApplyAcceptedOptionFills(context.Context, execution.ExecutionScope, []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
+	return nil, nil
+}
+
+func (strategyLifecycleRepoStub) SettleAcceptedPredictionDecision(context.Context, execution.ExecutionScope, repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
 	return repository.PredictionDecisionSettlementResult{}, nil
 }
 

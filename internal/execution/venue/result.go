@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 )
@@ -43,7 +44,7 @@ type Result struct {
 type Persistence interface {
 	RecordVenueObservation(context.Context, *Observation) (*Observation, error)
 	RecordEconomicSourceEvent(context.Context, *ledger.EconomicSourceEvent) (*ledger.EconomicSourceEvent, error)
-	ApplyExecutionFill(context.Context, uuid.UUID, *lifecycle.Transition) (*lifecycle.Aggregate, error)
+	ApplyAcceptedFill(context.Context, execution.AcceptedFillInput) (execution.AcceptedFillResult, error)
 	ApplyExecutionTransition(context.Context, uuid.UUID, *lifecycle.Transition) (*lifecycle.Aggregate, error)
 }
 
@@ -124,7 +125,16 @@ func PersistResult(
 			continue
 		}
 		if step.Transition.Fill != nil {
-			persisted, err = store.ApplyExecutionFill(ctx, accountID, step.Transition)
+			accepted, applyErr := store.ApplyAcceptedFill(ctx, execution.AcceptedFillInput{
+				Scope: result.Scope, PriorLifecycle: persisted, Transition: step.Transition, AcceptedFill: step.Transition.Fill,
+				SourceEvent: step.EconomicSourceEvent, Instrument: step.Transition.Normalization.Instrument,
+				VenueContract: step.Transition.Normalization.VenueContract, Normalization: step.Transition.Normalization,
+				LedgerTransaction: step.Transition.Normalization.Transaction,
+			})
+			if applyErr == nil {
+				persisted = accepted.Lifecycle
+			}
+			err = applyErr
 		} else {
 			persisted, err = store.ApplyExecutionTransition(ctx, accountID, step.Transition)
 		}

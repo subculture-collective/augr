@@ -20,12 +20,12 @@ import (
 )
 
 type StopGuardConfig struct {
-	ExecutionAccount   domain.ExecutionAccountBinding
-	Broker             templateSender
-	ExitRepo           repository.AtomicPredictionExitRepository
-	FinancialLifecycle repository.FinancialLifecycleRepository
-	Logger             *slog.Logger
-	Metrics            StopGuardMetrics
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           templateSender
+	ExitRepo         repository.AtomicPredictionExitRepository
+	EconomicWriter   execution.AcceptedOrderFillWriter
+	Logger           *slog.Logger
+	Metrics          StopGuardMetrics
 }
 
 type StopGuardMetrics interface {
@@ -48,6 +48,7 @@ type Position struct {
 	Size         float64
 	StopPx       float64
 	TakeProfitPx float64
+	Scope        execution.ExecutionScope
 }
 
 type templateSender interface {
@@ -82,17 +83,18 @@ type guardEntry struct {
 	order      *domain.Order
 	state      atomic.Int32
 	receivedAt time.Time
+	scope      execution.ExecutionScope
 	claimed    atomic.Bool
 	adopted    atomic.Bool
 }
 
 type StopGuard struct {
-	executionAccount   domain.ExecutionAccountBinding
-	broker             templateSender
-	exitRepo           repository.AtomicPredictionExitRepository
-	financialLifecycle repository.FinancialLifecycleRepository
-	logger             *slog.Logger
-	metrics            StopGuardMetrics
+	executionAccount domain.ExecutionAccountBinding
+	broker           templateSender
+	exitRepo         repository.AtomicPredictionExitRepository
+	economicWriter   execution.AcceptedOrderFillWriter
+	logger           *slog.Logger
+	metrics          StopGuardMetrics
 
 	mu     sync.RWMutex
 	bySlug map[string][]*guardEntry
@@ -119,14 +121,14 @@ func NewStopGuard(cfg StopGuardConfig) (*StopGuard, error) {
 		return nil, errors.New("polymarket: stop exit repository must provide an execution account lock")
 	}
 	return &StopGuard{
-		executionAccount:   cfg.ExecutionAccount,
-		broker:             cfg.Broker,
-		exitRepo:           cfg.ExitRepo,
-		financialLifecycle: cfg.FinancialLifecycle,
-		logger:             cfg.Logger,
-		metrics:            cfg.Metrics,
-		bySlug:             make(map[string][]*guardEntry),
-		byID:               make(map[string]*guardEntry),
+		executionAccount: cfg.ExecutionAccount,
+		broker:           cfg.Broker,
+		exitRepo:         cfg.ExitRepo,
+		economicWriter:   cfg.EconomicWriter,
+		logger:           cfg.Logger,
+		metrics:          cfg.Metrics,
+		bySlug:           make(map[string][]*guardEntry),
+		byID:             make(map[string]*guardEntry),
 	}, nil
 }
 
@@ -201,7 +203,7 @@ func (g *StopGuard) registerEntry(pos Position, initialState guardState, activat
 	if err != nil {
 		return nil, err
 	}
-	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, order: order, receivedAt: time.Now()}
+	entry := &guardEntry{positionID: positionID, slug: slug, outcome: outcome, stopPx: pos.StopPx, takePx: pos.TakeProfitPx, long: long, template: tmpl, order: order, receivedAt: time.Now(), scope: pos.Scope}
 	entry.state.Store(int32(initialState))
 	if activate {
 		g.activateEntry(entry)
@@ -258,7 +260,15 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 	if err != nil {
 		return err
 	}
-	entry := Position{AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity}
+	resolver, ok := g.economicWriter.(execution.PositionExecutionScopeResolver)
+	if !ok {
+		return errors.New("polymarket: stop guard economic writer cannot resolve position execution scope")
+	}
+	scope, err := resolver.ResolvePositionExecutionScope(ctx, pos)
+	if err != nil {
+		return fmt.Errorf("polymarket: resolve stop position execution scope: %w", err)
+	}
+	entry := Position{AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, ID: positionID, Slug: slug, OutcomeSide: outcome, EntryPx: pos.AvgEntry, Size: pos.Quantity, Scope: scope}
 	switch pos.Side {
 	case domain.PositionSideLong:
 		entry.Side = "BUY"
@@ -666,10 +676,10 @@ func (g *StopGuard) recoverClaimedExit(ctx context.Context, entry *guardEntry, p
 }
 
 func (g *StopGuard) persistRecoveredExitFill(ctx context.Context, entry *guardEntry, externalID string, result execution.BrokerOrderStatus) bool {
-	if g.financialLifecycle == nil || result.FilledQuantity <= 0 || result.FilledAvgPrice == nil || *result.FilledAvgPrice <= 0 || result.FilledAt == nil || result.FilledAt.IsZero() {
+	if g.economicWriter == nil || result.FilledQuantity <= 0 || result.FilledAvgPrice == nil || *result.FilledAvgPrice <= 0 || result.FilledAt == nil || result.FilledAt.IsZero() {
 		return false
 	}
-	locker, ok := g.financialLifecycle.(repository.ExecutionAccountLocker)
+	locker, ok := g.economicWriter.(repository.ExecutionAccountLocker)
 	if !ok {
 		return false
 	}
@@ -700,18 +710,12 @@ func (g *StopGuard) persistRecoveredExitFillLocked(ctx context.Context, entry *g
 	}
 	trade := &domain.Trade{ID: uuid.New(), AccountID: recoveredOrder.AccountID, Environment: recoveredOrder.Environment, OriginType: recoveredOrder.OriginType, OriginID: recoveredOrder.OriginID, OrderID: &recoveredOrder.ID, Ticker: recoveredOrder.Ticker, Side: recoveredOrder.Side, Quantity: result.FilledQuantity, Price: *result.FilledAvgPrice, ExecutedAt: result.FilledAt.UTC()}
 	input := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("polymarket_stop_fill:v1:%s:observed:%.8f", recoveredOrder.ID, result.FilledQuantity), Order: &recoveredOrder, FillIntent: repository.OrderFillIntent{Side: recoveredOrder.Side, Quantity: result.FilledQuantity, ExecutionPrice: *result.FilledAvgPrice}, Now: result.FilledAt.UTC(), Trade: trade}
-	_, err := g.financialLifecycle.ApplyOrderFill(ctx, input)
-	if err != nil {
-		if resolver, ok := g.financialLifecycle.(repository.OrderFillCommitResolver); ok {
-			resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			_, committed, resolveErr := resolver.ResolveOrderFillCommit(resolveCtx, input)
-			cancel()
-			if resolveErr != nil || !committed {
-				return false
-			}
-		} else {
-			return false
-		}
+	originType, originID := entry.scope.Origin()
+	if entry.scope.AccountID() != recoveredOrder.AccountID || entry.scope.Environment() != recoveredOrder.Environment || string(originType) != recoveredOrder.OriginType || originID != recoveredOrder.OriginID {
+		return false
+	}
+	if _, err := g.economicWriter.ApplyAcceptedOrderFill(ctx, entry.scope, input); err != nil {
+		return false
 	}
 	*entry.order = recoveredOrder
 	return true

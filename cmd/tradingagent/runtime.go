@@ -540,9 +540,59 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	closeKalshiProjectionDB := func() {}
+	economicCoordinator := pgrepo.NewEconomicFillCoordinator(db.Pool)
+	economicPlanner := pgrepo.NewAcceptedEconomicPlanner(db.Pool)
+	economicWriter, err := execution.NewCoordinatedEconomicWriter(economicPlanner, db, economicCoordinator)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("construct accepted economic writer: %w", err)
+	}
+	projectionOutbox := pgrepo.NewProjectionOutboxRepository(db.Pool)
+	kalshiProjectionRepo, closeKalshiProjectionDB := newRuntimeKalshiProjectionRepo(ctx, cfg.Brokers.Kalshi, cfg.Database.URL, logger)
+	var projectionWorker *pgrepo.ProjectionWorker
+	stopProjectionWorker := func() {}
+	if kalshiProjectionRepo != nil {
+		projectionWorker, err = pgrepo.NewProjectionWorker(projectionOutbox, kalshiProjectionRepo, pgrepo.ProjectionWorkerConfig{
+			WorkerID: "runtime-" + uuid.NewString(), Lease: 30 * time.Second, RetryLimit: 5,
+			MarkSource: kalshiexecution.KalshiMarkSource, MarkNamespace: kalshiexecution.KalshiAccountMarkNamespace(accountID),
+			MaxMarkAge: cfg.Brokers.Kalshi.MarkMaxAge,
+		})
+		if err != nil {
+			closeKalshiProjectionDB()
+			return nil, nil, nil, err
+		}
+		workerCtx, cancelWorker := context.WithCancel(ctx)
+		workerDone := make(chan struct{})
+		go func() {
+			defer close(workerDone)
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				if _, processErr := projectionWorker.ProcessOne(workerCtx); processErr != nil && workerCtx.Err() == nil {
+					logger.Warn("projection worker request failed", slog.Any("error", processErr))
+				}
+				select {
+				case <-workerCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		stopProjectionWorker = func() {
+			projectionWorker.StopAccepting()
+			drainCtx, cancelDrain := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = projectionWorker.Drain(drainCtx)
+			cancelDrain()
+			cancelWorker()
+			<-workerDone
+		}
+	}
 
 	redisHealth, closeRedis := newRedisHealthCheck(cfg)
+	teardown.stopWorkers = stopProjectionWorker
+	teardown.closeSecondaries = func() {
+		closeRedis()
+		closeKalshiProjectionDB()
+	}
 
 	appMetrics := metrics.New()
 	paperEvaluation := runtimeDeps.paperEvaluation
@@ -567,7 +617,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	tradeDecisionRecorder := execution.NewTradeDecisionJournalRecorder(tradeDecisionRepo, replayEventRepo)
 	var predictionSettler *predictionexecution.Settler
 	if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
-		predictionSettler = predictionexecution.NewSettler(executionAccount, db, tradeDecisionRepo, positionRepo, tradeRepo, replayEventRepo)
+		predictionSettler = predictionexecution.NewSettler(executionAccount, economicWriter, tradeDecisionRepo, positionRepo, tradeRepo, replayEventRepo)
 		return nil
 	}); err != nil {
 		return nil, nil, nil, err
@@ -729,6 +779,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	var polymarketRecorderConfig recorder.RecorderConfig
 	var strategyRunner *realStrategyRunner
 	teardown.stopWorkers = func() {
+		stopProjectionWorker()
 		if strategyRunner != nil {
 			strategyRunner.stopPolymarketTickWorkers()
 		}
@@ -788,7 +839,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		runner := newSmokeRunner(runRepo, snapshotRepo, decisionRepo, eventRepo, runRegistry, logger)
 		var strategyRunner api.StrategyRunner
 		if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
-			strategyRunner = newSmokeStrategyRunner(executionAccount, runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, db, notificationManager, tradeDecisionRecorder, logger)
+			strategyRunner = newSmokeStrategyRunner(executionAccount, runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, economicWriter, notificationManager, tradeDecisionRecorder, logger)
 			return nil
 		}); err != nil {
 			return nil, nil, nil, err
@@ -889,7 +940,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				alpacaReconciler = automation.NewAlpacaReconciler(automation.AlpacaReconcilerDeps{
 					ExecutionAccount: executionAccount,
 					Broker:           alpacaAdapter, PLAggregate: pgrepo.NewAlpacaPLAggregateRepo(db.Pool), StrategyRepo: strategyRepo,
-					OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo, OptionFillRepo: db, AuditLogRepo: auditLogRepo, AccountLocker: orderRepo, Logger: logger,
+					OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo, OptionFillWriter: economicWriter, AuditLogRepo: auditLogRepo, AccountLocker: orderRepo, Logger: logger,
 				})
 				return nil
 			}); err != nil {
@@ -947,7 +998,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				positionRepo,
 				tradeRepo,
 				auditLogRepo,
-				db,
+				economicWriter,
 				riskEngine,
 				appMetrics,
 				notificationManager,
@@ -976,7 +1027,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("read paper starting balance: %w", err)
 		}
-		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, Fills: db, Financial: db, Trades: tradeRepo, Decisions: tradeDecisionRecorder}); err != nil {
+		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, OptionWriter: strategyRunner.economicWriter, OrderWriter: strategyRunner.economicWriter, Trades: tradeRepo, Decisions: tradeDecisionRecorder}); err != nil {
 			return nil, nil, nil, err
 		}
 		strategyRunner.portfolioAllocatorMode = portfolioAllocatorMode
@@ -1012,7 +1063,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				Executor: copytrading.NewOrderManagerExecutor(copytrading.OrderManagerExecutorDeps{
 					ExecutionAccount: executionAccount,
 					Broker:           strategyRunner.localPaperBroker, Risk: riskEngine, Positions: positionRepo,
-					Orders: orderRepo, Trades: tradeRepo, FinancialLifecycle: db, Audit: auditLogRepo,
+					Orders: orderRepo, Trades: tradeRepo, EconomicWriter: strategyRunner.economicWriter, Audit: auditLogRepo,
 					Events: eventRepo, DecisionRecorder: tradeDecisionRecorder, Metrics: appMetrics, Logger: logger,
 				}),
 				Lifecycle: copytrading.NewOriginLifecycleResolver(pgrepo.NewExecutionLifecycleRepo(db.Pool), accountRepo, instrumentRepo, quoteSnapshotRepo, "legacy_augr_stock"),
@@ -1098,9 +1149,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				logger.Warn("automation: failed to create embedding provider", slog.Any("error", err))
 			} else {
 				var kalshiMarkProvider *kalshidata.Provider
-				var kalshiProjectionRepo repository.ProjectionRepository
 				if kalshiDataClient != nil {
-					kalshiProjectionRepo, closeKalshiProjectionDB = newRuntimeKalshiProjectionRepo(ctx, cfg.Brokers.Kalshi, cfg.Database.URL, logger)
 					if kalshiProjectionRepo != nil {
 						kalshiMarkProvider = kalshidata.NewProviderWithClient(kalshiDataClient, logger)
 					}
@@ -1108,18 +1157,18 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				overnightBacktestRunRepo := pgrepo.NewOvernightBacktestRunRepo(db.Pool)
 				polymarketDiscoveryRunRepo := pgrepo.NewPolymarketDiscoveryRunRepo(db.Pool)
 				portfolioPaperProcessor := portfolio.NewPaperOrderManagerProcessor(portfolio.PaperOrderManagerProcessorDeps{
-					RiskEngine:             riskEngine,
-					PositionRepo:           positionRepo,
-					OrderRepo:              orderRepo,
-					TradeRepo:              tradeRepo,
-					AuditLogRepo:           auditLogRepo,
-					AgentEventRepo:         eventRepo,
-					DecisionRecorder:       tradeDecisionRecorder,
-					OpportunityRepo:        opportunityRepo,
-					FinancialLifecycleRepo: db,
-					Metrics:                appMetrics,
-					Logger:                 logger,
-					PaperBroker:            strategyRunner.localPaperBroker,
+					RiskEngine:       riskEngine,
+					PositionRepo:     positionRepo,
+					OrderRepo:        orderRepo,
+					TradeRepo:        tradeRepo,
+					AuditLogRepo:     auditLogRepo,
+					AgentEventRepo:   eventRepo,
+					DecisionRecorder: tradeDecisionRecorder,
+					OpportunityRepo:  opportunityRepo,
+					EconomicWriter:   strategyRunner.economicWriter,
+					Metrics:          appMetrics,
+					Logger:           logger,
+					PaperBroker:      strategyRunner.localPaperBroker,
 				})
 				var orch *automation.JobOrchestrator
 				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
@@ -1189,6 +1238,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						KalshiSettlementEnabled:      !cfg.Brokers.Kalshi.DryRun,
 						KalshiMarkProvider:           kalshiMarkProvider,
 						KalshiProjectionRepo:         kalshiProjectionRepo,
+						KalshiProjectionOutbox:       projectionOutbox,
 						KalshiMarkMaxAge:             cfg.Brokers.Kalshi.MarkMaxAge,
 						ReportArtifactRepo:           reportArtifactRepo,
 						BacktestConfigRepo:           backtestConfigRepo,
@@ -1624,7 +1674,7 @@ type smokeStrategyRunner struct {
 	tradeRepo             repository.TradeRepository
 	auditLogRepo          repository.AuditLogRepository
 	agentEventRepo        repository.AgentEventRepository
-	financialRepo         repository.FinancialLifecycleRepository
+	economicWriter        execution.AcceptedEconomicWriter
 	tradeDecisionRecorder execution.DecisionRecorder
 	notificationManager   *notification.Manager
 	logger                *slog.Logger
@@ -1641,7 +1691,7 @@ func newSmokeStrategyRunner(
 	auditLogRepo repository.AuditLogRepository,
 	agentEventRepo repository.AgentEventRepository,
 	riskEngine risk.RiskEngine,
-	financialRepo repository.FinancialLifecycleRepository,
+	economicWriter execution.AcceptedEconomicWriter,
 	notificationManager *notification.Manager,
 	tradeDecisionRecorder execution.DecisionRecorder,
 	logger *slog.Logger,
@@ -1665,7 +1715,7 @@ func newSmokeStrategyRunner(
 		tradeRepo:             tradeRepo,
 		auditLogRepo:          auditLogRepo,
 		agentEventRepo:        agentEventRepo,
-		financialRepo:         financialRepo,
+		economicWriter:        economicWriter,
 		tradeDecisionRecorder: tradeDecisionRecorder,
 		notificationManager:   notificationManager,
 		logger:                logger,
@@ -1804,7 +1854,7 @@ func (r *smokeStrategyRunner) newOrderManager(ctx context.Context, strategy doma
 		r.agentEventRepo,
 		sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope),
 		r.logger,
-	).WithFinancialLifecycleRepo(r.financialRepo).WithDecisionRecorder(r.tradeDecisionRecorder), nil
+	).WithAcceptedOrderFillWriter(r.economicWriter).WithDecisionRecorder(r.tradeDecisionRecorder), nil
 }
 
 func (r *smokeStrategyRunner) dispatchNotifications(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, state *agent.PipelineState) error {

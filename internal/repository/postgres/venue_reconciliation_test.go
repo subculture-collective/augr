@@ -39,15 +39,7 @@ func newVenueReconFixture(t *testing.T) venueReconFixture {
 	ctx := context.Background()
 	pools := newProjectionIntegrationPool(t, ctx)
 	pool := pools.owner
-	for _, migration := range []string{
-		"000070_accounting_dual_run.up.sql", "000071_common_execution_lifecycle.up.sql",
-		"000072_simulation_policy_artifacts.up.sql", "000073_venue_adapter_observations.up.sql",
-		"000074_capital_margin_profiles.up.sql", "000075_venue_reconciliation.up.sql",
-	} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migration)); err != nil {
-			t.Fatalf("apply %s: %v", migration, err)
-		}
-	}
+	applyRepositoryMigrationRange(t, ctx, pool, "000069", "000108")
 	economic := newEconomicLedgerFixture(t, ctx, pool, "venue-reconciliation")
 	ledgerRepo := NewLedgerRepo(pool)
 	if _, err := ledgerRepo.RecordEconomicSourceEvent(ctx, economic.source); err != nil {
@@ -66,12 +58,13 @@ func newVenueReconFixture(t *testing.T) venueReconFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := projectionRepo.RecordMarkObservation(ctx, mark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, mark); err != nil {
 		t.Fatal(err)
 	}
 	asOf := time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond)
 	projection, err := projectionRepo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-		AccountID: economic.account.ID, AsOf: asOf, MarkSource: "test-source", MarkNamespace: "marks/reconciliation", MaxMarkAge: 48 * time.Hour,
+		AccountID: economic.account.ID, ThroughTransactionID: economic.normalization.Transaction.ID,
+		AsOf: asOf, MarkSource: "test-source", MarkNamespace: "marks/reconciliation", MaxMarkAge: 48 * time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)

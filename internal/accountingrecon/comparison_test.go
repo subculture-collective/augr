@@ -87,6 +87,24 @@ func TestCompareUsesExactDecimalsAndPositionUnion(t *testing.T) {
 	assertResultStatus(t, run, PositionFactKey(extraID), StatusUnexplained)
 }
 
+func TestCompareRejectsDifferentTransactionFrontiers(t *testing.T) {
+	t.Parallel()
+	legacyInput := completeSnapshotInput(SourceLegacy)
+	ledgerInput := completeSnapshotInput(SourceLedger)
+	ledgerInput.ThroughTransactionID = uuid.New()
+	legacy, err := NewSnapshot(legacyInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerSnapshot, err := NewSnapshot(ledgerInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Compare(ComparisonInput{Legacy: legacy, Ledger: ledgerSnapshot, Generator: "worker", GeneratedAt: legacy.AsOf.Add(2 * time.Hour)}); err == nil {
+		t.Fatal("Compare() accepted snapshots from different transaction frontiers")
+	}
+}
+
 func TestCompareRejectsForgedOrInapplicableExplanation(t *testing.T) {
 	t.Parallel()
 

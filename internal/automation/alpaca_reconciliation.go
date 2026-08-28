@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -105,7 +106,7 @@ type AlpacaReconcilerDeps struct {
 	OrderRepo        OrderPersistence
 	PositionRepo     PositionPersistence
 	TradeRepo        TradePersistence
-	OptionFillRepo   repository.OptionFillRepository
+	OptionFillWriter execution.AcceptedOptionFillWriter
 	AuditLogRepo     repository.AuditLogRepository
 	AccountLocker    repository.ExecutionAccountLocker
 	Logger           *slog.Logger
@@ -208,7 +209,7 @@ type AlpacaReconciler struct {
 	orderRepo        OrderPersistence
 	positionRepo     PositionPersistence
 	tradeRepo        TradePersistence
-	optionFillRepo   repository.OptionFillRepository
+	optionFillWriter execution.AcceptedOptionFillWriter
 	auditLogRepo     repository.AuditLogRepository
 	accountLocker    repository.ExecutionAccountLocker
 	logger           *slog.Logger
@@ -230,7 +231,7 @@ func NewAlpacaReconciler(deps AlpacaReconcilerDeps) *AlpacaReconciler {
 		orderRepo:        deps.OrderRepo,
 		positionRepo:     deps.PositionRepo,
 		tradeRepo:        deps.TradeRepo,
-		optionFillRepo:   deps.OptionFillRepo,
+		optionFillWriter: deps.OptionFillWriter,
 		auditLogRepo:     deps.AuditLogRepo,
 		accountLocker:    deps.AccountLocker,
 		logger:           logger,
@@ -480,7 +481,7 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 		}
 		position := positionByTicker[fill.Ticker]
 		if order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption {
-			if r.optionFillRepo == nil {
+			if r.optionFillWriter == nil {
 				return summary, fmt.Errorf("alpaca_reconcile: option fill repository is required for %s", fill.ExternalID)
 			}
 			var positionID *uuid.UUID
@@ -518,7 +519,11 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 				exitReason = "alpaca_reconciliation"
 			}
 			input := repository.OptionFillInput{IdempotencyKey: "alpaca_option_fill:v1:" + activityID, AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: &observedOrder, PositionID: positionID, FillPrice: cumulativePrice, FillQuantity: cumulativeQuantity, Fee: optionFeeByOrder[order.ID], Premium: optionPremiumByOrder[order.ID], FilledAt: fill.ExecutedAt, ExitReason: exitReason}
-			if _, err := r.optionFillRepo.ApplyOptionFills(ctx, []repository.OptionFillInput{input}); err != nil {
+			scope, scopeErr := execution.ExecutionScopeFromOrder(observedOrder)
+			if scopeErr != nil {
+				return summary, fmt.Errorf("alpaca_reconcile: option fill scope for %s: %w", fill.ExternalID, scopeErr)
+			}
+			if _, err := r.optionFillWriter.ApplyAcceptedOptionFills(ctx, scope, []repository.OptionFillInput{input}); err != nil {
 				return summary, fmt.Errorf("alpaca_reconcile: persist option fill for %s: %w", fill.ExternalID, err)
 			}
 			*order = observedOrder

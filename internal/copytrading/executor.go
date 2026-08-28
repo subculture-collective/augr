@@ -25,7 +25,7 @@ type OrderManagerExecutorDeps struct {
 	Positions          repository.PositionRepository
 	Orders             repository.OrderRepository
 	Trades             repository.TradeRepository
-	FinancialLifecycle repository.FinancialLifecycleRepository
+	EconomicWriter     execution.AcceptedOrderFillWriter
 	Audit              repository.AuditLogRepository
 	Events             repository.AgentEventRepository
 	DecisionRecorder   execution.DecisionRecorder
@@ -150,7 +150,7 @@ func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, reque
 	fraction := request.Intent.RequestedNotional / balance.Equity
 	orderRepo := claimedCopyOrderRepo{OrderRepository: e.deps.Orders, intentID: request.Intent.ID, claimID: request.ClaimID}
 	manager := execution.NewOrderManager(e.deps.Broker, "paper", e.deps.Risk, e.deps.Positions, orderRepo, e.deps.Trades, e.deps.Audit, e.deps.Events, execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: fraction}, e.deps.Logger).
-		WithFinancialLifecycleRepo(e.deps.FinancialLifecycle).
+		WithAcceptedOrderFillWriter(e.deps.EconomicWriter).
 		WithDecisionRecorder(e.deps.DecisionRecorder).
 		WithLiveTrading(false)
 	if e.deps.Metrics != nil {

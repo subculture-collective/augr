@@ -13,14 +13,12 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
-	"github.com/PatrickFanella/get-rich-quick/internal/execution/venue"
 	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/marketdata"
 	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
-	"github.com/PatrickFanella/get-rich-quick/internal/venuerecon"
 )
 
 var (
@@ -115,28 +113,29 @@ type CapitalPolicyRepository interface {
 	GetCapitalBinding(context.Context, uuid.UUID) (*capital.Binding, error)
 }
 
-// VenuePolicyRepository registers only reviewed immutable venue-adapter
-// artifacts and reloads the exact version pinned on a routed order.
-type VenuePolicyRepository interface {
-	RegisterVenuePolicy(context.Context, *venue.PolicyArtifact) (*venue.PolicyArtifact, error)
-	GetVenuePolicyByVersion(context.Context, string) (*venue.PolicyArtifact, error)
-}
-
-// VenueObservationRepository journals exact provider evidence before any
-// lifecycle or economic interpretation is applied.
-type VenueObservationRepository interface {
-	RecordVenueObservation(context.Context, *venue.Observation) (*venue.Observation, error)
-	GetVenueObservationByID(context.Context, uuid.UUID) (*venue.Observation, error)
-}
-
 // ProjectionRepository persists canonical marks and immutable rebuild
 // checkpoints without changing any legacy position or balance read path.
 type ProjectionRepository interface {
-	RecordMarkObservation(context.Context, *ledger.MarkObservation) (*ledger.MarkObservation, error)
 	GetMarkObservationByID(context.Context, uuid.UUID) (*ledger.MarkObservation, error)
 	ListCanonicalOpenLots(context.Context, uuid.UUID, time.Time) ([]CanonicalOpenLot, error)
 	RebuildPortfolioProjection(context.Context, ledger.ProjectionRequest) (*ledger.PortfolioProjection, error)
 	GetProjectionCheckpointByID(context.Context, uuid.UUID) (*ledger.ProjectionCheckpoint, error)
+}
+
+// ProjectionMarkBatch is one runtime-pool transaction that appends canonical
+// marks and queues a rebuild at an explicit ledger frontier.
+type ProjectionMarkBatch struct {
+	AccountID            uuid.UUID
+	ThroughTransactionID uuid.UUID
+	AsOf                 time.Time
+	MarkAsOf             time.Time
+	MaxMarkAge           time.Duration
+	Marks                []*ledger.MarkObservation
+}
+
+type ProjectionOutboxRepository interface {
+	LatestProjectionFrontier(context.Context, uuid.UUID, time.Time) (uuid.UUID, error)
+	RecordMarksAndEnqueueRebuild(context.Context, ProjectionMarkBatch) (uuid.UUID, error)
 }
 
 // ProjectionSnapshot is one canonical account-scoped checkpoint and the
@@ -153,6 +152,10 @@ type ProjectionSnapshot struct {
 	FreshMarks                      int
 	StaleMarks                      int
 	UnavailableMarks                int
+	ProjectionWorkPending           int
+	ProjectionWorkProcessing        int
+	ProjectionWorkRetrying          int
+	ProjectionWorkDegraded          int
 }
 
 // ProjectionReader exposes no mark or checkpoint write authority.
@@ -193,16 +196,6 @@ type AccountingReconciliationRepository interface {
 	RecordAccountingRun(context.Context, *accountingrecon.Run) (*accountingrecon.Run, error)
 	GetAccountingRunByID(context.Context, uuid.UUID) (*accountingrecon.Run, error)
 	ListAccountingRuns(context.Context, uuid.UUID, int, int) ([]*accountingrecon.Run, error)
-}
-
-// VenueReconciliationRepository appends exact read-only provider/local
-// evidence and deterministic discrepancy graphs. It exposes no mutation path.
-type VenueReconciliationRepository interface {
-	RegisterVenueReconciliationPolicy(context.Context, *venuerecon.PolicyArtifact) (*venuerecon.PolicyArtifact, error)
-	RecordVenueProviderSnapshot(context.Context, *venuerecon.StableProviderSnapshot, time.Time) error
-	RecordVenueLocalSnapshot(context.Context, *venuerecon.LocalSnapshot, time.Time) error
-	RecordVenueReconciliationRun(context.Context, *venuerecon.Run, time.Time) (*venuerecon.Run, error)
-	GetVenueReconciliationRun(context.Context, uuid.UUID) (*venuerecon.Run, error)
 }
 
 // DatasetRepository persists immutable point-in-time manifests and their
@@ -771,6 +764,20 @@ type PredictionDecisionSettlementInput struct {
 	PositionTicker string
 	Payout         float64
 	ResolvedAt     time.Time
+	Resolution     PredictionResolutionEvidence
+}
+
+// PredictionResolutionEvidence is the exact provider payload and stable
+// identity used to interpret one resolved prediction contract. It is carried
+// through the neutral repository input so the upstream economic planner never
+// has to reconstruct provider evidence from a mutable market row.
+type PredictionResolutionEvidence struct {
+	Source          string
+	SourceNamespace string
+	SourceEventID   string
+	SourceRevision  string
+	ObservedAt      time.Time
+	RawPayload      []byte
 }
 
 // PredictionDecisionSettlementResult returns the persisted settlement ids.

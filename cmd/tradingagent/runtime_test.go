@@ -1229,6 +1229,23 @@ func TestNewRuntimeKalshiClientsPublicCatalogWithoutLiveCredentials(t *testing.T
 
 type runtimeStopExitRepo struct{}
 
+type runtimeStopEconomicWriter struct{}
+
+func (runtimeStopEconomicWriter) ResolvePositionExecutionScope(_ context.Context, position domain.Position) (execution.ExecutionScope, error) {
+	strategyVersionID, err := uuid.Parse(position.OriginID)
+	if err != nil {
+		return execution.ExecutionScope{}, err
+	}
+	return execution.NewStrategyExecutionScope(position.AccountID, position.Environment, strategyVersionID, domain.PipelineRunRef{
+		ID:        uuid.MustParse("20000000-0000-4000-8000-000000000001"),
+		TradeDate: time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC),
+	})
+}
+
+func (runtimeStopEconomicWriter) ApplyAcceptedOrderFill(_ context.Context, _ execution.ExecutionScope, input repository.OrderFillInput) (repository.OrderFillResult, error) {
+	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, nil
+}
+
 func (runtimeStopExitRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
 	return fn()
 }
@@ -1259,7 +1276,7 @@ func TestBootstrapPolymarketStopGuardsFiltersAndPaginates(t *testing.T) {
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}, EconomicWriter: runtimeStopEconomicWriter{}})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}
@@ -1290,7 +1307,7 @@ func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}, EconomicWriter: runtimeStopEconomicWriter{}})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}

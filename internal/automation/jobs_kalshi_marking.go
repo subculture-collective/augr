@@ -12,13 +12,14 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
 var kalshiMarkingSpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "25 * * * *"}
 
 func (o *JobOrchestrator) registerKalshiMarkingJob() {
-	if o.deps.KalshiMarkProvider == nil || o.deps.KalshiProjectionRepo == nil || o.deps.KalshiMarkMaxAge <= 0 {
+	if o.deps.KalshiMarkProvider == nil || o.deps.KalshiProjectionRepo == nil || o.deps.KalshiProjectionOutbox == nil || o.deps.KalshiMarkMaxAge <= 0 {
 		return
 	}
 	o.Register("kalshi_marking", "Record conservative canonical Kalshi liquidation marks", kalshiMarkingSpec, o.kalshiMarking)
@@ -48,6 +49,7 @@ func (o *JobOrchestrator) kalshiMarking(ctx context.Context) error {
 	var accountAsOf time.Time
 	accountFailed := false
 	var failures []error
+	marks := make([]*ledger.MarkObservation, 0, len(lots))
 	for _, lot := range lots {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -92,12 +94,7 @@ func (o *JobOrchestrator) kalshiMarking(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("%s: evaluate mark: %w", lot.Ticker, markErr))
 			continue
 		}
-		if _, err := o.deps.KalshiProjectionRepo.RecordMarkObservation(ctx, mark); err != nil {
-			summary["unavailable"]++
-			accountFailed = true
-			failures = append(failures, fmt.Errorf("%s: record mark: %w", lot.Ticker, err))
-			continue
-		}
+		marks = append(marks, mark)
 		summary["marked"]++
 		if evaluatedAt.After(accountAsOf) {
 			accountAsOf = evaluatedAt
@@ -107,11 +104,14 @@ func (o *JobOrchestrator) kalshiMarking(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := o.deps.KalshiProjectionRepo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-			AccountID: accountID, AsOf: accountAsOf, MarkSource: kalshi.KalshiMarkSource,
-			MarkNamespace: kalshi.KalshiAccountMarkNamespace(accountID), MaxMarkAge: maxAge,
+		frontier, err := o.deps.KalshiProjectionOutbox.LatestProjectionFrontier(ctx, accountID, accountAsOf)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("resolve account %s projection frontier: %w", accountID, err))
+		} else if _, err := o.deps.KalshiProjectionOutbox.RecordMarksAndEnqueueRebuild(ctx, repository.ProjectionMarkBatch{
+			AccountID: accountID, ThroughTransactionID: frontier, AsOf: accountAsOf,
+			MarkAsOf: accountAsOf, MaxMarkAge: maxAge, Marks: marks,
 		}); err != nil {
-			failures = append(failures, fmt.Errorf("rebuild account %s projection: %w", accountID, err))
+			failures = append(failures, fmt.Errorf("record marks and enqueue account %s projection: %w", accountID, err))
 		} else {
 			summary["accounts_rebuilt"]++
 		}

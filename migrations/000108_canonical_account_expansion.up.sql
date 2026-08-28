@@ -477,6 +477,25 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DO $projection_privileges$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='augr_app_runtime') THEN
+        GRANT SELECT,INSERT,UPDATE ON account_projection_outbox TO augr_app_runtime;
+        GRANT INSERT ON mark_observations TO augr_app_runtime;
+        REVOKE DELETE,TRUNCATE ON account_projection_outbox FROM augr_app_runtime;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='augr_projection_writer') THEN
+        GRANT SELECT ON accounts,ledger_transactions,ledger_postings,economic_event_normalizations,
+            venue_contracts,option_contract_terms,instruments,mark_observations,projection_checkpoints
+            TO augr_projection_writer;
+        GRANT EXECUTE ON FUNCTION persist_canonical_projection_checkpoint(BYTEA,TEXT,BYTEA)
+            TO augr_projection_writer;
+        REVOKE INSERT ON mark_observations FROM augr_projection_writer;
+        REVOKE ALL PRIVILEGES ON account_projection_outbox FROM augr_projection_writer;
+    END IF;
+END;
+$projection_privileges$;
+
 DO $seed$
 DECLARE
     reviewed_json CONSTANT JSONB := $policy${"schema":"capital-margin-policy-v1","currency":"USD","scale":12,"tiers":["500","5000","25000","100000","1000000","5000000"],"profiles":[{"name":"cash","initial_long":"1","initial_short":"0","maintenance_long":"1","maintenance_short":"0","maximum_gross":"1","cash_reserve":"0","allow_short":false,"unlimited":false},{"name":"portfolio","initial_long":"0.15","initial_short":"0.3","maintenance_long":"0.15","maintenance_short":"0.3","maximum_gross":"6","cash_reserve":"0","allow_short":true,"unlimited":false},{"name":"reg_t","initial_long":"0.5","initial_short":"1.5","maintenance_long":"0.25","maintenance_short":"0.3","maximum_gross":"2","cash_reserve":"0","allow_short":true,"unlimited":false},{"name":"stress_unlimited","initial_long":"0","initial_short":"0","maintenance_long":"0","maintenance_short":"0","maximum_gross":"0","cash_reserve":"0","allow_short":true,"unlimited":true}]}$policy$::JSONB;

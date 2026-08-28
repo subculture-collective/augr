@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -29,7 +30,14 @@ func (s *kalshiSettlementCatalogStub) GetMarket(_ context.Context, ticker string
 	if s.getMarkets == nil {
 		return nil, nil
 	}
-	return s.getMarkets[strings.ToUpper(strings.TrimSpace(ticker))], nil
+	market := s.getMarkets[strings.ToUpper(strings.TrimSpace(ticker))]
+	if market != nil && len(market.Raw) == 0 {
+		market.Raw, _ = json.Marshal(struct {
+			Ticker string `json:"ticker"`
+			Result string `json:"result"`
+		}{Ticker: market.Ticker, Result: market.Result})
+	}
+	return market, nil
 }
 
 type kalshiGateRepoStub struct {
@@ -81,9 +89,21 @@ func (s *kalshiPendingSettlerStub) SettleDecisions(context.Context, domain.Marke
 	return 1, nil
 }
 
+func (s *kalshiPendingSettlerStub) SettleDecisionsWithEvidence(_ context.Context, _ domain.MarketType, ticker, winner string, _ time.Time, _ []uuid.UUID, evidence prediction.ResolutionEvidence) (int, error) {
+	if len(evidence.RawPayload) == 0 {
+		return 0, errors.New("missing raw evidence")
+	}
+	s.settle = append(s.settle, ticker+":"+winner)
+	return 1, nil
+}
+
 func (s *kalshiPendingSettlerStub) SettleMarket(_ context.Context, _ domain.MarketType, ticker, winner string, _ time.Time) (int, error) {
 	s.settle = append(s.settle, ticker+":"+winner)
 	return 1, nil
+}
+
+func (s *kalshiPendingSettlerStub) SettleMarketWithEvidence(ctx context.Context, marketType domain.MarketType, ticker, winner string, resolvedAt time.Time, _ prediction.ResolutionEvidence) (int, error) {
+	return s.SettleMarket(ctx, marketType, ticker, winner, resolvedAt)
 }
 
 func (s *kalshiGateRepoStub) Get(context.Context, string) (*domain.KalshiSettlementGateState, error) {
