@@ -139,7 +139,6 @@ type OrchestratorDeps struct {
 	OrderRepo                    repository.OrderRepository
 	TradeRepo                    repository.TradeRepository
 	OptionSettlementRepo         repository.OptionSettlementRepository
-	OptionSettlementLocker       repository.ExecutionAccountLocker
 	OptionSettlementState        execution.OptionSettlementState
 	OpportunityRepo              repository.OpportunityRepository
 	AllocationDecisionRepo       repository.AllocationDecisionRepository

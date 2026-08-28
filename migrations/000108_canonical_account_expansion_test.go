@@ -91,6 +91,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"drop index orders_allocation_effect_once",
 		"drop index if exists uq_portfolio_opportunities_execution_dedupe",
 		"drop constraint copy_intent_execution_claim_pair",
+		"spread_max_risk is not null or spread_max_reward is not null",
 		"expected_through_transaction_id uuid",
 		"order by effective_at desc, observed_at desc, id desc",
 	} {
@@ -347,6 +348,22 @@ func TestCanonicalAccountExpansionCyclesAndLocksRollback(t *testing.T) {
 			t.Fatalf("outbox rollback error=%v", err)
 		}
 	})
+
+	for _, column := range []string{"spread_max_risk", "spread_max_reward"} {
+		t.Run(column+" blocks lossy rollback", func(t *testing.T) {
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx) //nolint:errcheck
+			if _, err = tx.Exec(ctx, `INSERT INTO orders(ticker,side,order_type,quantity,`+column+`) VALUES('ROLLBACK-SPREAD','buy','limit',1,25)`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = tx.Exec(ctx, readMigrationFile(t, "000108_canonical_account_expansion.down.sql")); err == nil || !strings.Contains(err.Error(), "expansion columns are populated") {
+				t.Fatalf("%s rollback error=%v", column, err)
+			}
+		})
+	}
 
 	if _, err := pool.Exec(ctx, readMigrationFile(t, "000108_canonical_account_expansion.down.sql")); err != nil {
 		t.Fatalf("108 to 107: %v", err)

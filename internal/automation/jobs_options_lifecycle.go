@@ -79,17 +79,7 @@ func (o *JobOrchestrator) optionsExpirySettlement(ctx context.Context) error {
 		}
 		prices[underlying] = bars[len(bars)-1].Close
 	}
-	var summary execution.OptionsExpirySummary
-	settle := func() error {
-		var settleErr error
-		summary, settleErr = execution.SettleExpiredOptionPositions(ctx, scope, positions, prices, now, o.deps.OptionSettlementRepo, o.deps.OptionSettlementState)
-		return settleErr
-	}
-	if o.deps.OptionSettlementLocker != nil {
-		err = o.deps.OptionSettlementLocker.WithExecutionAccountLock(ctx, scope.AccountID(), settle)
-	} else {
-		err = settle()
-	}
+	summary, err := execution.SettleExpiredOptionPositions(ctx, scope, positions, prices, now, o.deps.OptionSettlementRepo, o.deps.OptionSettlementState)
 	if err != nil {
 		return err
 	}

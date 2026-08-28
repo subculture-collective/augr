@@ -797,6 +797,7 @@ type OptionSettlementRepository interface {
 }
 
 type OptionSettlementSyncRetryRepository interface {
+	HasOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) (bool, error)
 	ResolveOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) error
 }
 

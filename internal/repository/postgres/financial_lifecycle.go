@@ -1046,6 +1046,17 @@ func (db *DB) ResolveOptionSettlementSyncRetries(ctx context.Context, accountID 
 	return err
 }
 
+func (db *DB) HasOptionSettlementSyncRetries(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (bool, error) {
+	if accountID == uuid.Nil || !environment.IsValid() {
+		return false, fmt.Errorf("postgres: invalid option broker sync retry scope")
+	}
+	var pending bool
+	if err := db.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM option_broker_sync_retries WHERE account_id=$1 AND environment=$2 AND status='retry')`, accountID, environment).Scan(&pending); err != nil {
+		return false, err
+	}
+	return pending, nil
+}
+
 func numeric8Equal(left, right float64) bool {
 	return math.Round(left*1e8) == math.Round(right*1e8)
 }

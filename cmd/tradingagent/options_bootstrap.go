@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
@@ -16,6 +18,22 @@ type optionRecoveryDependencies struct {
 	Fills     repository.OptionFillRepository
 	Financial repository.FinancialLifecycleRepository
 	Decisions execution.DecisionRecorder
+}
+
+type durableOptionSettlementState struct {
+	broker  *paper.PaperBroker
+	rebuild func(context.Context) error
+}
+
+func (s *durableOptionSettlementState) ApplyOptionSettlement(ctx context.Context, positionID uuid.UUID, settlementPrice float64) error {
+	return s.broker.ApplyOptionSettlement(ctx, positionID, settlementPrice)
+}
+
+func (s *durableOptionSettlementState) RebuildOptionSettlementState(ctx context.Context) error {
+	if s == nil || s.broker == nil || s.rebuild == nil {
+		return fmt.Errorf("paper options durable settlement rebuild is unavailable")
+	}
+	return s.rebuild(ctx)
 }
 
 func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos []repository.AtomicOptionCloseRepository, recovery ...optionRecoveryDependencies) error {

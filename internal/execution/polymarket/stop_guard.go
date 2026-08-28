@@ -574,25 +574,30 @@ func (g *StopGuard) persistRecoveredExitFill(ctx context.Context, entry *guardEn
 }
 
 func (g *StopGuard) persistRecoveredExitFillLocked(ctx context.Context, entry *guardEntry, externalID string, result execution.BrokerOrderStatus) bool {
-	entry.order.ExternalID = strings.TrimSpace(externalID)
-	entry.order.Status = result.Status
-	entry.order.FilledQuantity = result.FilledQuantity
-	entry.order.FilledAvgPrice = result.FilledAvgPrice
-	entry.order.FilledAt = result.FilledAt
-	if entry.order.SubmittedAt == nil {
+	recoveredOrder := *entry.order
+	recoveredOrder.ExternalID = strings.TrimSpace(externalID)
+	recoveredOrder.Status = result.Status
+	recoveredOrder.FilledQuantity = result.FilledQuantity
+	recoveredOrder.FilledAvgPrice = result.FilledAvgPrice
+	recoveredOrder.FilledAt = result.FilledAt
+	if recoveredOrder.SubmittedAt == nil {
 		submittedAt := result.FilledAt.UTC()
-		entry.order.SubmittedAt = &submittedAt
+		recoveredOrder.SubmittedAt = &submittedAt
 	}
-	trade := &domain.Trade{ID: uuid.New(), AccountID: entry.order.AccountID, Environment: entry.order.Environment, OriginType: entry.order.OriginType, OriginID: entry.order.OriginID, OrderID: &entry.order.ID, Ticker: entry.order.Ticker, Side: entry.order.Side, Quantity: result.FilledQuantity, Price: *result.FilledAvgPrice, ExecutedAt: result.FilledAt.UTC()}
-	input := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("polymarket_stop_fill:v1:%s:observed:%.8f", entry.order.ID, result.FilledQuantity), Order: entry.order, FillIntent: repository.OrderFillIntent{Side: entry.order.Side, Quantity: result.FilledQuantity, ExecutionPrice: *result.FilledAvgPrice}, Now: result.FilledAt.UTC(), Trade: trade}
+	trade := &domain.Trade{ID: uuid.New(), AccountID: recoveredOrder.AccountID, Environment: recoveredOrder.Environment, OriginType: recoveredOrder.OriginType, OriginID: recoveredOrder.OriginID, OrderID: &recoveredOrder.ID, Ticker: recoveredOrder.Ticker, Side: recoveredOrder.Side, Quantity: result.FilledQuantity, Price: *result.FilledAvgPrice, ExecutedAt: result.FilledAt.UTC()}
+	input := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("polymarket_stop_fill:v1:%s:observed:%.8f", recoveredOrder.ID, result.FilledQuantity), Order: &recoveredOrder, FillIntent: repository.OrderFillIntent{Side: recoveredOrder.Side, Quantity: result.FilledQuantity, ExecutionPrice: *result.FilledAvgPrice}, Now: result.FilledAt.UTC(), Trade: trade}
 	_, err := g.financialLifecycle.ApplyOrderFill(ctx, input)
 	if err != nil {
 		if resolver, ok := g.financialLifecycle.(repository.OrderFillCommitResolver); ok {
 			_, committed, resolveErr := resolver.ResolveOrderFillCommit(ctx, input)
-			return resolveErr == nil && committed
+			if resolveErr != nil || !committed {
+				return false
+			}
+		} else {
+			return false
 		}
-		return false
 	}
+	*entry.order = recoveredOrder
 	return true
 }
 

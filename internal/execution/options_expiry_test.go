@@ -2,6 +2,7 @@ package execution_test
 
 import (
 	"context"
+	"errors"
 	"math"
 	"testing"
 	"time"
@@ -14,8 +15,12 @@ import (
 )
 
 type recordingOptionSettlementRepo struct {
-	inputs []repository.OptionPositionSettlementInput
-	err    error
+	inputs      []repository.OptionPositionSettlementInput
+	err         error
+	lockCalls   int
+	retry       bool
+	retryChecks int
+	resolved    int
 }
 
 type cancellationSafeSettlementState struct {
@@ -23,7 +28,33 @@ type cancellationSafeSettlementState struct {
 }
 
 func (r *recordingOptionSettlementRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	r.lockCalls++
 	return fn()
+}
+
+func (r *recordingOptionSettlementRepo) HasOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) (bool, error) {
+	r.retryChecks++
+	return r.retry, nil
+}
+
+func (r *recordingOptionSettlementRepo) ResolveOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	r.resolved++
+	r.retry = false
+	return nil
+}
+
+type rebuildingSettlementState struct {
+	rebuildErr error
+	rebuilt    int
+}
+
+func (*rebuildingSettlementState) ApplyOptionSettlement(context.Context, uuid.UUID, float64) error {
+	return nil
+}
+
+func (s *rebuildingSettlementState) RebuildOptionSettlementState(context.Context) error {
+	s.rebuilt++
+	return s.rebuildErr
 }
 
 func (s *cancellationSafeSettlementState) ApplyOptionSettlement(ctx context.Context, _ uuid.UUID, _ float64) error {
@@ -69,11 +100,37 @@ func TestSettleExpiredOptionPositionsPersistsExerciseAndWorthlessExpiryWithoutFa
 	if summary.CashSettled != 1 || summary.ExpiredWorthless != 1 || len(settlementRepo.inputs) != 2 {
 		t.Fatalf("unexpected settlement summary=%+v atomic_calls=%d", summary, len(settlementRepo.inputs))
 	}
+	if settlementRepo.lockCalls != 1 {
+		t.Fatalf("execution account lock calls = %d, want exactly one", settlementRepo.lockCalls)
+	}
 	if math.Abs(settlementRepo.inputs[0].SettlementPrice-5) > 1e-9 || settlementRepo.inputs[0].ExitReason != "exercise_cash_settled" {
 		t.Fatalf("ITM settlement incorrect: %+v", settlementRepo.inputs[0])
 	}
 	if settlementRepo.inputs[1].SettlementPrice != 0 || settlementRepo.inputs[1].ExitReason != "expired_worthless" {
 		t.Fatalf("OTM settlement incorrect: %+v", settlementRepo.inputs[1])
+	}
+}
+
+func TestSettleExpiredOptionPositionsRebuildsPendingSyncRetryWithoutOpenCandidate(t *testing.T) {
+	scope := optionExecutionScope(uuid.New(), uuid.New())
+	repo := &recordingOptionSettlementRepo{retry: true}
+	state := &rebuildingSettlementState{}
+	summary, err := execution.SettleExpiredOptionPositions(context.Background(), scope, nil, nil, time.Now(), repo, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != (execution.OptionsExpirySummary{}) || state.rebuilt != 1 || repo.resolved != 1 || repo.retryChecks != 1 {
+		t.Fatalf("retry recovery summary=%+v rebuilt=%d resolved=%d checks=%d", summary, state.rebuilt, repo.resolved, repo.retryChecks)
+	}
+}
+
+func TestSettleExpiredOptionPositionsKeepsRetryEvidenceWhenRebuildFails(t *testing.T) {
+	scope := optionExecutionScope(uuid.New(), uuid.New())
+	repo := &recordingOptionSettlementRepo{retry: true}
+	state := &rebuildingSettlementState{rebuildErr: errors.New("restore failed")}
+	_, err := execution.SettleExpiredOptionPositions(context.Background(), scope, nil, nil, time.Now(), repo, state)
+	if err == nil || repo.resolved != 0 || !repo.retry {
+		t.Fatalf("failed rebuild err=%v resolved=%d retry=%v", err, repo.resolved, repo.retry)
 	}
 }
 

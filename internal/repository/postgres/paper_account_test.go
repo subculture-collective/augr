@@ -59,12 +59,29 @@ func TestPaperAccountRepoExcludesNonLocalPaperRowsAndParsesSequence(t *testing.T
 	if len(orders) != 2 {
 		t.Fatalf("paper orders len = %d, want 2", len(orders))
 	}
+	var spreadOrder *domain.Order
+	for i := range orders {
+		if orders[i].ExternalID == "paper-43" {
+			spreadOrder = &orders[i]
+		}
+	}
+	if spreadOrder == nil || spreadOrder.SpreadMaxRisk != 7.5 || spreadOrder.SpreadMaxReward != 12.25 {
+		t.Fatalf("paper order spread economics = %+v", spreadOrder)
+	}
 	seq, err := repo.GetMaxPaperExternalIDSequence(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("GetMaxPaperExternalIDSequence() error = %v", err)
 	}
 	if seq != 43 {
 		t.Fatalf("seq = %d, want 43", seq)
+	}
+}
+
+func TestListOpenPaperOrdersSQLMatchesScanOrder(t *testing.T) {
+	normalized := strings.Join(strings.Fields(listOpenPaperOrdersSQL), " ")
+	wantTail := "o.allocation_opportunity_id, COALESCE(o.client_order_id, ''), COALESCE(o.spread_max_risk,0)::double precision, COALESCE(o.spread_max_reward,0)::double precision FROM orders o"
+	if !strings.Contains(normalized, wantTail) {
+		t.Fatalf("ListOpenPaperOrders select tail does not match scanOrder: %s", normalized)
 	}
 }
 
@@ -141,8 +158,8 @@ func seedPaperAccountFixtures(t *testing.T, ctx context.Context, pool *pgxpool.P
 	mustExecPaperAccount(t, ctx, pool, `INSERT INTO strategies (id, is_paper, market_type, ticker, name) VALUES ($1, true, 'stock', 'AAPL', 'local-paper'), ($2, true, 'stock', 'MSFT', 'alpaca-paper')`, paperStrategyID, alpacaStrategyID)
 	mustExecPaperAccount(t, ctx, pool, `INSERT INTO orders (id, strategy_id, external_id, broker, ticker, market_type, side, order_type, quantity, limit_price, stop_price, filled_quantity, filled_avg_price, status, submitted_at, filled_at, created_at, asset_class, contract_multiplier)
 		VALUES ($1,$2,'paper-42','paper','AAPL','stock','buy','market',1,NULL,100,1,100,'filled',$3,$3,$3,'equity',100)`, paperOrderID, paperStrategyID, now)
-	mustExecPaperAccount(t, ctx, pool, `INSERT INTO orders (id, strategy_id, external_id, broker, ticker, market_type, side, order_type, quantity, limit_price, stop_price, filled_quantity, filled_avg_price, status, submitted_at, filled_at, created_at, asset_class, contract_multiplier)
-		VALUES ($1,$2,'paper-43','paper','AAPL','stock','buy','limit',1,99,NULL,0,NULL,'submitted',$3,NULL,$3,'equity',100)`, openOrderID, paperStrategyID, now)
+	mustExecPaperAccount(t, ctx, pool, `INSERT INTO orders (id, strategy_id, external_id, broker, ticker, market_type, side, order_type, quantity, limit_price, stop_price, filled_quantity, filled_avg_price, status, submitted_at, filled_at, created_at, asset_class, contract_multiplier, spread_max_risk, spread_max_reward)
+		VALUES ($1,$2,'paper-43','paper','AAPL','stock','buy','limit',1,99,NULL,0,NULL,'submitted',$3,NULL,$3,'equity',100,7.5,12.25)`, openOrderID, paperStrategyID, now)
 	mustExecPaperAccount(t, ctx, pool, `INSERT INTO orders (id, strategy_id, external_id, broker, ticker, market_type, side, order_type, quantity, limit_price, stop_price, filled_quantity, filled_avg_price, status, submitted_at, filled_at, created_at, asset_class, contract_multiplier, prediction_side)
 		VALUES ($1,$2,'paper-41','paper','YES','stock','buy','limit',3,0.5,NULL,1,NULL,'partial',$3,NULL,$3,'equity',100,'YES')`, tradeID, paperStrategyID, now)
 	mustExecPaperAccount(t, ctx, pool, `INSERT INTO orders (id, strategy_id, external_id, broker, ticker, market_type, side, order_type, quantity, limit_price, stop_price, filled_quantity, filled_avg_price, status, submitted_at, filled_at, created_at, asset_class, contract_multiplier)
@@ -208,9 +225,9 @@ func newPaperAccountIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 	}
 	stmts := []string{
 		`CREATE TABLE strategies (id UUID PRIMARY KEY, is_paper BOOLEAN NOT NULL DEFAULT false, market_type TEXT NOT NULL, ticker TEXT NOT NULL, name TEXT NOT NULL DEFAULT '')`,
-		`CREATE TABLE orders (id UUID PRIMARY KEY, strategy_id UUID NOT NULL, pipeline_run_id UUID, external_id TEXT, ticker TEXT NOT NULL, market_type TEXT NOT NULL, side TEXT NOT NULL, order_type TEXT NOT NULL, quantity NUMERIC NOT NULL, limit_price NUMERIC, stop_price NUMERIC, filled_quantity NUMERIC NOT NULL DEFAULT 0, filled_avg_price NUMERIC, status TEXT NOT NULL, broker TEXT NOT NULL, submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'equity', underlying_ticker TEXT, option_type TEXT, strike NUMERIC, expiry TIMESTAMPTZ, contract_multiplier NUMERIC NOT NULL DEFAULT 100, position_intent TEXT, leg_group_id UUID, prediction_side TEXT, polymarket_intent TEXT, CONSTRAINT orders_prediction_side_check CHECK (prediction_side IS NULL OR prediction_side IN ('YES', 'NO')))`,
-		`CREATE TABLE positions (id UUID PRIMARY KEY, strategy_id UUID NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, quantity NUMERIC NOT NULL, avg_entry NUMERIC NOT NULL, current_price NUMERIC, unrealized_pnl NUMERIC, realized_pnl NUMERIC, stop_loss NUMERIC, take_profit NUMERIC, opened_at TIMESTAMPTZ NOT NULL, closed_at TIMESTAMPTZ, market_type TEXT NOT NULL DEFAULT 'stock', asset_class TEXT NOT NULL DEFAULT 'equity', underlying_ticker TEXT, option_type TEXT, strike NUMERIC, expiry TIMESTAMPTZ, contract_multiplier NUMERIC NOT NULL DEFAULT 100, leg_group_id UUID, delta NUMERIC, gamma NUMERIC, theta NUMERIC, vega NUMERIC)`,
-		`CREATE TABLE trades (id UUID PRIMARY KEY, external_id TEXT, order_id UUID NOT NULL, position_id UUID NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, quantity NUMERIC NOT NULL, price NUMERIC NOT NULL, fee NUMERIC NOT NULL DEFAULT 0, executed_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'equity', open_close TEXT, contract_multiplier NUMERIC NOT NULL DEFAULT 100, premium NUMERIC, exit_reason TEXT)`,
+		`CREATE TABLE orders (id UUID PRIMARY KEY, strategy_id UUID NOT NULL, pipeline_run_id UUID, account_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'strategy_version', origin_id TEXT NOT NULL DEFAULT 'paper-account-fixture', pipeline_run_trade_date DATE, copy_origin_rebalance_run_id UUID, allocation_opportunity_id UUID, client_order_id TEXT, external_id TEXT, ticker TEXT NOT NULL, market_type TEXT NOT NULL, side TEXT NOT NULL, order_type TEXT NOT NULL, quantity NUMERIC NOT NULL, limit_price NUMERIC, stop_price NUMERIC, filled_quantity NUMERIC NOT NULL DEFAULT 0, filled_avg_price NUMERIC, status TEXT NOT NULL, broker TEXT NOT NULL, submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'equity', underlying_ticker TEXT, option_type TEXT, strike NUMERIC, expiry TIMESTAMPTZ, contract_multiplier NUMERIC NOT NULL DEFAULT 100, position_intent TEXT, leg_group_id UUID, prediction_side TEXT, polymarket_intent TEXT, spread_max_risk NUMERIC, spread_max_reward NUMERIC, CONSTRAINT orders_prediction_side_check CHECK (prediction_side IS NULL OR prediction_side IN ('YES', 'NO')))`,
+		`CREATE TABLE positions (id UUID PRIMARY KEY, strategy_id UUID NOT NULL, account_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'strategy_version', origin_id TEXT NOT NULL DEFAULT 'paper-account-fixture', ticker TEXT NOT NULL, side TEXT NOT NULL, quantity NUMERIC NOT NULL, avg_entry NUMERIC NOT NULL, current_price NUMERIC, unrealized_pnl NUMERIC, realized_pnl NUMERIC, stop_loss NUMERIC, take_profit NUMERIC, opened_at TIMESTAMPTZ NOT NULL, closed_at TIMESTAMPTZ, market_type TEXT NOT NULL DEFAULT 'stock', asset_class TEXT NOT NULL DEFAULT 'equity', underlying_ticker TEXT, option_type TEXT, strike NUMERIC, expiry TIMESTAMPTZ, contract_multiplier NUMERIC NOT NULL DEFAULT 100, leg_group_id UUID, delta NUMERIC, gamma NUMERIC, theta NUMERIC, vega NUMERIC)`,
+		`CREATE TABLE trades (id UUID PRIMARY KEY, account_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'strategy_version', origin_id TEXT NOT NULL DEFAULT 'paper-account-fixture', external_id TEXT, order_id UUID NOT NULL, position_id UUID NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, quantity NUMERIC NOT NULL, price NUMERIC NOT NULL, fee NUMERIC NOT NULL DEFAULT 0, executed_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'equity', open_close TEXT, contract_multiplier NUMERIC NOT NULL DEFAULT 100, premium NUMERIC, exit_reason TEXT)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := pool.Exec(ctx, stmt); err != nil {

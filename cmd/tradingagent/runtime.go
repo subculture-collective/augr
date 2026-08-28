@@ -972,6 +972,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if _, persistent := paperAccountRepo.(*pgrepo.PaperAccountRepo); persistent {
 			optionCloseRepos = append(optionCloseRepos, orderRepo)
 		}
+		paperStartingBalance, err := strategyRunner.localPaperBroker.GetAccountBalance(ctx)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("read paper starting balance: %w", err)
+		}
 		if err := bootstrapPaperOptionsAccount(ctx, runtimeDeps.executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, optionCloseRepos, optionRecoveryDependencies{Orders: orderRepo, Fills: db, Financial: db, Decisions: tradeDecisionRecorder}); err != nil {
 			return nil, nil, nil, err
 		}
@@ -1119,6 +1123,15 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				})
 				var orch *automation.JobOrchestrator
 				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+					optionSettlementState := &durableOptionSettlementState{
+						broker: strategyRunner.localPaperBroker,
+						rebuild: func(rebuildCtx context.Context) error {
+							if err := strategyRunner.localPaperBroker.RestoreAccount(paperStartingBalance); err != nil {
+								return err
+							}
+							return bootstrapPaperOptionsAccountLocked(rebuildCtx, executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, nil)
+						},
+					}
 					orch = automation.NewJobOrchestrator(automation.OrchestratorDeps{
 						ExecutionAccount:            executionAccount,
 						CanonicalAccountID:          executionAccount.AccountID(),
@@ -1146,8 +1159,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						OrderRepo:                    orderRepo,
 						TradeRepo:                    tradeRepo,
 						OptionSettlementRepo:         db,
-						OptionSettlementLocker:       orderRepo,
-						OptionSettlementState:        strategyRunner.localPaperBroker,
+						OptionSettlementState:        optionSettlementState,
 						RunRepo:                      runRepo,
 						OpportunityRepo:              opportunityRepo,
 						AllocationDecisionRepo:       allocationDecisionRepo,

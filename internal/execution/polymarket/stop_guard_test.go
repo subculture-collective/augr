@@ -42,7 +42,9 @@ func (f *fakeBroker) GetOrderStatusByClientOrderIDResult(context.Context, string
 }
 
 type recordingStopFinancialLifecycle struct {
-	inputs []repository.OrderFillInput
+	inputs        []repository.OrderFillInput
+	applyErr      error
+	resolveCommit bool
 }
 
 func (r *recordingStopFinancialLifecycle) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
@@ -51,7 +53,11 @@ func (r *recordingStopFinancialLifecycle) WithExecutionAccountLock(_ context.Con
 
 func (r *recordingStopFinancialLifecycle) ApplyOrderFill(_ context.Context, input repository.OrderFillInput) (repository.OrderFillResult, error) {
 	r.inputs = append(r.inputs, input)
-	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, nil
+	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, r.applyErr
+}
+
+func (r *recordingStopFinancialLifecycle) ResolveOrderFillCommit(_ context.Context, input repository.OrderFillInput) (repository.OrderFillResult, bool, error) {
+	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, r.resolveCommit, nil
 }
 
 func (*recordingStopFinancialLifecycle) SettlePredictionDecision(context.Context, repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
@@ -414,6 +420,24 @@ func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
 	}
 	if g.Active() != 0 || broker.sendCalls.Load() != 0 {
 		t.Fatalf("filled recovery active=%d sends=%d", g.Active(), broker.sendCalls.Load())
+	}
+}
+
+func TestStopGuardRecoveredFillDoesNotMutateOrderBeforeConfirmedCommit(t *testing.T) {
+	filledAt := time.Now().UTC()
+	price := 0.41
+	order := &domain.Order{ID: uuid.New(), AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a", Side: domain.OrderSideSell, Status: domain.OrderStatusSubmitted, FilledQuantity: 0}
+	financial := &recordingStopFinancialLifecycle{applyErr: errors.New("commit unknown")}
+	g := &StopGuard{financialLifecycle: financial}
+	entry := &guardEntry{order: order}
+	if g.persistRecoveredExitFillLocked(context.Background(), entry, "venue-fill", execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 2, FilledAvgPrice: &price, FilledAt: &filledAt}) {
+		t.Fatal("unconfirmed commit reported success")
+	}
+	if order.ExternalID != "" || order.Status != domain.OrderStatusSubmitted || order.FilledQuantity != 0 || order.FilledAt != nil {
+		t.Fatalf("order mutated before commit confirmation: %+v", order)
+	}
+	if len(financial.inputs) != 1 || financial.inputs[0].Order == order {
+		t.Fatal("recovered economics were not applied from an isolated order copy")
 	}
 }
 

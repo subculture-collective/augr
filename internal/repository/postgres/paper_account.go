@@ -94,20 +94,23 @@ func (r *PaperAccountRepo) GetOpenPaperPositions(ctx context.Context, accountID 
 	return out, nil
 }
 
-func (r *PaperAccountRepo) ListOpenPaperOrders(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Order, error) {
-	rows, err := r.pool.Pool.Query(ctx, `SELECT o.id, o.strategy_id, o.pipeline_run_id, o.account_id, o.environment, o.origin_type, o.origin_id,
+const listOpenPaperOrdersSQL = `SELECT o.id, o.strategy_id, o.pipeline_run_id, o.account_id, o.environment, o.origin_type, o.origin_id,
 		o.pipeline_run_trade_date, o.copy_origin_rebalance_run_id, o.external_id, o.ticker,
 		o.market_type, o.side, o.order_type, o.quantity::double precision, o.limit_price::double precision,
 		o.stop_price::double precision, o.filled_quantity::double precision, o.filled_avg_price::double precision,
 		o.status, o.broker, o.submitted_at, o.filled_at, o.created_at, o.asset_class, o.underlying_ticker,
 		o.option_type, o.strike::double precision, o.expiry, o.contract_multiplier::double precision,
-		o.position_intent, o.leg_group_id, COALESCE(o.prediction_side, ''), COALESCE(o.polymarket_intent, ''), o.allocation_opportunity_id, COALESCE(o.client_order_id, '')
+		o.position_intent, o.leg_group_id, COALESCE(o.prediction_side, ''), COALESCE(o.polymarket_intent, ''), o.allocation_opportunity_id, COALESCE(o.client_order_id, ''),
+		COALESCE(o.spread_max_risk,0)::double precision, COALESCE(o.spread_max_reward,0)::double precision
 		FROM orders o
 		WHERE o.account_id=$1 AND o.environment=$2 AND o.broker = 'paper' AND (
 			o.status IN ('pending', 'submitted', 'partial') OR
 			(o.market_type='options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0))
 		)
-		ORDER BY o.submitted_at ASC, o.id ASC LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
+		ORDER BY o.submitted_at ASC, o.id ASC LIMIT $3 OFFSET $4`
+
+func (r *PaperAccountRepo) ListOpenPaperOrders(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Order, error) {
+	rows, err := r.pool.Pool.Query(ctx, listOpenPaperOrdersSQL, accountID, environment, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list open paper orders: %w", err)
 	}
