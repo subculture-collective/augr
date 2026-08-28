@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,7 @@ type TradeDecisionJournalRepo struct {
 
 // Compile-time check that TradeDecisionJournalRepo satisfies the repository interface.
 var _ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
+var _ repository.AtomicOrderReplayRepository = (*TradeDecisionJournalRepo)(nil)
 
 // NewTradeDecisionJournalRepo returns a repository backed by the given pool.
 func NewTradeDecisionJournalRepo(pool *pgxpool.Pool, accountID uuid.UUID) *TradeDecisionJournalRepo {
@@ -204,6 +206,54 @@ func (r *TradeDecisionJournalRepo) AttachPaperOrder(ctx context.Context, decisio
 // AttachLiveOrder links a live order to the trade decision.
 func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error) {
 	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true)
+}
+
+// AttachOrderWithReplay atomically links an order and persists the matching
+// ordered replay event. The decision row lock serializes same-decision retries.
+func (r *TradeDecisionJournalRepo) AttachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin order replay attachment: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	column, status, eventType := "paper_order_id", domain.TradeDecisionStatusPaper, domain.ReplayEventTypePaperOrdered
+	if live {
+		column, status, eventType = "live_order_id", domain.TradeDecisionStatusLive, domain.ReplayEventTypeLiveOrdered
+	}
+	var accountID uuid.UUID
+	var attached *uuid.UUID
+	if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT account_id,%s FROM trade_decisions WHERE id=$1 AND account_id=$2 FOR UPDATE`, column), decisionID, r.accountID).Scan(&accountID, &attached); err != nil {
+		return fmt.Errorf("postgres: lock trade decision for order replay: %w", err)
+	}
+	if attached != nil && *attached != orderID {
+		return fmt.Errorf("postgres: attach %s: different order already attached", column)
+	}
+	if attached == nil {
+		query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live)
+		var updatedID uuid.UUID
+		if err := tx.QueryRow(ctx, query, args...).Scan(&updatedID); err != nil {
+			return fmt.Errorf("postgres: attach order with replay: %w", err)
+		}
+	}
+	if source == "" {
+		source = "order_manager"
+	}
+	if occurredAt.IsZero() {
+		occurredAt = time.Now().UTC()
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at)
+		SELECT account_id,environment,origin_type,origin_id,id,$3,$4,jsonb_build_object('order_id',$2::text),$5
+		FROM trade_decisions td WHERE td.id=$1 AND td.account_id=$6
+		AND NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=td.id AND re.account_id=td.account_id AND re.event_type=$3 AND re.payload->>'order_id'=$2::text)`,
+		decisionID, orderID, eventType, source, occurredAt, r.accountID)
+	if err != nil {
+		return fmt.Errorf("postgres: insert attached order replay: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit order replay attachment: %w", err)
+	}
+	return nil
 }
 
 // ResolvePredictionOutcome marks a paper event-market decision closed after

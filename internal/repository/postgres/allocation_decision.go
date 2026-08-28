@@ -3,9 +3,9 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -84,6 +84,18 @@ func (r *AllocationDecisionRepo) Count(ctx context.Context, filter repository.Al
 		return 0, fmt.Errorf("postgres: count allocation decisions: %w", err)
 	}
 	return total, nil
+}
+
+// ReconcileExecutionResult terminally resolves a persisted pending paper intent.
+func (r *AllocationDecisionRepo) ReconcileExecutionResult(ctx context.Context, id uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
+	if action != domain.AllocationDecisionActionExecuted && action != domain.AllocationDecisionActionExecutionRejected {
+		return false, fmt.Errorf("postgres: reconcile allocation decision: terminal action required")
+	}
+	tag, err := r.pool.Exec(ctx, `UPDATE allocation_decisions SET action=$1, reasons=$2 WHERE id=$3 AND account_id=$4 AND action=$5`, action, stringSliceOrEmpty(reasons), id, r.accountID, domain.AllocationDecisionActionPaperOrderIntent)
+	if err != nil {
+		return false, fmt.Errorf("postgres: reconcile allocation decision: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 const allocationDecisionSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, opportunity_id, strategy_id, mode, action,

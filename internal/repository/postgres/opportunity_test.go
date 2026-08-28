@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -384,6 +385,42 @@ func TestOpportunityRepo_ListQueuedForAllocation(t *testing.T) {
 		if item.DedupeKey != fmt.Sprintf("queued-%03d", i) {
 			t.Fatalf("item %d dedupe=%s", i, item.DedupeKey)
 		}
+	}
+}
+
+func TestOpportunityRepo_TransitionStatusConcurrentClaimHasOneWinner(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	op := &domain.Opportunity{StrategyID: createTestStrategy(t, ctx, pool), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := repo.Create(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 16
+	results := make(chan bool, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := repo.TransitionStatus(ctx, op.ID, domain.OpportunityStatusQueued, domain.OpportunityStatusSelected, "")
+			if err != nil {
+				t.Errorf("TransitionStatus: %v", err)
+			}
+			results <- claimed
+		}()
+	}
+	wg.Wait()
+	close(results)
+	winners := 0
+	for claimed := range results {
+		if claimed {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim winners = %d, want 1", winners)
 	}
 }
 

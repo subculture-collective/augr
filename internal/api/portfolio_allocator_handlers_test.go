@@ -430,6 +430,10 @@ func (s *portfolioAllocatorOpportunityRepo) UpdateStatus(context.Context, uuid.U
 	return nil
 }
 
+func (s *portfolioAllocatorOpportunityRepo) TransitionStatus(context.Context, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
+	return true, nil
+}
+
 type portfolioAllocatorDecisionRepo struct {
 	items      []domain.AllocationDecision
 	lastFilter repository.AllocationDecisionFilter
@@ -450,6 +454,10 @@ func (s *portfolioAllocatorDecisionRepo) List(_ context.Context, filter reposito
 
 func (s *portfolioAllocatorDecisionRepo) Count(_ context.Context, filter repository.AllocationDecisionFilter) (int, error) {
 	return len(filterAllocationDecisions(s.items, filter)), nil
+}
+
+func (s *portfolioAllocatorDecisionRepo) ReconcileExecutionResult(context.Context, uuid.UUID, domain.AllocationDecisionAction, []string) (bool, error) {
+	return true, nil
 }
 
 type portfolioAllocatorOpportunityListResponse struct {

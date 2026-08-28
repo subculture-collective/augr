@@ -708,6 +708,10 @@ func (*recordingOpportunityRepo) UpdateStatus(context.Context, uuid.UUID, domain
 	return nil
 }
 
+func (*recordingOpportunityRepo) TransitionStatus(context.Context, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
+	return true, nil
+}
+
 func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 	t.Parallel()
 

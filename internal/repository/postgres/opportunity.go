@@ -84,8 +84,18 @@ func (r *OpportunityRepo) ListQueuedForAllocation(ctx context.Context, asOf time
 
 // ListSelectedForAllocation returns durable in-flight claims for restart reconciliation.
 func (r *OpportunityRepo) ListSelectedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error) {
-	query := opportunitySelectSQL + ` WHERE status = $1 AND expires_at > $2 AND account_id=$3 ORDER BY expires_at ASC, created_at ASC, id ASC`
-	return r.list(ctx, query, []any{domain.OpportunityStatusSelected, asOf.UTC(), r.accountID}, "list selected opportunities for allocation")
+	_ = asOf
+	query := opportunitySelectSQL + ` WHERE status = $1 AND account_id=$2 ORDER BY expires_at ASC, created_at ASC, id ASC`
+	return r.list(ctx, query, []any{domain.OpportunityStatusSelected, r.accountID}, "list selected opportunities for allocation")
+}
+
+// TransitionStatus performs a compare-and-swap lifecycle transition.
+func (r *OpportunityRepo) TransitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error) {
+	tag, err := r.pool.Exec(ctx, `UPDATE portfolio_opportunities SET status=$1, reject_reason=$2, updated_at=NOW() WHERE id=$3 AND account_id=$4 AND status=$5`, to, rejectReason, id, r.accountID, from)
+	if err != nil {
+		return false, fmt.Errorf("postgres: transition opportunity status: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // Count returns the number of opportunities matching the filter.

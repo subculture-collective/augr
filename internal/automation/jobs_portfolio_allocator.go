@@ -53,11 +53,9 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 		return fmt.Errorf("portfolio_allocator: snapshot opportunities: %w", err)
 	}
 	if mode == portfolio.AllocatorModePaper {
-		recoverable, err := o.recoverSelectedPaperOpportunities(ctx, asOf)
-		if err != nil {
+		if err := o.recoverSelectedPaperOpportunities(ctx, asOf); err != nil {
 			return err
 		}
-		opportunities = append(recoverable, opportunities...)
 	}
 
 	state, warnings, err := o.buildPortfolioAllocatorState(ctx, mode)
@@ -92,8 +90,12 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 		}
 
 		if mode == portfolio.AllocatorModePaper && decision.Action == domain.AllocationDecisionActionShadowSelected {
-			if err := o.preclaimPaperOpportunity(ctx, decision); err != nil {
+			claimed, err := o.preclaimPaperOpportunity(ctx, decision)
+			if err != nil {
 				return err
+			}
+			if !claimed {
+				continue
 			}
 			decision = o.executePaperAllocatorDecision(ctx, decision, opportunityByID)
 		}
@@ -198,28 +200,119 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 	return valid, rejected, nil
 }
 
-func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error) {
+func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context, asOf time.Time) error {
 	selected, err := o.deps.OpportunityRepo.ListSelectedForAllocation(ctx, asOf)
 	if err != nil {
-		return nil, fmt.Errorf("portfolio_allocator: load selected opportunity claims: %w", err)
+		return fmt.Errorf("portfolio_allocator: load selected opportunity claims: %w", err)
 	}
-	recoverable := make([]domain.Opportunity, 0, len(selected))
 	for i := range selected {
 		opportunity := selected[i]
 		decisions, err := o.deps.AllocationDecisionRepo.List(ctx, repository.AllocationDecisionFilter{OpportunityID: &opportunity.ID}, 1, 0)
 		if err != nil {
-			return nil, fmt.Errorf("portfolio_allocator: reconcile selected opportunity: %w", err)
+			return fmt.Errorf("portfolio_allocator: reconcile selected opportunity: %w", err)
 		}
 		if len(decisions) != 0 {
-			if err := o.updateOpportunityStatus(ctx, decisions[0]); err != nil {
-				return nil, err
+			decision := decisions[0]
+			if decision.Action == domain.AllocationDecisionActionPaperOrderIntent {
+				if err := o.reconcilePendingPaperDecision(ctx, opportunity, &decision); err != nil {
+					return err
+				}
+			}
+			if err := o.updateOpportunityStatus(ctx, decision); err != nil {
+				return err
 			}
 			continue
 		}
-		opportunity.Status = domain.OpportunityStatusQueued
-		recoverable = append(recoverable, opportunity)
+
+		order, err := o.findOpportunityOrder(ctx, opportunity)
+		if err != nil {
+			return err
+		}
+		if order == nil {
+			applied, err := o.deps.OpportunityRepo.TransitionStatus(ctx, opportunity.ID, domain.OpportunityStatusSelected, domain.OpportunityStatusQueued, "")
+			if err != nil {
+				return fmt.Errorf("portfolio_allocator: release empty selected claim: %w", err)
+			}
+			if !applied {
+				return fmt.Errorf("portfolio_allocator: release empty selected claim: compare-and-swap failed")
+			}
+			continue
+		}
+		decision := recoveredAllocationDecision(opportunity, *order)
+		if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
+			return fmt.Errorf("portfolio_allocator: persist recovered decision: %w", err)
+		}
+		if err := o.updateOpportunityStatus(ctx, decision); err != nil {
+			return err
+		}
 	}
-	return recoverable, nil
+	return nil
+}
+
+func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opportunity domain.Opportunity, decision *domain.AllocationDecision) error {
+	var order *domain.Order
+	var err error
+	if decision.CreatedOrderID != nil && o.deps.OrderRepo != nil {
+		order, err = o.deps.OrderRepo.Get(ctx, *decision.CreatedOrderID)
+	} else {
+		order, err = o.findOpportunityOrder(ctx, opportunity)
+	}
+	if err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return fmt.Errorf("portfolio_allocator: load pending paper order: %w", err)
+	}
+	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovery_order_missing"
+	if order != nil {
+		if !orderMatchesOpportunity(*order, opportunity) {
+			order = nil
+			reason = "recovery_order_scope_mismatch"
+		} else if order.Status == domain.OrderStatusFilled {
+			decision.CreatedOrderID = &order.ID
+			action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
+		} else {
+			decision.CreatedOrderID = &order.ID
+			reason = "recovered_nonterminal_or_failed_order:" + order.Status.String()
+		}
+	}
+	decision.Action = action
+	decision.Reasons = append(decision.Reasons, reason)
+	applied, err := o.deps.AllocationDecisionRepo.ReconcileExecutionResult(ctx, decision.ID, action, decision.Reasons)
+	if err != nil {
+		return fmt.Errorf("portfolio_allocator: reconcile pending paper intent: %w", err)
+	}
+	if !applied {
+		return fmt.Errorf("portfolio_allocator: reconcile pending paper intent: compare-and-swap failed")
+	}
+	return nil
+}
+
+func (o *JobOrchestrator) findOpportunityOrder(ctx context.Context, opportunity domain.Opportunity) (*domain.Order, error) {
+	if o.deps.OrderRepo == nil || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
+		return nil, nil
+	}
+	orders, err := o.deps.OrderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, repository.OrderFilter{}, 100, 0)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio_allocator: list scoped recovery orders: %w", err)
+	}
+	for i := range orders {
+		order := orders[i]
+		if orderMatchesOpportunity(order, opportunity) {
+			return &order, nil
+		}
+	}
+	return nil, nil
+}
+
+func orderMatchesOpportunity(order domain.Order, opportunity domain.Opportunity) bool {
+	return order.AccountID == opportunity.AccountID && order.Environment == opportunity.Environment && order.OriginType == opportunity.OriginType && order.OriginID == opportunity.OriginID && opportunity.PipelineRunID != nil && order.PipelineRunID != nil && *order.PipelineRunID == *opportunity.PipelineRunID && opportunity.PipelineRunTradeDate != nil && order.PipelineRunTradeDate != nil && order.PipelineRunTradeDate.Equal(*opportunity.PipelineRunTradeDate)
+}
+
+func recoveredAllocationDecision(opportunity domain.Opportunity, order domain.Order) domain.AllocationDecision {
+	opportunityID, strategyID, orderID := opportunity.ID, opportunity.StrategyID, order.ID
+	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovered_nonterminal_or_failed_order:"+order.Status.String()
+	if order.Status == domain.OrderStatusFilled {
+		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
+	}
+	return domain.AllocationDecision{AccountID: opportunity.AccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: action, Reasons: []string{reason}, CreatedOrderID: &orderID}
 }
 
 func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision domain.AllocationDecision) error {
@@ -243,14 +336,15 @@ func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision 
 	return nil
 }
 
-func (o *JobOrchestrator) preclaimPaperOpportunity(ctx context.Context, decision domain.AllocationDecision) error {
+func (o *JobOrchestrator) preclaimPaperOpportunity(ctx context.Context, decision domain.AllocationDecision) (bool, error) {
 	if o.deps.OpportunityRepo == nil || decision.OpportunityID == nil {
-		return fmt.Errorf("portfolio_allocator: preclaim opportunity selected: missing opportunity repo or opportunity id")
+		return false, fmt.Errorf("portfolio_allocator: preclaim opportunity selected: missing opportunity repo or opportunity id")
 	}
-	if err := o.deps.OpportunityRepo.UpdateStatus(ctx, *decision.OpportunityID, domain.OpportunityStatusSelected, ""); err != nil {
-		return fmt.Errorf("portfolio_allocator: preclaim opportunity selected: %w", err)
+	claimed, err := o.deps.OpportunityRepo.TransitionStatus(ctx, *decision.OpportunityID, domain.OpportunityStatusQueued, domain.OpportunityStatusSelected, "")
+	if err != nil {
+		return false, fmt.Errorf("portfolio_allocator: preclaim opportunity selected: %w", err)
 	}
-	return nil
+	return claimed, nil
 }
 
 func countDecisionActions(decisions []domain.AllocationDecision, action domain.AllocationDecisionAction) int {

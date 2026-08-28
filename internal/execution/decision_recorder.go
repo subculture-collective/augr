@@ -87,6 +87,13 @@ func (r *tradeDecisionJournalRecorder) AttachPaperOrder(ctx context.Context, dec
 	if r == nil || r.repo == nil {
 		return nil
 	}
+	if r.replayRepo != nil {
+		atomic, ok := r.repo.(repository.AtomicOrderReplayRepository)
+		if !ok {
+			return fmt.Errorf("decision recorder: atomic order replay repository is required")
+		}
+		return atomic.AttachOrderWithReplay(ctx, decisionID, orderID, false, "order_manager", time.Now().UTC())
+	}
 	applied, err := r.repo.AttachPaperOrder(ctx, decisionID, orderID)
 	if err != nil {
 		return err
@@ -107,6 +114,13 @@ func (r *tradeDecisionJournalRecorder) AttachPaperOrderScoped(ctx context.Contex
 func (r *tradeDecisionJournalRecorder) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
 	if r == nil || r.repo == nil {
 		return nil
+	}
+	if r.replayRepo != nil {
+		atomic, ok := r.repo.(repository.AtomicOrderReplayRepository)
+		if !ok {
+			return fmt.Errorf("decision recorder: atomic order replay repository is required")
+		}
+		return atomic.AttachOrderWithReplay(ctx, decisionID, orderID, true, "order_manager", time.Now().UTC())
 	}
 	applied, err := r.repo.AttachLiveOrder(ctx, decisionID, orderID)
 	if err != nil {

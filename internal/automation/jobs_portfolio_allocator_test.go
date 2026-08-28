@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,6 +128,16 @@ func (r *portfolioAllocatorOpportunityRepo) UpdateStatus(_ context.Context, id u
 	return nil
 }
 
+func (r *portfolioAllocatorOpportunityRepo) TransitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error) {
+	for i := range r.items {
+		if r.items[i].ID != id || r.items[i].Status != from {
+			continue
+		}
+		return true, r.UpdateStatus(ctx, id, to, rejectReason)
+	}
+	return false, nil
+}
+
 type portfolioAllocatorDecisionRepo struct {
 	created []*domain.AllocationDecision
 }
@@ -197,9 +208,22 @@ func (r *portfolioAllocatorDecisionRepo) List(_ context.Context, filter reposito
 		if filter.Mode != "" && decision.Mode != filter.Mode {
 			continue
 		}
+		if filter.OpportunityID != nil && (decision.OpportunityID == nil || *decision.OpportunityID != *filter.OpportunityID) {
+			continue
+		}
 		out = append(out, *decision)
 	}
 	return out, nil
+}
+
+func (r *portfolioAllocatorDecisionRepo) ReconcileExecutionResult(_ context.Context, id uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
+	for _, decision := range r.created {
+		if decision.ID == id && decision.Action == domain.AllocationDecisionActionPaperOrderIntent {
+			decision.Action, decision.Reasons = action, append([]string(nil), reasons...)
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *portfolioAllocatorDecisionRepo) Count(_ context.Context, filter repository.AllocationDecisionFilter) (int, error) {
@@ -266,15 +290,31 @@ type restartPaperProcessor struct {
 	orderID          uuid.UUID
 	calls            int
 	completedEffects int
+	orders           *portfolioRecoveryOrderRepo
 }
 
-func (p *restartPaperProcessor) ProcessPaperOrder(context.Context, portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
+func (p *restartPaperProcessor) ProcessPaperOrder(ctx context.Context, req portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
 	p.calls++
 	if p.orderID == uuid.Nil {
 		p.orderID = uuid.New()
 		p.completedEffects++
+		run, _ := req.Scope.PipelineRun()
+		originType, originID := req.Scope.Origin()
+		_ = p.orders.Create(ctx, &domain.Order{ID: p.orderID, AccountID: req.Scope.AccountID(), Environment: req.Scope.Environment(), OriginType: string(originType), OriginID: originID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, Status: domain.OrderStatusFilled})
 	}
 	return portfolio.PaperOrderResult{OrderID: &p.orderID, Status: domain.OrderStatusFilled}, nil
+}
+
+type portfolioRecoveryOrderRepo struct{ *recordingOrderRepo }
+
+func (r *portfolioRecoveryOrderRepo) GetByRun(_ context.Context, ref domain.PipelineRunRef, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
+	out := make([]domain.Order, 0)
+	for _, order := range r.list {
+		if order.PipelineRunID != nil && *order.PipelineRunID == ref.ID && order.PipelineRunTradeDate != nil && order.PipelineRunTradeDate.Equal(ref.TradeDate) {
+			out = append(out, *order)
+		}
+	}
+	return out, nil
 }
 
 type crashAfterEffectDecisionRepo struct {
@@ -303,15 +343,30 @@ type preclaimFailOpportunityRepo struct {
 	portfolioAllocatorOpportunityRepo
 }
 
-func (r *preclaimFailOpportunityRepo) UpdateStatus(_ context.Context, _ uuid.UUID, status domain.OpportunityStatus, rejectReason string) error {
+type concurrentClaimOpportunityRepo struct {
+	portfolioAllocatorOpportunityRepo
+	mu sync.Mutex
+}
+
+func (r *concurrentClaimOpportunityRepo) TransitionStatus(_ context.Context, id uuid.UUID, from, to domain.OpportunityStatus, _ string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.items) != 1 || r.items[0].ID != id || r.items[0].Status != from {
+		return false, nil
+	}
+	r.items[0].Status = to
+	return true, nil
+}
+
+func (r *preclaimFailOpportunityRepo) TransitionStatus(_ context.Context, _ uuid.UUID, _, status domain.OpportunityStatus, rejectReason string) (bool, error) {
 	r.updateStatusCalls++
 	r.lastStatus = status
 	r.lastRejectReason = rejectReason
 	r.statusHistory = append(r.statusHistory, status)
 	if r.updateStatusCalls == 1 {
-		return fmt.Errorf("preclaim failed")
+		return false, fmt.Errorf("preclaim failed")
 	}
-	return nil
+	return true, nil
 }
 
 func TestPortfolioAllocatorJobRegistrationWithNilDeps(t *testing.T) {
@@ -688,10 +743,11 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	runID, accountID, versionID, strategyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: .05, ExpectedReturnPct: .1, MaxLossPct: .05, EntryPrice: 100, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: .001, ProposedNotional: 2_000, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "restart-completed-effect"}}}
 	decisionRepo := &crashAfterEffectDecisionRepo{failCreate: true}
-	processor := &restartPaperProcessor{}
+	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo()}
+	processor := &restartPaperProcessor{orders: orders}
 	positionRepo, balance := paperAllocatorStateDeps()
 	binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
-	deps := OrchestratorDeps{ExecutionAccount: binding, OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}}, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, PortfolioAccountBalance: balance, RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}}
+	deps := OrchestratorDeps{ExecutionAccount: binding, OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}}, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, OrderRepo: orders, PortfolioAccountBalance: balance, RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}}
 
 	first := NewJobOrchestrator(deps)
 	first.registerPortfolioAllocatorJobs()
@@ -707,11 +763,30 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	if err := restarted.jobs["portfolio_allocator"].Fn(context.Background()); err != nil {
 		t.Fatalf("restart run error = %v", err)
 	}
-	if processor.calls != 2 || processor.completedEffects != 1 {
-		t.Fatalf("processor calls/effects = %d/%d, want retry with one completed effect", processor.calls, processor.completedEffects)
+	if processor.calls != 1 || processor.completedEffects != 1 {
+		t.Fatalf("processor calls/effects = %d/%d, want recovery without duplicate execution", processor.calls, processor.completedEffects)
 	}
 	if opportunityRepo.items[0].Status != domain.OpportunityStatusExecuted || len(decisionRepo.created) != 1 || decisionRepo.created[0].CreatedOrderID == nil || *decisionRepo.created[0].CreatedOrderID != processor.orderID {
 		t.Fatalf("restart did not reconcile completed effect: opportunity=%+v decisions=%+v", opportunityRepo.items[0], decisionRepo.created)
+	}
+}
+
+func TestPortfolioAllocatorRestartTerminallyReconcilesPendingIntent(t *testing.T) {
+	now := time.Now().UTC()
+	runID, accountID, versionID, strategyID, opportunityID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
+	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}}
+	decisionRepo := &portfolioAllocatorDecisionRepo{created: []*domain.AllocationDecision{{ID: uuid.New(), AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, CreatedOrderID: &orderID}}}
+	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OrderStatusSubmitted})}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, OrderRepo: orders})
+	if err := orch.recoverSelectedPaperOpportunities(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	if opportunityRepo.items[0].Status != domain.OpportunityStatusRejected {
+		t.Fatalf("opportunity status = %s, want rejected", opportunityRepo.items[0].Status)
+	}
+	if decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "submitted") {
+		t.Fatalf("pending decision not terminally reconciled: %+v", decisionRepo.created[0])
 	}
 }
 
@@ -799,6 +874,38 @@ func TestPortfolioAllocatorJobPaperModeStopsWhenPreclaimFails(t *testing.T) {
 	}
 	if len(decisionRepo.created) != 0 {
 		t.Fatalf("expected no persisted decision, got %+v", decisionRepo.created)
+	}
+}
+
+func TestPortfolioAllocatorPaperPreclaimHasOneConcurrentWinner(t *testing.T) {
+	opportunityID := uuid.New()
+	repo := &concurrentClaimOpportunityRepo{portfolioAllocatorOpportunityRepo: portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: opportunityID, Status: domain.OpportunityStatusQueued}}}}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo})
+	decision := domain.AllocationDecision{OpportunityID: &opportunityID}
+	const workers = 32
+	results := make(chan bool, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := orch.preclaimPaperOpportunity(context.Background(), decision)
+			if err != nil {
+				t.Errorf("preclaim: %v", err)
+			}
+			results <- claimed
+		}()
+	}
+	wg.Wait()
+	close(results)
+	winners := 0
+	for claimed := range results {
+		if claimed {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("preclaim winners = %d, want 1", winners)
 	}
 }
 

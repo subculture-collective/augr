@@ -780,6 +780,13 @@ type TradeDecisionJournalRepository interface {
 	AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error)
 }
 
+// AtomicOrderReplayRepository links an order and records its ordered replay
+// event in one transaction. Implementations must make same-order retries
+// idempotent.
+type AtomicOrderReplayRepository interface {
+	AttachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error
+}
+
 // OpportunityRepository provides CRUD operations for portfolio opportunities.
 type OpportunityRepository interface {
 	Create(ctx context.Context, opportunity *domain.Opportunity) error
@@ -789,6 +796,7 @@ type OpportunityRepository interface {
 	ExpireQueuedBefore(ctx context.Context, before time.Time) (int64, error)
 	ListQueuedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error)
 	ListSelectedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error)
+	TransitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error)
 	// Count returns the total number of opportunities matching the filter.
 	Count(ctx context.Context, filter OpportunityFilter) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OpportunityStatus, rejectReason string) error
@@ -800,6 +808,7 @@ type AllocationDecisionRepository interface {
 	List(ctx context.Context, filter AllocationDecisionFilter, limit, offset int) ([]domain.AllocationDecision, error)
 	// Count returns the total number of decisions matching the filter.
 	Count(ctx context.Context, filter AllocationDecisionFilter) (int, error)
+	ReconcileExecutionResult(ctx context.Context, id uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error)
 }
 
 // ReplayEventRepository provides access to persisted replay events.
