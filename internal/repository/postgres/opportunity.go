@@ -84,7 +84,7 @@ func (r *OpportunityRepo) ListQueuedForAllocation(ctx context.Context, asOf time
 
 // ListSelectedForAllocation returns durable in-flight claims for restart reconciliation.
 func (r *OpportunityRepo) ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error) {
-	query := opportunitySelectSQL + ` WHERE status = $1 AND account_id=$2 AND (allocation_claim_id=$3 OR allocation_claim_expires_at <= $4) ORDER BY allocation_claim_expires_at ASC, created_at ASC, id ASC`
+	query := opportunitySelectSQL + ` WHERE status = $1 AND account_id=$2 AND (allocation_claim_id=$3 OR allocation_claim_expires_at <= $4 OR (allocation_claim_id IS NULL AND allocation_claimed_at IS NULL AND allocation_claim_expires_at IS NULL)) ORDER BY allocation_claim_expires_at ASC NULLS FIRST, created_at ASC, id ASC`
 	return r.list(ctx, query, []any{domain.OpportunityStatusSelected, r.accountID, claimID, asOf.UTC()}, "list recoverable selected opportunities for allocation")
 }
 
@@ -103,7 +103,7 @@ func (r *OpportunityRepo) TakeOverExpiredAllocationClaim(ctx context.Context, id
 	if claimID == uuid.Nil || !claimExpiresAt.After(asOf) {
 		return false, fmt.Errorf("postgres: take over allocation claim: valid claim and lease are required")
 	}
-	tag, err := r.pool.Exec(ctx, `UPDATE portfolio_opportunities SET allocation_claim_id=$1, allocation_claimed_at=$2, allocation_claim_expires_at=$3, updated_at=NOW() WHERE id=$4 AND account_id=$5 AND status=$6 AND (allocation_claim_id=$1 OR allocation_claim_expires_at <= $2)`, claimID, asOf.UTC(), claimExpiresAt.UTC(), id, r.accountID, domain.OpportunityStatusSelected)
+	tag, err := r.pool.Exec(ctx, `UPDATE portfolio_opportunities SET allocation_claim_id=$1, allocation_claimed_at=$2, allocation_claim_expires_at=$3, updated_at=NOW() WHERE id=$4 AND account_id=$5 AND status=$6 AND (allocation_claim_id=$1 OR allocation_claim_expires_at <= $2 OR (allocation_claim_id IS NULL AND allocation_claimed_at IS NULL AND allocation_claim_expires_at IS NULL))`, claimID, asOf.UTC(), claimExpiresAt.UTC(), id, r.accountID, domain.OpportunityStatusSelected)
 	if err != nil {
 		return false, fmt.Errorf("postgres: take over allocation claim: %w", err)
 	}

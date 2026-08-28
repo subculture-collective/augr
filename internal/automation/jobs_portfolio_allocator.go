@@ -84,6 +84,7 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 
 	for i := range result.Decisions {
 		decision := result.Decisions[i]
+		persisted := false
 		decision.Mode = domain.AllocationDecisionMode(mode)
 		if opportunity, ok := opportunityByIDValue(decision, opportunityByID); ok {
 			decision.AccountID = opportunity.AccountID
@@ -100,12 +101,31 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 			if !claimed {
 				continue
 			}
-			decision = o.executePaperAllocatorDecision(ctx, decision, opportunityByID)
+			decision.Mode = domain.AllocationDecisionModePaper
+			decision.Action = domain.AllocationDecisionActionPaperOrderIntent
+			decision.ExecutionClaimID = claimID
+			if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
+				return fmt.Errorf("portfolio_allocator: persist paper intent: %w", err)
+			}
+			persisted = true
+			decision, err = o.executePaperAllocatorDecision(ctx, decision, opportunityByID)
+			applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, decision.CreatedOrderID, decision.Action, decision.Reasons)
+			if recordErr != nil {
+				return fmt.Errorf("portfolio_allocator: record paper result: %w", recordErr)
+			}
+			if !applied {
+				return fmt.Errorf("portfolio_allocator: record paper result: compare-and-swap failed")
+			}
+			if err != nil {
+				return fmt.Errorf("portfolio_allocator: paper execution ambiguous: %w", err)
+			}
 		}
 		result.Decisions[i] = decision
 
-		if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
-			return fmt.Errorf("portfolio_allocator: persist decision: %w", err)
+		if !persisted {
+			if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
+				return fmt.Errorf("portfolio_allocator: persist decision: %w", err)
+			}
 		}
 		var owner *uuid.UUID
 		if mode == portfolio.AllocatorModePaper && decision.Action != domain.AllocationDecisionActionShadowRejected {
@@ -274,7 +294,7 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 	if err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return fmt.Errorf("portfolio_allocator: load pending paper order: %w", err)
 	}
-	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovery_order_missing"
+	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovery_order_missing"
 	if order != nil {
 		if !orderMatchesOpportunity(*order, opportunity) {
 			order = nil
@@ -282,14 +302,17 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 		} else if order.Status == domain.OrderStatusFilled {
 			decision.CreatedOrderID = &order.ID
 			action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
+		} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+			decision.CreatedOrderID = &order.ID
+			action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
 		} else {
 			decision.CreatedOrderID = &order.ID
-			reason = "recovered_nonterminal_or_failed_order:" + order.Status.String()
+			reason = "recovered_pending_order:" + order.Status.String()
 		}
 	}
 	decision.Action = action
 	decision.Reasons = append(decision.Reasons, reason)
-	applied, err := o.deps.AllocationDecisionRepo.ReconcileExecutionResult(ctx, decision.ID, action, decision.Reasons)
+	applied, err := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, decision.CreatedOrderID, action, decision.Reasons)
 	if err != nil {
 		return fmt.Errorf("portfolio_allocator: reconcile pending paper intent: %w", err)
 	}
@@ -322,9 +345,11 @@ func orderMatchesOpportunity(order domain.Order, opportunity domain.Opportunity)
 
 func recoveredAllocationDecision(opportunity domain.Opportunity, order domain.Order) domain.AllocationDecision {
 	opportunityID, strategyID, orderID := opportunity.ID, opportunity.StrategyID, order.ID
-	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovered_nonterminal_or_failed_order:"+order.Status.String()
+	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovered_pending_order:"+order.Status.String()
 	if order.Status == domain.OrderStatusFilled {
 		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
+	} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+		action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
 	}
 	return domain.AllocationDecision{AccountID: opportunity.AccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: action, Reasons: []string{reason}, CreatedOrderID: &orderID}
 }
@@ -396,36 +421,39 @@ func (o *JobOrchestrator) portfolioAllocatorMode() portfolio.AllocatorMode {
 	return mode
 }
 
-func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, decision domain.AllocationDecision, opportunities map[uuid.UUID]domain.Opportunity) domain.AllocationDecision {
+func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, decision domain.AllocationDecision, opportunities map[uuid.UUID]domain.Opportunity) (domain.AllocationDecision, error) {
 	decision.Mode = domain.AllocationDecisionModePaper
 	decision.Action = domain.AllocationDecisionActionPaperOrderIntent
 
 	if decision.OpportunityID == nil {
-		return paperAllocatorRejected(decision, "missing_opportunity_id")
+		return paperAllocatorRejected(decision, "missing_opportunity_id"), nil
 	}
 	opportunity, ok := opportunities[*decision.OpportunityID]
 	if !ok {
-		return paperAllocatorRejected(decision, "missing_opportunity")
+		return paperAllocatorRejected(decision, "missing_opportunity"), nil
 	}
 	if o.deps.StrategyRepo == nil {
-		return paperAllocatorRejected(decision, "missing_strategy_repo")
+		return paperAllocatorRejected(decision, "missing_strategy_repo"), nil
 	}
 	strategy, err := o.deps.StrategyRepo.Get(ctx, opportunity.StrategyID)
 	if err != nil || strategy == nil {
-		return paperAllocatorRejected(decision, "missing_strategy")
+		return paperAllocatorRejected(decision, "missing_strategy"), nil
 	}
 
 	scope, err := opportunityExecutionScope(opportunity, *strategy)
 	if err != nil {
-		return paperAllocatorRejected(decision, "execution_scope_mismatch")
+		return paperAllocatorRejected(decision, "execution_scope_mismatch"), nil
 	}
 	executor := portfolio.NewPaperExecutor(portfolio.PaperExecutorDeps{Processor: o.deps.PortfolioPaperProcessor, ExecutionAccount: o.deps.ExecutionAccount})
 	result, err := executor.ExecutePaperDecisionScoped(ctx, scope, opportunity, decision, *strategy)
 	if err != nil {
-		return paperAllocatorRejected(decision, "paper_execution_error")
+		decision.Action = domain.AllocationDecisionActionPaperOrderIntent
+		decision.CreatedOrderID = result.OrderID
+		decision.Reasons = append(decision.Reasons, result.Reason)
+		return decision, err
 	}
 	if result.Action == domain.AllocationDecisionActionExecutionRejected {
-		return paperAllocatorRejected(decision, result.Reason)
+		return paperAllocatorRejected(decision, result.Reason), nil
 	}
 	decision.Action = result.Action
 	decision.CreatedOrderID = result.OrderID
@@ -433,7 +461,7 @@ func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, dec
 	if result.Reason != "" {
 		decision.Reasons = append(decision.Reasons, result.Reason)
 	}
-	return decision
+	return decision, nil
 }
 
 func opportunityByIDValue(decision domain.AllocationDecision, opportunities map[uuid.UUID]domain.Opportunity) (domain.Opportunity, bool) {

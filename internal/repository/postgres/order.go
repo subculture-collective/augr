@@ -46,15 +46,22 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 	order.MarketType = marketType
 
 	row := r.pool.QueryRow(ctx,
-		`INSERT INTO orders (
+		`WITH authorized AS (
+			SELECT 1 WHERE $34::uuid IS NULL OR EXISTS (
+				SELECT 1 FROM portfolio_opportunities
+				WHERE id=$33 AND account_id=$3 AND status='selected'
+				  AND allocation_claim_id=$34 AND allocation_claim_expires_at>NOW()
+			)
+		)
+		INSERT INTO orders (
 			strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
 			pipeline_run_trade_date, copy_origin_rebalance_run_id, external_id, ticker, market_type, side, order_type,
 			quantity, limit_price, stop_price, filled_quantity, filled_avg_price,
 			status, broker, submitted_at, filled_at, asset_class, underlying_ticker,
 			option_type, strike, expiry, contract_multiplier, position_intent, leg_group_id,
-			prediction_side, polymarket_intent
+			prediction_side, polymarket_intent, allocation_opportunity_id
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33 FROM authorized
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
@@ -88,9 +95,14 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 		order.LegGroupID,
 		nullString(order.PredictionSide),
 		nullString(order.PolymarketIntent),
+		order.AllocationOpportunityID,
+		order.AllocationClaimID,
 	)
 
 	if err := row.Scan(&order.ID, &order.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) && order.AllocationOpportunityID != nil {
+			return fmt.Errorf("postgres: create order: allocation claim ownership lost")
+		}
 		return fmt.Errorf("postgres: create order: %w", err)
 	}
 
@@ -109,6 +121,17 @@ func (r *OrderRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Order, error
 		return nil, fmt.Errorf("postgres: get order: %w", err)
 	}
 
+	return order, nil
+}
+
+func (r *OrderRepo) GetByAllocationOpportunity(ctx context.Context, opportunityID uuid.UUID) (*domain.Order, error) {
+	order, err := scanOrder(r.pool.QueryRow(ctx, orderSelectSQL+` WHERE allocation_opportunity_id=$1 AND account_id=$2`, opportunityID, r.accountID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: get allocation order: %w", ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get allocation order: %w", err)
+	}
 	return order, nil
 }
 

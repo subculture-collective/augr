@@ -111,6 +111,8 @@ type Order struct {
 	PipelineRunID            *uuid.UUID         `json:"pipeline_run_id,omitempty"`
 	PipelineRunTradeDate     *time.Time         `json:"pipeline_run_trade_date,omitempty"`
 	CopyOriginRebalanceRunID uuid.UUID          `json:"copy_origin_rebalance_run_id,omitzero"`
+	AllocationOpportunityID  *uuid.UUID         `json:"-"`
+	AllocationClaimID        *uuid.UUID         `json:"-"`
 	ExternalID               string             `json:"external_id,omitempty"`
 	Ticker                   string             `json:"ticker"`
 	MarketType               MarketType         `json:"market_type,omitempty"`

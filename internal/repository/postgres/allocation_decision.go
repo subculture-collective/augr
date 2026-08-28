@@ -87,14 +87,14 @@ func (r *AllocationDecisionRepo) Count(ctx context.Context, filter repository.Al
 	return total, nil
 }
 
-// ReconcileExecutionResult terminally resolves a persisted pending paper intent.
-func (r *AllocationDecisionRepo) ReconcileExecutionResult(ctx context.Context, id uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
-	if action != domain.AllocationDecisionActionExecuted && action != domain.AllocationDecisionActionExecutionRejected {
-		return false, fmt.Errorf("postgres: reconcile allocation decision: terminal action required")
+// RecordPaperOrderResult attaches the durable effect and resolves it only when terminal.
+func (r *AllocationDecisionRepo) RecordPaperOrderResult(ctx context.Context, id uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
+	if action != domain.AllocationDecisionActionPaperOrderIntent && action != domain.AllocationDecisionActionExecuted && action != domain.AllocationDecisionActionExecutionRejected {
+		return false, fmt.Errorf("postgres: record paper order result: paper action required")
 	}
-	tag, err := r.pool.Exec(ctx, `UPDATE allocation_decisions SET action=$1, reasons=$2 WHERE id=$3 AND account_id=$4 AND action=$5`, action, stringSliceOrEmpty(reasons), id, r.accountID, domain.AllocationDecisionActionPaperOrderIntent)
+	tag, err := r.pool.Exec(ctx, `UPDATE allocation_decisions SET action=$1, reasons=$2, created_order_id=COALESCE(created_order_id,$3) WHERE id=$4 AND account_id=$5 AND action=$6 AND (created_order_id IS NULL OR created_order_id=$3)`, action, stringSliceOrEmpty(reasons), orderID, id, r.accountID, domain.AllocationDecisionActionPaperOrderIntent)
 	if err != nil {
-		return false, fmt.Errorf("postgres: reconcile allocation decision: %w", err)
+		return false, fmt.Errorf("postgres: record paper order result: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
 }

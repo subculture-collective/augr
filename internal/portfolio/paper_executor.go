@@ -18,10 +18,12 @@ type PaperOrderProcessor interface {
 }
 
 type PaperOrderRequest struct {
-	Signal      execution.FinalSignal
-	Plan        execution.TradingPlan
-	Scope       execution.ExecutionScope
-	NotionalUSD float64
+	Signal        execution.FinalSignal
+	Plan          execution.TradingPlan
+	Scope         execution.ExecutionScope
+	NotionalUSD   float64
+	OpportunityID uuid.UUID
+	ClaimID       uuid.UUID
 }
 
 type PaperOrderResult struct {
@@ -145,14 +147,22 @@ func (e *PaperExecutor) ExecutePaperDecisionScoped(ctx context.Context, scope ex
 	if !hasRun || scope.AccountID() != opportunity.AccountID || scope.Environment() != opportunity.Environment || string(originType) != opportunity.OriginType || originID != opportunity.OriginID || run.ID != *opportunity.PipelineRunID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate) {
 		return e.rejected("execution_scope_mismatch"), nil
 	}
-	orderResult, err := e.deps.Processor.ProcessPaperOrder(ctx, PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD})
+	request := PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD, ClaimID: decision.ExecutionClaimID}
+	if decision.OpportunityID != nil {
+		request.OpportunityID = *decision.OpportunityID
+	}
+	orderResult, err := e.deps.Processor.ProcessPaperOrder(ctx, request)
 	if err != nil {
+		if orderResult.OrderID != nil && (orderResult.Status == domain.OrderStatusRejected || orderResult.Status == domain.OrderStatusCancelled) {
+			return PaperExecutionResult{Action: domain.AllocationDecisionActionExecutionRejected, Reason: firstReason(orderResult.Reason, "paper_order_"+string(orderResult.Status)), OrderID: orderResult.OrderID, FinalSignal: finalSignal, TradingPlan: plan}, nil
+		}
 		return PaperExecutionResult{
-			Action:      domain.AllocationDecisionActionExecutionRejected,
+			Action:      domain.AllocationDecisionActionPaperOrderIntent,
 			Reason:      fmt.Sprintf("processor_error:%s", sanitizeReason(err.Error())),
+			OrderID:     orderResult.OrderID,
 			FinalSignal: finalSignal,
 			TradingPlan: plan,
-		}, nil
+		}, err
 	}
 	if orderResult.Skipped || orderResult.OrderID == nil {
 		return PaperExecutionResult{Action: domain.AllocationDecisionActionExecutionRejected, Reason: firstReason(orderResult.Reason, "paper_order_not_created"), FinalSignal: finalSignal, TradingPlan: plan}, nil

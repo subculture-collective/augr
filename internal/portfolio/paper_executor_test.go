@@ -219,7 +219,7 @@ func TestPaperExecutorMapsProcessorOrderStatus(t *testing.T) {
 	}
 }
 
-func TestPaperExecutorConvertsProcessorErrorToExecutionRejected(t *testing.T) {
+func TestPaperExecutorKeepsProcessorErrorPending(t *testing.T) {
 	t.Parallel()
 
 	strategyID := uuid.New()
@@ -252,11 +252,11 @@ func TestPaperExecutorConvertsProcessorErrorToExecutionRejected(t *testing.T) {
 		IsPaper:                    true,
 		ExecutionStrategyVersionID: &versionID,
 	})
-	if err != nil {
-		t.Fatalf("ExecutePaperDecision() error = %v", err)
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("ExecutePaperDecision() error = %v, want boom", err)
 	}
-	if result.Action != domain.AllocationDecisionActionExecutionRejected {
-		t.Fatalf("action = %s, want execution_rejected", result.Action)
+	if result.Action != domain.AllocationDecisionActionPaperOrderIntent {
+		t.Fatalf("action = %s, want paper_order_intent", result.Action)
 	}
 	if result.Reason != "processor_error:boom" {
 		t.Fatalf("reason = %q, want processor_error:boom", result.Reason)

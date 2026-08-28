@@ -10,6 +10,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/google/uuid"
 )
 
 var ErrPaperProcessorUnavailable = errors.New("portfolio: paper processor unavailable")
@@ -37,6 +38,18 @@ type PaperOrderManagerProcessorDeps struct {
 	PaperBroker            *paper.PaperBroker
 }
 
+type allocationOrderRepo struct {
+	repository.OrderRepository
+	opportunityID uuid.UUID
+	claimID       uuid.UUID
+}
+
+func (r allocationOrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	order.AllocationOpportunityID = &r.opportunityID
+	order.AllocationClaimID = &r.claimID
+	return r.OrderRepository.Create(ctx, order)
+}
+
 func NewPaperOrderManagerProcessor(deps PaperOrderManagerProcessorDeps) *PaperOrderManagerProcessor {
 	return &PaperOrderManagerProcessor{deps: deps}
 }
@@ -60,12 +73,16 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if broker == nil {
 		broker = paper.NewPaperBroker(initialBalance, 0, 0)
 	}
+	orderRepo := p.deps.OrderRepo
+	if orderRepo != nil && request.OpportunityID != uuid.Nil && request.ClaimID != uuid.Nil {
+		orderRepo = allocationOrderRepo{OrderRepository: orderRepo, opportunityID: request.OpportunityID, claimID: request.ClaimID}
+	}
 	manager := execution.NewOrderManager(
 		broker,
 		"paper",
 		p.deps.RiskEngine,
 		p.deps.PositionRepo,
-		p.deps.OrderRepo,
+		orderRepo,
 		p.deps.TradeRepo,
 		p.deps.AuditLogRepo,
 		p.deps.AgentEventRepo,
@@ -78,11 +95,21 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if p.deps.DecisionRecorder != nil {
 		manager = manager.WithDecisionRecorder(p.deps.DecisionRecorder)
 	}
-	if err := manager.ProcessSignal(ctx, request.Scope, request.Signal, request.Plan); err != nil {
-		return PaperOrderResult{}, err
-	}
+	processErr := manager.ProcessSignal(ctx, request.Scope, request.Signal, request.Plan)
 	if p.deps.OrderRepo == nil {
 		return PaperOrderResult{Skipped: true, Reason: "missing_order_repo"}, nil
+	}
+	if allocationRepo, ok := p.deps.OrderRepo.(repository.AllocationOrderRepository); ok && request.OpportunityID != uuid.Nil {
+		order, err := allocationRepo.GetByAllocationOpportunity(ctx, request.OpportunityID)
+		if err == nil {
+			return PaperOrderResult{OrderID: &order.ID, Status: order.Status}, processErr
+		}
+		if !errors.Is(err, repository.ErrNotFound) {
+			return PaperOrderResult{}, errors.Join(processErr, err)
+		}
+		if processErr != nil {
+			return PaperOrderResult{}, processErr
+		}
 	}
 	run, ok := request.Scope.PipelineRun()
 	if !ok {
@@ -93,7 +120,7 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	for offset := 0; ; offset += pageSize {
 		page, err := p.deps.OrderRepo.GetByRun(ctx, run, repository.OrderFilter{}, pageSize, offset)
 		if err != nil {
-			return PaperOrderResult{}, err
+			return PaperOrderResult{}, errors.Join(processErr, err)
 		}
 		orders = append(orders, page...)
 		if len(page) < pageSize {
@@ -101,6 +128,9 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		}
 	}
 	if len(orders) == 0 {
+		if processErr != nil {
+			return PaperOrderResult{}, processErr
+		}
 		return PaperOrderResult{Skipped: true, Reason: "paper_order_not_created"}, nil
 	}
 	var order domain.Order
@@ -113,9 +143,12 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		}
 	}
 	if !found {
+		if processErr != nil {
+			return PaperOrderResult{}, processErr
+		}
 		return PaperOrderResult{Skipped: true, Reason: "paper_order_scope_mismatch"}, nil
 	}
-	return PaperOrderResult{OrderID: &order.ID, Status: order.Status, Skipped: false}, nil
+	return PaperOrderResult{OrderID: &order.ID, Status: order.Status, Skipped: false}, processErr
 }
 
 // Compile-time assertion that the processor stays on the paper execution boundary.

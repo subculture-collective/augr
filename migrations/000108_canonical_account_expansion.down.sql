@@ -61,7 +61,7 @@ BEGIN
        OR EXISTS(SELECT 1 FROM agent_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM agent_events WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trade_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM orders WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR copy_origin_rebalance_run_id IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM orders WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR copy_origin_rebalance_run_id IS NOT NULL OR allocation_opportunity_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM positions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trades WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR allocation_claim_id IS NOT NULL OR allocation_claimed_at IS NOT NULL OR allocation_claim_expires_at IS NOT NULL)
@@ -256,6 +256,7 @@ DROP INDEX idx_agent_decisions_account_run;
 DROP INDEX idx_agent_events_account_run;
 DROP INDEX idx_trade_decisions_account_created;
 DROP INDEX idx_orders_account_created;
+DROP INDEX orders_allocation_effect_once;
 DROP INDEX orders_copy_origin_effect_once;
 DROP INDEX idx_positions_account_opened;
 DROP INDEX idx_trades_account_executed;
@@ -296,7 +297,7 @@ ALTER TABLE allocation_decisions DROP COLUMN origin_id,DROP COLUMN origin_type,D
 ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trades DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE positions DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE orders DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE orders DROP COLUMN allocation_opportunity_id,DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trade_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE agent_events DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE agent_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

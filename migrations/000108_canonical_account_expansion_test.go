@@ -48,6 +48,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"add column execution_claimed_at timestamptz",
 		"add constraint copy_intent_execution_claim_pair check ((execution_claim_id is null) = (execution_claimed_at is null))",
 		"create unique index orders_copy_origin_effect_once on orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) where origin_type='copy_subscription' and copy_origin_rebalance_run_id is not null",
+		"create unique index orders_allocation_effect_once on orders(account_id,allocation_opportunity_id) where allocation_opportunity_id is not null",
 	} {
 		if !strings.Contains(up, fragment) {
 			t.Errorf("up migration missing %q", fragment)
@@ -68,6 +69,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"drop function validate_account_projection_outbox_row",
 		"drop index uq_strategies_paper_event_market_ticker",
 		"drop index orders_copy_origin_effect_once",
+		"drop index orders_allocation_effect_once",
 		"drop constraint copy_intent_execution_claim_pair",
 		"expected_through_transaction_id uuid",
 		"order by effective_at desc, observed_at desc, id desc",
@@ -669,7 +671,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 		"idx_copy_origin_rebalance_runs_account_created", "idx_copy_origin_rebalance_intents_account_run",
 		"idx_copy_target_drift_runs_account_created", "idx_copy_target_drift_legs_account_run",
 		"idx_conversations_account_run", "idx_conversation_messages_account_conversation", "idx_agent_memories_account_run",
-		"uq_account_projection_outbox_request", "idx_account_projection_outbox_claimable", "orders_copy_origin_effect_once",
+		"uq_account_projection_outbox_request", "idx_account_projection_outbox_claimable", "orders_copy_origin_effect_once", "orders_allocation_effect_once",
 	}
 	for _, index := range indexes {
 		var found any
@@ -702,7 +704,7 @@ func canonicalExpansionColumns() map[string][]string {
 		"agent_decisions":                   {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
 		"agent_events":                      {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
 		"trade_decisions":                   {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
-		"orders":                            {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date", "copy_origin_rebalance_run_id"},
+		"orders":                            {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date", "copy_origin_rebalance_run_id", "allocation_opportunity_id"},
 		"positions":                         {"account_id", "environment", "origin_type", "origin_id"},
 		"trades":                            {"account_id", "environment", "origin_type", "origin_id"},
 		"portfolio_opportunities":           {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date", "allocation_claim_id", "allocation_claimed_at", "allocation_claim_expires_at"},

@@ -266,6 +266,35 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 	}
 }
 
+func TestOpportunityRepoIntegration_TakesOverLegacySelectedNullClaim(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	opportunity := &domain.Opportunity{
+		StrategyID: createTestStrategy(t, ctx, pool), MarketType: domain.MarketTypeStock,
+		Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy,
+		Status: domain.OpportunityStatusSelected, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: "legacy-null-claim",
+	}
+	if err := repo.Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	now, claimID := time.Now().UTC(), uuid.New()
+	selected, err := repo.ListSelectedForAllocation(ctx, claimID, now)
+	if err != nil || len(selected) != 1 || selected[0].ID != opportunity.ID {
+		t.Fatalf("ListSelectedForAllocation() = %+v, %v", selected, err)
+	}
+	won, err := repo.TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, now, now.Add(time.Minute))
+	if err != nil || !won {
+		t.Fatalf("TakeOverExpiredAllocationClaim() = %v, %v", won, err)
+	}
+	var storedClaim uuid.UUID
+	if err := pool.QueryRow(ctx, `SELECT allocation_claim_id FROM portfolio_opportunities WHERE id=$1`, opportunity.ID).Scan(&storedClaim); err != nil || storedClaim != claimID {
+		t.Fatalf("stored claim = %s, %v; want %s", storedClaim, err, claimID)
+	}
+}
+
 func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)

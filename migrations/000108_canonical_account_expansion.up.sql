@@ -78,7 +78,8 @@ ALTER TABLE positions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT;
+    ADD COLUMN origin_id TEXT,
+    ADD COLUMN allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT;
 ALTER TABLE trades
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
@@ -167,6 +168,7 @@ CREATE INDEX idx_agent_decisions_account_run ON agent_decisions(account_id,pipel
 CREATE INDEX idx_agent_events_account_run ON agent_events(account_id,pipeline_run_trade_date,pipeline_run_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_trade_decisions_account_created ON trade_decisions(account_id,created_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_orders_account_created ON orders(account_id,created_at,id) WHERE account_id IS NOT NULL;
+CREATE UNIQUE INDEX orders_allocation_effect_once ON orders(account_id,allocation_opportunity_id) WHERE allocation_opportunity_id IS NOT NULL;
 CREATE UNIQUE INDEX orders_copy_origin_effect_once ON orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) WHERE origin_type='copy_subscription' AND copy_origin_rebalance_run_id IS NOT NULL;
 CREATE INDEX idx_positions_account_opened ON positions(account_id,opened_at,id) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_trades_account_executed ON trades(account_id,executed_at,id) WHERE account_id IS NOT NULL;

@@ -338,6 +338,41 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	}
 }
 
+func TestOrderRepoIntegration_SlowStaleAllocatorCannotCreateSecondEffect(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+
+	accountID, opportunityID, staleOwner, takeoverOwner := canonicalRepositoryTestAccountID, uuid.New(), uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(id,account_id,status,allocation_claim_id,allocation_claimed_at,allocation_claim_expires_at) VALUES($1,$2,'selected',$3,NOW()-INTERVAL '2 minutes',NOW()-INTERVAL '1 minute')`, opportunityID, accountID, staleOwner); err != nil {
+		t.Fatal(err)
+	}
+	staleMayResume := make(chan struct{})
+	staleDone := make(chan error, 1)
+	go func() {
+		<-staleMayResume
+		staleDone <- NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, staleOwner))
+	}()
+	if _, err := pool.Exec(ctx, `UPDATE portfolio_opportunities SET allocation_claim_id=$1,allocation_claimed_at=NOW(),allocation_claim_expires_at=NOW()+INTERVAL '1 minute' WHERE id=$2 AND allocation_claim_expires_at<=NOW()`, takeoverOwner, opportunityID); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, takeoverOwner)); err != nil {
+		t.Fatalf("takeover Create() error = %v", err)
+	}
+	close(staleMayResume)
+	if err := <-staleDone; err == nil || !strings.Contains(err.Error(), "claim ownership lost") {
+		t.Fatalf("stale Create() error = %v, want ownership lost", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM orders WHERE allocation_opportunity_id=$1`, opportunityID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("durable effects = %d, %v; want 1", count, err)
+	}
+}
+
+func allocationRaceOrder(opportunityID, claimID uuid.UUID) *domain.Order {
+	return &domain.Order{Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, AllocationOpportunityID: &opportunityID, AllocationClaimID: &claimID}
+}
+
 func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
 	t.Helper()
 
@@ -411,6 +446,14 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 		`CREATE TABLE strategies (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid()
 		)`,
+		`CREATE TABLE portfolio_opportunities (
+			id UUID PRIMARY KEY,
+			account_id UUID,
+			status TEXT NOT NULL,
+			allocation_claim_id UUID,
+			allocation_claimed_at TIMESTAMPTZ,
+			allocation_claim_expires_at TIMESTAMPTZ
+		)`,
 		`CREATE TABLE positions (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			strategy_id UUID REFERENCES strategies (id),
@@ -427,6 +470,13 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			strategy_id UUID REFERENCES strategies (id),
 			pipeline_run_id UUID,
+			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
+			pipeline_run_trade_date DATE,
+			copy_origin_rebalance_run_id UUID,
+			allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id),
 			external_id TEXT,
 			ticker TEXT NOT NULL,
 			side trade_side NOT NULL,
@@ -451,7 +501,8 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			leg_group_id        UUID,
 			market_type         market_type NOT NULL DEFAULT 'stock',
 			prediction_side     TEXT,
-			polymarket_intent   TEXT
+			polymarket_intent   TEXT,
+			UNIQUE(account_id, allocation_opportunity_id)
 		)`,
 		`CREATE TABLE trades (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

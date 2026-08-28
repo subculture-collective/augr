@@ -623,6 +623,10 @@ type OrderRepository interface {
 	GetByCopyOriginRun(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, subscriptionID, copyOriginRunID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
 }
 
+type AllocationOrderRepository interface {
+	GetByAllocationOpportunity(ctx context.Context, opportunityID uuid.UUID) (*domain.Order, error)
+}
+
 // PositionRepository provides CRUD operations for positions.
 type PositionRepository interface {
 	Create(ctx context.Context, position *domain.Position) error
@@ -817,7 +821,7 @@ type AllocationDecisionRepository interface {
 	List(ctx context.Context, filter AllocationDecisionFilter, limit, offset int) ([]domain.AllocationDecision, error)
 	// Count returns the total number of decisions matching the filter.
 	Count(ctx context.Context, filter AllocationDecisionFilter) (int, error)
-	ReconcileExecutionResult(ctx context.Context, id uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error)
+	RecordPaperOrderResult(ctx context.Context, id uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error)
 }
 
 // ReplayEventRepository provides access to persisted replay events.

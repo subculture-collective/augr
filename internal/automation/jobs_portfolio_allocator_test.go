@@ -270,10 +270,10 @@ func (r *portfolioAllocatorDecisionRepo) List(_ context.Context, filter reposito
 	return out, nil
 }
 
-func (r *portfolioAllocatorDecisionRepo) ReconcileExecutionResult(_ context.Context, id uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
+func (r *portfolioAllocatorDecisionRepo) RecordPaperOrderResult(_ context.Context, id uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
 	for _, decision := range r.created {
 		if decision.ID == id && decision.Action == domain.AllocationDecisionActionPaperOrderIntent {
-			decision.Action, decision.Reasons = action, append([]string(nil), reasons...)
+			decision.Action, decision.Reasons, decision.CreatedOrderID = action, append([]string(nil), reasons...), orderID
 			return true, nil
 		}
 	}
@@ -345,6 +345,7 @@ type restartPaperProcessor struct {
 	calls            int
 	completedEffects int
 	orders           *portfolioRecoveryOrderRepo
+	errAfterEffect   bool
 }
 
 func (p *restartPaperProcessor) ProcessPaperOrder(ctx context.Context, req portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
@@ -355,6 +356,10 @@ func (p *restartPaperProcessor) ProcessPaperOrder(ctx context.Context, req portf
 		run, _ := req.Scope.PipelineRun()
 		originType, originID := req.Scope.Origin()
 		_ = p.orders.Create(ctx, &domain.Order{ID: p.orderID, AccountID: req.Scope.AccountID(), Environment: req.Scope.Environment(), OriginType: string(originType), OriginID: originID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, Status: domain.OrderStatusFilled})
+	}
+	if p.errAfterEffect {
+		p.errAfterEffect = false
+		return portfolio.PaperOrderResult{OrderID: &p.orderID, Status: domain.OrderStatusSubmitted}, errors.New("post-submit transport error")
 	}
 	return portfolio.PaperOrderResult{OrderID: &p.orderID, Status: domain.OrderStatusFilled}, nil
 }
@@ -834,19 +839,19 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	now := time.Now().UTC()
 	runID, accountID, versionID, strategyID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: .05, ExpectedReturnPct: .1, MaxLossPct: .05, EntryPrice: 100, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: .001, ProposedNotional: 2_000, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "restart-completed-effect"}}}
-	decisionRepo := &crashAfterEffectDecisionRepo{failCreate: true}
+	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo()}
-	processor := &restartPaperProcessor{orders: orders}
+	processor := &restartPaperProcessor{orders: orders, errAfterEffect: true}
 	positionRepo, balance := paperAllocatorStateDeps()
 	binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
 	deps := OrchestratorDeps{ExecutionAccount: binding, OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}}, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, OrderRepo: orders, PortfolioAccountBalance: balance, RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}}
 
 	first := NewJobOrchestrator(deps)
 	first.registerPortfolioAllocatorJobs()
-	if err := first.jobs["portfolio_allocator"].Fn(context.Background()); err == nil || !strings.Contains(err.Error(), "simulated crash") {
-		t.Fatalf("first run error = %v, want simulated crash", err)
+	if err := first.jobs["portfolio_allocator"].Fn(context.Background()); err == nil || !strings.Contains(err.Error(), "post-submit transport error") {
+		t.Fatalf("first run error = %v, want post-submit transport error", err)
 	}
-	if opportunityRepo.items[0].Status != domain.OpportunityStatusSelected || processor.completedEffects != 1 {
+	if opportunityRepo.items[0].Status != domain.OpportunityStatusSelected || processor.completedEffects != 1 || decisionRepo.created[0].Action != domain.AllocationDecisionActionPaperOrderIntent {
 		t.Fatalf("durable claim/effect = %s/%d, want selected/1", opportunityRepo.items[0].Status, processor.completedEffects)
 	}
 	opportunityRepo.claimExpires[opportunityRepo.items[0].ID] = time.Now().Add(-time.Second)
@@ -864,7 +869,7 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	}
 }
 
-func TestPortfolioAllocatorRestartTerminallyReconcilesPendingIntent(t *testing.T) {
+func TestPortfolioAllocatorRestartPreservesPendingIntent(t *testing.T) {
 	now := time.Now().UTC()
 	runID, accountID, versionID, strategyID, opportunityID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
@@ -875,11 +880,11 @@ func TestPortfolioAllocatorRestartTerminallyReconcilesPendingIntent(t *testing.T
 	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
 		t.Fatal(err)
 	}
-	if opportunityRepo.items[0].Status != domain.OpportunityStatusRejected {
-		t.Fatalf("opportunity status = %s, want rejected", opportunityRepo.items[0].Status)
+	if opportunityRepo.items[0].Status != domain.OpportunityStatusSelected {
+		t.Fatalf("opportunity status = %s, want selected", opportunityRepo.items[0].Status)
 	}
-	if decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "submitted") {
-		t.Fatalf("pending decision not terminally reconciled: %+v", decisionRepo.created[0])
+	if decisionRepo.created[0].Action != domain.AllocationDecisionActionPaperOrderIntent || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "submitted") {
+		t.Fatalf("pending decision not preserved: %+v", decisionRepo.created[0])
 	}
 }
 
