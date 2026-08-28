@@ -142,7 +142,7 @@ func TestCanonicalAccountExpansionCopyExecutionFence(t *testing.T) {
 	runID := uuid.New()
 	canonical := `{"schema":"copy-origin-rebalance-v1"}`
 	if _, err := pool.Exec(ctx, `INSERT INTO copy_origin_rebalance_runs(id,schema_name,state,subscription_id,origin_type,origin_id,source_observation_id,calculation_version,intent_count,sha256,canonical_bytes,canonical_json,account_id,environment)
-		VALUES($1,'copy-origin-rebalance-v1','prepared',$2,'copy_subscription',$2,$3,1,1,encode(digest(convert_to($4,'UTF8'),'sha256'),'hex'),convert_to($4,'UTF8'),$4::JSONB,$5,'paper_scored')`, runID, graph.subscriptionID, observationID, canonical, accountID); err != nil {
+		VALUES($1,'copy-origin-rebalance-v1','prepared',$2,'copy_subscription',$2,$3,2,1,encode(digest(convert_to($4,'UTF8'),'sha256'),'hex'),convert_to($4,'UTF8'),$4::JSONB,$5,'paper_scored')`, runID, graph.subscriptionID, observationID, canonical, accountID); err != nil {
 		t.Fatal(err)
 	}
 	insertOrder := func() error {
