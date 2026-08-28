@@ -279,17 +279,33 @@ func (r *TradeDecisionJournalRepo) CountByNoActionReason(ctx context.Context, fi
 
 // AttachPaperOrder links a paper order to the trade decision.
 func (r *TradeDecisionJournalRepo) AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error) {
-	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper, false)
+	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper, false, nil)
+}
+
+func (r *TradeDecisionJournalRepo) AttachPaperOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope repository.DecisionOrderAttachmentScope) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper, false, &scope)
 }
 
 // AttachLiveOrder links a live order to the trade decision.
 func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error) {
-	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true)
+	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true, nil)
+}
+
+func (r *TradeDecisionJournalRepo) AttachLiveOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope repository.DecisionOrderAttachmentScope) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true, &scope)
 }
 
 // AttachOrderWithReplay atomically links an order and persists the matching
 // ordered replay event. The decision row lock serializes same-decision retries.
 func (r *TradeDecisionJournalRepo) AttachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error {
+	return r.attachOrderWithReplay(ctx, decisionID, orderID, live, source, occurredAt, nil)
+}
+
+func (r *TradeDecisionJournalRepo) AttachOrderWithReplayScoped(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time, scope repository.DecisionOrderAttachmentScope) error {
+	return r.attachOrderWithReplay(ctx, decisionID, orderID, live, source, occurredAt, &scope)
+}
+
+func (r *TradeDecisionJournalRepo) attachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time, scope *repository.DecisionOrderAttachmentScope) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("postgres: begin order replay attachment: %w", err)
@@ -309,7 +325,7 @@ func (r *TradeDecisionJournalRepo) AttachOrderWithReplay(ctx context.Context, de
 		return fmt.Errorf("postgres: attach %s: different order already attached", column)
 	}
 	if attached == nil {
-		query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live)
+		query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live, scope)
 		var updatedID uuid.UUID
 		if err := tx.QueryRow(ctx, query, args...).Scan(&updatedID); err != nil {
 			return fmt.Errorf("postgres: attach order with replay: %w", err)
@@ -350,8 +366,8 @@ func (r *TradeDecisionJournalRepo) ResolvePredictionOutcome(ctx context.Context,
 	return nil
 }
 
-func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, orderID uuid.UUID, column string, status domain.TradeDecisionStatus, live bool) (bool, error) {
-	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live)
+func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, orderID uuid.UUID, column string, status domain.TradeDecisionStatus, live bool, scope *repository.DecisionOrderAttachmentScope) (bool, error) {
+	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live, scope)
 	var updatedID uuid.UUID
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&updatedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -502,16 +518,25 @@ func buildTradeDecisionListQuery(accountID uuid.UUID, filter repository.TradeDec
 	return query, args
 }
 
-func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus, live bool) (string, []any) {
+func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus, live bool, scope *repository.DecisionOrderAttachmentScope) (string, []any) {
+	lineage := ""
+	args := []any{decisionID, accountID, orderID, status, live}
+	if scope != nil {
+		lineage = `
+			AND o.pipeline_run_id IS NOT DISTINCT FROM $6 AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $7
+			AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $8 AND o.strategy_id IS NOT DISTINCT FROM $9`
+		args = append(args, scope.PipelineRunID, scope.PipelineRunTradeDate, scope.CopyOriginRebalanceRunID, scope.StrategyID)
+	}
 	query := fmt.Sprintf(`UPDATE trade_decisions td SET %s = $3, status = $4, updated_at = NOW()
 		WHERE td.id = $1 AND td.account_id=$2 AND td.%s IS NULL
 		AND EXISTS (SELECT 1 FROM orders o WHERE o.id=$3 AND o.account_id=td.account_id
 			AND o.environment=td.environment AND o.origin_type=td.origin_type AND o.origin_id=td.origin_id
-			AND o.pipeline_run_id=td.pipeline_run_id AND o.pipeline_run_trade_date=td.pipeline_run_trade_date
+			AND o.pipeline_run_id IS NOT DISTINCT FROM td.pipeline_run_id AND o.pipeline_run_trade_date IS NOT DISTINCT FROM td.pipeline_run_trade_date
 			AND o.strategy_id IS NOT DISTINCT FROM td.strategy_id
+			%s
 			AND (($5 AND o.environment='live') OR (NOT $5 AND o.environment IN ('paper_scored','paper_stress'))))
-		RETURNING td.id`, column, column)
-	return query, []any{decisionID, accountID, orderID, status, live}
+		RETURNING td.id`, column, column, lineage)
+	return query, args
 }
 
 func buildTradeDecisionFilteredQuery(accountID uuid.UUID, base string, filter repository.TradeDecisionFilter, limit, offset int, includePagination bool) (string, []any) {

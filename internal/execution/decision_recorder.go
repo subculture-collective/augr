@@ -103,7 +103,19 @@ func (r *tradeDecisionJournalRecorder) AttachPaperOrderScoped(ctx context.Contex
 	if _, err := r.persistedDecisionScope(ctx, decisionID, &scope); err != nil {
 		return err
 	}
-	return r.AttachPaperOrder(ctx, decisionID, orderID)
+	if r.replayRepo != nil {
+		atomic, ok := r.repo.(repository.ScopedOrderReplayRepository)
+		if !ok {
+			return fmt.Errorf("decision recorder: scoped atomic order replay repository is required")
+		}
+		return atomic.AttachOrderWithReplayScoped(ctx, decisionID, orderID, false, "order_manager", time.Now().UTC(), decisionOrderAttachmentScope(scope))
+	}
+	scoped, ok := r.repo.(repository.ScopedDecisionOrderRepository)
+	if !ok {
+		return fmt.Errorf("decision recorder: scoped order repository is required")
+	}
+	_, err := scoped.AttachPaperOrderScoped(ctx, decisionID, orderID, decisionOrderAttachmentScope(scope))
+	return err
 }
 
 func (r *tradeDecisionJournalRecorder) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
@@ -131,7 +143,19 @@ func (r *tradeDecisionJournalRecorder) AttachLiveOrderScoped(ctx context.Context
 	if _, err := r.persistedDecisionScope(ctx, decisionID, &scope); err != nil {
 		return err
 	}
-	return r.AttachLiveOrder(ctx, decisionID, orderID)
+	if r.replayRepo != nil {
+		atomic, ok := r.repo.(repository.ScopedOrderReplayRepository)
+		if !ok {
+			return fmt.Errorf("decision recorder: scoped atomic order replay repository is required")
+		}
+		return atomic.AttachOrderWithReplayScoped(ctx, decisionID, orderID, true, "order_manager", time.Now().UTC(), decisionOrderAttachmentScope(scope))
+	}
+	scoped, ok := r.repo.(repository.ScopedDecisionOrderRepository)
+	if !ok {
+		return fmt.Errorf("decision recorder: scoped order repository is required")
+	}
+	_, err := scoped.AttachLiveOrderScoped(ctx, decisionID, orderID, decisionOrderAttachmentScope(scope))
+	return err
 }
 
 func (r *tradeDecisionJournalRecorder) RecordReplayEvent(ctx context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, source string, payload any, occurredAt time.Time) error {
@@ -187,22 +211,27 @@ func bindTradeDecisionScope(scope ExecutionScope, decision *domain.TradeDecision
 	}
 	originType, originID := scope.Origin()
 	run, hasRun := scope.PipelineRun()
-	if scope.AccountID() == uuid.Nil || !scope.Environment().IsValid() || originID == "" || !hasRun {
+	if scope.AccountID() == uuid.Nil || !scope.Environment().IsValid() || originID == "" {
 		return fmt.Errorf("decision recorder: complete execution scope is required")
+	}
+	if (decision.PipelineRunID == nil) != (decision.PipelineRunTradeDate == nil) {
+		return fmt.Errorf("decision recorder: decision scope conflicts with execution scope")
 	}
 	if decision.AccountID != uuid.Nil && decision.AccountID != scope.AccountID() ||
 		decision.Environment != "" && decision.Environment != scope.Environment() ||
 		decision.OriginType != "" && decision.OriginType != string(originType) ||
 		decision.OriginID != "" && decision.OriginID != originID ||
-		decision.PipelineRunID != nil && *decision.PipelineRunID != run.ID ||
-		decision.PipelineRunTradeDate != nil && !decision.PipelineRunTradeDate.Equal(run.TradeDate) {
+		decision.PipelineRunID != nil && (!hasRun || *decision.PipelineRunID != run.ID) ||
+		decision.PipelineRunTradeDate != nil && (!hasRun || !decision.PipelineRunTradeDate.Equal(run.TradeDate)) {
 		return fmt.Errorf("decision recorder: decision scope conflicts with execution scope")
 	}
 	decision.AccountID, decision.Environment = scope.AccountID(), scope.Environment()
 	decision.OriginType, decision.OriginID = string(originType), originID
-	decision.PipelineRunID = &run.ID
-	tradeDate := run.TradeDate
-	decision.PipelineRunTradeDate = &tradeDate
+	if hasRun {
+		decision.PipelineRunID = &run.ID
+		tradeDate := run.TradeDate
+		decision.PipelineRunTradeDate = &tradeDate
+	}
 	if strategyID := scope.LegacyStrategyID(); strategyID != nil {
 		if decision.StrategyID != nil && *decision.StrategyID != *strategyID {
 			return fmt.Errorf("decision recorder: decision strategy conflicts with execution scope")
@@ -216,11 +245,25 @@ func tradeDecisionMatchesScope(decision domain.TradeDecision, scope ExecutionSco
 	originType, originID := scope.Origin()
 	run, ok := scope.PipelineRun()
 	legacyStrategyID := scope.LegacyStrategyID()
-	return ok && decision.AccountID == scope.AccountID() && decision.Environment == scope.Environment() &&
+	lineageMatches := !ok && decision.PipelineRunID == nil && decision.PipelineRunTradeDate == nil ||
+		ok && decision.PipelineRunID != nil && *decision.PipelineRunID == run.ID &&
+			decision.PipelineRunTradeDate != nil && decision.PipelineRunTradeDate.Equal(run.TradeDate)
+	return lineageMatches && decision.AccountID == scope.AccountID() && decision.Environment == scope.Environment() &&
 		decision.OriginType == string(originType) && decision.OriginID == originID &&
-		decision.PipelineRunID != nil && *decision.PipelineRunID == run.ID &&
-		decision.PipelineRunTradeDate != nil && decision.PipelineRunTradeDate.Equal(run.TradeDate) &&
 		uuidPointersEqual(decision.StrategyID, legacyStrategyID)
+}
+
+func decisionOrderAttachmentScope(scope ExecutionScope) repository.DecisionOrderAttachmentScope {
+	result := repository.DecisionOrderAttachmentScope{StrategyID: scope.LegacyStrategyID()}
+	if run, ok := scope.PipelineRun(); ok {
+		result.PipelineRunID = &run.ID
+		tradeDate := run.TradeDate
+		result.PipelineRunTradeDate = &tradeDate
+	}
+	if copyRunID := scope.CopyOriginRunID(); copyRunID != uuid.Nil {
+		result.CopyOriginRebalanceRunID = &copyRunID
+	}
+	return result
 }
 
 func uuidPointersEqual(left, right *uuid.UUID) bool {

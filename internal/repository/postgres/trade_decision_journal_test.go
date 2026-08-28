@@ -79,16 +79,35 @@ func TestBuildTradeDecisionCountQuery(t *testing.T) {
 func TestBuildTradeDecisionAttachQuery(t *testing.T) {
 	decisionID := uuid.New()
 	orderID := uuid.New()
-	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, decisionID, orderID, domain.TradeDecisionStatusPaper, false)
+	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, decisionID, orderID, domain.TradeDecisionStatusPaper, false, nil)
 
 	assertContains(t, query, "UPDATE trade_decisions td SET paper_order_id = $3")
 	assertContains(t, query, "status = $4")
 	assertContains(t, query, "RETURNING td.id")
 	assertContains(t, query, "o.account_id=td.account_id")
-	assertContains(t, query, "o.pipeline_run_id=td.pipeline_run_id")
+	assertContains(t, query, "o.pipeline_run_id IS NOT DISTINCT FROM td.pipeline_run_id")
+	assertContains(t, query, "o.pipeline_run_trade_date IS NOT DISTINCT FROM td.pipeline_run_trade_date")
 	assertContains(t, query, "o.strategy_id IS NOT DISTINCT FROM td.strategy_id")
 	if len(args) != 5 || args[0] != decisionID || args[1] != canonicalRepositoryTestAccountID || args[2] != orderID || args[3] != domain.TradeDecisionStatusPaper || args[4] != false {
 		t.Fatalf("unexpected attach args: %#v", args)
+	}
+}
+
+func TestBuildTradeDecisionAttachQuery_StrategyFreeCopyScope(t *testing.T) {
+	copyRunID := uuid.New()
+	scope := repository.DecisionOrderAttachmentScope{CopyOriginRebalanceRunID: &copyRunID}
+	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, uuid.New(), uuid.New(), domain.TradeDecisionStatusPaper, false, &scope)
+
+	assertContains(t, query, "o.pipeline_run_id IS NOT DISTINCT FROM $6")
+	assertContains(t, query, "o.pipeline_run_trade_date IS NOT DISTINCT FROM $7")
+	assertContains(t, query, "o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $8")
+	assertContains(t, query, "o.strategy_id IS NOT DISTINCT FROM $9")
+	pipelineRunID, _ := args[5].(*uuid.UUID)
+	pipelineTradeDate, _ := args[6].(*time.Time)
+	copyOriginRunID, _ := args[7].(*uuid.UUID)
+	strategyID, _ := args[8].(*uuid.UUID)
+	if len(args) != 9 || pipelineRunID != nil || pipelineTradeDate != nil || copyOriginRunID == nil || *copyOriginRunID != copyRunID || strategyID != nil {
+		t.Fatalf("copy attach args = %#v", args)
 	}
 }
 

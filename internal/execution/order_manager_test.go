@@ -618,6 +618,47 @@ func TestProcessSignal_SlowWorkerTakeoverFencesStaleBrokerEffect(t *testing.T) {
 	}
 }
 
+func TestProcessSignal_PostSubmitLeaseLossLeavesRecoverableBrokerEvidence(t *testing.T) {
+	const externalID = "broker-order-lease-lost"
+	brokerSubmissions := 0
+	broker := &mockBroker{
+		submitOrderFn: func(context.Context, *domain.Order) (string, error) {
+			brokerSubmissions++
+			return externalID, nil
+		},
+		getOrderStatusFn: func(context.Context, string) (domain.OrderStatus, error) {
+			return domain.OrderStatusSubmitted, nil
+		},
+	}
+	orderRepo := &mockOrderRepo{}
+	fenceCalls := 0
+	leaseLost := errors.New("allocation claim ownership lost")
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).
+		WithDecisionRecorder(&mockDecisionRecorder{}).
+		WithEffectFence(func(context.Context) error {
+			fenceCalls++
+			if fenceCalls == 3 {
+				return leaseLost
+			}
+			return nil
+		})
+
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
+	if !errors.Is(err, leaseLost) {
+		t.Fatalf("ProcessSignal() error = %v, want lease loss", err)
+	}
+	if brokerSubmissions != 1 {
+		t.Fatalf("broker submissions = %d, want 1", brokerSubmissions)
+	}
+	if len(orderRepo.updates) == 0 {
+		t.Fatal("submitted broker order was not persisted")
+	}
+	persisted := orderRepo.updates[0]
+	if persisted.ExternalID != externalID || persisted.Status != domain.OrderStatusSubmitted || persisted.SubmittedAt == nil {
+		t.Fatalf("persisted order = %+v, want recoverable submitted evidence", persisted)
+	}
+}
+
 func (r *mockDecisionRecorder) AttachLiveOrder(_ context.Context, decisionID, orderID uuid.UUID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

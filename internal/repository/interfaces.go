@@ -791,6 +791,28 @@ type AtomicOrderReplayRepository interface {
 	AttachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error
 }
 
+// DecisionOrderAttachmentScope carries lineage that is present on orders but
+// not on trade decisions.
+type DecisionOrderAttachmentScope struct {
+	PipelineRunID            *uuid.UUID
+	PipelineRunTradeDate     *time.Time
+	CopyOriginRebalanceRunID *uuid.UUID
+	StrategyID               *uuid.UUID
+}
+
+// ScopedOrderReplayRepository validates the complete execution lineage while
+// atomically attaching an order and replay event.
+type ScopedOrderReplayRepository interface {
+	AttachOrderWithReplayScoped(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time, scope DecisionOrderAttachmentScope) error
+}
+
+// ScopedDecisionOrderRepository validates complete execution lineage when no
+// replay ledger is configured.
+type ScopedDecisionOrderRepository interface {
+	AttachPaperOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope DecisionOrderAttachmentScope) (bool, error)
+	AttachLiveOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope DecisionOrderAttachmentScope) (bool, error)
+}
+
 // OpportunityRepository provides CRUD operations for portfolio opportunities.
 type OpportunityRepository interface {
 	Create(ctx context.Context, opportunity *domain.Opportunity) error

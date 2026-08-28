@@ -648,9 +648,6 @@ func (m *OrderManager) ProcessSignal(
 		return err
 	}
 	externalID, err := m.broker.SubmitOrder(ctx, order)
-	if fenceErr := m.fenceEffect(ctx); fenceErr != nil {
-		return fenceErr
-	}
 	if err != nil {
 		order.Status = domain.OrderStatusRejected
 		if updateErr := m.orderRepo.Update(ctx, order); updateErr != nil {

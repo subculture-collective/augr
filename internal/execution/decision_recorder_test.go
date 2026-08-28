@@ -18,6 +18,7 @@ type decisionJournalStub struct {
 	replay      *replayEventStub
 	failAtomic  bool
 	failInitial bool
+	attachScope *repository.DecisionOrderAttachmentScope
 }
 
 func (s *decisionJournalStub) CreateWithInitialReplay(ctx context.Context, decision *domain.TradeDecision) error {
@@ -78,6 +79,11 @@ func (s *decisionJournalStub) AttachOrderWithReplay(_ context.Context, decisionI
 	return nil
 }
 
+func (s *decisionJournalStub) AttachOrderWithReplayScoped(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time, scope repository.DecisionOrderAttachmentScope) error {
+	s.attachScope = &scope
+	return s.AttachOrderWithReplay(ctx, decisionID, orderID, live, source, occurredAt)
+}
+
 func (s *decisionJournalStub) Create(_ context.Context, decision *domain.TradeDecision) error {
 	s.created = decision
 	if s.stored == nil {
@@ -116,8 +122,18 @@ func (s *decisionJournalStub) AttachPaperOrder(_ context.Context, decisionID, or
 	return true, nil
 }
 
+func (s *decisionJournalStub) AttachPaperOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope repository.DecisionOrderAttachmentScope) (bool, error) {
+	s.attachScope = &scope
+	return s.AttachPaperOrder(ctx, decisionID, orderID)
+}
+
 func (*decisionJournalStub) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 	return true, nil
+}
+
+func (s *decisionJournalStub) AttachLiveOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope repository.DecisionOrderAttachmentScope) (bool, error) {
+	s.attachScope = &scope
+	return s.AttachLiveOrder(ctx, decisionID, orderID)
 }
 
 type replayEventStub struct{ events []domain.ReplayEvent }
@@ -192,6 +208,29 @@ func TestTradeDecisionJournalRecorderRejectsConflictingAccountRetry(t *testing.T
 	}
 	if err := recorder.AttachPaperOrderScoped(context.Background(), conflicting, decision.ID, uuid.New()); err == nil {
 		t.Fatal("AttachPaperOrderScoped() accepted conflicting account retry")
+	}
+}
+
+func TestTradeDecisionJournalRecorderAttachesStrategyFreeCopyOrder(t *testing.T) {
+	journal := &decisionJournalStub{replay: &replayEventStub{}}
+	recorder := NewTradeDecisionJournalRecorder(journal, journal.replay).(ScopedDecisionRecorder)
+	accountID, subscriptionID, copyRunID := uuid.New(), uuid.New(), uuid.New()
+	scope, err := NewCopyExecutionScope(accountID, domain.AccountEnvironmentPaperScored, subscriptionID, copyRunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := &domain.TradeDecision{ID: uuid.New(), MarketType: domain.MarketTypeStock, InstrumentKey: "AAPL", Status: domain.TradeDecisionStatusCandidate}
+	if err := recorder.RecordDecisionScoped(context.Background(), scope, decision); err != nil {
+		t.Fatalf("RecordDecisionScoped() error = %v", err)
+	}
+	if err := recorder.AttachPaperOrderScoped(context.Background(), scope, decision.ID, uuid.New()); err != nil {
+		t.Fatalf("AttachPaperOrderScoped() error = %v", err)
+	}
+	if decision.PipelineRunID != nil || decision.PipelineRunTradeDate != nil || decision.StrategyID != nil {
+		t.Fatalf("copy decision lineage = %+v", decision)
+	}
+	if journal.attachScope == nil || journal.attachScope.CopyOriginRebalanceRunID == nil || *journal.attachScope.CopyOriginRebalanceRunID != copyRunID || journal.attachScope.PipelineRunID != nil || journal.attachScope.StrategyID != nil {
+		t.Fatalf("attachment scope = %+v", journal.attachScope)
 	}
 }
 
