@@ -113,6 +113,8 @@ type Order struct {
 	CopyOriginRebalanceRunID uuid.UUID          `json:"copy_origin_rebalance_run_id,omitzero"`
 	AllocationOpportunityID  *uuid.UUID         `json:"-"`
 	AllocationClaimID        *uuid.UUID         `json:"-"`
+	CopyIntentID             *uuid.UUID         `json:"-"`
+	CopyExecutionClaimID     *uuid.UUID         `json:"-"`
 	ClientOrderID            string             `json:"client_order_id,omitempty"`
 	ExternalID               string             `json:"external_id,omitempty"`
 	Ticker                   string             `json:"ticker"`

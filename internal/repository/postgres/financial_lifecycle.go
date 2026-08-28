@@ -104,7 +104,12 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	var persistedAccountID uuid.UUID
 	var persistedFilledQuantity float64
 	var persistedFilledAvgPrice *float64
-	if err := tx.QueryRow(ctx, `SELECT status,account_id,environment,origin_type,origin_id,filled_quantity::double precision,filled_avg_price::double precision FROM orders WHERE id = $1 FOR UPDATE`, input.Order.ID).Scan(&persistedStatus, &persistedAccountID, &persistedEnvironment, &persistedOriginType, &persistedOriginID, &persistedFilledQuantity, &persistedFilledAvgPrice); err != nil {
+	var persistedTicker, persistedPredictionSide string
+	var persistedMarketType domain.MarketType
+	var persistedSide domain.OrderSide
+	var persistedQuantity float64
+	var persistedPositionIntent *domain.PositionIntent
+	if err := tx.QueryRow(ctx, `SELECT status,account_id,environment,origin_type,origin_id,filled_quantity::double precision,filled_avg_price::double precision,ticker,market_type,side,quantity::double precision,position_intent,COALESCE(prediction_side,'') FROM orders WHERE id = $1 FOR UPDATE`, input.Order.ID).Scan(&persistedStatus, &persistedAccountID, &persistedEnvironment, &persistedOriginType, &persistedOriginID, &persistedFilledQuantity, &persistedFilledAvgPrice, &persistedTicker, &persistedMarketType, &persistedSide, &persistedQuantity, &persistedPositionIntent, &persistedPredictionSide); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: lock order: %w", err)
 	}
 	if persistedAccountID != input.Order.AccountID || persistedEnvironment != string(input.Order.Environment) || persistedOriginType != input.Order.OriginType || persistedOriginID != input.Order.OriginID {
@@ -113,10 +118,19 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 	if persistedStatus != string(domain.OrderStatusSubmitted) && persistedStatus != string(domain.OrderStatusPartial) && persistedStatus != string(domain.OrderStatusFilled) {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: order %s status %s not fill-compatible", input.Order.ID, persistedStatus)
 	}
-	order := input.Order
+	if input.FillIntent.Side != persistedSide {
+		return repository.OrderFillResult{}, fmt.Errorf("postgres: fill command side does not match persisted order")
+	}
+	orderValue := *input.Order
+	order := &orderValue
+	order.AccountID, order.Environment, order.OriginType, order.OriginID = persistedAccountID, domain.AccountEnvironment(persistedEnvironment), persistedOriginType, persistedOriginID
+	order.Ticker, order.MarketType, order.Side, order.Quantity, order.PositionIntent, order.PredictionSide = persistedTicker, persistedMarketType, persistedSide, persistedQuantity, persistedPositionIntent, persistedPredictionSide
 	observedQuantity := input.FillIntent.Quantity
 	if observedQuantity <= persistedFilledQuantity {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: observed fill quantity %.8f does not advance persisted quantity %.8f", observedQuantity, persistedFilledQuantity)
+	}
+	if observedQuantity > persistedQuantity {
+		return repository.OrderFillResult{}, fmt.Errorf("postgres: cumulative fill quantity %.8f exceeds persisted order size %.8f", observedQuantity, persistedQuantity)
 	}
 	observedAvgPrice := input.FillIntent.ExecutionPrice
 	if observedAvgPrice == 0 && order.FilledAvgPrice != nil {
@@ -153,13 +167,19 @@ func (db *DB) ApplyOrderFill(ctx context.Context, input repository.OrderFillInpu
 		closingPositionSide = domain.PositionSideShort
 	}
 	if closingPosition {
-		rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, s.market_type, p.ticker, p.side, p.quantity::double precision, p.avg_entry::double precision,
+		positionQuery := `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, s.market_type, p.ticker, p.side, p.quantity::double precision, p.avg_entry::double precision,
 			p.current_price::double precision, p.unrealized_pnl::double precision, p.realized_pnl::double precision, p.stop_loss::double precision,
 			p.take_profit::double precision, p.opened_at, p.closed_at, p.asset_class, p.underlying_ticker, p.option_type, p.strike::double precision,
 			p.expiry, p.contract_multiplier::double precision, p.leg_group_id, p.delta::double precision, p.gamma::double precision, p.theta::double precision, p.vega::double precision
 			FROM positions p LEFT JOIN strategies s ON s.id = p.strategy_id
 			WHERE p.account_id = $1 AND p.environment = $2 AND p.origin_type = $3 AND p.origin_id = $4 AND p.ticker = $5 AND p.side = $6 AND p.closed_at IS NULL AND p.quantity > 0
-			ORDER BY p.opened_at ASC, p.id ASC FOR UPDATE OF p`, order.AccountID, order.Environment, order.OriginType, order.OriginID, positionTicker, closingPositionSide)
+			ORDER BY p.opened_at ASC, p.id ASC FOR UPDATE OF p`
+		args := []any{order.AccountID, order.Environment, order.OriginType, order.OriginID, positionTicker, closingPositionSide}
+		if order.PositionIntent != nil && (*order.PositionIntent == domain.PositionIntentSellToClose || *order.PositionIntent == domain.PositionIntentBuyToClose) {
+			positionQuery = strings.Replace(positionQuery, " ORDER BY", " AND p.close_reservation_order_id=$7 ORDER BY", 1)
+			args = append(args, order.ID)
+		}
+		rows, err := tx.Query(ctx, positionQuery, args...)
 		if err != nil {
 			return repository.OrderFillResult{}, fmt.Errorf("postgres: lock polymarket position: %w", err)
 		}

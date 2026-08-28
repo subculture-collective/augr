@@ -221,6 +221,21 @@ func TestSettlerUsesAtomicLifecycleWhenAvailable(t *testing.T) {
 	}
 }
 
+func TestSettleDecisionsRoutesClosedRetryThroughRepositoryIdempotency(t *testing.T) {
+	strategyID, orderID, decisionID := uuid.New(), uuid.New(), uuid.New()
+	decision := domain.TradeDecision{ID: decisionID, AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusClosed}
+	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{decision}}
+	atomicRepo := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomicRepo, decisions, &settlementPositionStub{}, &settlementTradeStub{}, &settlementReplayStub{})
+	count, err := settler.SettleDecisions(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", time.Now().UTC(), []uuid.UUID{decisionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || atomicRepo.called != 1 {
+		t.Fatalf("count=%d repository calls=%d", count, atomicRepo.called)
+	}
+}
+
 func TestSettlerPreviewMarketCountsWithoutMutation(t *testing.T) {
 	strategyID, orderID, posID := uuid.New(), uuid.New(), uuid.New()
 	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{{ID: uuid.New(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}, {ID: uuid.New(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-OTHER", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}, {ID: uuid.New(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypePolymarket, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}}}

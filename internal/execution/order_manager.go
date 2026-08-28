@@ -683,11 +683,31 @@ func (m *OrderManager) processSignal(
 	m.emitOrderEvent(ctx, OrderEventSubmitted, order, scope)
 
 	// 7. Check order status and handle fill.
-	status, err := m.broker.GetOrderStatus(ctx, externalID)
+	brokerResult := BrokerOrderStatus{}
+	if provider, ok := m.broker.(BrokerOrderStatusProvider); ok {
+		brokerResult, err = provider.GetOrderStatusResult(ctx, externalID)
+	} else {
+		brokerResult.Status, err = m.broker.GetOrderStatus(ctx, externalID)
+	}
 	if err != nil {
 		return fmt.Errorf("order_manager: get order status: %w", err)
 	}
-
+	status := brokerResult.Status
+	priorFilledQuantity := order.FilledQuantity
+	if brokerResult.FilledQuantity > priorFilledQuantity {
+		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return err
+		}
+		if status == domain.OrderStatusCancelled || status == domain.OrderStatusRejected {
+			terminalStatus := status
+			order.Status = domain.OrderStatusPartial
+			if err := m.handleFill(ctx, order, plan, scope, decision.ID); err != nil {
+				return err
+			}
+			order.Status = terminalStatus
+		}
+	}
 	order.Status = status
 	if err := m.fenceEffect(ctx); err != nil {
 		return err
@@ -1184,6 +1204,7 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		return domain.OrderStatusFilled, nil
 	}
 	brokerOrderID := strings.TrimSpace(order.ExternalID)
+	lookupByClientID := brokerOrderID == ""
 	if brokerOrderID == "" {
 		brokerOrderID = strings.TrimSpace(order.ClientOrderID)
 	}
@@ -1197,7 +1218,20 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		}
 		return order.Status, nil
 	}
-	brokerResult, err := m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+	brokerResult := BrokerOrderStatus{}
+	if lookupByClientID {
+		provider, ok := m.broker.(BrokerClientOrderStatusProvider)
+		if !ok {
+			return "", fmt.Errorf("order_manager: broker client-id status provider is required for pending recovery")
+		}
+		var externalID string
+		externalID, brokerResult, err = provider.GetOrderStatusByClientOrderIDResult(ctx, brokerOrderID)
+		if err == nil {
+			brokerOrderID = externalID
+		}
+	} else {
+		brokerResult, err = m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+	}
 	status := brokerResult.Status
 	if err != nil {
 		if order.Status != domain.OrderStatusPending || strings.TrimSpace(order.ExternalID) != "" || !errors.Is(err, ErrBrokerOrderNotFound) {
@@ -1210,9 +1244,7 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		if submitErr != nil {
 			return "", fmt.Errorf("order_manager: resubmit persisted order: %w", submitErr)
 		}
-		if strings.TrimSpace(externalID) != brokerOrderID {
-			return "", fmt.Errorf("order_manager: resubmitted client order identity mismatch")
-		}
+		brokerOrderID = strings.TrimSpace(externalID)
 		brokerResult, err = m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
 		status = brokerResult.Status
 		if err != nil {
@@ -1261,6 +1293,18 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 			return "", err
 		}
 	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
+		if brokerResult.FilledQuantity > order.FilledQuantity {
+			terminalStatus := status
+			order.Status = domain.OrderStatusPartial
+			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
+			if err := validateRecoveredFillEvidence(order); err != nil {
+				return "", err
+			}
+			if err := m.handleFill(ctx, order, recoveredOrderPlan(order), scope, decisionID); err != nil {
+				return "", err
+			}
+			order.Status = terminalStatus
+		}
 		if err := m.orderRepo.Update(ctx, order); err != nil {
 			return "", fmt.Errorf("order_manager: persist reconciled %s order: %w", status, err)
 		}

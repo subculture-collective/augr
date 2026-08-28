@@ -30,6 +30,7 @@ type PaperOrderRequest struct {
 	Subscription domain.CopySubscription
 	Intent       domain.CopyTradeIntent
 	OriginRunID  uuid.UUID
+	ClaimID      uuid.UUID
 }
 
 type PaperOrderResult struct {
@@ -494,6 +495,14 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
+		reauthorizedIntent, reauthorizedSubscription, reloadErr := s.deps.Repo.GetClaimedIntentExecution(ctx, candidate.ID, claimID)
+		if reloadErr != nil {
+			return result, fmt.Errorf("reauthorize claimed copy intent %s: %w", candidate.ID, reloadErr)
+		}
+		candidate, subscription = *reauthorizedIntent, reauthorizedSubscription
+		if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
+			return result, err
+		}
 		if s.deps.Lifecycle != nil {
 			if lifecycleErr := s.deps.Lifecycle.ProposeCopyIntent(ctx, *subscription, candidate, persistedOrigin.ID()); lifecycleErr != nil {
 				candidate.Status, candidate.RiskStatus = "failed", "pending"
@@ -510,7 +519,7 @@ func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult
 		if scopeErr != nil {
 			return result, fmt.Errorf("copy execution scope: %w", scopeErr)
 		}
-		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
+		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID(), ClaimID: claimID})
 		candidate.OrderID = executionResult.OrderID
 		if executeErr != nil {
 			candidate.Status, candidate.RiskStatus = "failed", "pending"

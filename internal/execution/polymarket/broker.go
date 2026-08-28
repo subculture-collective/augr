@@ -64,12 +64,13 @@ type amount struct {
 }
 
 type createOrderRequest struct {
-	MarketSlug string  `json:"marketSlug"`
-	Type       string  `json:"type"`
-	Price      *amount `json:"price,omitempty"`
-	Quantity   float64 `json:"quantity,omitempty"`
-	TIF        string  `json:"tif,omitempty"`
-	Intent     string  `json:"intent"`
+	MarketSlug    string  `json:"marketSlug"`
+	Type          string  `json:"type"`
+	Price         *amount `json:"price,omitempty"`
+	Quantity      float64 `json:"quantity,omitempty"`
+	TIF           string  `json:"tif,omitempty"`
+	Intent        string  `json:"intent"`
+	ClientOrderID string  `json:"clientOrderId,omitempty"`
 }
 
 type createOrderResponse struct {
@@ -329,6 +330,31 @@ func (b *Broker) GetOrderStatus(ctx context.Context, externalID string) (domain.
 	return status, nil
 }
 
+// GetOrderByClientOrderID uses the retail API's idempotency lookup and returns
+// the provider-issued order ID. It never treats the client ID as an external ID.
+func (b *Broker) GetOrderByClientOrderID(ctx context.Context, clientOrderID string) (string, domain.OrderStatus, error) {
+	if b == nil || b.client == nil {
+		return "", "", errors.New("polymarket: broker client is required")
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return "", "", errors.New("polymarket: client order id is required")
+	}
+	body, err := b.client.Get(ctx, "/v1/orders/by-client-order-id", url.Values{"clientOrderId": []string{clientOrderID}})
+	if err != nil {
+		return "", "", fmt.Errorf("polymarket: lookup client order id: %w", err)
+	}
+	var response getOrderResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", "", fmt.Errorf("polymarket: decode client order lookup: %w", err)
+	}
+	if strings.TrimSpace(response.Order.ID) == "" {
+		return "", "", errors.New("polymarket: client order lookup missing provider id")
+	}
+	status, err := mapOrderStatus(response.Order.State)
+	return strings.TrimSpace(response.Order.ID), status, err
+}
+
 // GetPositions returns current Polymarket positions mapped to domain positions.
 func (b *Broker) GetPositions(ctx context.Context) ([]domain.Position, error) {
 	if b == nil || b.client == nil {
@@ -463,8 +489,9 @@ func mapCreateOrderRequest(order *domain.Order) (createOrderRequest, error) {
 	}
 
 	request := createOrderRequest{
-		MarketSlug: marketSlug,
-		Intent:     intent,
+		MarketSlug:    marketSlug,
+		Intent:        intent,
+		ClientOrderID: strings.TrimSpace(order.ClientOrderID),
 	}
 
 	switch order.OrderType {

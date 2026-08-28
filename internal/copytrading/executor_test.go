@@ -24,6 +24,7 @@ func TestMatchingCopyOrderResultRequiresOneExactStockCommand(t *testing.T) {
 	accountID, subscriptionID, runID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	price := 100.0
 	request := PaperOrderRequest{
+		ClaimID:      uuid.New(),
 		Subscription: domain.CopySubscription{ID: subscriptionID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored},
 		Intent:       domain.CopyTradeIntent{Ticker: "AAPL", Side: domain.OrderSideBuy, RequestedNotional: 1000, ExecutablePrice: &price},
 		OriginRunID:  runID,

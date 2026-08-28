@@ -52,6 +52,16 @@ func (r allocationOrderRepo) Create(ctx context.Context, order *domain.Order) er
 	return r.OrderRepository.Create(ctx, order)
 }
 
+func (r allocationOrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
+	locker, ok := r.OrderRepository.(repository.ExecutionAccountLocker)
+	if !ok {
+		return errors.New("portfolio: allocation order repository lacks execution account locker")
+	}
+	return locker.WithExecutionAccountLock(ctx, accountID, fn)
+}
+
+var _ repository.ExecutionAccountLocker = allocationOrderRepo{}
+
 func NewPaperOrderManagerProcessor(deps PaperOrderManagerProcessorDeps) *PaperOrderManagerProcessor {
 	return &PaperOrderManagerProcessor{deps: deps}
 }

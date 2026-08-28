@@ -35,3 +35,9 @@ type BrokerOrderStatus struct {
 type BrokerOrderStatusProvider interface {
 	GetOrderStatusResult(context.Context, string) (BrokerOrderStatus, error)
 }
+
+// BrokerClientOrderStatusProvider resolves the provider's client-order
+// idempotency key and returns the real provider order ID.
+type BrokerClientOrderStatusProvider interface {
+	GetOrderStatusByClientOrderIDResult(context.Context, string) (string, BrokerOrderStatus, error)
+}

@@ -662,6 +662,14 @@ type AtomicOptionCloseRepository interface {
 	ReconcileOptionCloseReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error
 }
 
+type AtomicOptionOrderRepository interface {
+	CreateOptionOrders(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []*domain.Order) error
+}
+
+type OptionCloseReservationLookup interface {
+	GetOptionClosePositionByOrder(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID) (*domain.Position, error)
+}
+
 type AtomicPredictionExitRepository interface {
 	CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error
 	ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
@@ -1049,5 +1057,6 @@ type CopyTradingRepository interface {
 	ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error)
 	UpdateIntent(ctx context.Context, intent *domain.CopyTradeIntent) error
 	ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error)
+	GetClaimedIntentExecution(ctx context.Context, intentID, claimID uuid.UUID) (*domain.CopyTradeIntent, *domain.CopySubscription, error)
 	CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, claimID uuid.UUID) (bool, error)
 }

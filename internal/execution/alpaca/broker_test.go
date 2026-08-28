@@ -411,6 +411,26 @@ func TestBrokerGetOrderStatus_MapsAlpacaStatuses(t *testing.T) {
 	}
 }
 
+func TestBrokerOrderStatusResultCarriesAuthoritativePartialFillAndClientLookup(t *testing.T) {
+	filledAt := "2026-08-28T14:03:02.123456Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/orders:by_client_order_id" || r.URL.Query().Get("client_order_id") != "augr-restart-1" {
+			t.Fatalf("lookup request = %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"id":"alpaca-real-42","status":"partially_filled","filled_qty":"3.5","filled_avg_price":"101.25","filled_at":"` + filledAt + `"}`))
+	}))
+	defer server.Close()
+	client := NewClient("test-key", "test-secret", true, discardLogger())
+	client.SetBaseURL(server.URL)
+	externalID, result, err := NewBroker(client).GetOrderStatusByClientOrderIDResult(context.Background(), "augr-restart-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if externalID != "alpaca-real-42" || result.Status != domain.OrderStatusPartial || result.FilledQuantity != 3.5 || result.FilledAvgPrice == nil || *result.FilledAvgPrice != 101.25 || result.FilledAt == nil || result.FilledAt.Format(time.RFC3339Nano) != filledAt {
+		t.Fatalf("lookup result = %q %+v", externalID, result)
+	}
+}
+
 func TestBrokerGetOrderStatus_RejectsInvalidStatus(t *testing.T) {
 	t.Parallel()
 

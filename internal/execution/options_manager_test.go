@@ -32,6 +32,11 @@ func (b *mockOptionsBroker) GetOrderStatusResult(ctx context.Context, id string)
 	return execution.BrokerOrderStatus{}, execution.ErrBrokerOrderNotFound
 }
 
+func (b *mockOptionsBroker) GetOrderStatusByClientOrderIDResult(ctx context.Context, id string) (string, execution.BrokerOrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, id)
+	return id, result, err
+}
+
 type malformedAsyncSpreadBroker struct{}
 
 func (malformedAsyncSpreadBroker) SubmitOptionOrder(context.Context, *domain.Order) (string, error) {
@@ -486,14 +491,42 @@ func TestReconcilePendingOptionOrderUsesClientIDAndPersistsFill(t *testing.T) {
 		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
 	}}
 	fillRepo := &recordingOptionFillRepo{}
-	orderRepo := &mockOrderRepo{}
-	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
 	strategyID := uuid.New()
 	order := domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: clientID, Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusPending}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := order; return &copy, nil }}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
 	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, []domain.Order{order}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(fillRepo.batches) != 1 || len(fillRepo.batches[0]) != 1 || fillRepo.batches[0][0].Order.ClientOrderID != clientID {
 		t.Fatalf("recovered fills = %+v", fillRepo.batches)
+	}
+}
+
+func TestReconcileOptionSpreadReloadsEveryNonterminalLegAndPersistsOneBatch(t *testing.T) {
+	price, filledAt, groupID := 1.25, time.Now().UTC(), uuid.New()
+	strategyID := uuid.New()
+	orders := make([]domain.Order, 2)
+	byID := make(map[uuid.UUID]domain.Order, 2)
+	for i := range orders {
+		orders[i] = domain.Order{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, ClientOrderID: "spread-client-" + uuid.NewString(), ExternalID: "spread-real-" + uuid.NewString(), Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, Quantity: 1, Status: domain.OrderStatusSubmitted, LegGroupID: &groupID}
+		byID[orders[i].ID] = orders[i]
+	}
+	broker := &mockOptionsBroker{getOrderStatusFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
+		return execution.BrokerOrderStatus{Status: domain.OrderStatusFilled, FilledQuantity: 1, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
+	}}
+	reloads := 0
+	orderRepo := &mockOrderRepo{getFn: func(_ context.Context, id uuid.UUID) (*domain.Order, error) {
+		reloads++
+		value := byID[id]
+		return &value, nil
+	}}
+	fillRepo := &recordingOptionFillRepo{}
+	mgr := newTestOptionsManagerWithFillRepo(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{}, fillRepo)
+	if err := mgr.ReconcilePendingOptionOrders(context.Background(), testExecutionAccountBinding, orders, nil); err != nil {
+		t.Fatal(err)
+	}
+	if reloads != 2 || len(fillRepo.batches) != 1 || len(fillRepo.batches[0]) != 2 {
+		t.Fatalf("reloads=%d batches=%v", reloads, fillRepo.batches)
 	}
 }

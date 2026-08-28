@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
@@ -28,10 +29,11 @@ type submitOrderRequest struct {
 	TimeInForce   string `json:"time_in_force"`
 	ExtendedHours bool   `json:"extended_hours,omitempty"`
 
-	LimitPrice   string `json:"limit_price,omitempty"`
-	StopPrice    string `json:"stop_price,omitempty"`
-	TrailPrice   string `json:"trail_price,omitempty"`
-	TrailPercent string `json:"trail_percent,omitempty"`
+	LimitPrice    string `json:"limit_price,omitempty"`
+	StopPrice     string `json:"stop_price,omitempty"`
+	TrailPrice    string `json:"trail_price,omitempty"`
+	TrailPercent  string `json:"trail_percent,omitempty"`
+	ClientOrderID string `json:"client_order_id,omitempty"`
 }
 
 type submitOrderResponse struct {
@@ -39,7 +41,11 @@ type submitOrderResponse struct {
 }
 
 type orderStatusResponse struct {
-	Status string `json:"status"`
+	ID             string  `json:"id"`
+	Status         string  `json:"status"`
+	FilledQty      string  `json:"filled_qty"`
+	FilledAvgPrice *string `json:"filled_avg_price"`
+	FilledAt       *string `json:"filled_at"`
 }
 
 type positionResponse struct {
@@ -113,31 +119,82 @@ func (b *Broker) CancelOrder(ctx context.Context, externalID string) error {
 
 // GetOrderStatus fetches an Alpaca order by external ID and maps its status.
 func (b *Broker) GetOrderStatus(ctx context.Context, externalID string) (domain.OrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, externalID)
+	return result.Status, err
+}
+
+func (b *Broker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
 	if b == nil || b.client == nil {
-		return "", errors.New("alpaca: broker client is required")
+		return execution.BrokerOrderStatus{}, errors.New("alpaca: broker client is required")
 	}
 
 	orderID := strings.TrimSpace(externalID)
 	if orderID == "" {
-		return "", errors.New("alpaca: external order id is required")
+		return execution.BrokerOrderStatus{}, errors.New("alpaca: external order id is required")
 	}
 
 	responseBody, err := b.client.Get(ctx, "/v2/orders/"+url.PathEscape(orderID), nil)
 	if err != nil {
-		return "", fmt.Errorf("alpaca: get order status: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: get order status: %w", err)
 	}
 
 	var response orderStatusResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return "", fmt.Errorf("alpaca: decode order status response: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: decode order status response: %w", err)
 	}
+	return mapBrokerOrderStatus(response)
+}
 
+func (b *Broker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	if b == nil || b.client == nil {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: broker client is required")
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: client order id is required")
+	}
+	body, err := b.client.Get(ctx, "/v2/orders:by_client_order_id", url.Values{"client_order_id": []string{clientOrderID}})
+	if err != nil {
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: lookup client order id: %w", err)
+	}
+	var response orderStatusResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: decode client order lookup: %w", err)
+	}
+	if strings.TrimSpace(response.ID) == "" {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: client order lookup missing provider id")
+	}
+	result, err := mapBrokerOrderStatus(response)
+	return strings.TrimSpace(response.ID), result, err
+}
+
+func mapBrokerOrderStatus(response orderStatusResponse) (execution.BrokerOrderStatus, error) {
 	status, err := mapOrderStatus(response.Status)
 	if err != nil {
-		return "", err
+		return execution.BrokerOrderStatus{}, err
 	}
-
-	return status, nil
+	result := execution.BrokerOrderStatus{Status: status}
+	if strings.TrimSpace(response.FilledQty) != "" {
+		result.FilledQuantity, err = strconv.ParseFloat(response.FilledQty, 64)
+		if err != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid filled quantity: %w", err)
+		}
+	}
+	if response.FilledAvgPrice != nil && strings.TrimSpace(*response.FilledAvgPrice) != "" {
+		price, parseErr := strconv.ParseFloat(*response.FilledAvgPrice, 64)
+		if parseErr != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid filled average price: %w", parseErr)
+		}
+		result.FilledAvgPrice = &price
+	}
+	if response.FilledAt != nil && strings.TrimSpace(*response.FilledAt) != "" {
+		filledAt, parseErr := time.Parse(time.RFC3339Nano, *response.FilledAt)
+		if parseErr != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid filled at: %w", parseErr)
+		}
+		result.FilledAt = &filledAt
+	}
+	return result, nil
 }
 
 // GetPositions returns current Alpaca positions mapped to domain positions.
@@ -233,11 +290,12 @@ func mapSubmitOrderRequest(order *domain.Order) (submitOrderRequest, error) {
 	}
 
 	request := submitOrderRequest{
-		Symbol:      symbol,
-		Qty:         formatFloat(order.Quantity),
-		Side:        side,
-		Type:        orderType,
-		TimeInForce: defaultTimeInForce,
+		Symbol:        symbol,
+		Qty:           formatFloat(order.Quantity),
+		Side:          side,
+		Type:          orderType,
+		TimeInForce:   defaultTimeInForce,
+		ClientOrderID: strings.TrimSpace(order.ClientOrderID),
 	}
 
 	switch order.OrderType {

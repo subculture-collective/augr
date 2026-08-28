@@ -53,7 +53,7 @@ type templateSender interface {
 }
 
 type stopOrderLookup interface {
-	GetOrderStatus(context.Context, string) (domain.OrderStatus, error)
+	GetOrderByClientOrderID(context.Context, string) (string, domain.OrderStatus, error)
 }
 
 type guardState int32
@@ -336,17 +336,20 @@ func (g *StopGuard) OnTick(ctx context.Context, t marketdata.Tick) {
 			if g.logger != nil {
 				g.logger.Error("polymarket stop guard send failed", "slug", entry.slug, "position_id", entry.positionID, "err", err)
 			}
-			lookup, ok := g.broker.(stopOrderLookup)
-			if !ok {
+			var externalID string
+			var status domain.OrderStatus
+			var lookupErr error
+			if lookup, ok := g.broker.(stopOrderLookup); ok {
+				externalID, status, lookupErr = lookup.GetOrderByClientOrderID(ctx, entry.order.ClientOrderID)
+			} else {
 				entry.state.Store(int32(guardFired))
 				continue
 			}
-			status, lookupErr := lookup.GetOrderStatus(ctx, entry.order.ClientOrderID)
 			if lookupErr != nil || (status != domain.OrderStatusPending && status != domain.OrderStatusSubmitted && status != domain.OrderStatusPartial && status != domain.OrderStatusFilled) {
 				entry.state.Store(int32(guardFired))
 				continue
 			}
-			response = &CreateOrderResponse{ID: entry.order.ClientOrderID}
+			response = &CreateOrderResponse{ID: externalID}
 		}
 		if response == nil || strings.TrimSpace(response.ID) == "" {
 			entry.state.Store(int32(guardFired))

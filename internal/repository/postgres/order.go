@@ -27,6 +27,8 @@ type OrderRepo struct {
 var _ repository.OrderRepository = (*OrderRepo)(nil)
 var _ repository.ExecutionAccountLocker = (*OrderRepo)(nil)
 var _ repository.AtomicOptionCloseRepository = (*OrderRepo)(nil)
+var _ repository.AtomicOptionOrderRepository = (*OrderRepo)(nil)
+var _ repository.OptionCloseReservationLookup = (*OrderRepo)(nil)
 
 // NewOrderRepo returns an OrderRepo backed by the given connection pool.
 func NewOrderRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OrderRepo {
@@ -76,6 +78,9 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 	if (order.AllocationOpportunityID == nil) != (order.AllocationClaimID == nil) {
 		return fmt.Errorf("postgres: create order: allocation opportunity and claim must be provided together")
 	}
+	if order.OriginType == "copy_subscription" && (order.CopyIntentID == nil || order.CopyExecutionClaimID == nil) {
+		return fmt.Errorf("postgres: create order: copy intent and execution claim are required")
+	}
 	if err := validateOptionalPipelineRunRef(order.PipelineRunID, order.PipelineRunTradeDate); err != nil {
 		return fmt.Errorf("postgres: create order: %w", err)
 	}
@@ -100,6 +105,17 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 				  AND $4::text IS NOT NULL AND $5::text IS NOT NULL AND $6::text IS NOT NULL
 				  AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL AND $7::date IS NOT NULL
 			)
+		), locked_copy_subscription AS (
+			SELECT id FROM copy_subscriptions
+			WHERE $5='copy_subscription' AND id=$6::uuid AND account_id=$3 AND environment=$4 AND status='paper_active' AND is_paper=true
+			FOR SHARE
+		), copy_authorized AS (
+			SELECT 1 WHERE $5<>'copy_subscription' OR EXISTS (
+				SELECT 1 FROM locked_copy_subscription s
+				JOIN copy_origin_rebalance_intents ri ON ri.run_id=$8 AND ri.account_id=$3 AND ri.environment=$4 AND ri.origin_type=$5 AND ri.origin_id=$6
+				JOIN copy_trade_intents i ON i.id=ri.intent_id AND i.subscription_id=s.id AND i.account_id=$3 AND i.environment=$4
+				WHERE i.id=$36 AND i.ticker=$10 AND i.side=$12 AND i.execution_claim_id=$37 AND i.status='received' AND i.order_id IS NULL
+			)
 		)
 		INSERT INTO orders (
 			strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
@@ -109,7 +125,7 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 			option_type, strike, expiry, contract_multiplier, position_intent, leg_group_id,
 			prediction_side, polymarket_intent, allocation_opportunity_id, client_order_id
 		)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35 FROM authorized
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35 FROM authorized,copy_authorized
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
@@ -146,6 +162,8 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 		order.AllocationOpportunityID,
 		order.AllocationClaimID,
 		nullString(order.ClientOrderID),
+		order.CopyIntentID,
+		order.CopyExecutionClaimID,
 	)
 
 	if err := row.Scan(&order.ID, &order.CreatedAt); err != nil {
@@ -186,6 +204,43 @@ func (r *OrderRepo) CreateOptionCloseOrdersAndReserve(ctx context.Context, accou
 		return fmt.Errorf("postgres: atomic option close commit: %w", err)
 	}
 	return nil
+}
+
+func (r *OrderRepo) CreateOptionOrders(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, orders []*domain.Order) error {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || strings.TrimSpace(originType) == "" || strings.TrimSpace(originID) == "" || len(orders) == 0 {
+		return fmt.Errorf("postgres: atomic option orders: complete account-bound batch is required")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("postgres: atomic option orders begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, order := range orders {
+		if order == nil || order.AccountID != accountID || order.Environment != environment || order.OriginType != originType || order.OriginID != originID || order.MarketType.Normalize() != domain.MarketTypeOptions || order.Status != domain.OrderStatusPending || order.PositionIntent == nil || (*order.PositionIntent != domain.PositionIntentBuyToOpen && *order.PositionIntent != domain.PositionIntentSellToOpen) {
+			return fmt.Errorf("postgres: atomic option orders: invalid opening order")
+		}
+		if err := r.create(ctx, tx, order); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: atomic option orders commit: %w", err)
+	}
+	return nil
+}
+
+func (r *OrderRepo) GetOptionClosePositionByOrder(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, orderID uuid.UUID) (*domain.Position, error) {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || orderID == uuid.Nil {
+		return nil, fmt.Errorf("postgres: option close reservation lookup: invalid identity")
+	}
+	position, err := scanPosition(r.pool.QueryRow(ctx, positionSelectSQL+` WHERE p.account_id=$1 AND p.environment=$2 AND p.close_reservation_order_id=$3`, accountID, environment, orderID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: option close reservation lookup: %w", repository.ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: option close reservation lookup: %w", err)
+	}
+	return position, nil
 }
 
 func (r *OrderRepo) ReleaseOptionClosePositions(ctx context.Context, accountID uuid.UUID, positionIDs, orderIDs []uuid.UUID) error {

@@ -121,8 +121,11 @@ func (s *Settler) SettleDecisions(ctx context.Context, marketType domain.MarketT
 		if err != nil {
 			return settled, fmt.Errorf("prediction settlement: get decision %s: %w", id, err)
 		}
-		if decision == nil || decision.AccountID != s.executionAccount.AccountID() || decision.Environment != s.executionAccount.Environment() || decision.Status != domain.TradeDecisionStatusPaper || decision.MarketType.Normalize() != marketType || strings.TrimSpace(decision.InstrumentKey) != instrument {
+		if decision == nil || decision.AccountID != s.executionAccount.AccountID() || decision.Environment != s.executionAccount.Environment() || (decision.Status != domain.TradeDecisionStatusPaper && decision.Status != domain.TradeDecisionStatusClosed) || decision.MarketType.Normalize() != marketType || strings.TrimSpace(decision.InstrumentKey) != instrument {
 			return settled, fmt.Errorf("prediction settlement: decision %s changed before settlement", id)
+		}
+		if decision.Status == domain.TradeDecisionStatusClosed && s.financialLifecycle == nil {
+			return settled, fmt.Errorf("prediction settlement: closed decision %s requires repository idempotency", id)
 		}
 		if err := s.settleDecision(ctx, decision, winner, resolvedAt); err != nil {
 			return settled, err

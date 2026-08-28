@@ -62,6 +62,11 @@ func (b *mockBroker) GetOrderStatusResult(ctx context.Context, externalID string
 	return execution.BrokerOrderStatus{Status: status}, err
 }
 
+func (b *mockBroker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, clientOrderID)
+	return clientOrderID, result, err
+}
+
 func (b *mockBroker) SubmitOrder(ctx context.Context, order *domain.Order) (string, error) {
 	if b.submitOrderFn != nil {
 		return b.submitOrderFn(ctx, order)
@@ -295,6 +300,15 @@ func (r *mockOrderRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID,
 }
 
 func (r *mockOrderRepo) CreateOptionCloseOrdersAndReserve(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ string, _ []uuid.UUID, orders []*domain.Order) error {
+	for _, order := range orders {
+		if err := r.Create(ctx, order); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *mockOrderRepo) CreateOptionOrders(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ string, orders []*domain.Order) error {
 	for _, order := range orders {
 		if err := r.Create(ctx, order); err != nil {
 			return err
@@ -1085,6 +1099,32 @@ func TestReconcilePersistedOrderRejectsZeroBrokerFillPrice(t *testing.T) {
 	}
 	if financial.called != 0 {
 		t.Fatalf("financial fill calls=%d, want 0", financial.called)
+	}
+}
+
+func TestReconcilePersistedCancelledOrderPersistsQuantityAdvanceBeforeTerminalState(t *testing.T) {
+	scope := strategyScope(uuid.New(), uuid.New())
+	originType, originID := scope.Origin()
+	run, _ := scope.PipelineRun()
+	orderID, strategyID := uuid.New(), uuid.New()
+	price, filledAt := 101.5, time.Now().UTC()
+	order := &domain.Order{ID: orderID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, StrategyID: &strategyID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, ExternalID: "alpaca-real", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 10, Status: domain.OrderStatusSubmitted}
+	broker := &mockBroker{getOrderResultFn: func(context.Context, string) (execution.BrokerOrderStatus, error) {
+		return execution.BrokerOrderStatus{Status: domain.OrderStatusCancelled, FilledQuantity: 4, FilledAvgPrice: &price, FilledAt: &filledAt}, nil
+	}}
+	positionID, tradeID := uuid.New(), uuid.New()
+	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}}}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := *order; return &copy, nil }}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(&recoveryDecisionRecorder{decisionID: uuid.New()})
+	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != domain.OrderStatusCancelled || financial.called != 1 || financial.input.FillIntent.Quantity != 4 {
+		t.Fatalf("status=%s fills=%d input=%+v", status, financial.called, financial.input.FillIntent)
+	}
+	if len(orderRepo.updates) == 0 || orderRepo.updates[len(orderRepo.updates)-1].Status != domain.OrderStatusCancelled || orderRepo.updates[len(orderRepo.updates)-1].FilledQuantity != 4 {
+		t.Fatalf("terminal update=%+v", orderRepo.updates)
 	}
 }
 

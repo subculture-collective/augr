@@ -2,6 +2,7 @@ package copytrading
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -35,6 +36,25 @@ type OrderManagerExecutorDeps struct {
 // order lifecycle. It never enables live trading.
 type OrderManagerExecutor struct{ deps OrderManagerExecutorDeps }
 
+type claimedCopyOrderRepo struct {
+	repository.OrderRepository
+	intentID uuid.UUID
+	claimID  uuid.UUID
+}
+
+func (r claimedCopyOrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	order.CopyIntentID, order.CopyExecutionClaimID = &r.intentID, &r.claimID
+	return r.OrderRepository.Create(ctx, order)
+}
+
+func (r claimedCopyOrderRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
+	locker, ok := r.OrderRepository.(repository.ExecutionAccountLocker)
+	if !ok {
+		return fmt.Errorf("copy order repository lacks execution account locker")
+	}
+	return locker.WithExecutionAccountLock(ctx, accountID, fn)
+}
+
 func NewOrderManagerExecutor(deps OrderManagerExecutorDeps) *OrderManagerExecutor {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
@@ -43,6 +63,23 @@ func NewOrderManagerExecutor(deps OrderManagerExecutorDeps) *OrderManagerExecuto
 }
 
 func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
+	if e == nil || e.deps.Orders == nil {
+		return PaperOrderResult{}, fmt.Errorf("copy paper executor dependencies are unavailable")
+	}
+	locker, ok := e.deps.Orders.(repository.ExecutionAccountLocker)
+	if !ok {
+		return PaperOrderResult{}, fmt.Errorf("copy pending recovery requires execution account locker")
+	}
+	var result PaperOrderResult
+	err := locker.WithExecutionAccountLock(ctx, request.Scope.AccountID(), func() error {
+		var innerErr error
+		result, innerErr = e.executeCopyOrderLocked(ctx, request)
+		return innerErr
+	})
+	return result, err
+}
+
+func (e *OrderManagerExecutor) executeCopyOrderLocked(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
 	if e == nil || e.deps.Broker == nil || e.deps.Risk == nil || e.deps.Positions == nil || e.deps.Orders == nil || e.deps.Trades == nil {
 		return PaperOrderResult{}, fmt.Errorf("copy paper executor dependencies are unavailable")
 	}
@@ -60,6 +97,9 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 	if request.Scope.AccountID() != request.Subscription.AccountID || request.Scope.Environment() != request.Subscription.Environment || request.Scope.CopyOriginRunID() != request.OriginRunID {
 		return PaperOrderResult{}, fmt.Errorf("copy execution scope does not match persisted subscription and run")
 	}
+	if request.ClaimID == uuid.Nil {
+		return PaperOrderResult{}, fmt.Errorf("copy execution claim is required")
+	}
 	existing, err := e.deps.Orders.GetByCopyOriginRun(ctx, e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), request.Subscription.ID, request.OriginRunID, repository.OrderFilter{Ticker: request.Intent.Ticker, Side: request.Intent.Side}, 2, 0)
 	if err != nil {
 		return PaperOrderResult{}, err
@@ -72,7 +112,8 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 		return PaperOrderResult{}, fmt.Errorf("paper account equity is not positive")
 	}
 	fraction := request.Intent.RequestedNotional / balance.Equity
-	manager := execution.NewOrderManager(e.deps.Broker, "paper", e.deps.Risk, e.deps.Positions, e.deps.Orders, e.deps.Trades, e.deps.Audit, e.deps.Events, execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: fraction}, e.deps.Logger).
+	orderRepo := claimedCopyOrderRepo{OrderRepository: e.deps.Orders, intentID: request.Intent.ID, claimID: request.ClaimID}
+	manager := execution.NewOrderManager(e.deps.Broker, "paper", e.deps.Risk, e.deps.Positions, orderRepo, e.deps.Trades, e.deps.Audit, e.deps.Events, execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: fraction}, e.deps.Logger).
 		WithFinancialLifecycleRepo(e.deps.FinancialLifecycle).
 		WithDecisionRecorder(e.deps.DecisionRecorder).
 		WithLiveTrading(false)
@@ -92,14 +133,32 @@ func (e *OrderManagerExecutor) ExecuteCopyOrder(ctx context.Context, request Pap
 		if matchErr != nil || result.Status != domain.OrderStatusPending {
 			return result, matchErr
 		}
-		order := existing[0]
-		externalID, submitErr := e.deps.Broker.SubmitOrder(ctx, &order)
-		if submitErr != nil {
-			order.Status = domain.OrderStatusRejected
-			_ = e.deps.Orders.Update(ctx, &order)
-			return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, fmt.Errorf("resume pending copy order: %w", submitErr)
+		persisted, reloadErr := e.deps.Orders.Get(ctx, existing[0].ID)
+		if reloadErr != nil {
+			return PaperOrderResult{}, fmt.Errorf("reload pending copy order: %w", reloadErr)
 		}
-		order.ExternalID = externalID
+		order := *persisted
+		provider, ok := any(e.deps.Broker).(execution.BrokerClientOrderStatusProvider)
+		if !ok {
+			return PaperOrderResult{}, fmt.Errorf("copy pending recovery requires client-id lookup")
+		}
+		externalID, brokerResult, lookupErr := provider.GetOrderStatusByClientOrderIDResult(ctx, order.ClientOrderID)
+		if lookupErr != nil && !errors.Is(lookupErr, execution.ErrBrokerOrderNotFound) {
+			return PaperOrderResult{}, fmt.Errorf("lookup pending copy order: %w", lookupErr)
+		}
+		if errors.Is(lookupErr, execution.ErrBrokerOrderNotFound) {
+			var submitErr error
+			externalID, submitErr = e.deps.Broker.SubmitOrder(ctx, &order)
+			if submitErr != nil {
+				return PaperOrderResult{Scope: scope, OrderID: &order.ID, Status: order.Status}, fmt.Errorf("resume pending copy order remains ambiguous: %w", submitErr)
+			}
+			brokerResult, lookupErr = e.deps.Broker.GetOrderStatusResult(ctx, externalID)
+			if lookupErr != nil {
+				return PaperOrderResult{}, fmt.Errorf("verify resumed copy order: %w", lookupErr)
+			}
+		}
+		order.ExternalID, order.Status = externalID, brokerResult.Status
+		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, brokerResult.FilledAvgPrice, brokerResult.FilledAt
 		submittedAt := time.Now().UTC()
 		order.SubmittedAt = &submittedAt
 		if order.Status == domain.OrderStatusPending {

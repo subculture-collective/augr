@@ -16,18 +16,24 @@ import (
 )
 
 type fakeBroker struct {
-	prepareTmpl  *OrderTemplate
-	sendCalls    atomic.Int32
-	sendErr      error
-	lastTmpl     *OrderTemplate
-	lastOrder    *domain.Order
-	mu           sync.Mutex
-	lookupStatus domain.OrderStatus
-	lookupErr    error
+	prepareTmpl         *OrderTemplate
+	sendCalls           atomic.Int32
+	sendErr             error
+	lastTmpl            *OrderTemplate
+	lastOrder           *domain.Order
+	mu                  sync.Mutex
+	lookupStatus        domain.OrderStatus
+	lookupErr           error
+	lookupExternalID    string
+	submittedExternalID string
 }
 
 func (f *fakeBroker) GetOrderStatus(context.Context, string) (domain.OrderStatus, error) {
 	return f.lookupStatus, f.lookupErr
+}
+
+func (f *fakeBroker) GetOrderByClientOrderID(context.Context, string) (string, domain.OrderStatus, error) {
+	return f.lookupExternalID, f.lookupStatus, f.lookupErr
 }
 
 type sharedExitClaims struct {
@@ -81,7 +87,8 @@ func (f *fakeBroker) ReleasePredictionExitPosition(context.Context, uuid.UUID, u
 	return nil
 }
 
-func (f *fakeBroker) MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error {
+func (f *fakeBroker) MarkPredictionExitSubmitted(_ context.Context, _ uuid.UUID, _ uuid.UUID, externalID string, _ time.Time) error {
+	f.submittedExternalID = externalID
 	return nil
 }
 
@@ -246,7 +253,7 @@ func TestStopGuard_DuplicateRegistrationRefreshesPersistedEconomics(t *testing.T
 }
 
 func TestStopGuard_AmbiguousSendRecoversByClientIDBeforeDisarm(t *testing.T) {
-	broker := &fakeBroker{sendErr: errors.New("timeout after send"), lookupStatus: domain.OrderStatusSubmitted}
+	broker := &fakeBroker{sendErr: errors.New("timeout after send"), lookupStatus: domain.OrderStatusSubmitted, lookupExternalID: "poly-real-42"}
 	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker})
 	if err != nil {
 		t.Fatal(err)
@@ -257,6 +264,9 @@ func TestStopGuard_AmbiguousSendRecoversByClientIDBeforeDisarm(t *testing.T) {
 	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.44, ReceivedAt: time.Now()})
 	if g.Active() != 0 {
 		t.Fatalf("recovered submitted stop remained armed")
+	}
+	if broker.submittedExternalID != "poly-real-42" {
+		t.Fatalf("persisted external id = %q", broker.submittedExternalID)
 	}
 }
 

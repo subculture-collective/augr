@@ -433,6 +433,26 @@ func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, cl
 	return tag.RowsAffected() == 1, nil
 }
 
+func (r *CopyTradingRepo) GetClaimedIntentExecution(ctx context.Context, intentID, claimID uuid.UUID) (*domain.CopyTradeIntent, *domain.CopySubscription, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	intent, err := scanCopyIntent(tx.QueryRow(ctx, copyIntentSelect+` WHERE id=$1 AND account_id=$2 AND execution_claim_id=$3 AND status='received' FOR UPDATE`, intentID, r.accountID, claimID))
+	if err != nil {
+		return nil, nil, copyRepoNotFound("claimed intent", err)
+	}
+	subscription, err := scanCopySubscription(tx.QueryRow(ctx, copySubscriptionSelect+` WHERE id=$1 AND account_id=$2 AND environment=$3 AND status='paper_active' AND is_paper=true FOR SHARE`, intent.SubscriptionID, r.accountID, intent.Environment))
+	if err != nil {
+		return nil, nil, copyRepoNotFound("active claimed subscription", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return intent, subscription, nil
+}
+
 func (r *CopyTradingRepo) CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, claimID uuid.UUID) (bool, error) {
 	tag, err := r.pool.Exec(ctx, `UPDATE copy_trade_intents
 		SET risk_status=$3,risk_reasons=$4,order_id=$5,status=$6,

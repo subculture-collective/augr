@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 )
 
 // OptionsBroker extends the standard Alpaca broker with options support.
@@ -33,6 +34,21 @@ type optionOrderRequest struct {
 	LimitPrice     string `json:"limit_price,omitempty"`
 	OrderClass     string `json:"order_class"`
 	PositionIntent string `json:"position_intent"`
+	ClientOrderID  string `json:"client_order_id,omitempty"`
+}
+
+func (b *OptionsBroker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
+	if b == nil {
+		return execution.BrokerOrderStatus{}, errors.New("alpaca: options broker is required")
+	}
+	return NewBroker(b.client).GetOrderStatusResult(ctx, externalID)
+}
+
+func (b *OptionsBroker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	if b == nil {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: options broker is required")
+	}
+	return NewBroker(b.client).GetOrderStatusByClientOrderIDResult(ctx, clientOrderID)
 }
 
 // mlegOrderRequest is the Alpaca multi-leg options order payload.
@@ -120,6 +136,7 @@ func (b *OptionsBroker) SubmitOptionOrder(ctx context.Context, order *domain.Ord
 		TimeInForce:    defaultTimeInForce,
 		OrderClass:     "simple",
 		PositionIntent: string(*order.PositionIntent),
+		ClientOrderID:  strings.TrimSpace(order.ClientOrderID),
 	}
 
 	if order.LimitPrice != nil {

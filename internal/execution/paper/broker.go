@@ -364,6 +364,27 @@ func (b *PaperBroker) GetOrderStatusResult(ctx context.Context, externalID strin
 	return execution.BrokerOrderStatus{Status: order.Status, FilledQuantity: order.FilledQuantity, FilledAvgPrice: cloneFloatPtr(order.FilledAvgPrice), FilledAt: cloneTimePtr(order.FilledAt)}, nil
 }
 
+func (b *PaperBroker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	if b == nil {
+		return "", execution.BrokerOrderStatus{}, errors.New("paper: broker is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", execution.BrokerOrderStatus{}, err
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return "", execution.BrokerOrderStatus{}, errors.New("paper: client order id is required")
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for externalID, order := range b.orders {
+		if order.ClientOrderID == clientOrderID {
+			return externalID, execution.BrokerOrderStatus{Status: order.Status, FilledQuantity: order.FilledQuantity, FilledAvgPrice: cloneFloatPtr(order.FilledAvgPrice), FilledAt: cloneTimePtr(order.FilledAt)}, nil
+		}
+	}
+	return "", execution.BrokerOrderStatus{}, fmt.Errorf("paper: client order %q not found: %w", clientOrderID, execution.ErrBrokerOrderNotFound)
+}
+
 // GetPositions returns a copy of the current open paper positions.
 func (b *PaperBroker) GetPositions(ctx context.Context) ([]domain.Position, error) {
 	if b == nil {

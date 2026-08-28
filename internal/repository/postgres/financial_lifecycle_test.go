@@ -131,6 +131,32 @@ func TestFinancialLifecycle_FirstDeliveryReplayRollbackAndPositions(t *testing.T
 	}
 }
 
+func TestFinancialLifecycleLockedOrderOwnsCommandAndCapsCumulativeQuantity(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := &DB{Pool: pool}
+	strategyID := createFinancialLifecycleStrategy(t, ctx, pool)
+	now := time.Now().UTC()
+	persisted := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Status: domain.OrderStatusSubmitted, Quantity: 2}
+	createFinancialLifecycleOrder(t, ctx, pool, persisted)
+	tampered := *persisted
+	tampered.Ticker, tampered.MarketType = "MSFT", domain.MarketTypePolymarket
+	result, err := repo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: "locked-command", Order: &tampered, FillIntent: repository.OrderFillIntent{Side: domain.OrderSideBuy, Quantity: 1, ExecutionPrice: 100}, Now: now, Trade: &domain.Trade{ID: uuid.New()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Position == nil || result.Position.Ticker != "AAPL" || result.Trade == nil || result.Trade.Ticker != "AAPL" {
+		t.Fatalf("persisted command was not authoritative: %+v", result)
+	}
+	overfill := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, Ticker: "NVDA", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Status: domain.OrderStatusSubmitted, Quantity: 2}
+	createFinancialLifecycleOrder(t, ctx, pool, overfill)
+	_, err = repo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: "overfill", Order: overfill, FillIntent: repository.OrderFillIntent{Side: domain.OrderSideBuy, Quantity: 3, ExecutionPrice: 100}, Now: now, Trade: &domain.Trade{ID: uuid.New()}})
+	if err == nil || !strings.Contains(err.Error(), "exceeds persisted order size") {
+		t.Fatalf("overfill error=%v", err)
+	}
+}
+
 func TestFinancialLifecycle_OptionSettlementCommitsPositionAndTradeAtomically(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)

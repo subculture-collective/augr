@@ -230,6 +230,30 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	}
 }
 
+func TestOrderRepoIntegration_OpeningSpreadCreationRollsBackIncompleteBatch(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
+	strategyID := createTestStrategy(t, ctx, pool)
+	originID := uuid.NewString()
+	intent := domain.PositionIntentBuyToOpen
+	orders := []*domain.Order{
+		{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: originID, StrategyID: &strategyID, Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, PositionIntent: &intent},
+		{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: originID, StrategyID: &strategyID, Ticker: "AAPL271217P00140000", MarketType: domain.MarketTypeOptions, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusRejected, PositionIntent: &intent},
+	}
+	if err := repo.CreateOptionOrders(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, "strategy_version", originID, orders); err == nil {
+		t.Fatal("CreateOptionOrders() error=nil")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders WHERE id=ANY($1)`, []uuid.UUID{orders[0].ID, orders[1].ID}).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("persisted spread legs=%d", count)
+	}
+}
+
 func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	t.Helper()
 

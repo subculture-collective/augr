@@ -95,12 +95,15 @@ type strategyWriteTrap struct {
 
 type cancellationRaceCopyRepo struct {
 	repository.CopyTradingRepository
-	subscription domain.CopySubscription
-	observation  domain.CopySourceObservation
-	snapshot     domain.CopyPortfolioSnapshot
-	mapping      domain.CopyInstrumentMapping
-	intentWrites int
-	completed    *domain.CopyTradeIntent
+	subscription    domain.CopySubscription
+	observation     domain.CopySourceObservation
+	snapshot        domain.CopyPortfolioSnapshot
+	mapping         domain.CopyInstrumentMapping
+	intentWrites    int
+	intent          *domain.CopyTradeIntent
+	claimedIntentID uuid.UUID
+	stopAfterClaim  bool
+	completed       *domain.CopyTradeIntent
 }
 
 func (r *cancellationRaceCopyRepo) GetSubscription(context.Context, uuid.UUID) (*domain.CopySubscription, error) {
@@ -117,8 +120,10 @@ func (r *cancellationRaceCopyRepo) ListInstrumentMappings(context.Context, strin
 	return []domain.CopyInstrumentMapping{r.mapping}, nil
 }
 
-func (r *cancellationRaceCopyRepo) CreateIntent(context.Context, *domain.CopyTradeIntent) (bool, error) {
+func (r *cancellationRaceCopyRepo) CreateIntent(_ context.Context, intent *domain.CopyTradeIntent) (bool, error) {
 	r.intentWrites++
+	value := *intent
+	r.intent = &value
 	return true, nil
 }
 
@@ -126,8 +131,24 @@ func (r *cancellationRaceCopyRepo) UpdateIntent(context.Context, *domain.CopyTra
 	return nil
 }
 
-func (r *cancellationRaceCopyRepo) ClaimIntentExecution(context.Context, uuid.UUID, uuid.UUID, time.Time) (bool, error) {
+func (r *cancellationRaceCopyRepo) ClaimIntentExecution(_ context.Context, intentID uuid.UUID, _ uuid.UUID, _ time.Time) (bool, error) {
+	r.claimedIntentID = intentID
 	return true, nil
+}
+
+func (r *cancellationRaceCopyRepo) GetClaimedIntentExecution(_ context.Context, _ uuid.UUID, _ uuid.UUID) (*domain.CopyTradeIntent, *domain.CopySubscription, error) {
+	if r.stopAfterClaim {
+		return nil, nil, repository.ErrNotFound
+	}
+	var intent domain.CopyTradeIntent
+	if r.intent != nil && r.intent.ID == r.claimedIntentID {
+		intent = *r.intent
+	} else {
+		price := 100.0
+		intent = domain.CopyTradeIntent{ID: r.claimedIntentID, AccountID: r.subscription.AccountID, Environment: r.subscription.Environment, SubscriptionID: r.subscription.ID, OriginType: "copy_subscription", OriginID: r.subscription.ID, SourceObservationID: r.observation.ID, InstrumentKey: r.mapping.Ticker, Ticker: r.mapping.Ticker, Side: domain.OrderSideBuy, RequestedNotional: r.subscription.CapitalBudget, ExecutablePrice: &price, PolicyStatus: "approved", RiskStatus: "pending", Status: "received"}
+	}
+	subscription := r.subscription
+	return &intent, &subscription, nil
 }
 
 func (r *cancellationRaceCopyRepo) CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, _ uuid.UUID) (bool, error) {
@@ -500,6 +521,19 @@ func TestOriginNativeRebalanceUsesAtomicPlanningBoundary(t *testing.T) {
 		}
 		if executor.calls != 0 {
 			t.Fatalf("executor calls=%d, want 0", executor.calls)
+		}
+	})
+
+	t.Run("subscription stop after claim prevents child order", func(t *testing.T) {
+		repo.stopAfterClaim, executor.calls = true, 0
+		defer func() { repo.stopAfterClaim = false }()
+		service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, OriginRuns: &plannedOriginStore{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
+		_, err := service.Rebalance(context.Background(), subscription.ID)
+		if err == nil || !strings.Contains(err.Error(), "reauthorize claimed copy intent") {
+			t.Fatalf("Rebalance() error=%v", err)
+		}
+		if executor.calls != 0 {
+			t.Fatalf("executor calls=%d", executor.calls)
 		}
 	})
 
