@@ -143,7 +143,7 @@ func (*settlementTradeStub) Count(context.Context, repository.TradeFilter) (int,
 	return 0, nil
 }
 
-func (s *settlementTradeStub) GetByOrder(_ context.Context, orderID uuid.UUID, _ repository.TradeFilter, _, _ int) ([]domain.Trade, error) {
+func (s *settlementTradeStub) GetByOrder(_ context.Context, orderID uuid.UUID, _ repository.TradeFilter, limit, offset int) ([]domain.Trade, error) {
 	var out []domain.Trade
 	for _, trade := range s.trades {
 		if trade.OrderID != nil && *trade.OrderID == orderID {
@@ -151,6 +151,11 @@ func (s *settlementTradeStub) GetByOrder(_ context.Context, orderID uuid.UUID, _
 			out = append(out, trade)
 		}
 	}
+	if offset >= len(out) {
+		return nil, nil
+	}
+	end := min(offset+limit, len(out))
+	out = out[offset:end]
 	return out, nil
 }
 
@@ -203,6 +208,20 @@ func TestSettlerPreviewAcceptsMultiFillPositionResidual(t *testing.T) {
 	preview, err := settler.SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-MULTI")
 	if err != nil || preview.Count != 1 {
 		t.Fatalf("multi-fill residual preview = %+v, err=%v", preview, err)
+	}
+}
+
+func TestSettlerPreviewAggregatesEveryOpeningFillPage(t *testing.T) {
+	strategyID, orderID, decisionID, positionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{{ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-PAGED", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}}}
+	positions := &settlementPositionStub{position: domain.Position{ID: positionID, StrategyID: &strategyID, MarketType: domain.MarketTypeKalshi, Ticker: "KX-PAGED:YES", Side: domain.PositionSideLong, Quantity: 251, AvgEntry: .40}}
+	trades := &settlementTradeStub{trades: make([]domain.Trade, 251)}
+	for i := range trades.trades {
+		trades.trades[i] = domain.Trade{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Quantity: 1, Price: .40}
+	}
+	preview, err := NewSettler(testExecutionAccountBinding, &atomicLifecycleStub{}, decisions, positions, trades, &settlementReplayStub{}).SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-PAGED")
+	if err != nil || preview.Count != 1 {
+		t.Fatalf("paged fill preview = %+v, err=%v", preview, err)
 	}
 }
 

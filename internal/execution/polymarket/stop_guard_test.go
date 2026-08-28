@@ -36,6 +36,8 @@ type fakeBroker struct {
 	sentUnderLock        atomic.Bool
 	persistedUnderLock   atomic.Bool
 	claimedUnderLock     atomic.Bool
+	accountLockDepth     *atomic.Int32
+	lookupUnderLock      atomic.Bool
 }
 
 func (f *fakeBroker) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
@@ -49,6 +51,9 @@ func (f *fakeBroker) GetOrderStatus(context.Context, string) (domain.OrderStatus
 }
 
 func (f *fakeBroker) GetOrderStatusByClientOrderIDResult(context.Context, string) (string, execution.BrokerOrderStatus, error) {
+	if f.accountLockDepth != nil {
+		f.lookupUnderLock.Store(f.accountLockDepth.Load() > 0)
+	}
 	return f.lookupExternalID, execution.BrokerOrderStatus{Status: f.lookupStatus, FilledQuantity: f.lookupFilledQuantity, FilledAvgPrice: f.lookupFilledAvgPrice, FilledAt: f.lookupFilledAt}, f.lookupErr
 }
 
@@ -82,9 +87,12 @@ type sharedExitClaims struct {
 	reservedOrder          *domain.Order
 	createErrAfterCommit   bool
 	finalizeErrAfterCommit bool
+	lockDepth              atomic.Int32
 }
 
 func (r *sharedExitClaims) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	r.lockDepth.Add(1)
+	defer r.lockDepth.Add(-1)
 	return fn()
 }
 
@@ -521,16 +529,19 @@ func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
 	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusSubmitted, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", ClientOrderID: "reserved-stop-client"}
 	price := 0.41
 	filledAt := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
-	broker := &fakeBroker{lookupStatus: domain.OrderStatusFilled, lookupExternalID: "filled-venue-id", lookupFilledQuantity: 2, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt}
+	repo := &sharedExitClaims{reservedOrder: reserved}
+	broker := &fakeBroker{lookupStatus: domain.OrderStatusFilled, lookupExternalID: "filled-venue-id", lookupFilledQuantity: 2, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt, accountLockDepth: &repo.lockDepth}
 	financial := &recordingStopFinancialLifecycle{}
-	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: &sharedExitClaims{reservedOrder: reserved}, FinancialLifecycle: financial})
+	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: repo, FinancialLifecycle: financial})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := g.RegisterPositionContext(context.Background(), pos); err != nil {
 		t.Fatal(err)
 	}
-	g.OnTick(context.Background(), marketdata.Tick{Slug: "slug-a", Side: "YES", Price: 0.50, ReceivedAt: time.Now()})
+	if !broker.lookupUnderLock.Load() {
+		t.Fatal("bootstrap claimed-exit lookup ran outside account lock")
+	}
 	if len(financial.inputs) != 1 || !financial.inputs[0].Now.Equal(filledAt) || financial.inputs[0].FillIntent.Quantity != 2 {
 		t.Fatalf("recovered economics = %+v", financial.inputs)
 	}

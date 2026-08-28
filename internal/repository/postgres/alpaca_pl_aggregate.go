@@ -22,37 +22,41 @@ func NewAlpacaPLAggregateRepo(pool *pgxpool.Pool) *AlpacaPLAggregateRepo {
 	return &AlpacaPLAggregateRepo{pool: pool}
 }
 
-func (r *AlpacaPLAggregateRepo) ClosedRealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error) {
-	var total float64
-	if err := r.pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(p.realized_pnl, 0)), 0)
+const alpacaClosedRealizedPnLSQL = `SELECT COALESCE(SUM(COALESCE(p.realized_pnl, 0)), 0)
 		FROM positions p
 		WHERE p.account_id=$1 AND p.environment=$2 AND p.closed_at IS NOT NULL AND (
 			EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
 			EXISTS (
 				SELECT 1
 				FROM trades t
-				JOIN orders o ON o.id = t.order_id
-				WHERE t.position_id = p.id AND o.broker = 'alpaca'
+				JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment
+				WHERE t.position_id = p.id AND t.account_id=p.account_id AND t.environment=p.environment AND o.broker = 'alpaca'
 			)
-		)`, accountID, environment).Scan(&total); err != nil {
+		)`
+
+func (r *AlpacaPLAggregateRepo) ClosedRealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error) {
+	var total float64
+	if err := r.pool.QueryRow(ctx, alpacaClosedRealizedPnLSQL, accountID, environment).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: alpaca closed realized pnl: %w", err)
 	}
 	return total, nil
 }
 
-func (r *AlpacaPLAggregateRepo) OpenUnrealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error) {
-	var total float64
-	if err := r.pool.QueryRow(ctx, `SELECT COALESCE(SUM(COALESCE(p.unrealized_pnl, 0)), 0)
+const alpacaOpenUnrealizedPnLSQL = `SELECT COALESCE(SUM(COALESCE(p.unrealized_pnl, 0)), 0)
 		FROM positions p
 		WHERE p.account_id=$1 AND p.environment=$2 AND p.closed_at IS NULL AND (
 			EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
 			EXISTS (
 				SELECT 1
 				FROM trades t
-				JOIN orders o ON o.id = t.order_id
-				WHERE t.position_id = p.id AND o.broker = 'alpaca'
+				JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment
+				WHERE t.position_id = p.id AND t.account_id=p.account_id AND t.environment=p.environment AND o.broker = 'alpaca'
 			)
-		)`, accountID, environment).Scan(&total); err != nil {
+		)`
+
+func (r *AlpacaPLAggregateRepo) OpenUnrealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error) {
+	var total float64
+	if err := r.pool.QueryRow(ctx, alpacaOpenUnrealizedPnLSQL, accountID, environment).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: alpaca open unrealized pnl: %w", err)
 	}
 	return total, nil

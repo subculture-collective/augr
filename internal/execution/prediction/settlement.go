@@ -17,8 +17,9 @@ import (
 )
 
 const (
-	pendingMarketCap  = 5000
-	marketDecisionCap = 1000
+	pendingMarketCap        = 5000
+	marketDecisionCap       = 1000
+	settlementTradePageSize = 250
 )
 
 type settlementDecisionRepository interface {
@@ -277,9 +278,16 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 	if s.trades == nil || s.positions == nil {
 		return fmt.Errorf("prediction settlement: repositories are required")
 	}
-	trades, err := s.trades.GetByOrder(ctx, *decision.PaperOrderID, repository.TradeFilter{}, 10, 0)
-	if err != nil {
-		return fmt.Errorf("prediction settlement: load paper order %s trades: %w", decision.PaperOrderID.String(), err)
+	var trades []domain.Trade
+	for offset := 0; ; offset += settlementTradePageSize {
+		page, err := s.trades.GetByOrder(ctx, *decision.PaperOrderID, repository.TradeFilter{}, settlementTradePageSize, offset)
+		if err != nil {
+			return fmt.Errorf("prediction settlement: load paper order %s trades: %w", decision.PaperOrderID.String(), err)
+		}
+		trades = append(trades, page...)
+		if len(page) < settlementTradePageSize {
+			break
+		}
 	}
 	var opening *domain.Trade
 	openingQuantity := 0.0

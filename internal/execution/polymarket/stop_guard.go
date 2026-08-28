@@ -303,6 +303,18 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 		guard.state.Store(int32(guardArmed))
 	}
 	g.mu.Unlock()
+	locker := g.exitRepo.(repository.ExecutionAccountLocker)
+	recovered := false
+	if err := locker.WithExecutionAccountLock(ctx, pos.AccountID, func() error {
+		recovered = g.recoverClaimedExit(context.WithValue(ctx, stopAccountLockHeldKey{}, true), guard, pos.ID)
+		if !recovered {
+			return errors.New("polymarket: claimed stop exit bootstrap reconciliation failed")
+		}
+		return nil
+	}); err != nil {
+		g.Cancel(positionID)
+		return err
+	}
 	return nil
 }
 

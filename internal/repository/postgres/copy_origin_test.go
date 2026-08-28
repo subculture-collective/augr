@@ -20,6 +20,15 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+func TestUnfinishedCopyRunsIncludeInactiveReceivedIntentsWithScopedOrders(t *testing.T) {
+	normalized := strings.Join(strings.Fields(listUnfinishedCopyRunsSQL), " ")
+	for _, required := range []string{"intent.status='received' AND EXISTS", "o.copy_intent_id=intent.id", "o.copy_origin_rebalance_run_id=run.id", "o.account_id=intent.account_id", "o.environment=intent.environment", "o.origin_type=intent.origin_type", "o.origin_id=intent.origin_id::text"} {
+		if !strings.Contains(normalized, required) {
+			t.Fatalf("unfinished copy recovery lacks durable scoped order condition %q", required)
+		}
+	}
+}
+
 func TestCopyOriginRetainedQualification(t *testing.T) {
 	databaseURL := os.Getenv("COPY_ORIGIN_QUALIFICATION_DB_URL")
 	if databaseURL == "" {

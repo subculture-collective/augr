@@ -96,7 +96,7 @@ func (r *PositionRepo) CreateAlpacaOwned(ctx context.Context, position *domain.P
 
 	row := tx.QueryRow(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.ticker = $1 AND p.side = $2 AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
-		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND t.account_id = p.account_id AND o.account_id = p.account_id AND o.broker = 'alpaca')
+		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment WHERE t.position_id = p.id AND t.account_id = p.account_id AND t.environment=p.environment AND o.broker = 'alpaca')
 	) ORDER BY p.opened_at ASC, p.id ASC LIMIT 1`, position.Ticker, position.Side, r.accountID)
 	if existing, err := scanPosition(row); err == nil {
 		*position = *existing
@@ -253,7 +253,7 @@ func (r *PositionRepo) ListOpenAlpacaOwnedByAccount(ctx context.Context, account
 	}
 	rows, err := r.pool.Query(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
-		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND t.account_id = p.account_id AND o.account_id = p.account_id AND o.broker = 'alpaca')
+		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment WHERE t.position_id = p.id AND t.account_id = p.account_id AND t.environment=p.environment AND o.broker = 'alpaca')
 	) AND p.environment=$4 ORDER BY p.opened_at ASC, p.id ASC LIMIT $1 OFFSET $2`, limit, offset, accountID, environment)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list open alpaca-owned positions: %w", err)
@@ -301,7 +301,7 @@ func (r *PositionRepo) GetOpenByAccount(ctx context.Context, accountID uuid.UUID
 	return r.list(ctx, query, args, "get open positions by account")
 }
 
-const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id WHERE t.position_id=p.id AND t.account_id=p.account_id AND o.account_id=p.account_id ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,
+const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id AND o.account_id=p.account_id AND o.environment=p.environment WHERE t.position_id=p.id AND t.account_id=p.account_id AND t.environment=p.environment ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,
 		p.quantity::double precision, p.avg_entry::double precision,
 		p.current_price::double precision, p.unrealized_pnl::double precision,
 		p.realized_pnl::double precision, p.stop_loss::double precision,

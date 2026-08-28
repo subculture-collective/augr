@@ -1254,7 +1254,7 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 	if err != nil {
 		return "", err
 	}
-	if order.Status == domain.OrderStatusFilled {
+	if order.Status == domain.OrderStatusFilled || ((order.Status == domain.OrderStatusCancelled || order.Status == domain.OrderStatusRejected) && order.FilledQuantity > 0) {
 		if err := validateRecoveredFillEvidence(order); err != nil {
 			return "", err
 		}
@@ -1262,7 +1262,7 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		if err := m.handleFill(ctx, order, plan, scope, decisionID); err != nil {
 			return "", err
 		}
-		return domain.OrderStatusFilled, nil
+		return order.Status, nil
 	}
 	brokerOrderID := strings.TrimSpace(order.ExternalID)
 	lookupByClientID := brokerOrderID == ""

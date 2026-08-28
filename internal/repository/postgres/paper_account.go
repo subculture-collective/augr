@@ -33,7 +33,7 @@ func (r *PaperAccountRepo) ListPaperTrades(ctx context.Context, accountID uuid.U
 			COALESCE(t.contract_multiplier, 100)::double precision, COALESCE(t.premium, 0)::double precision,
 			COALESCE(t.exit_reason, '')
 		FROM trades t
-		LEFT JOIN orders o ON o.id = t.order_id AND o.account_id=t.account_id
+		LEFT JOIN orders o ON o.id = t.order_id AND o.account_id=t.account_id AND o.environment=t.environment
 		WHERE t.account_id=$1 AND t.environment=$2
 		  AND (o.broker = 'paper' OR (t.order_id IS NULL AND t.origin_type='settlement'))
 		ORDER BY t.executed_at DESC, t.created_at DESC, t.id DESC LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
@@ -72,8 +72,8 @@ func (r *PaperAccountRepo) GetOpenPaperPositions(ctx context.Context, accountID 
 		AND (p.origin_type='copy_subscription' OR EXISTS (
 			SELECT 1
 			FROM trades t
-			INNER JOIN orders o ON o.id = t.order_id
-			WHERE t.position_id = p.id AND t.account_id=p.account_id AND o.account_id=p.account_id AND o.broker = 'paper'
+			INNER JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment
+			WHERE t.position_id = p.id AND t.account_id=p.account_id AND t.environment=p.environment AND o.broker = 'paper'
 		))
 		ORDER BY p.opened_at ASC, p.id ASC LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
 	if err != nil {
@@ -109,15 +109,23 @@ const listOpenPaperOrdersSQL = `SELECT o.id, o.strategy_id, o.pipeline_run_id, o
 				o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id AND t.environment=o.environment),0) OR
 				NOT EXISTS (SELECT 1 FROM trade_decisions d WHERE d.paper_order_id=o.id AND d.account_id=o.account_id AND d.environment=o.environment) OR
 				EXISTS (SELECT 1 FROM trade_decisions d WHERE d.paper_order_id=o.id AND d.account_id=o.account_id AND d.environment=o.environment AND (
-					NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.event_type='fill_observed' AND re.payload->>'order_id'=o.id::text) OR
-					(EXISTS (SELECT 1 FROM financial_fill_idempotency f WHERE f.order_id=o.id AND f.position_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.event_type='position_updated'))
+					NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.environment=o.environment AND re.event_type='fill_observed' AND re.payload->>'order_id'=o.id::text) OR
+					(EXISTS (SELECT 1 FROM financial_fill_idempotency f WHERE f.order_id=o.id AND f.account_id=o.account_id AND f.environment=o.environment AND f.position_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.environment=o.environment AND re.event_type='position_updated'))
 				))
 			)) OR
-			(o.market_type='options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id),0)) OR
+			(o.market_type<>'options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>0 AND (
+				o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id AND t.environment=o.environment),0) OR
+				NOT EXISTS (SELECT 1 FROM trade_decisions d WHERE d.paper_order_id=o.id AND d.account_id=o.account_id AND d.environment=o.environment) OR
+				EXISTS (SELECT 1 FROM trade_decisions d WHERE d.paper_order_id=o.id AND d.account_id=o.account_id AND d.environment=o.environment AND (
+					NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.environment=o.environment AND re.event_type='fill_observed' AND re.payload->>'order_id'=o.id::text) OR
+					(EXISTS (SELECT 1 FROM financial_fill_idempotency f WHERE f.order_id=o.id AND f.account_id=o.account_id AND f.environment=o.environment AND f.position_id IS NOT NULL) AND NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=d.id AND re.account_id=o.account_id AND re.environment=o.environment AND re.event_type='position_updated'))
+				))
+			)) OR
+			(o.market_type='options' AND o.status IN ('cancelled','rejected') AND o.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=o.id AND t.account_id=o.account_id AND t.environment=o.environment),0)) OR
 			(o.market_type='options' AND o.leg_group_id IS NOT NULL AND EXISTS (
 				SELECT 1 FROM orders sibling WHERE sibling.account_id=o.account_id AND sibling.environment=o.environment
 				AND sibling.broker='paper' AND sibling.market_type='options' AND sibling.leg_group_id=o.leg_group_id AND (sibling.status IN ('pending','submitted','partial') OR
-				(sibling.status IN ('cancelled','rejected') AND sibling.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=sibling.id AND t.account_id=sibling.account_id),0)))
+				(sibling.status IN ('cancelled','rejected') AND sibling.filled_quantity>COALESCE((SELECT SUM(t.quantity) FROM trades t WHERE t.order_id=sibling.id AND t.account_id=sibling.account_id AND t.environment=sibling.environment),0)))
 			))
 		)
 		ORDER BY o.submitted_at ASC, o.id ASC LIMIT $3 OFFSET $4`

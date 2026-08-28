@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,16 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
+
+func TestAlpacaPLAggregateLegacyEvidenceRequiresEnvironmentEquality(t *testing.T) {
+	for name, query := range map[string]string{"closed": alpacaClosedRealizedPnLSQL, "open": alpacaOpenUnrealizedPnLSQL} {
+		for _, required := range []string{"t.environment=p.environment", "o.environment=p.environment"} {
+			if !strings.Contains(query, required) {
+				t.Fatalf("%s aggregate legacy child linkage lacks %q", name, required)
+			}
+		}
+	}
+}
 
 func TestAlpacaPLAggregateRepo_IncludesProvenanceLegacyAndDedupes(t *testing.T) {
 	t.Helper()

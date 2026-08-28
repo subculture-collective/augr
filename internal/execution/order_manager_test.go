@@ -1150,6 +1150,27 @@ func TestReconcilePersistedCancelledOrderPersistsQuantityAdvanceBeforeTerminalSt
 	}
 }
 
+func TestReconcilePersistedTerminalPartialRepairsAtomicAndReplayEvidenceWithoutBroker(t *testing.T) {
+	scope := strategyScope(uuid.New(), uuid.New())
+	originType, originID := scope.Origin()
+	run, _ := scope.PipelineRun()
+	orderID, strategyID, positionID, tradeID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	price, filledAt := 101.5, time.Now().UTC()
+	order := &domain.Order{ID: orderID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, StrategyID: &strategyID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, ExternalID: "alpaca-terminal", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 10, FilledQuantity: 4, FilledAvgPrice: &price, FilledAt: &filledAt, Status: domain.OrderStatusCancelled}
+	broker := &mockBroker{getOrderStatusFn: func(context.Context, string) (domain.OrderStatus, error) {
+		t.Fatal("durable terminal partial recovery must not query broker")
+		return "", nil
+	}}
+	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, Position: &domain.Position{ID: positionID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Ticker: order.Ticker}, TradeID: tradeID, Trade: &domain.Trade{ID: tradeID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &orderID, PositionID: &positionID, Ticker: order.Ticker, Side: order.Side}, Replayed: true}}
+	recorder := &recoveryDecisionRecorder{decisionID: uuid.New()}
+	orderRepo := &mockOrderRepo{getFn: func(context.Context, uuid.UUID) (*domain.Order, error) { copy := *order; return &copy, nil }}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
+	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
+	if err != nil || status != domain.OrderStatusCancelled || financial.called != 1 || !slices.Equal(recorder.events, []domain.ReplayEventType{domain.ReplayEventTypeFillObserved, domain.ReplayEventTypePositionUpdated}) {
+		t.Fatalf("terminal repair status=%s fills=%d replay=%v err=%v", status, financial.called, recorder.events, err)
+	}
+}
+
 func TestHandleFillRejectsReplayedPositionIdentityWithoutPersistedRow(t *testing.T) {
 	strategyVersionID, runID := uuid.New(), uuid.New()
 	scope := strategyScope(strategyVersionID, runID)

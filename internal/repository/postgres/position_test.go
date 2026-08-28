@@ -39,6 +39,11 @@ func TestPositionReloadGetsMarketTypeFromOriginatingOrder(t *testing.T) {
 	if !strings.Contains(positionSelectSQL, "SELECT o.market_type FROM trades t JOIN orders o") {
 		t.Fatal("position reload lacks originating-order market type fallback")
 	}
+	for _, required := range []string{"t.environment=p.environment", "o.environment=p.environment"} {
+		if !strings.Contains(positionSelectSQL, required) {
+			t.Fatalf("position reload child linkage lacks %q", required)
+		}
+	}
 }
 
 func TestBuildPositionListQuery_AllFilters(t *testing.T) {
