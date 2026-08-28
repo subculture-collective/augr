@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"github.com/google/uuid"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -13,25 +14,30 @@ import (
 
 // AllocationDecisionRepo implements repository.AllocationDecisionRepository using PostgreSQL.
 type AllocationDecisionRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 var _ repository.AllocationDecisionRepository = (*AllocationDecisionRepo)(nil)
 
 // NewAllocationDecisionRepo returns a repository backed by the given pool.
-func NewAllocationDecisionRepo(pool *pgxpool.Pool) *AllocationDecisionRepo {
-	return &AllocationDecisionRepo{pool: pool}
+func NewAllocationDecisionRepo(pool *pgxpool.Pool, accountID uuid.UUID) *AllocationDecisionRepo {
+	return &AllocationDecisionRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new allocation decision.
 func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.AllocationDecision) error {
+	if decision.AccountID != uuid.Nil && decision.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create allocation decision: account mismatch")
+	}
+	decision.AccountID = r.accountID
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO allocation_decisions (
-			opportunity_id, strategy_id, mode, action, score, notional_usd, quantity, reasons, created_order_id
+			account_id, environment, origin_type, origin_id, opportunity_id, strategy_id, mode, action, score, notional_usd, quantity, reasons, created_order_id
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 RETURNING id, created_at`,
-		decision.OpportunityID,
+		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.OpportunityID,
 		decision.StrategyID,
 		decision.Mode,
 		decision.Action,
@@ -49,7 +55,7 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 
 // List returns allocation decisions matching the filter.
 func (r *AllocationDecisionRepo) List(ctx context.Context, filter repository.AllocationDecisionFilter, limit, offset int) ([]domain.AllocationDecision, error) {
-	query, args := buildAllocationDecisionListQuery(filter, limit, offset)
+	query, args := buildAllocationDecisionListQuery(r.accountID, filter, limit, offset)
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list allocation decisions: %w", err)
@@ -72,7 +78,7 @@ func (r *AllocationDecisionRepo) List(ctx context.Context, filter repository.All
 
 // Count returns the total number of allocation decisions matching the filter.
 func (r *AllocationDecisionRepo) Count(ctx context.Context, filter repository.AllocationDecisionFilter) (int, error) {
-	query, args := buildAllocationDecisionCountQuery(filter)
+	query, args := buildAllocationDecisionCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count allocation decisions: %w", err)
@@ -80,7 +86,7 @@ func (r *AllocationDecisionRepo) Count(ctx context.Context, filter repository.Al
 	return total, nil
 }
 
-const allocationDecisionSelectSQL = `SELECT id, opportunity_id, strategy_id, mode, action,
+const allocationDecisionSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, opportunity_id, strategy_id, mode, action,
 	score::double precision, notional_usd::double precision, quantity::double precision,
 	reasons, created_order_id, created_at
 	FROM allocation_decisions`
@@ -89,6 +95,7 @@ func scanAllocationDecision(sc scanner) (*domain.AllocationDecision, error) {
 	var decision domain.AllocationDecision
 	if err := sc.Scan(
 		&decision.ID,
+		&decision.AccountID, &decision.Environment, &decision.OriginType, &decision.OriginID,
 		&decision.OpportunityID,
 		&decision.StrategyID,
 		&decision.Mode,
@@ -105,16 +112,16 @@ func scanAllocationDecision(sc scanner) (*domain.AllocationDecision, error) {
 	return &decision, nil
 }
 
-func buildAllocationDecisionCountQuery(filter repository.AllocationDecisionFilter) (string, []any) {
-	query, args := buildAllocationDecisionQuery("SELECT COUNT(*) FROM allocation_decisions", filter, 0, 0, false)
+func buildAllocationDecisionCountQuery(accountID uuid.UUID, filter repository.AllocationDecisionFilter) (string, []any) {
+	query, args := buildAllocationDecisionQuery(accountID, "SELECT COUNT(*) FROM allocation_decisions", filter, 0, 0, false)
 	return query, args
 }
 
-func buildAllocationDecisionListQuery(filter repository.AllocationDecisionFilter, limit, offset int) (string, []any) {
-	return buildAllocationDecisionQuery(allocationDecisionSelectSQL, filter, limit, offset, true)
+func buildAllocationDecisionListQuery(accountID uuid.UUID, filter repository.AllocationDecisionFilter, limit, offset int) (string, []any) {
+	return buildAllocationDecisionQuery(accountID, allocationDecisionSelectSQL, filter, limit, offset, true)
 }
 
-func buildAllocationDecisionQuery(base string, filter repository.AllocationDecisionFilter, limit, offset int, includePagination bool) (string, []any) {
+func buildAllocationDecisionQuery(accountID uuid.UUID, base string, filter repository.AllocationDecisionFilter, limit, offset int, includePagination bool) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -125,6 +132,7 @@ func buildAllocationDecisionQuery(base string, filter repository.AllocationDecis
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
 	if filter.Mode != "" {
 		conditions = append(conditions, "mode = "+nextArg(filter.Mode))

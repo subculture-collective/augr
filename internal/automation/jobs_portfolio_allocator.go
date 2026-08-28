@@ -145,10 +145,10 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 	for i := range opportunities {
 		opportunity := opportunities[i]
 		reason := ""
-		if opportunity.PipelineRunID == nil || *opportunity.PipelineRunID == uuid.Nil {
+		if opportunity.PipelineRunID == nil || *opportunity.PipelineRunID == uuid.Nil || opportunity.PipelineRunTradeDate == nil {
 			reason = "source_run_missing"
 		} else {
-			run, err := o.deps.RunRepo.GetByID(ctx, *opportunity.PipelineRunID)
+			run, err := o.deps.RunRepo.Get(ctx, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
 			switch {
 			case err == nil && run == nil:
 				reason = "source_run_missing"

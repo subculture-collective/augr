@@ -14,21 +14,26 @@ import (
 
 // ReplayEventRepo implements repository.ReplayEventRepository using PostgreSQL.
 type ReplayEventRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that ReplayEventRepo satisfies ReplayEventRepository.
 var _ repository.ReplayEventRepository = (*ReplayEventRepo)(nil)
 
 // NewReplayEventRepo returns a replay-event repository backed by the given pool.
-func NewReplayEventRepo(pool *pgxpool.Pool) *ReplayEventRepo {
-	return &ReplayEventRepo{pool: pool}
+func NewReplayEventRepo(pool *pgxpool.Pool, accountID uuid.UUID) *ReplayEventRepo {
+	return &ReplayEventRepo{pool: pool, accountID: accountID}
 }
 
-const replayEventSelectSQL = `SELECT id, trade_decision_id, event_type, source, payload, occurred_at, created_at FROM replay_events`
+const replayEventSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, trade_decision_id, event_type, source, payload, occurred_at, created_at FROM replay_events`
 
 // CreateReplayEvent inserts a new replay event and populates generated fields.
 func (r *ReplayEventRepo) CreateReplayEvent(ctx context.Context, event *domain.ReplayEvent) error {
+	if event.AccountID != uuid.Nil && event.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create replay event: account mismatch")
+	}
+	event.AccountID = r.accountID
 	payload, err := marshalReplayEventPayload(event.Payload)
 	if err != nil {
 		return err
@@ -44,11 +49,11 @@ func (r *ReplayEventRepo) CreateReplayEvent(ctx context.Context, event *domain.R
 
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO replay_events (
-			trade_decision_id, event_type, source, payload, occurred_at
+			account_id, environment, origin_type, origin_id, trade_decision_id, event_type, source, payload, occurred_at
 		)
-		 VALUES ($1, $2, $3, $4, $5)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		 RETURNING id, created_at`,
-		event.TradeDecisionID,
+		r.accountID, event.Environment, event.OriginType, event.OriginID, event.TradeDecisionID,
 		event.EventType,
 		source,
 		payload,
@@ -69,7 +74,7 @@ func (r *ReplayEventRepo) CreateReplayEvent(ctx context.Context, event *domain.R
 
 // ListReplayEvents returns replay events for a decision ordered deterministically.
 func (r *ReplayEventRepo) ListReplayEvents(ctx context.Context, tradeDecisionID uuid.UUID) ([]domain.ReplayEvent, error) {
-	rows, err := r.pool.Query(ctx, replayEventSelectSQL+` WHERE trade_decision_id = $1 ORDER BY occurred_at ASC, created_at ASC, id ASC`, tradeDecisionID)
+	rows, err := r.pool.Query(ctx, replayEventSelectSQL+` WHERE trade_decision_id = $1 AND account_id=$2 ORDER BY occurred_at ASC, created_at ASC, id ASC`, tradeDecisionID, r.accountID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list replay events: %w", err)
 	}
@@ -97,6 +102,7 @@ func scanReplayEvent(sc scanner) (*domain.ReplayEvent, error) {
 
 	if err := sc.Scan(
 		&event.ID,
+		&event.AccountID, &event.Environment, &event.OriginType, &event.OriginID,
 		&event.TradeDecisionID,
 		&event.EventType,
 		&event.Source,

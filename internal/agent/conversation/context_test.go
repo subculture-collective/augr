@@ -22,11 +22,11 @@ type stubDecisionRepo struct {
 }
 
 func (s *stubDecisionRepo) Create(_ context.Context, _ *domain.AgentDecision) error { return nil }
-func (s *stubDecisionRepo) GetByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
+func (s *stubDecisionRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
 	return s.decisions, s.err
 }
 
-func (s *stubDecisionRepo) CountByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter) (int, error) {
+func (s *stubDecisionRepo) CountByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter) (int, error) {
 	return len(s.decisions), nil
 }
 
@@ -39,7 +39,7 @@ func (s *stubSnapshotRepo) Create(_ context.Context, _ *domain.PipelineRunSnapsh
 	return nil
 }
 
-func (s *stubSnapshotRepo) GetByRun(_ context.Context, _ uuid.UUID) ([]domain.PipelineRunSnapshot, error) {
+func (s *stubSnapshotRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef) ([]domain.PipelineRunSnapshot, error) {
 	return s.snapshots, s.err
 }
 
@@ -124,7 +124,7 @@ func TestBuildContext_FullData(t *testing.T) {
 	)
 
 	result, err := cb.BuildContext(context.Background(), conversation.ContextInput{
-		RunID:               uuid.New(),
+		RunRef:              domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Now()},
 		AgentRole:           domain.AgentRoleMarketAnalyst,
 		ConversationHistory: makeHistory(4),
 	})
@@ -162,7 +162,7 @@ func TestBuildContext_MissingSnapshots(t *testing.T) {
 	)
 
 	result, err := cb.BuildContext(context.Background(), conversation.ContextInput{
-		RunID:     uuid.New(),
+		RunRef:    domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Now()},
 		AgentRole: domain.AgentRoleTrader,
 	})
 	if err != nil {
@@ -187,7 +187,7 @@ func TestBuildContext_MissingMemories(t *testing.T) {
 	)
 
 	result, err := cb.BuildContext(context.Background(), conversation.ContextInput{
-		RunID:     uuid.New(),
+		RunRef:    domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Now()},
 		AgentRole: domain.AgentRoleMarketAnalyst,
 	})
 	if err != nil {
@@ -217,7 +217,7 @@ func TestBuildContext_TruncationDropsMarketFirst(t *testing.T) {
 	)
 
 	result, err := cb.BuildContext(context.Background(), conversation.ContextInput{
-		RunID:               uuid.New(),
+		RunRef:              domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Now()},
 		AgentRole:           domain.AgentRoleMarketAnalyst,
 		ConversationHistory: makeHistory(2),
 	})
@@ -249,7 +249,7 @@ func TestBuildContext_TruncationDropsOlderMessages(t *testing.T) {
 	)
 
 	result, err := cb.BuildContext(context.Background(), conversation.ContextInput{
-		RunID:               uuid.New(),
+		RunRef:              domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Now()},
 		AgentRole:           domain.AgentRoleTrader,
 		ConversationHistory: history,
 	})
@@ -267,7 +267,7 @@ func TestBuildContext_NilRepos(t *testing.T) {
 
 	cb := conversation.NewContextBuilder(nil, nil, nil, 0)
 	_, err := cb.BuildContext(context.Background(), conversation.ContextInput{
-		RunID:     uuid.New(),
+		RunRef:    domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Now()},
 		AgentRole: domain.AgentRoleTrader,
 	})
 	if err == nil {
@@ -286,7 +286,7 @@ func TestBuildContext_EmptyConversation(t *testing.T) {
 	)
 
 	result, err := cb.BuildContext(context.Background(), conversation.ContextInput{
-		RunID:     uuid.New(),
+		RunRef:    domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Now()},
 		AgentRole: domain.AgentRoleRiskManager,
 	})
 	if err != nil {

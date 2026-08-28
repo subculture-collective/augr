@@ -16,7 +16,7 @@ func TestBuildAllocationDecisionQuery(t *testing.T) {
 	opportunityID := uuid.New()
 	createdAfter := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 
-	query, args := buildAllocationDecisionListQuery(repository.AllocationDecisionFilter{
+	query, args := buildAllocationDecisionListQuery(canonicalRepositoryTestAccountID, repository.AllocationDecisionFilter{
 		Mode:          domain.AllocationDecisionModeShadow,
 		Action:        domain.AllocationDecisionActionShadowSelected,
 		StrategyID:    &strategyID,
@@ -24,15 +24,15 @@ func TestBuildAllocationDecisionQuery(t *testing.T) {
 		CreatedAfter:  &createdAfter,
 	}, 25, 50)
 
-	if len(args) != 7 {
+	if len(args) != 8 {
 		t.Fatalf("expected 7 args, got %d: %#v", len(args), args)
 	}
-	assertContains(t, query, "mode = $1")
-	assertContains(t, query, "action = $2")
-	assertContains(t, query, "strategy_id = $3")
-	assertContains(t, query, "opportunity_id = $4")
-	assertContains(t, query, "created_at >= $5")
-	assertContains(t, query, "LIMIT $6 OFFSET $7")
+	assertContains(t, query, "mode = $2")
+	assertContains(t, query, "action = $3")
+	assertContains(t, query, "strategy_id = $4")
+	assertContains(t, query, "opportunity_id = $5")
+	assertContains(t, query, "created_at >= $6")
+	assertContains(t, query, "LIMIT $7 OFFSET $8")
 }
 
 func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
@@ -40,9 +40,9 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAllocationDecisionRepo(pool)
+	repo := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
-	opportunityRepo := NewOpportunityRepo(pool)
+	opportunityRepo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	opportunity := &domain.Opportunity{
 		StrategyID:        strategyID,
 		MarketType:        domain.MarketTypeStock,
@@ -67,7 +67,7 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 	}
 
 	createdOrderID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO orders (id) VALUES ($1)`, createdOrderID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO orders (id) VALUES ($2)`, createdOrderID); err != nil {
 		t.Fatalf("create order fixture: %v", err)
 	}
 	decision := &domain.AllocationDecision{

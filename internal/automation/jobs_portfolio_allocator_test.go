@@ -119,21 +119,19 @@ type portfolioAllocatorRunRepo struct {
 	err  error
 }
 
+var allocatorRunTradeDate = time.Date(2026, time.August, 27, 0, 0, 0, 0, time.UTC)
+
 func (*portfolioAllocatorRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (r *portfolioAllocatorRunRepo) GetByID(_ context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
+func (r *portfolioAllocatorRunRepo) Get(_ context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	run, ok := r.runs[id]
+	run, ok := r.runs[ref.ID]
 	if !ok {
 		return nil, repository.ErrNotFound
 	}
 	return &run, nil
-}
-
-func (r *portfolioAllocatorRunRepo) Get(ctx context.Context, id uuid.UUID, _ time.Time) (*domain.PipelineRun, error) {
-	return r.GetByID(ctx, id)
 }
 
 func (*portfolioAllocatorRunRepo) List(context.Context, repository.PipelineRunFilter, int, int) ([]domain.PipelineRun, error) {
@@ -144,11 +142,12 @@ func (*portfolioAllocatorRunRepo) Count(context.Context, repository.PipelineRunF
 	return 0, nil
 }
 
-func (*portfolioAllocatorRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (*portfolioAllocatorRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	id, tradeDate := ref.ID, ref.TradeDate
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
 }
 
-func (*portfolioAllocatorRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (*portfolioAllocatorRunRepo) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
@@ -277,9 +276,9 @@ func TestValidatePortfolioOpportunitySourcesRejectsFailedAndMismatchedRuns(t *te
 	}}
 	orch := NewJobOrchestrator(OrchestratorDeps{RunRepo: runRepo})
 	opportunities := []domain.Opportunity{
-		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &validRunID, Signal: domain.PipelineSignalBuy},
-		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &failedRunID, Signal: domain.PipelineSignalBuy},
-		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &mismatchedRunID, Signal: domain.PipelineSignalBuy},
+		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &validRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
+		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &failedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
+		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &mismatchedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
 		{ID: uuid.New(), StrategyID: strategyID, Signal: domain.PipelineSignalBuy},
 	}
 
@@ -306,7 +305,7 @@ func TestValidatePortfolioOpportunitySourcesFailsClosedOnRunRepositoryError(t *t
 
 	runID := uuid.New()
 	orch := NewJobOrchestrator(OrchestratorDeps{RunRepo: &portfolioAllocatorRunRepo{err: errors.New("run store unavailable")}})
-	_, _, err := orch.validatePortfolioOpportunitySources(context.Background(), []domain.Opportunity{{ID: uuid.New(), PipelineRunID: &runID}}, portfolio.AllocatorModeShadow)
+	_, _, err := orch.validatePortfolioOpportunitySources(context.Background(), []domain.Opportunity{{ID: uuid.New(), PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate}}, portfolio.AllocatorModeShadow)
 	if err == nil || !strings.Contains(err.Error(), "load source run") {
 		t.Fatalf("validatePortfolioOpportunitySources() error = %v, want repository failure", err)
 	}
@@ -489,8 +488,8 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 	accountID, versionID := uuid.New(), uuid.New()
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{
 		{
-			ID:                   uuid.MustParse("11111111-1111-1111-1111-111111111111"),
-			StrategyID:           uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+			ID:            uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			StrategyID:    uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 			PipelineRunID:        &runID,
 			PipelineRunTradeDate: &tradeDate,
 			AccountID:            accountID,
@@ -593,9 +592,9 @@ func TestPortfolioAllocatorJobPaperModeRejectsWithoutStrategyRepo(t *testing.T) 
 	now := time.Now()
 	runID := uuid.New()
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{
-		ID:                uuid.MustParse("33333333-3333-3333-3333-333333333333"),
-		StrategyID:        uuid.MustParse("44444444-4444-4444-4444-444444444444"),
-		PipelineRunID:     &runID,
+		ID:            uuid.MustParse("33333333-3333-3333-3333-333333333333"),
+		StrategyID:    uuid.MustParse("44444444-4444-4444-4444-444444444444"),
+		PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate,
 		Status:            domain.OpportunityStatusQueued,
 		MarketType:        domain.MarketTypeStock,
 		Ticker:            "MSFT",
@@ -652,7 +651,7 @@ func TestPortfolioAllocatorJobPaperModeStopsWhenPreclaimFails(t *testing.T) {
 
 	now := time.Now()
 	runID := uuid.New()
-	opportunityRepo := &preclaimFailOpportunityRepo{portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), StrategyID: uuid.New(), PipelineRunID: &runID, Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.05, EntryPrice: 100, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: 0.001, ProposedNotional: 2_000, ExpiresAt: now.Add(24 * time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "aapl-paper-1"}}}}
+	opportunityRepo := &preclaimFailOpportunityRepo{portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), StrategyID: uuid.New(), PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.05, EntryPrice: 100, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: 0.001, ProposedNotional: 2_000, ExpiresAt: now.Add(24 * time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "aapl-paper-1"}}}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	strategyRepo := &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: opportunityRepo.items[0].StrategyID, Name: "paper-aapl", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}}
 	processor := &portfolioPaperProcessorStub{}

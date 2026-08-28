@@ -152,14 +152,15 @@ func integrationTestMigrations(t *testing.T) []string {
 
 // newRepos creates all repository implementations for the given test DB.
 func newRepos(db *testDB) repos {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
 	return repos{
 		Strategy:      postgres.NewStrategyRepo(db.Pool),
-		PipelineRun:   postgres.NewPipelineRunRepo(db.Pool),
-		AgentDecision: postgres.NewAgentDecisionRepo(db.Pool),
-		Order:         postgres.NewOrderRepo(db.Pool),
-		Position:      postgres.NewPositionRepo(db.Pool),
-		Trade:         postgres.NewTradeRepo(db.Pool),
-		Memory:        postgres.NewMemoryRepo(db.Pool),
+		PipelineRun:   postgres.NewPipelineRunRepo(db.Pool, accountID),
+		AgentDecision: postgres.NewAgentDecisionRepo(db.Pool, accountID),
+		Order:         postgres.NewOrderRepo(db.Pool, accountID),
+		Position:      postgres.NewPositionRepo(db.Pool, accountID),
+		Trade:         postgres.NewTradeRepo(db.Pool, accountID),
+		Memory:        postgres.NewMemoryRepo(db.Pool, accountID),
 	}
 }
 

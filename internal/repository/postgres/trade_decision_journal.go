@@ -17,18 +17,19 @@ import (
 
 // TradeDecisionJournalRepo implements repository.TradeDecisionJournalRepository using PostgreSQL.
 type TradeDecisionJournalRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that TradeDecisionJournalRepo satisfies the repository interface.
 var _ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
 
 // NewTradeDecisionJournalRepo returns a repository backed by the given pool.
-func NewTradeDecisionJournalRepo(pool *pgxpool.Pool) *TradeDecisionJournalRepo {
-	return &TradeDecisionJournalRepo{pool: pool}
+func NewTradeDecisionJournalRepo(pool *pgxpool.Pool, accountID uuid.UUID) *TradeDecisionJournalRepo {
+	return &TradeDecisionJournalRepo{pool: pool, accountID: accountID}
 }
 
-const tradeDecisionSelectSQL = `SELECT id, strategy_id, pipeline_run_id, market_type, instrument_key,
+const tradeDecisionSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, pipeline_run_trade_date, strategy_id, pipeline_run_id, market_type, instrument_key,
 		external_market_id, side, outcome, fair_value::double precision,
 		executable_price::double precision, spread::double precision,
 		depth::double precision, gross_ev::double precision, net_ev::double precision,
@@ -42,6 +43,10 @@ const tradeDecisionSelectSQL = `SELECT id, strategy_id, pipeline_run_id, market_
 
 // Create inserts a new trade decision and populates the generated ID and timestamps.
 func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.TradeDecision) error {
+	if decision.AccountID != uuid.Nil && decision.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create trade decision: account mismatch")
+	}
+	decision.AccountID = r.accountID
 	evidence, err := marshalTradeDecisionJSON(decision.Evidence)
 	if err != nil {
 		return err
@@ -53,18 +58,16 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO trade_decisions (
-			strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
+			account_id, environment, origin_type, origin_id, pipeline_run_trade_date, strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
 			side, outcome, fair_value, executable_price, spread, depth, gross_ev,
 			net_ev, kelly_fraction, proposed_size, approved_size, risk_status,
 			risk_reasons, evidence, features, regime_tags, prompt_text, llm_provider,
 			llm_model, prompt_tokens, completion_tokens, latency_ms, cost_usd,
 			paper_order_id, live_order_id, status
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-		         $28, $29, $30, $31)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
 		 RETURNING id, created_at, updated_at`,
-		decision.StrategyID,
+		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.PipelineRunTradeDate, decision.StrategyID,
 		decision.PipelineRunID,
 		decision.MarketType,
 		decision.InstrumentKey,
@@ -106,7 +109,7 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 
 // Get retrieves a trade decision by ID.
 func (r *TradeDecisionJournalRepo) Get(ctx context.Context, id uuid.UUID) (*domain.TradeDecision, error) {
-	row := r.pool.QueryRow(ctx, tradeDecisionSelectSQL+` WHERE id = $1`, id)
+	row := r.pool.QueryRow(ctx, tradeDecisionSelectSQL+` WHERE id = $1 AND account_id = $2`, id, r.accountID)
 	decision, err := scanTradeDecision(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -119,13 +122,13 @@ func (r *TradeDecisionJournalRepo) Get(ctx context.Context, id uuid.UUID) (*doma
 
 // List returns trade decisions matching the provided filter with pagination.
 func (r *TradeDecisionJournalRepo) List(ctx context.Context, filter repository.TradeDecisionFilter, limit, offset int) ([]domain.TradeDecision, error) {
-	query, args := buildTradeDecisionListQuery(filter, limit, offset)
+	query, args := buildTradeDecisionListQuery(r.accountID, filter, limit, offset)
 	return r.list(ctx, query, args, "list trade decisions")
 }
 
 // Count returns the number of trade decisions matching the filter.
 func (r *TradeDecisionJournalRepo) Count(ctx context.Context, filter repository.TradeDecisionFilter) (int, error) {
-	query, args := buildTradeDecisionCountQuery(filter)
+	query, args := buildTradeDecisionCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count trade decisions: %w", err)
@@ -134,7 +137,7 @@ func (r *TradeDecisionJournalRepo) Count(ctx context.Context, filter repository.
 }
 
 func (r *TradeDecisionJournalRepo) CountByStatus(ctx context.Context, filter repository.TradeDecisionFilter) (map[domain.TradeDecisionStatus]int, error) {
-	query, args := buildTradeDecisionFilteredQuery("SELECT status, COUNT(*) FROM trade_decisions", filter, 0, 0, false)
+	query, args := buildTradeDecisionFilteredQuery(r.accountID, "SELECT status, COUNT(*) FROM trade_decisions", filter, 0, 0, false)
 	query += " GROUP BY status ORDER BY status"
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -154,7 +157,7 @@ func (r *TradeDecisionJournalRepo) CountByStatus(ctx context.Context, filter rep
 }
 
 func (r *TradeDecisionJournalRepo) CountByNoActionReason(ctx context.Context, filter repository.TradeDecisionFilter) (map[string]int, error) {
-	filtered, args := buildTradeDecisionFilteredQuery(`SELECT
+	filtered, args := buildTradeDecisionFilteredQuery(r.accountID, `SELECT
 			id, risk_reasons, status, evidence
 			FROM trade_decisions`, filter, 0, 0, false)
 	query := `SELECT
@@ -205,7 +208,7 @@ func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decision
 func (r *TradeDecisionJournalRepo) ResolvePredictionOutcome(ctx context.Context, decisionID uuid.UUID) error {
 	var updatedID uuid.UUID
 	err := r.pool.QueryRow(ctx, `UPDATE trade_decisions SET status = $2, updated_at = NOW()
-		WHERE id = $1 AND status = $3 RETURNING id`, decisionID, domain.TradeDecisionStatusClosed, domain.TradeDecisionStatusPaper).Scan(&updatedID)
+		WHERE id = $1 AND status = $3 AND account_id=$4 RETURNING id`, decisionID, domain.TradeDecisionStatusClosed, domain.TradeDecisionStatusPaper, r.accountID).Scan(&updatedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("postgres: resolve prediction decision %s: %w", decisionID, ErrNotFound)
@@ -216,7 +219,7 @@ func (r *TradeDecisionJournalRepo) ResolvePredictionOutcome(ctx context.Context,
 }
 
 func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, orderID uuid.UUID, column string, status domain.TradeDecisionStatus) error {
-	query, args := buildTradeDecisionAttachQuery(column, decisionID, orderID, status)
+	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status)
 	var updatedID uuid.UUID
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&updatedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -274,6 +277,7 @@ func scanTradeDecision(sc scanner) (*domain.TradeDecision, error) {
 
 	if err := sc.Scan(
 		&decision.ID,
+		&decision.AccountID, &decision.Environment, &decision.OriginType, &decision.OriginID, &decision.PipelineRunTradeDate,
 		&strategyID,
 		&pipelineRunID,
 		&decision.MarketType,
@@ -342,22 +346,22 @@ func scanTradeDecision(sc scanner) (*domain.TradeDecision, error) {
 	return &decision, nil
 }
 
-func buildTradeDecisionCountQuery(filter repository.TradeDecisionFilter) (string, []any) {
-	query, args := buildTradeDecisionFilteredQuery("SELECT COUNT(*) FROM trade_decisions", filter, 0, 0, false)
+func buildTradeDecisionCountQuery(accountID uuid.UUID, filter repository.TradeDecisionFilter) (string, []any) {
+	query, args := buildTradeDecisionFilteredQuery(accountID, "SELECT COUNT(*) FROM trade_decisions", filter, 0, 0, false)
 	return query, args
 }
 
-func buildTradeDecisionListQuery(filter repository.TradeDecisionFilter, limit, offset int) (string, []any) {
-	query, args := buildTradeDecisionFilteredQuery(tradeDecisionSelectSQL, filter, limit, offset, true)
+func buildTradeDecisionListQuery(accountID uuid.UUID, filter repository.TradeDecisionFilter, limit, offset int) (string, []any) {
+	query, args := buildTradeDecisionFilteredQuery(accountID, tradeDecisionSelectSQL, filter, limit, offset, true)
 	return query, args
 }
 
-func buildTradeDecisionAttachQuery(column string, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus) (string, []any) {
-	query := fmt.Sprintf(`UPDATE trade_decisions SET %s = $2, status = $3, updated_at = NOW() WHERE id = $1 RETURNING id`, column)
-	return query, []any{decisionID, orderID, status}
+func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus) (string, []any) {
+	query := fmt.Sprintf(`UPDATE trade_decisions SET %s = $3, status = $4, updated_at = NOW() WHERE id = $1 AND account_id=$2 RETURNING id`, column)
+	return query, []any{decisionID, accountID, orderID, status}
 }
 
-func buildTradeDecisionFilteredQuery(base string, filter repository.TradeDecisionFilter, limit, offset int, includePagination bool) (string, []any) {
+func buildTradeDecisionFilteredQuery(accountID uuid.UUID, base string, filter repository.TradeDecisionFilter, limit, offset int, includePagination bool) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -369,6 +373,7 @@ func buildTradeDecisionFilteredQuery(base string, filter repository.TradeDecisio
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))

@@ -15,38 +15,39 @@ import (
 )
 
 func TestBuildConversationListQuery_NoFilters(t *testing.T) {
-	query, args := buildConversationListQuery(repository.ConversationFilter{}, 10, 5)
+	query, args := buildConversationListQuery(canonicalRepositoryTestAccountID, repository.ConversationFilter{}, 10, 5)
 
-	if len(args) != 2 {
-		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
+	if len(args) != 3 {
+		t.Fatalf("expected account, limit, offset args; got %d", len(args))
 	}
-	if args[0] != 10 {
-		t.Errorf("expected limit=10, got %v", args[0])
+	if args[1] != 10 {
+		t.Errorf("expected limit=10, got %v", args[1])
 	}
-	if args[1] != 5 {
-		t.Errorf("expected offset=5, got %v", args[1])
+	if args[2] != 5 {
+		t.Errorf("expected offset=5, got %v", args[2])
 	}
 
 	assertContains(t, query, "FROM conversations")
 	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertContains(t, query, "account_id = $1")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 }
 
 func TestBuildConversationListQuery_WithFilters(t *testing.T) {
 	runID := uuid.New()
-	query, args := buildConversationListQuery(repository.ConversationFilter{
-		PipelineRunID: &runID,
-		AgentRole:     domain.AgentRoleTrader,
+	query, args := buildConversationListQuery(canonicalRepositoryTestAccountID, repository.ConversationFilter{
+		PipelineRunRef: &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
+		AgentRole:      domain.AgentRoleTrader,
 	}, 20, 0)
 
-	if len(args) != 4 {
-		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
+	if len(args) != 6 {
+		t.Fatalf("expected 6 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "pipeline_run_id = $1")
-	assertContains(t, query, "agent_role = $2")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "pipeline_run_id = $2")
+	assertContains(t, query, "pipeline_run_trade_date = $3")
+	assertContains(t, query, "agent_role = $4")
+	assertContains(t, query, "LIMIT $5 OFFSET $6")
 }
 
 func TestConversationRepoIntegration_CreateAndGetConversation(t *testing.T) {
@@ -54,7 +55,7 @@ func TestConversationRepoIntegration_CreateAndGetConversation(t *testing.T) {
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := &domain.Conversation{
 		PipelineRunID: uuid.New(),
 		AgentRole:     domain.AgentRoleTrader,
@@ -99,7 +100,7 @@ func TestConversationRepoIntegration_GetConversationNotFound(t *testing.T) {
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 
 	_, err := repo.GetConversation(ctx, uuid.New())
 	if err == nil {
@@ -115,7 +116,7 @@ func TestConversationRepoIntegration_AddMessagesAndGetMessagesChronological(t *t
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := createTestConversation(t, ctx, repo, uuid.New(), domain.AgentRoleMarketAnalyst, "Analysis thread")
 
 	first := &domain.ConversationMessage{
@@ -157,7 +158,7 @@ func TestConversationRepoIntegration_ListConversationsFiltersAndPagination(t *te
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	otherRunID := uuid.New()
 
@@ -166,7 +167,7 @@ func TestConversationRepoIntegration_ListConversationsFiltersAndPagination(t *te
 	conv3 := createTestConversationWithID(t, ctx, repo, mustParseConversationUUID(t, "00000000-0000-0000-0000-000000000003"), otherRunID, domain.AgentRoleMarketAnalyst, "Third")
 
 	byRun, err := repo.ListConversations(ctx, repository.ConversationFilter{
-		PipelineRunID: &runID,
+		PipelineRunRef: &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
 	}, 10, 0)
 	if err != nil {
 		t.Fatalf("ListConversations() by pipeline_run_id error = %v", err)
@@ -210,7 +211,7 @@ func TestConversationRepoIntegration_MessagePagination(t *testing.T) {
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := createTestConversation(t, ctx, repo, uuid.New(), domain.AgentRoleTrader, "Paginated messages")
 
 	first := &domain.ConversationMessage{

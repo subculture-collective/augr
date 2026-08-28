@@ -17,24 +17,24 @@ import (
 )
 
 func TestBuildAgentEventListQuery_NoFilters(t *testing.T) {
-	query, args := buildAgentEventListQuery(repository.AgentEventFilter{}, 10, 0)
+	query, args := buildAgentEventListQuery(canonicalRepositoryTestAccountID, repository.AgentEventFilter{}, 10, 0)
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
 
-	if args[0] != 10 {
-		t.Errorf("expected limit=10, got %v", args[0])
+	if args[1] != 10 {
+		t.Errorf("expected limit=10, got %v", args[1])
 	}
 
-	if args[1] != 0 {
-		t.Errorf("expected offset=0, got %v", args[1])
+	if args[2] != 0 {
+		t.Errorf("expected offset=0, got %v", args[2])
 	}
 
 	assertContains(t, query, "FROM agent_events")
 	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
+	assertContains(t, query, "account_id = $1")
 }
 
 func TestBuildAgentEventListQuery_AllFilters(t *testing.T) {
@@ -53,20 +53,20 @@ func TestBuildAgentEventListQuery_AllFilters(t *testing.T) {
 		CreatedBefore: &before,
 	}
 
-	query, args := buildAgentEventListQuery(filter, 25, 50)
+	query, args := buildAgentEventListQuery(canonicalRepositoryTestAccountID, filter, 25, 50)
 
-	if len(args) != 9 {
+	if len(args) != 10 {
 		t.Fatalf("expected 9 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "pipeline_run_id = $1")
-	assertContains(t, query, "strategy_id = $2")
-	assertContains(t, query, "agent_role = $3")
-	assertContains(t, query, "event_kind = $4")
-	assertContains(t, query, "tags && $5")
-	assertContains(t, query, "created_at >= $6")
-	assertContains(t, query, "created_at <= $7")
-	assertContains(t, query, "LIMIT $8 OFFSET $9")
+	assertContains(t, query, "pipeline_run_id = $2")
+	assertContains(t, query, "strategy_id = $3")
+	assertContains(t, query, "agent_role = $4")
+	assertContains(t, query, "event_kind = $5")
+	assertContains(t, query, "tags && $6")
+	assertContains(t, query, "created_at >= $7")
+	assertContains(t, query, "created_at <= $8")
+	assertContains(t, query, "LIMIT $9 OFFSET $10")
 }
 
 func TestBuildAgentEventListQuery_PartialFilters(t *testing.T) {
@@ -75,17 +75,17 @@ func TestBuildAgentEventListQuery_PartialFilters(t *testing.T) {
 		Tags:      []string{"analysis"},
 	}
 
-	query, args := buildAgentEventListQuery(filter, 10, 5)
+	query, args := buildAgentEventListQuery(canonicalRepositoryTestAccountID, filter, 10, 5)
 
-	if len(args) != 4 {
+	if len(args) != 5 {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "event_kind = $1")
-	assertContains(t, query, "tags && $2")
+	assertContains(t, query, "event_kind = $2")
+	assertContains(t, query, "tags && $3")
 	assertNotContains(t, query, "pipeline_run_id =")
 	assertNotContains(t, query, "strategy_id =")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "LIMIT $4 OFFSET $5")
 }
 
 func TestMarshalAgentEventMetadata_ValidJSON(t *testing.T) {
@@ -124,7 +124,7 @@ func TestAgentEventRepoIntegration_CreatePersistsEvent(t *testing.T) {
 	pool, cleanup := newAgentEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentEventRepo(pool)
+	repo := NewAgentEventRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	strategyID := uuid.New()
 
@@ -193,7 +193,7 @@ func TestAgentEventRepoIntegration_ListFilters(t *testing.T) {
 	pool, cleanup := newAgentEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentEventRepo(pool)
+	repo := NewAgentEventRepo(pool, canonicalRepositoryTestAccountID)
 
 	runIDOne := uuid.New()
 	runIDTwo := uuid.New()
@@ -343,7 +343,7 @@ func insertAgentEventRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		`INSERT INTO agent_events (
 			pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata, created_at
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 VALUES ($2, $3, $4, $5, $6, $7, $8, $9, $10)
 		 RETURNING id, created_at`,
 		row.PipelineRunID,
 		row.StrategyID,

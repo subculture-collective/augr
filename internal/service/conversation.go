@@ -84,7 +84,7 @@ func (svc *ConversationService) CreateMessage(ctx context.Context, convID uuid.U
 	if svc.decisions != nil && svc.snapshots != nil && svc.memories != nil {
 		cb := agentconv.NewContextBuilder(svc.decisions, svc.snapshots, svc.memories, 0)
 		builtCtx, buildErr := cb.BuildContext(ctx, agentconv.ContextInput{
-			RunID:               conv.PipelineRunID,
+			RunRef:              domain.PipelineRunRef{ID: conv.PipelineRunID, TradeDate: conv.PipelineRunTradeDate},
 			AgentRole:           conv.AgentRole,
 			ConversationHistory: history,
 		})

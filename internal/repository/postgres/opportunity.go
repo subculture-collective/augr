@@ -18,13 +18,16 @@ import (
 
 // OpportunityRepo implements repository.OpportunityRepository using PostgreSQL.
 type OpportunityRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 var _ repository.OpportunityRepository = (*OpportunityRepo)(nil)
 
 // NewOpportunityRepo returns a repository backed by the given pool.
-func NewOpportunityRepo(pool *pgxpool.Pool) *OpportunityRepo { return &OpportunityRepo{pool: pool} }
+func NewOpportunityRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OpportunityRepo {
+	return &OpportunityRepo{pool: pool, accountID: accountID}
+}
 
 // Create inserts a new opportunity.
 func (r *OpportunityRepo) Create(ctx context.Context, opportunity *domain.Opportunity) error {
@@ -39,7 +42,7 @@ func (r *OpportunityRepo) UpsertQueuedByDedupeKey(ctx context.Context, opportuni
 
 // Get retrieves an opportunity by ID.
 func (r *OpportunityRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Opportunity, error) {
-	row := r.pool.QueryRow(ctx, opportunitySelectSQL+` WHERE id = $1`, id)
+	row := r.pool.QueryRow(ctx, opportunitySelectSQL+` WHERE id = $1 AND account_id = $2`, id, r.accountID)
 	opportunity, err := scanOpportunity(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -52,7 +55,7 @@ func (r *OpportunityRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Opport
 
 // List returns opportunities matching the provided filter.
 func (r *OpportunityRepo) List(ctx context.Context, filter repository.OpportunityFilter, limit, offset int) ([]domain.Opportunity, error) {
-	query, args := buildOpportunityListQuery(filter, limit, offset)
+	query, args := buildOpportunityListQuery(r.accountID, filter, limit, offset)
 	return r.list(ctx, query, args, "list opportunities")
 }
 
@@ -61,11 +64,11 @@ func (r *OpportunityRepo) ExpireQueuedBefore(ctx context.Context, before time.Ti
 	tag, err := r.pool.Exec(ctx, `
 		UPDATE portfolio_opportunities
 		SET status = $1, reject_reason = $2, updated_at = NOW()
-		WHERE status = $3 AND expires_at <= $4`,
+		WHERE status = $3 AND expires_at <= $4 AND account_id=$5`,
 		domain.OpportunityStatusExpired,
 		"expired_before_allocation",
 		domain.OpportunityStatusQueued,
-		before.UTC(),
+		before.UTC(), r.accountID,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: expire queued opportunities: %w", err)
@@ -75,13 +78,13 @@ func (r *OpportunityRepo) ExpireQueuedBefore(ctx context.Context, before time.Ti
 
 // ListQueuedForAllocation returns the stable allocation snapshot for queued opportunities.
 func (r *OpportunityRepo) ListQueuedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error) {
-	query := opportunitySelectSQL + ` WHERE status = $1 AND expires_at > $2 ORDER BY expires_at ASC, created_at ASC, id ASC`
-	return r.list(ctx, query, []any{domain.OpportunityStatusQueued, asOf.UTC()}, "list queued opportunities for allocation")
+	query := opportunitySelectSQL + ` WHERE status = $1 AND expires_at > $2 AND account_id=$3 ORDER BY expires_at ASC, created_at ASC, id ASC`
+	return r.list(ctx, query, []any{domain.OpportunityStatusQueued, asOf.UTC(), r.accountID}, "list queued opportunities for allocation")
 }
 
 // Count returns the number of opportunities matching the filter.
 func (r *OpportunityRepo) Count(ctx context.Context, filter repository.OpportunityFilter) (int, error) {
-	query, args := buildOpportunityCountQuery(filter)
+	query, args := buildOpportunityCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count opportunities: %w", err)
@@ -94,11 +97,11 @@ func (r *OpportunityRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status
 	row := r.pool.QueryRow(ctx,
 		`UPDATE portfolio_opportunities
 		 SET status = $1, reject_reason = $2, updated_at = NOW()
-		 WHERE id = $3
+		 WHERE id = $3 AND account_id=$4
 		 RETURNING id`,
 		status,
 		rejectReason,
-		id,
+		id, r.accountID,
 	)
 
 	var updatedID uuid.UUID
@@ -112,6 +115,10 @@ func (r *OpportunityRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status
 }
 
 func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportunity, upsert bool) error {
+	if opportunity.AccountID != uuid.Nil && opportunity.AccountID != r.accountID {
+		return fmt.Errorf("postgres: save opportunity: account mismatch")
+	}
+	opportunity.AccountID = r.accountID
 	evidence, err := marshalOpportunityJSON(opportunity.Evidence)
 	if err != nil {
 		return err
@@ -158,7 +165,7 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	query += ` RETURNING id, created_at, updated_at`
 
 	row := r.pool.QueryRow(ctx, query,
-		nullableUUID(opportunity.AccountID),
+		r.accountID,
 		nullString(string(opportunity.Environment)),
 		nullString(opportunity.OriginType),
 		nullString(opportunity.OriginID),
@@ -292,16 +299,16 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 	return &opportunity, nil
 }
 
-func buildOpportunityCountQuery(filter repository.OpportunityFilter) (string, []any) {
-	query, args := buildOpportunityQuery("SELECT COUNT(*) FROM portfolio_opportunities", filter, 0, 0, false)
+func buildOpportunityCountQuery(accountID uuid.UUID, filter repository.OpportunityFilter) (string, []any) {
+	query, args := buildOpportunityQuery(accountID, "SELECT COUNT(*) FROM portfolio_opportunities", filter, 0, 0, false)
 	return query, args
 }
 
-func buildOpportunityListQuery(filter repository.OpportunityFilter, limit, offset int) (string, []any) {
-	return buildOpportunityQuery(opportunitySelectSQL, filter, limit, offset, true)
+func buildOpportunityListQuery(accountID uuid.UUID, filter repository.OpportunityFilter, limit, offset int) (string, []any) {
+	return buildOpportunityQuery(accountID, opportunitySelectSQL, filter, limit, offset, true)
 }
 
-func buildOpportunityQuery(base string, filter repository.OpportunityFilter, limit, offset int, includePagination bool) (string, []any) {
+func buildOpportunityQuery(accountID uuid.UUID, base string, filter repository.OpportunityFilter, limit, offset int, includePagination bool) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -312,6 +319,7 @@ func buildOpportunityQuery(base string, filter repository.OpportunityFilter, lim
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
 	if filter.Status != "" {
 		conditions = append(conditions, "status = "+nextArg(filter.Status))

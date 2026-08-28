@@ -260,7 +260,7 @@ func (r *recordingOrderRepo) GetByStrategy(_ context.Context, _ uuid.UUID, _ rep
 	return nil, nil
 }
 
-func (r *recordingOrderRepo) GetByRun(_ context.Context, _ uuid.UUID, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
+func (r *recordingOrderRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
 	return nil, nil
 }
 

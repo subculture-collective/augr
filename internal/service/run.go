@@ -30,8 +30,8 @@ func NewRunService(runs repository.PipelineRunRepository, registry ...RunCancell
 }
 
 // Cancel validates the state machine transition and cancels the run.
-func (svc *RunService) Cancel(ctx context.Context, id uuid.UUID) error {
-	run, err := svc.runs.GetByID(ctx, id)
+func (svc *RunService) Cancel(ctx context.Context, ref domain.PipelineRunRef) error {
+	run, err := svc.runs.Get(ctx, ref)
 	if err != nil {
 		return err
 	}
@@ -53,7 +53,7 @@ func (svc *RunService) Cancel(ctx context.Context, id uuid.UUID) error {
 	}
 	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	receipt, err := svc.runs.Finalize(finalizeCtx, id, run.TradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusCancelled, CompletedAt: completedAt, ErrorMessage: message, Event: event})
+	receipt, err := svc.runs.Finalize(finalizeCtx, ref, repository.PipelineRunFinalization{Status: domain.PipelineStatusCancelled, CompletedAt: completedAt, ErrorMessage: message, Event: event})
 	if err != nil {
 		return err
 	}
@@ -61,7 +61,7 @@ func (svc *RunService) Cancel(ctx context.Context, id uuid.UUID) error {
 		return &ServiceError{Status: 409, Message: "run already reached terminal state"}
 	}
 	if svc.registry != nil {
-		svc.registry.Cancel(id, run.TradeDate, runcontrol.Operator)
+		svc.registry.Cancel(ref.ID, run.TradeDate, runcontrol.Operator)
 	}
 	return nil
 }

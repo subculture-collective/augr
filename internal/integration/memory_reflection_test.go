@@ -52,7 +52,7 @@ func TestIntegration_MemoryReflection_EndToEnd(t *testing.T) {
 	// Mark the pipeline run as completed.
 	completedAt := run.StartedAt.Add(30 * time.Minute)
 	buySignal := domain.PipelineSignalBuy
-	if _, err := r.PipelineRun.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+	if _, err := r.PipelineRun.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{
 		Status:      domain.PipelineStatusCompleted,
 		Signal:      &buySignal,
 		CompletedAt: completedAt,
@@ -344,7 +344,7 @@ func TestIntegration_PipelineExecution_PersistRunAndDecisions(t *testing.T) {
 	// 4. Complete the pipeline run.
 	completedAt := run.StartedAt.Add(5 * time.Minute)
 	buySignal := domain.PipelineSignalBuy
-	if _, err := r.PipelineRun.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+	if _, err := r.PipelineRun.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{
 		Status:      domain.PipelineStatusCompleted,
 		Signal:      &buySignal,
 		CompletedAt: completedAt,
@@ -353,7 +353,7 @@ func TestIntegration_PipelineExecution_PersistRunAndDecisions(t *testing.T) {
 	}
 
 	// 5. Verify the pipeline run is persisted and completed.
-	gotRun, err := r.PipelineRun.Get(ctx, run.ID, run.TradeDate)
+	gotRun, err := r.PipelineRun.Get(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {
 		t.Fatalf("PipelineRun.Get(): %v", err)
 	}
@@ -368,7 +368,7 @@ func TestIntegration_PipelineExecution_PersistRunAndDecisions(t *testing.T) {
 	}
 
 	// 6. Verify all 4 decisions are retrievable.
-	allDecisions, err := r.AgentDecision.GetByRun(ctx, run.ID, repository.AgentDecisionFilter{}, 20, 0)
+	allDecisions, err := r.AgentDecision.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.AgentDecisionFilter{}, 20, 0)
 	if err != nil {
 		t.Fatalf("GetByRun(): %v", err)
 	}
@@ -377,7 +377,7 @@ func TestIntegration_PipelineExecution_PersistRunAndDecisions(t *testing.T) {
 	}
 
 	// 7. Verify filtering by phase.
-	researchDecisions, err := r.AgentDecision.GetByRun(ctx, run.ID, repository.AgentDecisionFilter{
+	researchDecisions, err := r.AgentDecision.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.AgentDecisionFilter{
 		Phase: domain.PhaseResearchDebate,
 	}, 20, 0)
 	if err != nil {
@@ -412,7 +412,7 @@ func TestIntegration_PipelineExecution_FailedRun(t *testing.T) {
 
 	// Mark as failed.
 	completedAt := run.StartedAt.Add(2 * time.Minute)
-	if _, err := r.PipelineRun.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+	if _, err := r.PipelineRun.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{
 		Status:       domain.PipelineStatusFailed,
 		CompletedAt:  completedAt,
 		ErrorMessage: "LLM provider timeout after 30s",
@@ -420,7 +420,7 @@ func TestIntegration_PipelineExecution_FailedRun(t *testing.T) {
 		t.Fatalf("Finalize(): %v", err)
 	}
 
-	got, err := r.PipelineRun.Get(ctx, run.ID, run.TradeDate)
+	got, err := r.PipelineRun.Get(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {
 		t.Fatalf("Get(): %v", err)
 	}

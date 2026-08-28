@@ -629,9 +629,13 @@ func (s *rootState) newMemoriesCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			accountID := strings.TrimSpace(os.Getenv("PROJECTION_ACCOUNT_ID"))
+			if accountID == "" {
+				return errors.New("PROJECTION_ACCOUNT_ID is required")
+			}
 
 			var response listResponse[domain.AgentMemory]
-			if err := client.post(cmd.Context(), "/api/v1/memories/search", nil, map[string]string{"query": args[0]}, &response); err != nil {
+			if err := client.post(cmd.Context(), "/api/v1/accounts/"+url.PathEscape(accountID)+"/memories/search", nil, map[string]string{"query": args[0]}, &response); err != nil {
 				return err
 			}
 

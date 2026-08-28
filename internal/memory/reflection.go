@@ -88,7 +88,7 @@ func (r *Reflector) Reflect(ctx context.Context, positionID uuid.UUID) error {
 	// 3. Load all agent decisions for that run.
 	// Use a large limit to cover multi-round debates; only the 5 reflection
 	// roles are extracted from the result set.
-	decisions, err := r.decisionRepo.GetByRun(ctx, run.ID, repository.AgentDecisionFilter{}, 500, 0)
+	decisions, err := r.decisionRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.AgentDecisionFilter{}, 500, 0)
 	if err != nil {
 		return fmt.Errorf("load decisions for run %s: %w", run.ID, err)
 	}

@@ -17,38 +17,38 @@ func TestBuildTradeScopedListQuery_AllFilters(t *testing.T) {
 	executedAfter := time.Date(2026, 3, 21, 10, 0, 0, 0, time.UTC)
 	executedBefore := time.Date(2026, 3, 21, 12, 0, 0, 0, time.UTC)
 
-	query, args := buildTradeScopedListQuery("order_id", orderID, repository.TradeFilter{
+	query, args := buildTradeScopedListQuery(canonicalRepositoryTestAccountID, "order_id", orderID, repository.TradeFilter{
 		Ticker:    stringPtr("AAPL"),
 		Side:      orderSidePtr(domain.OrderSideBuy),
 		StartDate: &executedAfter,
 		EndDate:   &executedBefore,
 	}, 20, 40)
 
-	if len(args) != 7 {
+	if len(args) != 8 {
 		t.Fatalf("expected 7 args, got %d: %v", len(args), args)
 	}
 
 	assertContains(t, query, "FROM trades")
-	assertContains(t, query, "order_id = $1")
-	assertContains(t, query, "ticker = $2")
-	assertContains(t, query, "side = $3")
-	assertContains(t, query, "executed_at >= $4")
-	assertContains(t, query, "executed_at <= $5")
-	assertContains(t, query, "LIMIT $6 OFFSET $7")
+	assertContains(t, query, "order_id = $2")
+	assertContains(t, query, "ticker = $3")
+	assertContains(t, query, "side = $4")
+	assertContains(t, query, "executed_at >= $5")
+	assertContains(t, query, "executed_at <= $6")
+	assertContains(t, query, "LIMIT $7 OFFSET $8")
 	assertContains(t, query, "ORDER BY executed_at DESC, created_at DESC, id DESC")
 }
 
 func TestBuildTradeListQuery_EmptyFilter(t *testing.T) {
-	query, args := buildTradeListQuery(repository.TradeFilter{}, 25, 10)
+	query, args := buildTradeListQuery(canonicalRepositoryTestAccountID, repository.TradeFilter{}, 25, 10)
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args, got %d: %v", len(args), args)
 	}
 
 	assertContains(t, query, "FROM trades")
-	assertNotContains(t, query, " WHERE ")
+	assertContains(t, query, "account_id = $1")
 	assertContains(t, query, "ORDER BY executed_at DESC, created_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 	assertContains(t, query, "COALESCE(contract_multiplier, 100)")
 	assertContains(t, query, "COALESCE(premium, 0)")
 	assertContains(t, query, "COALESCE(exit_reason, '')")
@@ -63,7 +63,7 @@ func TestBuildTradeScopedListQuery_UnsupportedScopePanics(t *testing.T) {
 		}
 	}()
 
-	buildTradeScopedListQuery("unsupported", uuid.New(), repository.TradeFilter{}, 10, 0)
+	buildTradeScopedListQuery(canonicalRepositoryTestAccountID, "unsupported", uuid.New(), repository.TradeFilter{}, 10, 0)
 }
 
 func TestTradeRepoIntegration_CreateListGetByOrderAndPosition(t *testing.T) {
@@ -73,8 +73,8 @@ func TestTradeRepoIntegration_CreateListGetByOrderAndPosition(t *testing.T) {
 	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
 	defer cleanup()
 
-	orderRepo := NewOrderRepo(pool)
-	tradeRepo := NewTradeRepo(pool)
+	orderRepo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
+	tradeRepo := NewTradeRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	orderID := createTestOrder(t, ctx, orderRepo, strategyID)
 	positionID := createTestPosition(t, ctx, pool, strategyID)

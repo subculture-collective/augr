@@ -17,20 +17,25 @@ import (
 
 // OrderRepo implements repository.OrderRepository using PostgreSQL.
 type OrderRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that OrderRepo satisfies OrderRepository.
 var _ repository.OrderRepository = (*OrderRepo)(nil)
 
 // NewOrderRepo returns an OrderRepo backed by the given connection pool.
-func NewOrderRepo(pool *pgxpool.Pool) *OrderRepo {
-	return &OrderRepo{pool: pool}
+func NewOrderRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OrderRepo {
+	return &OrderRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new order and populates the generated ID and CreatedAt on
 // the provided struct.
 func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	if order.AccountID != uuid.Nil && order.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create order: account mismatch")
+	}
+	order.AccountID = r.accountID
 	marketType := order.MarketType.Normalize()
 	if marketType == "" {
 		marketType = domain.MarketTypeStock
@@ -50,7 +55,7 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
-		nullableUUID(order.AccountID),
+		r.accountID,
 		nullString(string(order.Environment)),
 		nullString(order.OriginType),
 		nullString(order.OriginID),
@@ -91,7 +96,7 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 
 // Get retrieves an order by ID. It returns ErrNotFound when no row matches.
 func (r *OrderRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Order, error) {
-	row := r.pool.QueryRow(ctx, orderSelectSQL+` WHERE id = $1`, id)
+	row := r.pool.QueryRow(ctx, orderSelectSQL+` WHERE id = $1 AND account_id = $2`, id, r.accountID)
 
 	order, err := scanOrder(row)
 	if err != nil {
@@ -106,7 +111,7 @@ func (r *OrderRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Order, error
 
 // List returns orders matching the provided filter with pagination.
 func (r *OrderRepo) List(ctx context.Context, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
-	query, args := buildOrderListQuery(filter, limit, offset)
+	query, args := buildOrderQuery("account", r.accountID, filter, limit, offset)
 	return r.list(ctx, query, args, "list orders")
 }
 
@@ -120,7 +125,7 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 	order.MarketType = marketType
 
 	row := r.pool.QueryRow(ctx,
-		`WITH locked AS (SELECT id FROM orders WHERE id=$33 FOR UPDATE)
+		`WITH locked AS (SELECT id FROM orders WHERE id=$33 AND account_id=$34 FOR UPDATE)
 		 UPDATE orders o
 		 SET external_id = $9, filled_quantity = $17, filled_avg_price = $18, status = $19,
 		     broker = $20, submitted_at = $21, filled_at = $22
@@ -169,7 +174,7 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 		order.LegGroupID,
 		nullString(order.PredictionSide),
 		nullString(order.PolymarketIntent),
-		order.ID,
+		order.ID, r.accountID,
 	)
 
 	var updatedID uuid.UUID
@@ -185,7 +190,7 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 
 // Delete removes an order by ID. It returns ErrNotFound when no row matches.
 func (r *OrderRepo) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM orders WHERE id = $1`, id)
+	tag, err := r.pool.Exec(ctx, `DELETE FROM orders WHERE id = $1 AND account_id = $2`, id, r.accountID)
 	if err != nil {
 		return fmt.Errorf("postgres: delete order: %w", err)
 	}
@@ -200,19 +205,22 @@ func (r *OrderRepo) Delete(ctx context.Context, id uuid.UUID) error {
 // GetByStrategy returns orders for the given strategy with optional filtering
 // and pagination.
 func (r *OrderRepo) GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
-	query, args := buildOrderScopedListQuery("strategy_id", strategyID, filter, limit, offset)
+	query, args := buildOrderQuery("account_strategy", []any{r.accountID, strategyID}, filter, limit, offset)
 	return r.list(ctx, query, args, "get orders by strategy")
 }
 
 // GetByRun returns orders for the given pipeline run with optional filtering
 // and pagination.
-func (r *OrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
-	query, args := buildOrderScopedListQuery("pipeline_run_id", runID, filter, limit, offset)
+func (r *OrderRepo) GetByRun(ctx context.Context, ref domain.PipelineRunRef, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+	query, args := buildOrderQuery("pipeline_run", runOrderScope{r.accountID, ref}, filter, limit, offset)
 	return r.list(ctx, query, args, "get orders by run")
 }
 
 func (r *OrderRepo) GetByCopyOriginRun(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, subscriptionID, copyOriginRunID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
-	query, args := buildOrderQuery("copy_origin", copyOrderScope{accountID, environment, subscriptionID, copyOriginRunID}, filter, limit, offset)
+	if accountID != r.accountID {
+		return []domain.Order{}, nil
+	}
+	query, args := buildOrderQuery("copy_origin", copyOrderScope{r.accountID, environment, subscriptionID, copyOriginRunID}, filter, limit, offset)
 	return r.list(ctx, query, args, "get orders by copy origin run")
 }
 
@@ -221,6 +229,11 @@ type copyOrderScope struct {
 	environment    domain.AccountEnvironment
 	subscriptionID uuid.UUID
 	runID          uuid.UUID
+}
+
+type runOrderScope struct {
+	accountID uuid.UUID
+	ref       domain.PipelineRunRef
 }
 
 const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
@@ -366,7 +379,7 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 // dynamic WHERE conditions. All values are parameterized.
 // Count returns the total number of orders matching the filter (ignoring pagination).
 func (r *OrderRepo) Count(ctx context.Context, filter repository.OrderFilter) (int, error) {
-	query, args := buildOrderCountQuery(filter)
+	query, args := buildOrderCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count orders: %w", err)
@@ -374,7 +387,7 @@ func (r *OrderRepo) Count(ctx context.Context, filter repository.OrderFilter) (i
 	return total, nil
 }
 
-func buildOrderCountQuery(filter repository.OrderFilter) (string, []any) {
+func buildOrderCountQuery(accountID uuid.UUID, filter repository.OrderFilter) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -385,6 +398,7 @@ func buildOrderCountQuery(filter repository.OrderFilter) (string, []any) {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 	if filter.Ticker != "" {
 		conditions = append(conditions, "ticker = "+nextArg(filter.Ticker))
 	}
@@ -454,6 +468,14 @@ func buildOrderQuery(scopeColumn string, scopeValue any, filter repository.Order
 			"copy_origin_rebalance_run_id = "+runParameter,
 			"EXISTS (SELECT 1 FROM copy_origin_rebalance_runs r WHERE r.id = "+runParameter+" AND r.account_id = "+accountParameter+" AND r.environment = "+environmentParameter+" AND r.subscription_id = "+subscriptionParameter+" AND r.origin_type = 'copy_subscription' AND r.origin_id = "+subscriptionParameter+")",
 		)
+	} else if scopeColumn == "pipeline_run" {
+		scope := scopeValue.(runOrderScope)
+		conditions = append(conditions, "account_id = "+nextArg(scope.accountID), "pipeline_run_id = "+nextArg(scope.ref.ID), "pipeline_run_trade_date = "+nextArg(scope.ref.TradeDate)+"::date")
+	} else if scopeColumn == "account" {
+		conditions = append(conditions, "account_id = "+nextArg(scopeValue))
+	} else if scopeColumn == "account_strategy" {
+		values := scopeValue.([]any)
+		conditions = append(conditions, "account_id = "+nextArg(values[0]), "strategy_id = "+nextArg(values[1]))
 	} else if scopeColumn != "" {
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))
 	}

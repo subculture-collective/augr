@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -27,7 +28,12 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	}
 	if v := q.Get("pipeline_run_id"); v != "" {
 		if id, err := uuid.Parse(v); err == nil {
-			filter.PipelineRunID = &id
+			tradeDate, dateErr := time.Parse("2006-01-02", q.Get("pipeline_run_trade_date"))
+			if dateErr != nil {
+				respondError(w, http.StatusBadRequest, "pipeline_run_trade_date is required", ErrCodeBadRequest)
+				return
+			}
+			filter.PipelineRunRef = &domain.PipelineRunRef{ID: id, TradeDate: tradeDate}
 		}
 	}
 
@@ -75,7 +81,7 @@ func (s *Server) handleGetConversationMessages(w http.ResponseWriter, r *http.Re
 	// start of the conversation so the agent's analysis appears as if they
 	// were a participant in the chat.
 	if offset == 0 && s.decisions != nil {
-		decisions, decErr := s.decisions.GetByRun(r.Context(), conv.PipelineRunID, repository.AgentDecisionFilter{
+		decisions, decErr := s.decisions.GetByRun(r.Context(), domain.PipelineRunRef{ID: conv.PipelineRunID, TradeDate: conv.PipelineRunTradeDate}, repository.AgentDecisionFilter{
 			AgentRole: conv.AgentRole,
 		}, 20, 0)
 		if decErr == nil && len(decisions) > 0 {
@@ -107,8 +113,9 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var body struct {
-		PipelineRunID uuid.UUID        `json:"pipeline_run_id"`
-		AgentRole     domain.AgentRole `json:"agent_role"`
+		PipelineRunID        uuid.UUID        `json:"pipeline_run_id"`
+		PipelineRunTradeDate time.Time        `json:"pipeline_run_trade_date"`
+		AgentRole            domain.AgentRole `json:"agent_role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		respondError(w, http.StatusBadRequest, "invalid request body", ErrCodeBadRequest)
@@ -123,7 +130,7 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	run, err := s.runs.GetByID(r.Context(), body.PipelineRunID)
+	run, err := s.runs.Get(r.Context(), domain.PipelineRunRef{ID: body.PipelineRunID, TradeDate: body.PipelineRunTradeDate})
 	if err != nil {
 		if isNotFound(err) {
 			respondError(w, http.StatusBadRequest, "pipeline_run_id does not reference an existing run", ErrCodeValidation)
@@ -141,9 +148,11 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	title := fmt.Sprintf("Chat with %s \u2014 %s", titleCase(roleLabel), run.Ticker)
 
 	conv := &domain.Conversation{
-		PipelineRunID: body.PipelineRunID,
-		AgentRole:     body.AgentRole,
-		Title:         title,
+		PipelineRunID:        body.PipelineRunID,
+		PipelineRunTradeDate: body.PipelineRunTradeDate,
+		Environment:          run.Environment,
+		AgentRole:            body.AgentRole,
+		Title:                title,
 	}
 	if err := s.conversations.CreateConversation(r.Context(), conv); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to create conversation", ErrCodeInternal)

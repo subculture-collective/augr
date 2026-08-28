@@ -43,6 +43,7 @@ func newTestServerWithDepsAndLogger(t *testing.T, deps Deps, logger *slog.Logger
 
 	cfg := DefaultServerConfig()
 	cfg.JWTSecret = "test-jwt-secret"
+	cfg.ProjectionAccountID = &testAPIAccountID
 
 	srv, err := NewServer(cfg, deps, logger)
 	if err != nil {
@@ -50,6 +51,8 @@ func newTestServerWithDepsAndLogger(t *testing.T, deps Deps, logger *slog.Logger
 	}
 	return srv
 }
+
+var testAPIAccountID = uuid.MustParse("00000000-0000-4000-8000-000000000064")
 
 func testDeps() Deps {
 	strategyA := stratA
@@ -315,7 +318,7 @@ func TestGuestObservationRoutesAllowReadOnlyRequests(t *testing.T) {
 		"/api/v1/automation/alpaca/verify",
 		"/api/v1/signals/evaluated",
 		"/api/v1/me",
-		"/api/v1/conversations",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations",
 		"/api/v1/audit-log",
 		"/api/v1/api-keys",
 	} {
@@ -1671,7 +1674,7 @@ func TestGetRunIncludesPhaseTimings(t *testing.T) {
 	deps.Runs = runRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String(), nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -1710,7 +1713,7 @@ func TestGetRunNotFound(t *testing.T) {
 
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String(), nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String()+"?trade_date=2026-03-14", nil)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
@@ -1784,7 +1787,7 @@ func TestPortfolioSummaryNeverFallsBackToLegacyPnL(t *testing.T) {
 		t.Fatalf("legacy P&L leaked into canonical valuation: %+v", body)
 	}
 	reasons, _ := body["unavailable_reasons"].([]any)
-	if len(reasons) != 1 || reasons[0] != "server_account_binding_unavailable" {
+	if len(reasons) != 1 || reasons[0] != "projection_reader_unavailable" {
 		t.Fatalf("unavailable_reasons = %+v", reasons)
 	}
 }
@@ -1811,7 +1814,7 @@ func TestPortfolioSummaryDoesNotRenderUnknownValuationAsZero(t *testing.T) {
 	if body.UnrealizedPnL != nil || body.RealizedPnL != nil || body.TotalPnL != nil || body.MarketValue != nil {
 		t.Fatalf("unknown valuation returned numeric values: %+v", body)
 	}
-	if len(body.UnavailableReasons) != 1 || body.UnavailableReasons[0] != "server_account_binding_unavailable" {
+	if len(body.UnavailableReasons) != 1 || body.UnavailableReasons[0] != "projection_reader_unavailable" {
 		t.Fatalf("unexpected valuation coverage: %+v", body)
 	}
 }
@@ -2105,7 +2108,7 @@ func TestListMemories(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/memories", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -2116,7 +2119,7 @@ func TestSearchMemories(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/memories/search", map[string]string{"query": "test"})
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories/search", map[string]string{"query": "test"})
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -2127,7 +2130,7 @@ func TestSearchMemoriesValidation(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/memories/search", map[string]string{"query": ""})
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories/search", map[string]string{"query": ""})
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
@@ -2142,7 +2145,7 @@ func TestSearchMemoriesInvalidJSON(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/memories/search", strings.NewReader("{invalid"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories/search", strings.NewReader("{invalid"))
 	req.Header.Set("Content-Type", "application/json")
 	tokenPair, err := srv.auth.GenerateTokenPair("test-user")
 	if err != nil {
@@ -2165,7 +2168,7 @@ func TestDeleteMemory(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodDelete, "/api/v1/memories/"+uuid.New().String(), nil)
+	rr := doRequest(t, srv, http.MethodDelete, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories/"+uuid.New().String(), nil)
 
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNoContent)
@@ -2745,13 +2748,9 @@ type stubRunRepo struct {
 
 func (*stubRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (s *stubRunRepo) Get(_ context.Context, _ uuid.UUID, _ time.Time) (*domain.PipelineRun, error) {
-	return nil, fmt.Errorf("run: %w", repository.ErrNotFound)
-}
-
-func (s *stubRunRepo) GetByID(_ context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
+func (s *stubRunRepo) Get(_ context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	for i := range s.runs {
-		if s.runs[i].ID == id {
+		if s.runs[i].ID == ref.ID && (ref.TradeDate.IsZero() || s.runs[i].TradeDate.Equal(ref.TradeDate)) {
 			return &s.runs[i], nil
 		}
 	}
@@ -2767,11 +2766,12 @@ func (s *stubRunRepo) Count(_ context.Context, _ repository.PipelineRunFilter) (
 	return len(s.runs), nil
 }
 
-func (*stubRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (*stubRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	id, tradeDate := ref.ID, ref.TradeDate
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
 }
 
-func (*stubRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (*stubRunRepo) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
@@ -2847,11 +2847,11 @@ type stubDecisionRepo struct {
 }
 
 func (stubDecisionRepo) Create(context.Context, *domain.AgentDecision) error { return nil }
-func (s *stubDecisionRepo) GetByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
+func (s *stubDecisionRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
 	return s.decisions, nil
 }
 
-func (s *stubDecisionRepo) CountByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter) (int, error) {
+func (s *stubDecisionRepo) CountByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter) (int, error) {
 	return len(s.decisions), nil
 }
 
@@ -2873,7 +2873,7 @@ func (stubOrderRepo) GetByStrategy(context.Context, uuid.UUID, repository.OrderF
 	return nil, nil
 }
 
-func (stubOrderRepo) GetByRun(context.Context, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
+func (stubOrderRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.OrderFilter, int, int) ([]domain.Order, error) {
 	return nil, nil
 }
 func (stubOrderRepo) GetByCopyOriginRun(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
@@ -3368,7 +3368,7 @@ func TestListConversationsEndpoint(t *testing.T) {
 	deps.Conversations = newStubConversationRepo()
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/conversations", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3380,7 +3380,7 @@ func TestListConversationsRejectsBadAgentRole(t *testing.T) {
 	deps.Conversations = newStubConversationRepo()
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/conversations?agent_role=fake_role", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations?agent_role=fake_role", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -3403,7 +3403,7 @@ func TestCreateConversationEndpoint(t *testing.T) {
 	deps.Conversations = newStubConversationRepo()
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/conversations", map[string]any{
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations", map[string]any{
 		"pipeline_run_id": runID.String(),
 		"agent_role":      "bull_researcher",
 	})
@@ -3426,7 +3426,7 @@ func TestCreateConversationUnknownPipelineRunReturnsValidationError(t *testing.T
 	deps.Conversations = newStubConversationRepo()
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/conversations", map[string]any{
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations", map[string]any{
 		"pipeline_run_id": uuid.New().String(),
 		"agent_role":      "bull_researcher",
 	})
@@ -3446,7 +3446,7 @@ func (r *stubSnapshotRepo) Create(_ context.Context, _ *domain.PipelineRunSnapsh
 	return r.createErr
 }
 
-func (r *stubSnapshotRepo) GetByRun(_ context.Context, _ uuid.UUID) ([]domain.PipelineRunSnapshot, error) {
+func (r *stubSnapshotRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef) ([]domain.PipelineRunSnapshot, error) {
 	return r.snapshots, nil
 }
 
@@ -3489,7 +3489,7 @@ func TestGetRunDecisions_IncludesCostUSD(t *testing.T) {
 	}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3533,7 +3533,7 @@ func TestGetRunDecisions_IncludePromptText(t *testing.T) {
 	srv := newTestServerWithDeps(t, deps)
 
 	// With include_prompt=true, prompt_text should appear.
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions?include_prompt=true", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions?trade_date=2026-03-14&include_prompt=true", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3555,7 +3555,7 @@ func TestGetRunDecisions_IncludePromptText(t *testing.T) {
 	}
 
 	// Without include_prompt, prompt_text should be absent (omitempty).
-	rr2 := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions", nil)
+	rr2 := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions?trade_date=2026-03-14", nil)
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr2.Code, http.StatusOK)
 	}
@@ -3597,7 +3597,7 @@ func TestGetRunSnapshot(t *testing.T) {
 	}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/snapshot", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/snapshot?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3621,7 +3621,7 @@ func TestGetRunSnapshot_NotConfigured(t *testing.T) {
 	// Snapshots is nil by default.
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String()+"/snapshot", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String()+"/snapshot?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
 	}
@@ -3632,7 +3632,7 @@ func TestGetRunSnapshot_NotConfigured(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// #450 — POST /api/v1/conversations/{id}/messages
+// #450 — POST /api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations/{id}/messages
 // ---------------------------------------------------------------------------
 
 func TestCreateConversationMessage(t *testing.T) {
@@ -3652,7 +3652,7 @@ func TestCreateConversationMessage(t *testing.T) {
 	deps.LLMProvider = &stubLLMProvider{content: "AI response here"}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/conversations/"+conv.ID.String()+"/messages", map[string]string{
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations/"+conv.ID.String()+"/messages", map[string]string{
 		"content": "What do you think about AAPL?",
 	})
 	if rr.Code != http.StatusCreated {
@@ -3700,7 +3700,7 @@ func TestCreateConversationMessage_NoLLM(t *testing.T) {
 	// LLMProvider is nil by default.
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/conversations/"+conv.ID.String()+"/messages", map[string]string{
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations/"+conv.ID.String()+"/messages", map[string]string{
 		"content": "Hello",
 	})
 	if rr.Code != http.StatusNotImplemented {
@@ -3725,7 +3725,7 @@ func TestCreateConversationMessage_ConversationNotFound(t *testing.T) {
 	deps.LLMProvider = &stubLLMProvider{content: "nope"}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/conversations/"+uuid.New().String()+"/messages", map[string]string{
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations/"+uuid.New().String()+"/messages", map[string]string{
 		"content": "Hello",
 	})
 	if rr.Code != http.StatusNotFound {
@@ -3838,7 +3838,7 @@ func TestListMemoriesRejectsBadAgentRole(t *testing.T) {
 
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/memories?agent_role=invalid_role", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories?agent_role=invalid_role", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
 	}

@@ -21,7 +21,7 @@ func TestBuildOpportunityQuery(t *testing.T) {
 	createdAfter := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
 	expiresBefore := time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC)
 
-	query, args := buildOpportunityListQuery(repository.OpportunityFilter{
+	query, args := buildOpportunityListQuery(canonicalRepositoryTestAccountID, repository.OpportunityFilter{
 		Status:        domain.OpportunityStatusQueued,
 		MarketType:    domain.MarketTypeStock,
 		StrategyID:    &strategyID,
@@ -30,21 +30,21 @@ func TestBuildOpportunityQuery(t *testing.T) {
 		CreatedAfter:  &createdAfter,
 	}, 25, 50)
 
-	if len(args) != 8 {
+	if len(args) != 9 {
 		t.Fatalf("expected 8 args, got %d: %#v", len(args), args)
 	}
-	assertContains(t, query, "status = $1")
-	assertContains(t, query, "market_type = $2")
-	assertContains(t, query, "strategy_id = $3")
-	assertContains(t, query, "ticker = $4")
-	assertContains(t, query, "expires_at <= $5")
-	assertContains(t, query, "created_at >= $6")
-	assertContains(t, query, "LIMIT $7 OFFSET $8")
+	assertContains(t, query, "status = $2")
+	assertContains(t, query, "market_type = $3")
+	assertContains(t, query, "strategy_id = $4")
+	assertContains(t, query, "ticker = $5")
+	assertContains(t, query, "expires_at <= $6")
+	assertContains(t, query, "created_at >= $7")
+	assertContains(t, query, "LIMIT $8 OFFSET $9")
 }
 
 func TestBuildQueuedForAllocationQuery(t *testing.T) {
-	query := opportunitySelectSQL + ` WHERE status = $1 AND expires_at > $2 ORDER BY expires_at ASC, created_at ASC, id ASC`
-	assertContains(t, query, "WHERE status = $1 AND expires_at > $2")
+	query := opportunitySelectSQL + ` WHERE status = $2 AND expires_at > $3 ORDER BY expires_at ASC, created_at ASC, id ASC`
+	assertContains(t, query, "WHERE status = $2 AND expires_at > $3")
 	assertContains(t, query, "ORDER BY expires_at ASC, created_at ASC, id ASC")
 	_ = fmt.Sprintf
 }
@@ -54,7 +54,7 @@ func TestOpportunityRepoIntegration_CRUDAndUpsert(t *testing.T) {
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	runID := uuid.New()
 	expiresAt := time.Date(2026, 6, 20, 15, 0, 0, 0, time.UTC)
@@ -194,7 +194,7 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	expiresAt := time.Date(2026, 6, 20, 15, 0, 0, 0, time.UTC)
 	score := 1.0
@@ -269,7 +269,7 @@ func TestOpportunityRepo_ExpireQueuedBefore(t *testing.T) {
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	seedOpportunity := func(status domain.OpportunityStatus, expiresAt time.Time, dedupe string) uuid.UUID {
@@ -305,7 +305,7 @@ func TestOpportunityRepo_ListQueuedForAllocation(t *testing.T) {
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	asOf := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 205; i++ {

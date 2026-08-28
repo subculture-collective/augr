@@ -18,18 +18,18 @@ import (
 )
 
 func TestBuildTradeDecisionListQuery_NoFilters(t *testing.T) {
-	query, args := buildTradeDecisionListQuery(repository.TradeDecisionFilter{}, 10, 0)
+	query, args := buildTradeDecisionListQuery(canonicalRepositoryTestAccountID, repository.TradeDecisionFilter{}, 10, 0)
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
-	if args[0] != 10 || args[1] != 0 {
+	if args[1] != 10 || args[2] != 0 {
 		t.Fatalf("unexpected args: %#v", args)
 	}
 	assertContains(t, query, "FROM trade_decisions")
 	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
+	assertContains(t, query, "account_id = $1")
 }
 
 func TestBuildTradeDecisionListQuery_AllFilters(t *testing.T) {
@@ -38,7 +38,7 @@ func TestBuildTradeDecisionListQuery_AllFilters(t *testing.T) {
 	after := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	before := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 
-	query, args := buildTradeDecisionListQuery(repository.TradeDecisionFilter{
+	query, args := buildTradeDecisionListQuery(canonicalRepositoryTestAccountID, repository.TradeDecisionFilter{
 		StrategyID:    &strategyID,
 		InstrumentKey: instrumentKey,
 		MarketType:    domain.MarketTypeStock,
@@ -47,43 +47,43 @@ func TestBuildTradeDecisionListQuery_AllFilters(t *testing.T) {
 		CreatedBefore: &before,
 	}, 25, 50)
 
-	if len(args) != 8 {
+	if len(args) != 9 {
 		t.Fatalf("expected 7 args, got %d: %#v", len(args), args)
 	}
-	assertContains(t, query, "strategy_id = $1")
-	assertContains(t, query, "instrument_key = $2")
-	assertContains(t, query, "market_type = $3")
-	assertContains(t, query, "status = $4")
-	assertContains(t, query, "created_at >= $5")
-	assertContains(t, query, "created_at <= $6")
-	assertContains(t, query, "LIMIT $7 OFFSET $8")
-	if args[0] != strategyID || args[1] != instrumentKey || args[2] != domain.MarketTypeStock || args[3] != domain.TradeDecisionStatusLive {
-		t.Fatalf("unexpected filter args: %#v", args[:4])
+	assertContains(t, query, "strategy_id = $2")
+	assertContains(t, query, "instrument_key = $3")
+	assertContains(t, query, "market_type = $4")
+	assertContains(t, query, "status = $5")
+	assertContains(t, query, "created_at >= $6")
+	assertContains(t, query, "created_at <= $7")
+	assertContains(t, query, "LIMIT $8 OFFSET $9")
+	if args[1] != strategyID || args[2] != instrumentKey || args[3] != domain.MarketTypeStock || args[4] != domain.TradeDecisionStatusLive {
+		t.Fatalf("unexpected filter args: %#v", args[:5])
 	}
 }
 
 func TestBuildTradeDecisionCountQuery(t *testing.T) {
 	strategyID := uuid.New()
-	query, args := buildTradeDecisionCountQuery(repository.TradeDecisionFilter{StrategyID: &strategyID, Status: domain.TradeDecisionStatusPaper})
+	query, args := buildTradeDecisionCountQuery(canonicalRepositoryTestAccountID, repository.TradeDecisionFilter{StrategyID: &strategyID, Status: domain.TradeDecisionStatusPaper})
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args, got %d", len(args))
 	}
 	assertContains(t, query, "SELECT COUNT(*) FROM trade_decisions")
-	assertContains(t, query, "strategy_id = $1")
-	assertContains(t, query, "status = $2")
+	assertContains(t, query, "strategy_id = $2")
+	assertContains(t, query, "status = $3")
 	assertNotContains(t, query, "LIMIT")
 }
 
 func TestBuildTradeDecisionAttachQuery(t *testing.T) {
 	decisionID := uuid.New()
 	orderID := uuid.New()
-	query, args := buildTradeDecisionAttachQuery("paper_order_id", decisionID, orderID, domain.TradeDecisionStatusPaper)
+	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, decisionID, orderID, domain.TradeDecisionStatusPaper)
 
-	assertContains(t, query, "UPDATE trade_decisions SET paper_order_id = $2")
-	assertContains(t, query, "status = $3")
+	assertContains(t, query, "UPDATE trade_decisions SET paper_order_id = $3")
+	assertContains(t, query, "status = $4")
 	assertContains(t, query, "RETURNING id")
-	if len(args) != 3 || args[0] != decisionID || args[1] != orderID || args[2] != domain.TradeDecisionStatusPaper {
+	if len(args) != 4 || args[0] != decisionID || args[1] != canonicalRepositoryTestAccountID || args[2] != orderID || args[3] != domain.TradeDecisionStatusPaper {
 		t.Fatalf("unexpected attach args: %#v", args)
 	}
 }
@@ -131,6 +131,11 @@ func TestScanTradeDecision_RoundTrip(t *testing.T) {
 
 	got, err := scanTradeDecision(fakeTradeDecisionScanner{values: []any{
 		uuid.New(),
+		canonicalRepositoryTestAccountID,
+		domain.AccountEnvironmentPaperScored,
+		"strategy_version",
+		uuid.NewString(),
+		&createdAt,
 		&strategyID,
 		&runID,
 		domain.MarketTypeStock,
@@ -216,7 +221,7 @@ func TestTradeDecisionJournalRepo_CountByNoActionReason_ParsesFilterAndCoalesces
 	pool, cleanup := newTradeDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewTradeDecisionJournalRepo(pool)
+	repo := NewTradeDecisionJournalRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := uuid.New()
 	if _, err := pool.Exec(ctx, `INSERT INTO strategies (id, market_type) VALUES ($1, $2)`, strategyID, domain.MarketTypeStock); err != nil {
 		t.Fatalf("insert strategy: %v", err)
@@ -262,7 +267,7 @@ func TestTradeDecisionJournalRepo_CountByNoActionReason_EmptyTableEmptyFilterRet
 	pool, cleanup := newTradeDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewTradeDecisionJournalRepo(pool)
+	repo := NewTradeDecisionJournalRepo(pool, canonicalRepositoryTestAccountID)
 	counts, err := repo.CountByNoActionReason(ctx, repository.TradeDecisionFilter{})
 	if err != nil {
 		t.Fatalf("CountByNoActionReason() error = %v", err)

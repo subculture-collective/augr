@@ -1444,11 +1444,11 @@ func (m *mockAgentDecisionRepo) Create(_ context.Context, decision *domain.Agent
 	return nil
 }
 
-func (m *mockAgentDecisionRepo) GetByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
+func (m *mockAgentDecisionRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
 	return nil, nil
 }
 
-func (m *mockAgentDecisionRepo) CountByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter) (int, error) {
+func (m *mockAgentDecisionRepo) CountByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter) (int, error) {
 	return 0, nil
 }
 
@@ -1493,7 +1493,7 @@ func (m *mockPipelineRunSnapshotRepo) Create(_ context.Context, snapshot *domain
 	return nil
 }
 
-func (m *mockPipelineRunSnapshotRepo) GetByRun(_ context.Context, _ uuid.UUID) ([]domain.PipelineRunSnapshot, error) {
+func (m *mockPipelineRunSnapshotRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef) ([]domain.PipelineRunSnapshot, error) {
 	return nil, nil
 }
 
@@ -1537,13 +1537,9 @@ func (m *mockPipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRu
 	return nil
 }
 
-func (m *mockPipelineRunRepo) Get(_ context.Context, _ uuid.UUID, _ time.Time) (*domain.PipelineRun, error) {
-	return nil, nil
-}
-
-func (m *mockPipelineRunRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
+func (m *mockPipelineRunRepo) Get(ctx context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	if m.getByIDFn != nil {
-		return m.getByIDFn(ctx, id)
+		return m.getByIDFn(ctx, ref.ID)
 	}
 	return nil, nil
 }
@@ -1556,16 +1552,16 @@ func (m *mockPipelineRunRepo) Count(_ context.Context, _ repository.PipelineRunF
 	return 0, nil
 }
 
-func (m *mockPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (m *mockPipelineRunRepo) Finalize(ctx context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	m.finalizations = append(m.finalizations, finalization)
 	if m.finalizeFn != nil {
-		return m.finalizeFn(ctx, id, tradeDate, finalization)
+		return m.finalizeFn(ctx, ref.ID, ref.TradeDate, finalization)
 	}
-	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
 }
 
-func (*mockPipelineRunRepo) RefineCompletedSignal(_ context.Context, id uuid.UUID, tradeDate time.Time, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
-	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}}, nil
+func (*mockPipelineRunRepo) RefineCompletedSignal(_ context.Context, ref domain.PipelineRunRef, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}}, nil
 }
 
 // mockPhaseNode is a flexible test double that can represent any phase/role combination.

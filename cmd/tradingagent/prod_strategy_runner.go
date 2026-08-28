@@ -291,7 +291,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	}
 	r.recordAgentTerminalMetrics(result)
 
-	run, err := r.findRun(ctx, result.Run.ID)
+	run, err := r.findRun(ctx, domain.PipelineRunRef{ID: result.Run.ID, TradeDate: result.Run.TradeDate})
 	if err != nil {
 		return canonical, err
 	}
@@ -304,7 +304,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		planTicker = strategy.Ticker
 	}
 
-	receipt, err := r.runRepo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, run.Signal, signal)
+	receipt, err := r.runRepo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, run.Signal, signal)
 	if err != nil {
 		return canonical, err
 	}
@@ -327,7 +327,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		}
 	}
 
-	decisionMetadata := r.executionDecisionMetadata(ctx, run.ID)
+	decisionMetadata := r.executionDecisionMetadata(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 
 	finalSignal := execution.FinalSignal{Signal: signal, Confidence: result.State.FinalSignal.Confidence}
 	tradingPlan := execution.TradingPlan{
@@ -375,7 +375,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		r.logger.WarnContext(ctx, "notification dispatch failed (non-fatal)", "error", err, "run_id", run.ID)
 	}
 
-	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+	orders, err := r.orderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		return canonical, err
 	}
@@ -808,7 +808,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
 		return canonical, err
 	}
-	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+	orders, err := r.orderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		return canonical, err
 	}
@@ -961,7 +961,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 
 	var orders []domain.Order
 	if r.orderRepo != nil {
-		orders, err = r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+		orders, err = r.orderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
 		if err != nil {
 			return canonical, err
 		}
@@ -1042,7 +1042,7 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 		return recognizedRunControlError(ctx, errors.Join(fmt.Errorf("%s native: persist start event: %w", source, eventErr), terminalEventErr))
 	}
 	updateCtx, updateCancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-	receipt, updateErr := r.runRepo.Finalize(updateCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, Signal: &fallbackSignal, CompletedAt: completedAt, ErrorMessage: message, Event: terminalEvent})
+	receipt, updateErr := r.runRepo.Finalize(updateCtx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{Status: status, Signal: &fallbackSignal, CompletedAt: completedAt, ErrorMessage: message, Event: terminalEvent})
 	updateCancel()
 	if updateErr != nil {
 		return recognizedRunControlError(ctx, errors.Join(
@@ -1090,7 +1090,7 @@ func (r *realStrategyRunner) completeNativeRun(
 		persistParent = ctx
 	}
 	persistCtx, cancel := context.WithTimeout(persistParent, nativeTerminalTimeout)
-	receipt, err := r.runRepo.Finalize(persistCtx, run.ID, run.TradeDate, finalization)
+	receipt, err := r.runRepo.Finalize(persistCtx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, finalization)
 	cancel()
 	if err != nil && status == domain.PipelineStatusCompleted && ctx.Err() != nil {
 		fallbackStatus, fallbackMessage := nativeFailure(ctx, ctx.Err())
@@ -1100,7 +1100,7 @@ func (r *realStrategyRunner) completeNativeRun(
 			return recognizedRunControlError(ctx, errors.Join(fmt.Errorf("%s native: finalize run: %w", source, err), eventErr))
 		}
 		fallbackCtx, fallbackCancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-		receipt, err = r.runRepo.Finalize(fallbackCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: fallbackStatus, Signal: &fallbackSignal, CompletedAt: time.Now().UTC(), ErrorMessage: fallbackMessage, Event: fallbackEvent})
+		receipt, err = r.runRepo.Finalize(fallbackCtx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{Status: fallbackStatus, Signal: &fallbackSignal, CompletedAt: time.Now().UTC(), ErrorMessage: fallbackMessage, Event: fallbackEvent})
 		fallbackCancel()
 	}
 	if err != nil {
@@ -1319,22 +1319,22 @@ func (r *realStrategyRunner) effectivePolymarketExecutionStrategy(strategy domai
 	return effective
 }
 
-func (r *realStrategyRunner) executionDecisionMetadata(ctx context.Context, runID uuid.UUID) *execution.DecisionMetadata {
-	return executionDecisionMetadata(ctx, r.decisionRepo, r.logger, runID)
+func (r *realStrategyRunner) executionDecisionMetadata(ctx context.Context, ref domain.PipelineRunRef) *execution.DecisionMetadata {
+	return executionDecisionMetadata(ctx, r.decisionRepo, r.logger, ref)
 }
 
-func executionDecisionMetadata(ctx context.Context, decisionRepo repository.AgentDecisionRepository, logger *slog.Logger, runID uuid.UUID) *execution.DecisionMetadata {
-	if decisionRepo == nil || runID == uuid.Nil {
+func executionDecisionMetadata(ctx context.Context, decisionRepo repository.AgentDecisionRepository, logger *slog.Logger, ref domain.PipelineRunRef) *execution.DecisionMetadata {
+	if decisionRepo == nil || ref.ID == uuid.Nil || ref.TradeDate.IsZero() {
 		return nil
 	}
 
-	decisions, err := decisionRepo.GetByRun(ctx, runID, repository.AgentDecisionFilter{
+	decisions, err := decisionRepo.GetByRun(ctx, ref, repository.AgentDecisionFilter{
 		AgentRole: domain.AgentRoleTrader,
 		Phase:     domain.PhaseTrading,
 	}, 1, 0)
 	if err != nil || len(decisions) == 0 {
 		if err != nil && logger != nil {
-			logger.WarnContext(ctx, "load trader decision metadata", "error", err, "run_id", runID)
+			logger.WarnContext(ctx, "load trader decision metadata", "error", err, "run_id", ref.ID)
 		}
 		return nil
 	}
@@ -2645,7 +2645,7 @@ func (r *realStrategyRunner) dispatchNotifications(ctx context.Context, strategy
 		return fmt.Errorf("dispatch signal notification: %w", err)
 	}
 
-	decisions, err := r.decisionRepo.GetByRun(ctx, run.ID, repository.AgentDecisionFilter{}, 100, 0)
+	decisions, err := r.decisionRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.AgentDecisionFilter{}, 100, 0)
 	if err != nil {
 		return fmt.Errorf("load run decisions: %w", err)
 	}
@@ -2668,13 +2668,13 @@ func (r *realStrategyRunner) dispatchNotifications(ctx context.Context, strategy
 	return nil
 }
 
-func (r *realStrategyRunner) findRun(ctx context.Context, runID uuid.UUID) (*domain.PipelineRun, error) {
-	run, err := r.runRepo.GetByID(ctx, runID)
+func (r *realStrategyRunner) findRun(ctx context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
+	run, err := r.runRepo.Get(ctx, ref)
 	if err == nil {
 		return run, nil
 	}
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, fmt.Errorf("run %s: %w", runID, repository.ErrNotFound)
+		return nil, fmt.Errorf("run %s: %w", ref.ID, repository.ErrNotFound)
 	}
 	return nil, err
 }

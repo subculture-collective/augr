@@ -72,8 +72,6 @@ func TestCapitalLadderSchemaCompatibility(t *testing.T) {
 }
 
 func TestCLICommands(t *testing.T) {
-	t.Parallel()
-
 	strategyID := uuid.New()
 	runID := uuid.New()
 	positionID := uuid.New()
@@ -203,7 +201,7 @@ func TestCLICommands(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]bool{"active": true})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/memories/search":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories/search":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.AgentMemory]{
 				Data: []domain.AgentMemory{{
 					ID:             uuid.New(),
@@ -335,6 +333,7 @@ func TestCLICommands(t *testing.T) {
 	})
 
 	t.Run("memories search prints results", func(t *testing.T) {
+		t.Setenv("PROJECTION_ACCOUNT_ID", "00000000-0000-4000-8000-000000000064")
 		stdout, _, err := executeCLI(t, nil, "--api-url", server.URL, "memories", "search", "AAPL breakout")
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)

@@ -1456,11 +1456,11 @@ func (captureProvider) Complete(_ context.Context, request llm.CompletionRequest
 
 func (s *stubDecisionRepo) Create(context.Context, *domain.AgentDecision) error { return nil }
 
-func (s *stubDecisionRepo) GetByRun(context.Context, uuid.UUID, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
+func (s *stubDecisionRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
 	return s.decisions, nil
 }
 
-func (s *stubDecisionRepo) CountByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter) (int, error) {
+func (s *stubDecisionRepo) CountByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter) (int, error) {
 	return len(s.decisions), nil
 }
 
@@ -1494,14 +1494,9 @@ func (r *stubPipelineRunRepo) Create(_ context.Context, run *domain.PipelineRun)
 	return nil
 }
 
-func (r *stubPipelineRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
+func (r *stubPipelineRunRepo) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	r.getByID = true
 	return r.run, r.err
-}
-
-func (r *stubPipelineRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
-	r.getCalled = true
-	panic("unexpected Get call")
 }
 
 func (r *stubPipelineRunRepo) List(context.Context, repository.PipelineRunFilter, int, int) ([]domain.PipelineRun, error) {
@@ -1522,7 +1517,7 @@ func (r *stubPipelineRunRepo) CountByStatus(context.Context, repository.Pipeline
 	return map[domain.PipelineStatus]int{}, nil
 }
 
-func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, update repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *stubPipelineRunRepo) Finalize(ctx context.Context, ref domain.PipelineRunRef, update repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	r.updateCalled = true
 	r.updates = append(r.updates, update)
 	if r.finalizeHook != nil {
@@ -1536,7 +1531,7 @@ func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeD
 	if r.receipt != nil {
 		return *r.receipt, nil
 	}
-	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: update.Status, CompletedAt: &update.CompletedAt, ErrorMessage: update.ErrorMessage}
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: update.Status, CompletedAt: &update.CompletedAt, ErrorMessage: update.ErrorMessage}
 	if update.Signal != nil {
 		run.Signal = *update.Signal
 	}
@@ -1544,13 +1539,13 @@ func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeD
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
 }
 
-func (r *stubPipelineRunRepo) RefineCompletedSignal(_ context.Context, id uuid.UUID, tradeDate time.Time, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *stubPipelineRunRepo) RefineCompletedSignal(_ context.Context, ref domain.PipelineRunRef, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	r.refineCalled = true
 	r.updateCalled = true
 	if r.updateErr != nil {
 		return repository.PipelineRunFinalizationReceipt{}, r.updateErr
 	}
-	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}
 	if r.run != nil {
 		run = *r.run
 		run.Signal = signal
@@ -1691,7 +1686,7 @@ func TestSmokeStrategyRunnerDispatchNotifications_RoutesSignalAndDecisionsToN8NA
 	}
 }
 
-func TestSmokeStrategyRunnerFindRunUsesGetByID(t *testing.T) {
+func TestSmokeStrategyRunnerFindRunUsesCompositeRef(t *testing.T) {
 	t.Parallel()
 
 	runID := uuid.New()
@@ -1699,7 +1694,7 @@ func TestSmokeStrategyRunnerFindRunUsesGetByID(t *testing.T) {
 	repo := &stubPipelineRunRepo{run: expected}
 	runner := &smokeStrategyRunner{runRepo: repo}
 
-	got, err := runner.findRun(context.Background(), runID)
+	got, err := runner.findRun(context.Background(), domain.PipelineRunRef{ID: runID, TradeDate: repo.run.TradeDate})
 	if err != nil {
 		t.Fatalf("findRun() error = %v", err)
 	}
@@ -1714,7 +1709,7 @@ func TestSmokeStrategyRunnerFindRunUsesGetByID(t *testing.T) {
 	}
 }
 
-func TestRealStrategyRunnerFindRunUsesGetByID(t *testing.T) {
+func TestRealStrategyRunnerFindRunUsesCompositeRef(t *testing.T) {
 	t.Parallel()
 
 	runID := uuid.New()
@@ -1722,7 +1717,7 @@ func TestRealStrategyRunnerFindRunUsesGetByID(t *testing.T) {
 	repo := &stubPipelineRunRepo{run: expected}
 	runner := &realStrategyRunner{runRepo: repo}
 
-	got, err := runner.findRun(context.Background(), runID)
+	got, err := runner.findRun(context.Background(), domain.PipelineRunRef{ID: runID, TradeDate: repo.run.TradeDate})
 	if err != nil {
 		t.Fatalf("findRun() error = %v", err)
 	}
@@ -1743,7 +1738,7 @@ func TestSmokeStrategyRunnerFindRunNotFoundWrapsErrNotFound(t *testing.T) {
 	runID := uuid.New()
 	runner := &smokeStrategyRunner{runRepo: &stubPipelineRunRepo{err: repository.ErrNotFound}}
 
-	got, err := runner.findRun(context.Background(), runID)
+	got, err := runner.findRun(context.Background(), domain.PipelineRunRef{ID: runID, TradeDate: time.Now()})
 	if got != nil {
 		t.Fatalf("findRun() run = %+v, want nil", got)
 	}

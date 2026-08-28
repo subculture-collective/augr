@@ -109,7 +109,7 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOrderRepo(pool)
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	runID := uuid.New()
 	submittedAt := time.Date(2026, 3, 21, 13, 30, 0, 0, time.UTC)
@@ -228,7 +228,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOrderRepo(pool)
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
 	strategyA := createTestStrategy(t, ctx, pool)
 	strategyB := createTestStrategy(t, ctx, pool)
 	runA := uuid.New()
@@ -312,7 +312,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 		t.Fatalf("expected orderB, got %s", strategyOrders[0].ID)
 	}
 
-	runOrders, err := repo.GetByRun(ctx, runA, repository.OrderFilter{
+	runOrders, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runA, TradeDate: canonicalRepositoryTestTradeDate}, repository.OrderFilter{
 		SubmittedAfter: timePtr(baseTime.Add(15 * time.Minute)),
 	}, 10, 0)
 	if err != nil {

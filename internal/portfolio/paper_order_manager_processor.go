@@ -88,7 +88,7 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if !ok {
 		return PaperOrderResult{Skipped: true, Reason: "missing_pipeline_run"}, nil
 	}
-	orders, err := p.deps.OrderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+	orders, err := p.deps.OrderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		return PaperOrderResult{}, err
 	}

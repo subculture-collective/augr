@@ -302,8 +302,8 @@ type AgentDecisionFilter struct {
 
 // ConversationFilter defines supported filters when listing conversations.
 type ConversationFilter struct {
-	PipelineRunID *uuid.UUID
-	AgentRole     domain.AgentRole
+	PipelineRunRef *domain.PipelineRunRef
+	AgentRole      domain.AgentRole
 }
 
 // AgentEventFilter defines supported filters when listing agent events.
@@ -412,7 +412,7 @@ type PolymarketAccountFilter struct {
 // MemorySearchFilter defines supported filters when searching agent memories.
 type MemorySearchFilter struct {
 	AgentRole         domain.AgentRole
-	PipelineRunID     *uuid.UUID
+	PipelineRunRef    *domain.PipelineRunRef
 	MinRelevanceScore *float64
 	CreatedAfter      *time.Time
 	CreatedBefore     *time.Time
@@ -561,27 +561,26 @@ type CapitalLadderRepository interface {
 // PipelineRunRepository provides access to pipeline runs.
 type PipelineRunRepository interface {
 	Create(ctx context.Context, run *domain.PipelineRun) error
-	GetByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error)
-	Get(ctx context.Context, id uuid.UUID, tradeDate time.Time) (*domain.PipelineRun, error)
+	Get(ctx context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error)
 	List(ctx context.Context, filter PipelineRunFilter, limit, offset int) ([]domain.PipelineRun, error)
 	// Count returns the total number of pipeline runs matching the filter (ignoring pagination).
 	Count(ctx context.Context, filter PipelineRunFilter) (int, error)
-	Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization PipelineRunFinalization) (PipelineRunFinalizationReceipt, error)
-	RefineCompletedSignal(ctx context.Context, id uuid.UUID, tradeDate time.Time, expected, signal domain.PipelineSignal) (PipelineRunFinalizationReceipt, error)
+	Finalize(ctx context.Context, ref domain.PipelineRunRef, finalization PipelineRunFinalization) (PipelineRunFinalizationReceipt, error)
+	RefineCompletedSignal(ctx context.Context, ref domain.PipelineRunRef, expected, signal domain.PipelineSignal) (PipelineRunFinalizationReceipt, error)
 }
 
 // PipelineRunSnapshotRepository provides access to snapshots captured during a run.
 type PipelineRunSnapshotRepository interface {
 	Create(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error
-	GetByRun(ctx context.Context, runID uuid.UUID) ([]domain.PipelineRunSnapshot, error)
+	GetByRun(ctx context.Context, ref domain.PipelineRunRef) ([]domain.PipelineRunSnapshot, error)
 }
 
 // AgentDecisionRepository provides access to agent decisions created during a run.
 type AgentDecisionRepository interface {
 	Create(ctx context.Context, decision *domain.AgentDecision) error
-	GetByRun(ctx context.Context, runID uuid.UUID, filter AgentDecisionFilter, limit, offset int) ([]domain.AgentDecision, error)
+	GetByRun(ctx context.Context, ref domain.PipelineRunRef, filter AgentDecisionFilter, limit, offset int) ([]domain.AgentDecision, error)
 	// CountByRun returns the total number of decisions for the given run matching the filter.
-	CountByRun(ctx context.Context, runID uuid.UUID, filter AgentDecisionFilter) (int, error)
+	CountByRun(ctx context.Context, ref domain.PipelineRunRef, filter AgentDecisionFilter) (int, error)
 }
 
 // AgentEventRepository provides access to structured agent and pipeline events.
@@ -620,7 +619,7 @@ type OrderRepository interface {
 	Update(ctx context.Context, order *domain.Order) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
-	GetByRun(ctx context.Context, runID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
+	GetByRun(ctx context.Context, ref domain.PipelineRunRef, filter OrderFilter, limit, offset int) ([]domain.Order, error)
 	GetByCopyOriginRun(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, subscriptionID, copyOriginRunID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
 }
 

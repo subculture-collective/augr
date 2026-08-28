@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -47,12 +48,12 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUID(r, "id")
+	ref, err := parsePipelineRunRef(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
 	}
-	run, err := s.runs.GetByID(r.Context(), id)
+	run, err := s.runs.Get(r.Context(), ref)
 	if err != nil {
 		if isNotFound(err) {
 			respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
@@ -69,7 +70,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRunDecisions(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUID(r, "id")
+	ref, err := parsePipelineRunRef(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
@@ -86,7 +87,7 @@ func (s *Server) handleGetRunDecisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	decisions, err := s.decisions.GetByRun(r.Context(), id, filter, limit, offset)
+	decisions, err := s.decisions.GetByRun(r.Context(), ref, filter, limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to get decisions", ErrCodeInternal)
 		return
@@ -106,7 +107,7 @@ func (s *Server) handleGetRunDecisions(w http.ResponseWriter, r *http.Request) {
 		responses[i] = resp
 	}
 
-	total, err := s.decisions.CountByRun(r.Context(), id, filter)
+	total, err := s.decisions.CountByRun(r.Context(), ref, filter)
 	if err != nil {
 		s.logger.Warn("count run decisions", "error", err.Error())
 	}
@@ -114,12 +115,12 @@ func (s *Server) handleGetRunDecisions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
-	id, err := parseUUID(r, "id")
+	ref, err := parsePipelineRunRef(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
 	}
-	if err := s.runSvc.Cancel(r.Context(), id); err != nil {
+	if err := s.runSvc.Cancel(r.Context(), ref); err != nil {
 		if isNotFound(err) {
 			respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
 			return
@@ -139,13 +140,13 @@ func (s *Server) handleGetRunSnapshot(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotImplemented, "snapshots not configured", ErrCodeNotImplemented)
 		return
 	}
-	id, err := parseUUID(r, "id")
+	ref, err := parsePipelineRunRef(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
 	}
 
-	snapshots, err := s.snapshots.GetByRun(r.Context(), id)
+	snapshots, err := s.snapshots.GetByRun(r.Context(), ref)
 	if err != nil {
 		if isNotFound(err) {
 			respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
@@ -161,4 +162,16 @@ func (s *Server) handleGetRunSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusOK, grouped)
+}
+
+func parsePipelineRunRef(r *http.Request) (domain.PipelineRunRef, error) {
+	id, err := parseUUID(r, "id")
+	if err != nil {
+		return domain.PipelineRunRef{}, err
+	}
+	tradeDate, err := time.Parse("2006-01-02", r.URL.Query().Get("trade_date"))
+	if err != nil {
+		return domain.PipelineRunRef{}, fmt.Errorf("trade_date must use YYYY-MM-DD")
+	}
+	return domain.PipelineRunRef{ID: id, TradeDate: tradeDate}, nil
 }

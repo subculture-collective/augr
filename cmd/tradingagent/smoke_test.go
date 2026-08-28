@@ -59,13 +59,17 @@ func TestSmokeEndToEnd(t *testing.T) {
 		t.Fatalf("pgxpool.New() error = %v", err)
 	}
 	defer pool.Close()
+	accountID, err := uuid.Parse(os.Getenv("PROJECTION_ACCOUNT_ID"))
+	if err != nil || accountID == uuid.Nil {
+		t.Skip("PROJECTION_ACCOUNT_ID is required for account-scoped smoke test")
+	}
 
 	strategyRepo := pgrepo.NewStrategyRepo(pool)
-	runRepo := pgrepo.NewPipelineRunRepo(pool)
-	decisionRepo := pgrepo.NewAgentDecisionRepo(pool)
-	orderRepo := pgrepo.NewOrderRepo(pool)
-	positionRepo := pgrepo.NewPositionRepo(pool)
-	tradeRepo := pgrepo.NewTradeRepo(pool)
+	runRepo := pgrepo.NewPipelineRunRepo(pool, accountID)
+	decisionRepo := pgrepo.NewAgentDecisionRepo(pool, accountID)
+	orderRepo := pgrepo.NewOrderRepo(pool, accountID)
+	positionRepo := pgrepo.NewPositionRepo(pool, accountID)
+	tradeRepo := pgrepo.NewTradeRepo(pool, accountID)
 
 	strategyPayload := map[string]any{
 		"name":          "Smoke Strategy",
@@ -132,7 +136,12 @@ func TestSmokeEndToEnd(t *testing.T) {
 		t.Fatal("websocket events did not identify the pipeline run")
 	}
 
-	savedRun, err := runRepo.GetByID(ctx, runID)
+	var runTradeDate time.Time
+	if err := pool.QueryRow(ctx, `SELECT trade_date FROM pipeline_runs WHERE id=$1 AND account_id=$2`, runID, accountID).Scan(&runTradeDate); err != nil {
+		t.Fatalf("load run ref: %v", err)
+	}
+	ref := domain.PipelineRunRef{ID: runID, TradeDate: runTradeDate}
+	savedRun, err := runRepo.Get(ctx, ref)
 	if err != nil {
 		t.Fatalf("runRepo.Get() error = %v", err)
 	}
@@ -143,7 +152,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 		t.Fatalf("saved run signal = %q, want %q", savedRun.Signal, domain.PipelineSignalBuy)
 	}
 
-	decisions, err := decisionRepo.GetByRun(ctx, savedRun.ID, repository.AgentDecisionFilter{}, 20, 0)
+	decisions, err := decisionRepo.GetByRun(ctx, ref, repository.AgentDecisionFilter{}, 20, 0)
 	if err != nil {
 		t.Fatalf("decisionRepo.GetByRun() error = %v", err)
 	}
@@ -154,7 +163,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 		t.Fatalf("decision count = %d, want at least 9", len(decisions))
 	}
 
-	orders, err := orderRepo.GetByRun(ctx, savedRun.ID, repository.OrderFilter{}, 10, 0)
+	orders, err := orderRepo.GetByRun(ctx, ref, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		t.Fatalf("orderRepo.GetByRun() error = %v", err)
 	}

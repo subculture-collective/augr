@@ -56,7 +56,7 @@ func (p *RepoPersister) FinalizeRun(ctx context.Context, runID uuid.UUID, tradeD
 	if p.pipelineRunRepo == nil {
 		return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: runID, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt, ErrorMessage: finalization.ErrorMessage}}, nil
 	}
-	receipt, err := p.pipelineRunRepo.Finalize(ctx, runID, tradeDate, finalization)
+	receipt, err := p.pipelineRunRepo.Finalize(ctx, domain.PipelineRunRef{ID: runID, TradeDate: tradeDate}, finalization)
 	if err != nil {
 		return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("agent/pipeline: finalize run: %w", err)
 	}

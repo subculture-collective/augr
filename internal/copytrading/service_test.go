@@ -153,14 +153,14 @@ type cancellationWinnerRunRepo struct {
 
 func (*cancellationWinnerRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (r *cancellationWinnerRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *cancellationWinnerRunRepo) Finalize(ctx context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	r.calls++
 	if r.calls == 1 && r.cancel != nil && finalization.Status == domain.PipelineStatusCompleted {
 		r.cancel(runcontrol.Operator)
 		<-ctx.Done()
 		return repository.PipelineRunFinalizationReceipt{}, ctx.Err()
 	}
-	r.winner.ID, r.winner.TradeDate = id, tradeDate
+	r.winner.ID, r.winner.TradeDate = ref.ID, ref.TradeDate
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: r.winner}, nil
 }
 
@@ -214,10 +214,10 @@ type authorizedRunRepo struct {
 
 func (*authorizedRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (r *authorizedRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *authorizedRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	r.calls++
 	r.finalization = finalization
-	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, Signal: *finalization.Signal}
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: finalization.Status, Signal: *finalization.Signal}
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
 }
 
@@ -280,8 +280,8 @@ type completedLoserRunRepo struct {
 
 func (*completedLoserRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (*completedLoserRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
-	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: *finalization.Signal}
+func (*completedLoserRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: domain.PipelineStatusCompleted, Signal: *finalization.Signal}
 	return repository.PipelineRunFinalizationReceipt{Run: run}, nil
 }
 

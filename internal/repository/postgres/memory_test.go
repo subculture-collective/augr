@@ -20,42 +20,42 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestBuildSearchQuery_NoFTS_NoFilters(t *testing.T) {
-	query, args := buildSearchQuery("", repository.MemorySearchFilter{}, 10, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "", repository.MemorySearchFilter{}, 10, 0)
 
 	// limit + offset = 2 args
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
-	if args[0] != 10 {
+	if args[1] != 10 {
 		t.Errorf("expected limit=10, got %v", args[0])
 	}
-	if args[1] != 0 {
+	if args[2] != 0 {
 		t.Errorf("expected offset=0, got %v", args[1])
 	}
 
 	assertContains(t, query, "FROM agent_memories")
 	assertContains(t, query, "ORDER BY created_at DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 	assertNotContains(t, query, "situation_tsv")
 	assertNotContains(t, query, "agent_role =")
 	assertNotContains(t, query, "rank")
 }
 
 func TestBuildSearchQuery_FTS_NoFilters(t *testing.T) {
-	query, args := buildSearchQuery("bullish trend", repository.MemorySearchFilter{}, 5, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "bullish trend", repository.MemorySearchFilter{}, 5, 0)
 
 	// fts_query + limit + offset = 3 args
-	if len(args) != 3 {
+	if len(args) != 4 {
 		t.Fatalf("expected 3 args, got %d: %v", len(args), args)
 	}
-	if args[0] != "bullish trend" {
+	if args[1] != "bullish trend" {
 		t.Errorf("expected args[0] = FTS query, got %v", args[0])
 	}
 
-	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $1)")
-	assertContains(t, query, "ts_rank(situation_tsv, plainto_tsquery('english', $1)) AS rank")
+	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $2)")
+	assertContains(t, query, "ts_rank(situation_tsv, plainto_tsquery('english', $2)) AS rank")
 	assertContains(t, query, "ORDER BY rank DESC, created_at DESC")
-	assertContains(t, query, "LIMIT $2 OFFSET $3")
+	assertContains(t, query, "LIMIT $3 OFFSET $4")
 }
 
 func TestBuildSearchQuery_FTS_WithRoleFilter(t *testing.T) {
@@ -63,18 +63,18 @@ func TestBuildSearchQuery_FTS_WithRoleFilter(t *testing.T) {
 		AgentRole: domain.AgentRoleTrader,
 	}
 
-	query, args := buildSearchQuery("market downturn", filter, 5, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "market downturn", filter, 5, 0)
 
 	// fts_query + role + limit + offset = 4 args
-	if len(args) != 4 {
+	if len(args) != 5 {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $1)")
-	assertContains(t, query, "agent_role = $2")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $2)")
+	assertContains(t, query, "agent_role = $3")
+	assertContains(t, query, "LIMIT $4 OFFSET $5")
 
-	if args[1] != domain.AgentRoleTrader {
+	if args[2] != domain.AgentRoleTrader {
 		t.Errorf("expected args[1] = trader role, got %v", args[1])
 	}
 }
@@ -86,25 +86,25 @@ func TestBuildSearchQuery_NoFTS_AllFilters(t *testing.T) {
 	before := now.Add(time.Hour)
 	filter := repository.MemorySearchFilter{
 		AgentRole:         domain.AgentRoleMarketAnalyst,
-		PipelineRunID:     &runID,
+		PipelineRunRef:    &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
 		MinRelevanceScore: &minScore,
 		CreatedAfter:      &now,
 		CreatedBefore:     &before,
 	}
 
-	query, args := buildSearchQuery("", filter, 10, 20)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "", filter, 10, 20)
 
 	// role + run_id + min_score + after + before + limit + offset = 7 args
-	if len(args) != 7 {
+	if len(args) != 9 {
 		t.Fatalf("expected 7 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "agent_role = $1")
-	assertContains(t, query, "pipeline_run_id = $2")
-	assertContains(t, query, "relevance_score >= $3")
-	assertContains(t, query, "created_at >= $4")
-	assertContains(t, query, "created_at < $5")
-	assertContains(t, query, "LIMIT $6 OFFSET $7")
+	assertContains(t, query, "agent_role = $2")
+	assertContains(t, query, "pipeline_run_id = $3")
+	assertContains(t, query, "relevance_score >= $5")
+	assertContains(t, query, "created_at >= $6")
+	assertContains(t, query, "created_at < $7")
+	assertContains(t, query, "LIMIT $8 OFFSET $9")
 	assertContains(t, query, "ORDER BY created_at DESC")
 	assertNotContains(t, query, "rank")
 }
@@ -116,43 +116,43 @@ func TestBuildSearchQuery_FTS_AllFilters(t *testing.T) {
 	before := now.Add(time.Hour)
 	filter := repository.MemorySearchFilter{
 		AgentRole:         domain.AgentRoleBullResearcher,
-		PipelineRunID:     &runID,
+		PipelineRunRef:    &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
 		MinRelevanceScore: &minScore,
 		CreatedAfter:      &now,
 		CreatedBefore:     &before,
 	}
 
-	query, args := buildSearchQuery("positive outlook", filter, 3, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "positive outlook", filter, 3, 0)
 
 	// fts_query + role + run_id + min_score + after + before + limit + offset = 8 args
-	if len(args) != 8 {
+	if len(args) != 10 {
 		t.Fatalf("expected 8 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $1)")
-	assertContains(t, query, "agent_role = $2")
-	assertContains(t, query, "pipeline_run_id = $3")
-	assertContains(t, query, "relevance_score >= $4")
-	assertContains(t, query, "created_at >= $5")
-	assertContains(t, query, "created_at < $6")
-	assertContains(t, query, "LIMIT $7 OFFSET $8")
+	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $2)")
+	assertContains(t, query, "agent_role = $3")
+	assertContains(t, query, "pipeline_run_id = $4")
+	assertContains(t, query, "relevance_score >= $6")
+	assertContains(t, query, "created_at >= $7")
+	assertContains(t, query, "created_at < $8")
+	assertContains(t, query, "LIMIT $9 OFFSET $10")
 	assertContains(t, query, "ORDER BY rank DESC, created_at DESC")
 }
 
 func TestBuildSearchQuery_WhitespaceOnlyQuery(t *testing.T) {
 	// Search() trims whitespace before calling buildSearchQuery, so
 	// a whitespace-only input arrives here as "".
-	query, args := buildSearchQuery("", repository.MemorySearchFilter{}, 10, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "", repository.MemorySearchFilter{}, 10, 0)
 
 	// Should behave identically to the no-FTS path.
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
 
 	assertNotContains(t, query, "situation_tsv")
 	assertNotContains(t, query, "rank")
 	assertContains(t, query, "ORDER BY created_at DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ func TestMemoryRepoIntegration_CreateAndSearch(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	runID := uuid.New()
 	m1 := &domain.AgentMemory{
@@ -244,7 +244,7 @@ func TestMemoryRepoIntegration_CreateAndSearch(t *testing.T) {
 		t.Errorf("Outcome: want %q, got %q", m1.Outcome, got.Outcome)
 	}
 	if got.PipelineRunID == nil || *got.PipelineRunID != runID {
-		t.Errorf("PipelineRunID: want %s, got %v", runID, got.PipelineRunID)
+		t.Errorf("PipelineRunRef: want %s, got %v", runID, got.PipelineRunID)
 	}
 }
 
@@ -253,7 +253,7 @@ func TestMemoryRepoIntegration_SearchWithRoleFilter(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	// Insert memories with different roles but overlapping situation text.
 	m1 := &domain.AgentMemory{
@@ -293,7 +293,7 @@ func TestMemoryRepoIntegration_Delete(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m := &domain.AgentMemory{
 		AgentRole:      domain.AgentRoleRiskManager,
@@ -324,7 +324,7 @@ func TestMemoryRepoIntegration_DeleteUnknownID(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	err := repo.Delete(ctx, uuid.New())
 	if err == nil {
@@ -340,7 +340,7 @@ func TestMemoryRepoIntegration_SearchEmptyResult(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	results, err := repo.Search(ctx, "nonexistent", repository.MemorySearchFilter{}, 5, 0)
 	if err != nil {
@@ -356,7 +356,7 @@ func TestMemoryRepoIntegration_SearchNoFTS(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m1 := &domain.AgentMemory{
 		AgentRole:      domain.AgentRoleTrader,
@@ -396,7 +396,7 @@ func TestMemoryRepoIntegration_Pagination(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	for i := 0; i < 5; i++ {
 		m := &domain.AgentMemory{
@@ -440,7 +440,7 @@ func TestMemoryRepoIntegration_NullableFieldsRoundTrip(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	// Memory with all optional fields omitted.
 	m := &domain.AgentMemory{
@@ -478,7 +478,7 @@ func TestMemoryRepoIntegration_FTSRelevanceRanking(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	// m1 contains "bullish" once; m2 has a more relevant situation text.
 	m1 := &domain.AgentMemory{
@@ -525,7 +525,7 @@ func TestMemoryRepoIntegration_SearchWithDateFilter(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m := &domain.AgentMemory{
 		AgentRole:      domain.AgentRoleTrader,

@@ -552,18 +552,18 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	sharedLLMBudget := llm.BuildLLMBudget(cfg.LLM)
 
 	strategyRepo := pgrepo.NewStrategyRepo(db.Pool)
-	runRepo := pgrepo.NewPipelineRunRepo(db.Pool)
-	snapshotRepo := pgrepo.NewPipelineRunSnapshotRepo(db.Pool)
-	decisionRepo := pgrepo.NewAgentDecisionRepo(db.Pool)
-	eventRepo := pgrepo.NewAgentEventRepo(db.Pool)
-	orderRepo := pgrepo.NewOrderRepo(db.Pool)
-	positionRepo := pgrepo.NewPositionRepo(db.Pool)
-	tradeRepo := pgrepo.NewTradeRepo(db.Pool)
+	runRepo := pgrepo.NewPipelineRunRepo(db.Pool, accountID)
+	snapshotRepo := pgrepo.NewPipelineRunSnapshotRepo(db.Pool, accountID)
+	decisionRepo := pgrepo.NewAgentDecisionRepo(db.Pool, accountID)
+	eventRepo := pgrepo.NewAgentEventRepo(db.Pool, accountID)
+	orderRepo := pgrepo.NewOrderRepo(db.Pool, accountID)
+	positionRepo := pgrepo.NewPositionRepo(db.Pool, accountID)
+	tradeRepo := pgrepo.NewTradeRepo(db.Pool, accountID)
 	paperAccountRepo := runtimeNewPaperAccountRepo(db)
-	tradeDecisionRepo := pgrepo.NewTradeDecisionJournalRepo(db.Pool)
-	opportunityRepo := pgrepo.NewOpportunityRepo(db.Pool)
-	allocationDecisionRepo := pgrepo.NewAllocationDecisionRepo(db.Pool)
-	replayEventRepo := pgrepo.NewReplayEventRepo(db.Pool)
+	tradeDecisionRepo := pgrepo.NewTradeDecisionJournalRepo(db.Pool, accountID)
+	opportunityRepo := pgrepo.NewOpportunityRepo(db.Pool, accountID)
+	allocationDecisionRepo := pgrepo.NewAllocationDecisionRepo(db.Pool, accountID)
+	replayEventRepo := pgrepo.NewReplayEventRepo(db.Pool, accountID)
 	tradeDecisionRecorder := execution.NewTradeDecisionJournalRecorder(tradeDecisionRepo, replayEventRepo)
 	var predictionSettler *predictionexecution.Settler
 	if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
@@ -572,14 +572,14 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}); err != nil {
 		return nil, nil, nil, err
 	}
-	memoryRepo := pgrepo.NewMemoryRepo(db.Pool)
+	memoryRepo := pgrepo.NewMemoryRepo(db.Pool, accountID)
 	apiKeyRepo := pgrepo.NewAPIKeyRepo(db.Pool)
 	auditLogRepo := pgrepo.NewAuditLogRepo(db.Pool)
 	backtestConfigRepo := pgrepo.NewBacktestConfigRepo(db.Pool)
 	backtestRunRepo := pgrepo.NewBacktestRunRepo(db.Pool)
 	discoveryRunRepo := pgrepo.NewDiscoveryRunRepo(db.Pool)
 	userRepo := pgrepo.NewUserRepo(db.Pool)
-	conversationRepo := pgrepo.NewConversationRepo(db.Pool)
+	conversationRepo := pgrepo.NewConversationRepo(db.Pool, accountID)
 	marketDataCacheRepo := pgrepo.NewMarketDataCacheRepo(db.Pool)
 	jobRunRepo := pgrepo.NewJobRunRepo(db.Pool)
 	jobControlRepo := pgrepo.NewAutomationJobControlRepo(db.Pool)
@@ -1691,7 +1691,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 		return canonical, err
 	}
 
-	run, err := r.findRun(ctx, result.Run.ID)
+	run, err := r.findRun(ctx, domain.PipelineRunRef{ID: result.Run.ID, TradeDate: result.Run.TradeDate})
 	if err != nil {
 		return canonical, err
 	}
@@ -1702,7 +1702,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	if planTicker == "" {
 		planTicker = strategy.Ticker
 	}
-	receipt, err := r.runRepo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, run.Signal, signal)
+	receipt, err := r.runRepo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, run.Signal, signal)
 	if err != nil {
 		return canonical, err
 	}
@@ -1743,7 +1743,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 			Rationale:        state.TradingPlan.Rationale,
 			RiskReward:       state.TradingPlan.RiskReward,
 			Side:             state.TradingPlan.Side,
-			DecisionMetadata: executionDecisionMetadata(ctx, r.decisionRepo, r.logger, run.ID),
+			DecisionMetadata: executionDecisionMetadata(ctx, r.decisionRepo, r.logger, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}),
 		},
 	); err != nil {
 		return canonical, err
@@ -1753,7 +1753,7 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 		r.logger.WarnContext(ctx, "notification dispatch failed (non-fatal)", "error", err, "run_id", run.ID)
 	}
 
-	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+	orders, err := r.orderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		return canonical, err
 	}
@@ -1828,7 +1828,7 @@ func (r *smokeStrategyRunner) dispatchNotifications(ctx context.Context, strateg
 		return nil
 	}
 
-	decisions, err := r.decisionRepo.GetByRun(ctx, run.ID, repository.AgentDecisionFilter{}, 100, 0)
+	decisions, err := r.decisionRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.AgentDecisionFilter{}, 100, 0)
 	if err != nil {
 		return fmt.Errorf("load run decisions: %w", err)
 	}
@@ -1851,13 +1851,13 @@ func (r *smokeStrategyRunner) dispatchNotifications(ctx context.Context, strateg
 	return nil
 }
 
-func (r *smokeStrategyRunner) findRun(ctx context.Context, runID uuid.UUID) (*domain.PipelineRun, error) {
-	run, err := r.runRepo.GetByID(ctx, runID)
+func (r *smokeStrategyRunner) findRun(ctx context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
+	run, err := r.runRepo.Get(ctx, ref)
 	if err == nil {
 		return run, nil
 	}
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, fmt.Errorf("run %s: %w", runID, repository.ErrNotFound)
+		return nil, fmt.Errorf("run %s: %w", ref.ID, repository.ErrNotFound)
 	}
 	return nil, err
 }

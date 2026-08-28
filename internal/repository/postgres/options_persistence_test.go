@@ -62,7 +62,7 @@ func TestScanPositionAndTradeRestoreOptionLifecycle(t *testing.T) {
 	if err != nil || position.UnderlyingTicker != "AAPL" || position.Delta == nil || *position.Delta != delta {
 		t.Fatalf("option position metadata lost: position=%+v err=%v", position, err)
 	}
-	trade, err := scanTrade(optionPersistenceScanner{uuid.New(), (*string)(nil), (*uuid.UUID)(nil), (*uuid.UUID)(nil), "AAPL271217C00150000", domain.OrderSideBuy, 1.0, 2.5, 0.65, now, now, domain.AssetClassOption, stringPtr("open"), 100.0, 250.0})
+	trade, err := scanTrade(optionPersistenceScanner{uuid.New(), uuid.New(), domain.AccountEnvironmentPaperScored, "strategy_version", uuid.NewString(), (*string)(nil), (*uuid.UUID)(nil), (*uuid.UUID)(nil), "AAPL271217C00150000", domain.OrderSideBuy, 1.0, 2.5, 0.65, now, now, domain.AssetClassOption, stringPtr("open"), 100.0, 250.0})
 	if err != nil || trade.OpenClose != "open" || trade.Premium != 250 || trade.ContractMultiplier != 100 {
 		t.Fatalf("option trade metadata lost: trade=%+v err=%v", trade, err)
 	}

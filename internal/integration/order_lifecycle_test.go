@@ -259,7 +259,7 @@ func TestIntegration_OrderLifecycle_MultipleStrategies(t *testing.T) {
 	}
 
 	// Verify run scoping.
-	runOrders, err := r.Order.GetByRun(ctx, runA, repository.OrderFilter{}, 10, 0)
+	runOrders, err := r.Order.GetByRun(ctx, domain.PipelineRunRef{ID: runA, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		t.Fatalf("GetByRun(A): %v", err)
 	}

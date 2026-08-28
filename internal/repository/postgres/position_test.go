@@ -124,7 +124,7 @@ func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 
 	currentPrice := 185.50
@@ -253,7 +253,7 @@ func TestPositionRepoIntegration_GetNotFound(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 
 	_, err := repo.Get(ctx, uuid.New())
 	if err == nil {
@@ -271,7 +271,7 @@ func TestPositionRepoIntegration_UpdateNotFound(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 
 	err := repo.Update(ctx, &domain.Position{
 		ID:       uuid.New(),
@@ -295,7 +295,7 @@ func TestPositionRepoIntegration_DeleteNotFound(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 
 	err := repo.Delete(ctx, uuid.New())
 	if err == nil {
@@ -313,7 +313,7 @@ func TestPositionRepoIntegration_ListGetOpenGetByStrategy(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyA := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	strategyB := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	closedAt := time.Now().UTC()
@@ -423,7 +423,7 @@ func TestPositionRepoIntegration_CountOpenByMarketAndGrossExposureParity(t *test
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	stockStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	cryptoStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeCrypto)
 	closedAt := time.Now().UTC()
@@ -474,7 +474,7 @@ func TestPositionRepoIntegration_CountOpenByMarketHandlesNullAndEnumMarketTypes(
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	stockStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	current := 12.5
 	positions := []*domain.Position{
@@ -662,7 +662,7 @@ func TestPositionRepoIntegration_ListOpenAlpacaOwned(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	openAt := time.Now().UTC()
 	proven := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100, OpenedAt: openAt}
@@ -694,7 +694,7 @@ func TestPositionRepoIntegration_CreateAlpacaOwnedDedupesAndRollsBack(t *testing
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	position := &domain.Position{MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
 	if err := repo.CreateAlpacaOwned(ctx, position); err != nil {
 		t.Fatalf("CreateAlpacaOwned() error = %v", err)
@@ -730,7 +730,7 @@ func TestPositionRepoIntegration_ListOpenAlpacaOwnedIncludesProvenanceAndLegacy(
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	proven := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100}
 	legacy := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "MSFT", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 200}
@@ -765,7 +765,7 @@ func TestPositionRepoIntegration_CreateAlpacaOwnedUsesTransactionalRollback(t *t
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	_, _ = pool.Exec(ctx, `CREATE OR REPLACE FUNCTION fail_position_provenance() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'boom'; END; $$ LANGUAGE plpgsql`)
 	_, _ = pool.Exec(ctx, `CREATE TRIGGER position_provenance_fail BEFORE INSERT ON position_provenance FOR EACH ROW EXECUTE FUNCTION fail_position_provenance()`)
 	defer func() {

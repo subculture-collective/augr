@@ -15,37 +15,42 @@ import (
 
 // ConversationRepo implements repository.ConversationRepository using PostgreSQL.
 type ConversationRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that ConversationRepo satisfies ConversationRepository.
 var _ repository.ConversationRepository = (*ConversationRepo)(nil)
 
 // NewConversationRepo returns a ConversationRepo backed by the given connection pool.
-func NewConversationRepo(pool *pgxpool.Pool) *ConversationRepo {
-	return &ConversationRepo{pool: pool}
+func NewConversationRepo(pool *pgxpool.Pool, accountID uuid.UUID) *ConversationRepo {
+	return &ConversationRepo{pool: pool, accountID: accountID}
 }
 
 // CreateConversation inserts a new conversation and populates generated fields on
 // the provided struct.
 func (r *ConversationRepo) CreateConversation(ctx context.Context, conv *domain.Conversation) error {
+	if conv.AccountID != uuid.Nil && conv.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create conversation: account mismatch")
+	}
+	conv.AccountID = r.accountID
 	var row scanner
 	if conv.ID == uuid.Nil {
 		row = r.pool.QueryRow(ctx,
-			`INSERT INTO conversations (pipeline_run_id, agent_role, title)
-			 VALUES ($1, $2, $3)
+			`INSERT INTO conversations (account_id, environment, pipeline_run_id, pipeline_run_trade_date, agent_role, title)
+			 VALUES ($1, $2, $3, $4, $5, $6)
 			 RETURNING id, created_at, updated_at`,
-			conv.PipelineRunID,
+			r.accountID, conv.Environment, conv.PipelineRunID, conv.PipelineRunTradeDate,
 			conv.AgentRole,
 			nullString(conv.Title),
 		)
 	} else {
 		row = r.pool.QueryRow(ctx,
-			`INSERT INTO conversations (id, pipeline_run_id, agent_role, title)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO conversations (id, account_id, environment, pipeline_run_id, pipeline_run_trade_date, agent_role, title)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)
 			 RETURNING id, created_at, updated_at`,
 			conv.ID,
-			conv.PipelineRunID,
+			r.accountID, conv.Environment, conv.PipelineRunID, conv.PipelineRunTradeDate,
 			conv.AgentRole,
 			nullString(conv.Title),
 		)
@@ -61,7 +66,7 @@ func (r *ConversationRepo) CreateConversation(ctx context.Context, conv *domain.
 // GetConversation retrieves a conversation by ID. It returns ErrNotFound when
 // no row matches.
 func (r *ConversationRepo) GetConversation(ctx context.Context, id uuid.UUID) (*domain.Conversation, error) {
-	row := r.pool.QueryRow(ctx, conversationSelectSQL+` WHERE id = $1`, id)
+	row := r.pool.QueryRow(ctx, conversationSelectSQL+` WHERE id = $1 AND account_id = $2`, id, r.accountID)
 
 	conv, err := scanConversation(row)
 	if err != nil {
@@ -76,7 +81,7 @@ func (r *ConversationRepo) GetConversation(ctx context.Context, id uuid.UUID) (*
 
 // ListConversations returns conversations matching the provided filter with pagination.
 func (r *ConversationRepo) ListConversations(ctx context.Context, filter repository.ConversationFilter, limit, offset int) ([]domain.Conversation, error) {
-	query, args := buildConversationListQuery(filter, limit, offset)
+	query, args := buildConversationListQuery(r.accountID, filter, limit, offset)
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -102,7 +107,7 @@ func (r *ConversationRepo) ListConversations(ctx context.Context, filter reposit
 
 // CountConversations returns the total number of conversations matching the filter.
 func (r *ConversationRepo) CountConversations(ctx context.Context, filter repository.ConversationFilter) (int, error) {
-	query, args := buildConversationCountQuery(filter)
+	query, args := buildConversationCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count conversations: %w", err)
@@ -110,10 +115,12 @@ func (r *ConversationRepo) CountConversations(ctx context.Context, filter reposi
 	return total, nil
 }
 
-func buildConversationCountQuery(filter repository.ConversationFilter) (string, []any) {
+func buildConversationCountQuery(accountID uuid.UUID, filter repository.ConversationFilter) (string, []any) {
 	qb := NewQueryBuilder()
-	if filter.PipelineRunID != nil {
-		qb.AddCondition("pipeline_run_id", "=", *filter.PipelineRunID)
+	qb.AddCondition("account_id", "=", accountID)
+	if filter.PipelineRunRef != nil {
+		qb.AddCondition("pipeline_run_id", "=", filter.PipelineRunRef.ID)
+		qb.AddCondition("pipeline_run_trade_date", "=", filter.PipelineRunRef.TradeDate)
 	}
 	if filter.AgentRole != "" {
 		qb.AddCondition("agent_role", "=", filter.AgentRole)
@@ -124,23 +131,27 @@ func buildConversationCountQuery(filter repository.ConversationFilter) (string, 
 // AddMessage inserts a new message for the given conversation and populates the
 // generated fields on the provided struct.
 func (r *ConversationRepo) AddMessage(ctx context.Context, convID uuid.UUID, msg *domain.ConversationMessage) error {
+	if _, err := r.GetConversation(ctx, convID); err != nil {
+		return err
+	}
+	msg.AccountID = r.accountID
 	var row scanner
 	if msg.ID == uuid.Nil {
 		row = r.pool.QueryRow(ctx,
-			`INSERT INTO conversation_messages (conversation_id, role, content)
-			 VALUES ($1, $2, $3)
+			`INSERT INTO conversation_messages (account_id, conversation_id, role, content)
+			 VALUES ($1, $2, $3, $4)
 			 RETURNING id, created_at`,
-			convID,
+			r.accountID, convID,
 			msg.Role,
 			msg.Content,
 		)
 	} else {
 		row = r.pool.QueryRow(ctx,
-			`INSERT INTO conversation_messages (id, conversation_id, role, content)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO conversation_messages (id, account_id, conversation_id, role, content)
+			 VALUES ($1, $2, $3, $4, $5)
 			 RETURNING id, created_at`,
 			msg.ID,
-			convID,
+			r.accountID, convID,
 			msg.Role,
 			msg.Content,
 		)
@@ -156,9 +167,12 @@ func (r *ConversationRepo) AddMessage(ctx context.Context, convID uuid.UUID, msg
 
 // GetMessages retrieves conversation messages in chronological order with pagination.
 func (r *ConversationRepo) GetMessages(ctx context.Context, convID uuid.UUID, limit, offset int) ([]domain.ConversationMessage, error) {
+	if _, err := r.GetConversation(ctx, convID); err != nil {
+		return nil, err
+	}
 	rows, err := r.pool.Query(ctx,
-		messageSelectSQL+` WHERE conversation_id = $1 ORDER BY created_at, id LIMIT $2 OFFSET $3`,
-		convID,
+		messageSelectSQL+` WHERE conversation_id = $1 AND account_id = $2 ORDER BY created_at, id LIMIT $3 OFFSET $4`,
+		convID, r.accountID,
 		limit,
 		offset,
 	)
@@ -183,10 +197,10 @@ func (r *ConversationRepo) GetMessages(ctx context.Context, convID uuid.UUID, li
 	return messages, nil
 }
 
-const conversationSelectSQL = `SELECT id, pipeline_run_id, agent_role, title, created_at, updated_at
+const conversationSelectSQL = `SELECT id, account_id, environment, pipeline_run_id, pipeline_run_trade_date, agent_role, title, created_at, updated_at
 	FROM conversations`
 
-const messageSelectSQL = `SELECT id, conversation_id, role, content, created_at
+const messageSelectSQL = `SELECT id, account_id, conversation_id, role, content, created_at
 	FROM conversation_messages`
 
 func scanConversation(sc scanner) (*domain.Conversation, error) {
@@ -197,7 +211,9 @@ func scanConversation(sc scanner) (*domain.Conversation, error) {
 
 	if err := sc.Scan(
 		&conv.ID,
+		&conv.AccountID, &conv.Environment,
 		&conv.PipelineRunID,
+		&conv.PipelineRunTradeDate,
 		&conv.AgentRole,
 		&title,
 		&conv.CreatedAt,
@@ -218,6 +234,7 @@ func scanConversationMessage(sc scanner) (*domain.ConversationMessage, error) {
 
 	if err := sc.Scan(
 		&msg.ID,
+		&msg.AccountID,
 		&msg.ConversationID,
 		&msg.Role,
 		&msg.Content,
@@ -229,11 +246,12 @@ func scanConversationMessage(sc scanner) (*domain.ConversationMessage, error) {
 	return &msg, nil
 }
 
-func buildConversationListQuery(filter repository.ConversationFilter, limit, offset int) (string, []any) {
+func buildConversationListQuery(accountID uuid.UUID, filter repository.ConversationFilter, limit, offset int) (string, []any) {
 	qb := NewQueryBuilder()
-
-	if filter.PipelineRunID != nil {
-		qb.AddCondition("pipeline_run_id", "=", *filter.PipelineRunID)
+	qb.AddCondition("account_id", "=", accountID)
+	if filter.PipelineRunRef != nil {
+		qb.AddCondition("pipeline_run_id", "=", filter.PipelineRunRef.ID)
+		qb.AddCondition("pipeline_run_trade_date", "=", filter.PipelineRunRef.TradeDate)
 	}
 	if filter.AgentRole != "" {
 		qb.AddCondition("agent_role", "=", filter.AgentRole)

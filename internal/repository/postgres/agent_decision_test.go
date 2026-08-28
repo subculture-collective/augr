@@ -20,27 +20,27 @@ import (
 
 func TestBuildGetByRunQuery_NoFilters(t *testing.T) {
 	runID := uuid.New()
-	query, args := buildGetByRunQuery(runID, repository.AgentDecisionFilter{}, 10, 0)
+	query, args := buildGetByRunQuery(canonicalRepositoryTestAccountID, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 10, 0)
 
 	// runID + limit + offset = 3 args
-	if len(args) != 3 {
+	if len(args) != 5 {
 		t.Fatalf("expected 3 args (runID, limit, offset), got %d", len(args))
 	}
 
-	if args[0] != runID {
+	if args[1] != runID {
 		t.Errorf("expected args[0] = runID %s, got %v", runID, args[0])
 	}
-	if args[1] != 10 {
+	if args[3] != 10 {
 		t.Errorf("expected limit=10, got %v", args[1])
 	}
-	if args[2] != 0 {
+	if args[4] != 0 {
 		t.Errorf("expected offset=0, got %v", args[2])
 	}
 
 	assertContains(t, query, "FROM agent_decisions")
-	assertContains(t, query, "pipeline_run_id = $1")
+	assertContains(t, query, "pipeline_run_id = $2")
 	assertContains(t, query, "ORDER BY phase, round_number NULLS LAST, created_at")
-	assertContains(t, query, "LIMIT $2 OFFSET $3")
+	assertContains(t, query, "LIMIT $4 OFFSET $5")
 	assertNotContains(t, query, "agent_role =")
 	assertNotContains(t, query, "phase =")
 	assertNotContains(t, query, "round_number =")
@@ -55,35 +55,35 @@ func TestBuildGetByRunQuery_AllFilters(t *testing.T) {
 		RoundNumber: &roundNumber,
 	}
 
-	query, args := buildGetByRunQuery(runID, filter, 25, 50)
+	query, args := buildGetByRunQuery(canonicalRepositoryTestAccountID, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, filter, 25, 50)
 
 	// runID + role + phase + round + limit + offset = 6 args
-	if len(args) != 6 {
+	if len(args) != 8 {
 		t.Fatalf("expected 6 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "pipeline_run_id = $1")
-	assertContains(t, query, "agent_role = $2")
-	assertContains(t, query, "phase = $3")
-	assertContains(t, query, "round_number = $4")
-	assertContains(t, query, "LIMIT $5 OFFSET $6")
+	assertContains(t, query, "pipeline_run_id = $2")
+	assertContains(t, query, "agent_role = $4")
+	assertContains(t, query, "phase = $5")
+	assertContains(t, query, "round_number = $6")
+	assertContains(t, query, "LIMIT $7 OFFSET $8")
 
-	if args[0] != runID {
+	if args[1] != runID {
 		t.Errorf("expected args[0] = runID, got %v", args[0])
 	}
-	if args[1] != domain.AgentRoleTrader {
+	if args[3] != domain.AgentRoleTrader {
 		t.Errorf("expected args[1] = trader role, got %v", args[1])
 	}
-	if args[2] != domain.PhaseTrading {
+	if args[4] != domain.PhaseTrading {
 		t.Errorf("expected args[2] = trading phase, got %v", args[2])
 	}
-	if args[3] != roundNumber {
+	if args[5] != roundNumber {
 		t.Errorf("expected args[3] = round %d, got %v", roundNumber, args[3])
 	}
-	if args[4] != 25 {
+	if args[6] != 25 {
 		t.Errorf("expected limit=25, got %v", args[4])
 	}
-	if args[5] != 50 {
+	if args[7] != 50 {
 		t.Errorf("expected offset=50, got %v", args[5])
 	}
 }
@@ -94,18 +94,18 @@ func TestBuildGetByRunQuery_PartialFilters(t *testing.T) {
 		AgentRole: domain.AgentRoleMarketAnalyst,
 	}
 
-	query, args := buildGetByRunQuery(runID, filter, 10, 0)
+	query, args := buildGetByRunQuery(canonicalRepositoryTestAccountID, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, filter, 10, 0)
 
 	// runID + role + limit + offset = 4 args
-	if len(args) != 4 {
+	if len(args) != 6 {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "pipeline_run_id = $1")
-	assertContains(t, query, "agent_role = $2")
+	assertContains(t, query, "pipeline_run_id = $2")
+	assertContains(t, query, "agent_role = $4")
 	assertNotContains(t, query, "phase =")
 	assertNotContains(t, query, "round_number =")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "LIMIT $5 OFFSET $6")
 }
 
 func TestBuildGetByRunQuery_PhaseOnlyFilter(t *testing.T) {
@@ -114,17 +114,17 @@ func TestBuildGetByRunQuery_PhaseOnlyFilter(t *testing.T) {
 		Phase: domain.PhaseAnalysis,
 	}
 
-	query, args := buildGetByRunQuery(runID, filter, 10, 0)
+	query, args := buildGetByRunQuery(canonicalRepositoryTestAccountID, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, filter, 10, 0)
 
 	// runID + phase + limit + offset = 4 args
-	if len(args) != 4 {
+	if len(args) != 6 {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "pipeline_run_id = $1")
+	assertContains(t, query, "pipeline_run_id = $2")
 	assertNotContains(t, query, "agent_role =")
-	assertContains(t, query, "phase = $2")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "phase = $4")
+	assertContains(t, query, "LIMIT $5 OFFSET $6")
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +184,7 @@ func TestAgentDecisionRepoIntegration_CreateAndGetByRun(t *testing.T) {
 	pool, cleanup := newAgentDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentDecisionRepo(pool)
+	repo := NewAgentDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	otherRunID := uuid.New()
 
@@ -230,7 +230,7 @@ func TestAgentDecisionRepoIntegration_CreateAndGetByRun(t *testing.T) {
 		}
 	}
 
-	decisions, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{}, 10, 0)
+	decisions, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 10, 0)
 	if err != nil {
 		t.Fatalf("GetByRun() error = %v", err)
 	}
@@ -293,7 +293,7 @@ func TestAgentDecisionRepoIntegration_FilterByRoleAndPhase(t *testing.T) {
 	pool, cleanup := newAgentDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentDecisionRepo(pool)
+	repo := NewAgentDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 
 	round1 := 1
@@ -313,7 +313,7 @@ func TestAgentDecisionRepoIntegration_FilterByRoleAndPhase(t *testing.T) {
 	}
 
 	// Filter by agent role.
-	bullDecisions, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{
+	bullDecisions, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{
 		AgentRole: domain.AgentRoleBullResearcher,
 	}, 10, 0)
 	if err != nil {
@@ -324,7 +324,7 @@ func TestAgentDecisionRepoIntegration_FilterByRoleAndPhase(t *testing.T) {
 	}
 
 	// Filter by phase.
-	researchDecisions, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{
+	researchDecisions, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{
 		Phase: domain.PhaseResearchDebate,
 	}, 10, 0)
 	if err != nil {
@@ -335,7 +335,7 @@ func TestAgentDecisionRepoIntegration_FilterByRoleAndPhase(t *testing.T) {
 	}
 
 	// Filter by role and phase combined (GetByRunAndRole behaviour).
-	bearResearch, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{
+	bearResearch, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{
 		AgentRole: domain.AgentRoleBearResearcher,
 		Phase:     domain.PhaseResearchDebate,
 	}, 10, 0)
@@ -350,7 +350,7 @@ func TestAgentDecisionRepoIntegration_FilterByRoleAndPhase(t *testing.T) {
 	}
 
 	// Filter by round number.
-	round1Decisions, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{
+	round1Decisions, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{
 		RoundNumber: &round1,
 	}, 10, 0)
 	if err != nil {
@@ -368,7 +368,7 @@ func TestAgentDecisionRepoIntegration_OrderByPhaseAndRound(t *testing.T) {
 	pool, cleanup := newAgentDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentDecisionRepo(pool)
+	repo := NewAgentDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 
 	round2 := 2
@@ -388,7 +388,7 @@ func TestAgentDecisionRepoIntegration_OrderByPhaseAndRound(t *testing.T) {
 		}
 	}
 
-	decisions, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{}, 10, 0)
+	decisions, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 10, 0)
 	if err != nil {
 		t.Fatalf("GetByRun() error = %v", err)
 	}
@@ -429,7 +429,7 @@ func TestAgentDecisionRepoIntegration_Pagination(t *testing.T) {
 	pool, cleanup := newAgentDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentDecisionRepo(pool)
+	repo := NewAgentDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 
 	for i := 0; i < 5; i++ {
@@ -444,7 +444,7 @@ func TestAgentDecisionRepoIntegration_Pagination(t *testing.T) {
 		}
 	}
 
-	page1, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{}, 3, 0)
+	page1, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 3, 0)
 	if err != nil {
 		t.Fatalf("GetByRun() page 1 error = %v", err)
 	}
@@ -452,7 +452,7 @@ func TestAgentDecisionRepoIntegration_Pagination(t *testing.T) {
 		t.Fatalf("expected 3 results on page 1, got %d", len(page1))
 	}
 
-	page2, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{}, 3, 3)
+	page2, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 3, 3)
 	if err != nil {
 		t.Fatalf("GetByRun() page 2 error = %v", err)
 	}
@@ -477,9 +477,9 @@ func TestAgentDecisionRepoIntegration_EmptyResult(t *testing.T) {
 	pool, cleanup := newAgentDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentDecisionRepo(pool)
+	repo := NewAgentDecisionRepo(pool, canonicalRepositoryTestAccountID)
 
-	decisions, err := repo.GetByRun(ctx, uuid.New(), repository.AgentDecisionFilter{}, 10, 0)
+	decisions, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: uuid.New(), TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 10, 0)
 	if err != nil {
 		t.Fatalf("GetByRun() for unknown run error = %v", err)
 	}
@@ -496,7 +496,7 @@ func TestAgentDecisionRepoIntegration_NullableFieldsRoundTrip(t *testing.T) {
 	pool, cleanup := newAgentDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentDecisionRepo(pool)
+	repo := NewAgentDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 
 	// Decision with all optional fields omitted (zero values).
@@ -511,7 +511,7 @@ func TestAgentDecisionRepoIntegration_NullableFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 
-	decisions, err := repo.GetByRun(ctx, runID, repository.AgentDecisionFilter{}, 10, 0)
+	decisions, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}, repository.AgentDecisionFilter{}, 10, 0)
 	if err != nil {
 		t.Fatalf("GetByRun() error = %v", err)
 	}

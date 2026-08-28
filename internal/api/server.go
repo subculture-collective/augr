@@ -617,7 +617,8 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Get("/trades", s.handleListTrades)
 
 		// Memories
-		v1.Route("/memories", func(mr chi.Router) {
+		v1.Route("/accounts/{accountID}/memories", func(mr chi.Router) {
+			mr.Use(s.requireCanonicalAccountPath)
 			mr.Get("/", s.handleListMemories)
 			mr.Post("/search", s.handleSearchMemories)
 			mr.Delete("/{id}", s.handleDeleteMemory)
@@ -652,7 +653,8 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Get("/events", s.handleListEvents)
 
 		// Conversations
-		v1.Route("/conversations", func(cr chi.Router) {
+		v1.Route("/accounts/{accountID}/conversations", func(cr chi.Router) {
+			cr.Use(s.requireCanonicalAccountPath)
 			cr.Get("/", s.handleListConversations)
 			cr.Post("/", s.handleCreateConversation)
 			cr.Get("/{id}/messages", s.handleGetConversationMessages)
@@ -764,6 +766,17 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 	}
 
 	return s, nil
+}
+
+func (s *Server) requireCanonicalAccountPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accountID, err := uuid.Parse(chi.URLParam(r, "accountID"))
+		if err != nil || s.projectionAccountID == nil || accountID != *s.projectionAccountID {
+			respondError(w, http.StatusNotFound, "account not found", ErrCodeNotFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Router returns the underlying chi.Router. Useful for testing.

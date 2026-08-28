@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
@@ -45,7 +43,7 @@ func NewContextBuilder(
 
 // ContextInput provides the data needed to build an LLM context.
 type ContextInput struct {
-	RunID               uuid.UUID
+	RunRef              domain.PipelineRunRef
 	AgentRole           domain.AgentRole
 	ConversationHistory []domain.ConversationMessage
 }
@@ -65,7 +63,7 @@ func (b *ContextBuilder) BuildContext(ctx context.Context, input ContextInput) (
 	}
 
 	// 1. Agent decisions for this run filtered by role.
-	decisions, err := b.decisions.GetByRun(ctx, input.RunID, repository.AgentDecisionFilter{
+	decisions, err := b.decisions.GetByRun(ctx, input.RunRef, repository.AgentDecisionFilter{
 		AgentRole: input.AgentRole,
 	}, 100, 0)
 	if err != nil {
@@ -73,7 +71,7 @@ func (b *ContextBuilder) BuildContext(ctx context.Context, input ContextInput) (
 	}
 
 	// 2. Pipeline run snapshots (market data).
-	snapshots, err := b.snapshots.GetByRun(ctx, input.RunID)
+	snapshots, err := b.snapshots.GetByRun(ctx, input.RunRef)
 	if err != nil {
 		return nil, fmt.Errorf("context builder: fetch snapshots: %w", err)
 	}

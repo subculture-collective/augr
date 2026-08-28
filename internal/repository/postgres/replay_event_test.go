@@ -20,7 +20,7 @@ func TestReplayEventRepoIntegration_CreateAndList(t *testing.T) {
 	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewReplayEventRepo(pool)
+	repo := NewReplayEventRepo(pool, canonicalRepositoryTestAccountID)
 	decisionID := insertReplayDecisionRow(t, ctx, pool)
 
 	event := &domain.ReplayEvent{
@@ -64,7 +64,7 @@ func TestReplayEventRepoIntegration_ListOrdersDeterministically(t *testing.T) {
 	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewReplayEventRepo(pool)
+	repo := NewReplayEventRepo(pool, canonicalRepositoryTestAccountID)
 	decisionID := insertReplayDecisionRow(t, ctx, pool)
 	occurred := time.Date(2026, time.June, 9, 12, 0, 0, 0, time.UTC)
 	created := time.Date(2026, time.June, 9, 12, 5, 0, 0, time.UTC)
@@ -116,7 +116,7 @@ func TestReplayEventRepoIntegration_ListReturnsEmptySlice(t *testing.T) {
 	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewReplayEventRepo(pool)
+	repo := NewReplayEventRepo(pool, canonicalRepositoryTestAccountID)
 	decisionID := insertReplayDecisionRow(t, ctx, pool)
 
 	got, err := repo.ListReplayEvents(ctx, decisionID)

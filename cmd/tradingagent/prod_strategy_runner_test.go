@@ -510,7 +510,7 @@ type postTerminalOrderRepo struct {
 	err error
 }
 
-func (r postTerminalOrderRepo) GetByRun(context.Context, uuid.UUID, repository.OrderFilter, int, int) ([]domain.Order, error) {
+func (r postTerminalOrderRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.OrderFilter, int, int) ([]domain.Order, error) {
 	return nil, r.err
 }
 
@@ -996,7 +996,7 @@ func (r *recordingNativeSnapshotRepo) Create(_ context.Context, snapshot *domain
 	return nil
 }
 
-func (r *recordingNativeSnapshotRepo) GetByRun(context.Context, uuid.UUID) ([]domain.PipelineRunSnapshot, error) {
+func (r *recordingNativeSnapshotRepo) GetByRun(context.Context, domain.PipelineRunRef) ([]domain.PipelineRunSnapshot, error) {
 	return append([]domain.PipelineRunSnapshot(nil), r.snapshots...), nil
 }
 
@@ -1116,7 +1116,7 @@ func TestExecutionDecisionMetadata_PreservesZeroCostWithLLMProvenance(t *testing
 		CostUSD:          0,
 	}}}
 
-	got := executionDecisionMetadata(context.Background(), decisionRepo, slog.Default(), runID)
+	got := executionDecisionMetadata(context.Background(), decisionRepo, slog.Default(), domain.PipelineRunRef{ID: runID, TradeDate: time.Now()})
 	if got == nil {
 		t.Fatal("executionDecisionMetadata() = nil, want metadata")
 	}
@@ -1151,7 +1151,7 @@ func TestExecutionDecisionMetadata_OmitsDeterministicDecision(t *testing.T) {
 		CostUSD:       0.25,
 	}}}
 
-	if got := executionDecisionMetadata(context.Background(), decisionRepo, slog.Default(), runID); got != nil {
+	if got := executionDecisionMetadata(context.Background(), decisionRepo, slog.Default(), domain.PipelineRunRef{ID: runID, TradeDate: time.Now()}); got != nil {
 		t.Fatalf("executionDecisionMetadata() = %+v, want nil", got)
 	}
 }
@@ -1165,14 +1165,14 @@ func (r *stubAgentDecisionRepository) Create(context.Context, *domain.AgentDecis
 	return nil
 }
 
-func (r *stubAgentDecisionRepository) GetByRun(context.Context, uuid.UUID, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
+func (r *stubAgentDecisionRepository) GetByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
 	return r.decisions, nil
 }
 
-func (r *stubAgentDecisionRepository) CountByRun(context.Context, uuid.UUID, repository.AgentDecisionFilter) (int, error) {
+func (r *stubAgentDecisionRepository) CountByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter) (int, error) {
 	if r.err != nil {
 		return 0, r.err
 	}

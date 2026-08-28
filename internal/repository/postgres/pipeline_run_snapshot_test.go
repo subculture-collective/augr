@@ -47,7 +47,7 @@ func TestPipelineRunSnapshotRepoIntegration_CreatePersistsSnapshot(t *testing.T)
 	pool, cleanup := newPipelineRunSnapshotIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunSnapshotRepo(pool)
+	repo := NewPipelineRunSnapshotRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	snapshot := &domain.PipelineRunSnapshot{
 		PipelineRunID: runID,
@@ -99,7 +99,7 @@ func TestPipelineRunSnapshotRepoIntegration_GetByRun(t *testing.T) {
 	pool, cleanup := newPipelineRunSnapshotIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunSnapshotRepo(pool)
+	repo := NewPipelineRunSnapshotRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	otherRunID := uuid.New()
 	createdAt := time.Date(2026, time.March, 31, 12, 0, 0, 0, time.UTC)
@@ -144,7 +144,7 @@ func TestPipelineRunSnapshotRepoIntegration_GetByRun(t *testing.T) {
 		}
 	}
 
-	got, err := repo.GetByRun(ctx, runID)
+	got, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate})
 	if err != nil {
 		t.Fatalf("GetByRun() error = %v", err)
 	}

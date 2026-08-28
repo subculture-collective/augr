@@ -268,16 +268,16 @@ func (r *mockOrderRepo) Count(_ context.Context, _ repository.OrderFilter) (int,
 	return 0, nil
 }
 
-func (r *mockOrderRepo) GetByRun(ctx context.Context, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+func (r *mockOrderRepo) GetByRun(ctx context.Context, ref domain.PipelineRunRef, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
 	if r.getByRunFn != nil {
-		return r.getByRunFn(ctx, runID, filter, limit, offset)
+		return r.getByRunFn(ctx, ref.ID, filter, limit, offset)
 	}
 
 	return nil, nil
 }
 
 func (r *mockOrderRepo) GetByCopyOriginRun(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _ uuid.UUID, runID uuid.UUID, filter repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
-	return r.GetByRun(ctx, runID, filter, limit, offset)
+	return r.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}, filter, limit, offset)
 }
 
 // mockPositionRepo implements repository.PositionRepository.

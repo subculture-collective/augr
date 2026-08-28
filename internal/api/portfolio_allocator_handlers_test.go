@@ -35,11 +35,7 @@ type portfolioDiagnosticsRunRepo struct {
 
 func (s *portfolioDiagnosticsRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (s *portfolioDiagnosticsRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
-	return nil, repository.ErrNotFound
-}
-
-func (s *portfolioDiagnosticsRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
+func (s *portfolioDiagnosticsRunRepo) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	return nil, repository.ErrNotFound
 }
 
@@ -70,11 +66,12 @@ func (s *portfolioDiagnosticsRunRepo) CountByStatus(context.Context, repository.
 	return counts, nil
 }
 
-func (s *portfolioDiagnosticsRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (s *portfolioDiagnosticsRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	id, tradeDate := ref.ID, ref.TradeDate
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
 }
 
-func (s *portfolioDiagnosticsRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (s *portfolioDiagnosticsRunRepo) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
