@@ -718,7 +718,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		polymarketReadClient := polymarketexecution.NewClient(cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, logger)
 		polymarketReadClient.SetAPIBaseURL(cfg.Brokers.Polymarket.APIBaseURL)
 		polymarketReadClient.SetGatewayBaseURL(cfg.Brokers.Polymarket.GatewayBaseURL)
-		if polymarketL2Configured(cfg.Brokers.Polymarket) {
+		if polymarketL2Configured(cfg.Brokers.Polymarket) && polymarketLiveExecutionAuthorized(cfg, runtimeDeps.executionAccount) {
 			polymarketReadClient.SetL2Auth(cfg.Brokers.Polymarket.Address, cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, cfg.Brokers.Polymarket.Passphrase)
 		}
 		deps.PolymarketClient = polymarketReadClient
@@ -857,7 +857,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		deps.DataService = dataService
 		var alpacaReconciler *automation.AlpacaReconciler
 		var polymarketExecutionReconciler *polymarketexecution.Reconciler
-		if cfg.Features.EnablePolymarketAutomation && polymarketL2Configured(cfg.Brokers.Polymarket) {
+		if cfg.Features.EnablePolymarketAutomation && polymarketL2Configured(cfg.Brokers.Polymarket) && polymarketLiveExecutionAuthorized(cfg, runtimeDeps.executionAccount) {
 			polymarketClient := polymarketexecution.NewClient(cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, logger)
 			polymarketClient.SetL2Auth(cfg.Brokers.Polymarket.Address, cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, cfg.Brokers.Polymarket.Passphrase)
 			polymarketClient.SetAPIBaseURL(cfg.Brokers.Polymarket.APIBaseURL)

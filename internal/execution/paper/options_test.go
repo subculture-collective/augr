@@ -7,12 +7,35 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/google/uuid"
 )
 
 func optionOrder(price *float64) *domain.Order {
 	optionType := domain.OptionTypeCall
 	intent := domain.PositionIntentBuyToOpen
 	return &domain.Order{Ticker: "AAPL271217C00150000", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 2, LimitPrice: price, AssetClass: domain.AssetClassOption, OptionType: &optionType, ContractMultiplier: 100, PositionIntent: &intent}
+}
+
+func TestOptionSettlementRequiresCommittedDurablePositionIdentity(t *testing.T) {
+	price := 2.50
+	broker := NewPaperBroker(10000, 0, 0)
+	order := optionOrder(&price)
+	if _, err := broker.SubmitOptionOrder(context.Background(), order); err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.ApplyOptionSettlement(context.Background(), uuid.New(), 5); err == nil {
+		t.Fatal("unmatched durable settlement must be rejected")
+	}
+	positionID := uuid.New()
+	if err := broker.BindDurableOptionPosition(context.Background(), order.Ticker, positionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.ApplyOptionSettlement(context.Background(), positionID, 5); err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.ApplyOptionSettlement(context.Background(), positionID, 5); err != nil {
+		t.Fatalf("durable settlement replay must be idempotent: %v", err)
+	}
 }
 
 func TestSubmitOptionOrderRequiresExecutablePrice(t *testing.T) {

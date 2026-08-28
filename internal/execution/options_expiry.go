@@ -75,7 +75,10 @@ func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, pos
 			return summary, fmt.Errorf("options expiry: settle position %s: %w", settlement.positionID, err)
 		}
 		if len(states) > 0 && states[0] != nil {
-			if err := states[0].ApplyOptionSettlement(ctx, settlement.positionID, settlement.intrinsic); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			err := states[0].ApplyOptionSettlement(cleanupCtx, settlement.positionID, settlement.intrinsic)
+			cancel()
+			if err != nil {
 				return summary, fmt.Errorf("options expiry: update paper broker position %s: %w", settlement.positionID, err)
 			}
 		}

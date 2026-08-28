@@ -33,6 +33,7 @@ type PaperBroker struct {
 	optionOrderEffects  map[string]optionPositionEffect
 	orderEffects        map[string]standardOrderEffect
 	optionSpreadOrders  map[string]execution.BrokerSpreadOrderStatus
+	settledOptions      map[uuid.UUID]struct{}
 	balance             execution.Balance
 	slippageBps         float64
 	feePct              float64
@@ -86,6 +87,7 @@ func newPaperBroker(profile domain.PaperEvaluationProfile) *PaperBroker {
 		optionOrderEffects:  make(map[string]optionPositionEffect),
 		orderEffects:        make(map[string]standardOrderEffect),
 		optionSpreadOrders:  make(map[string]execution.BrokerSpreadOrderStatus),
+		settledOptions:      make(map[uuid.UUID]struct{}),
 		balance: execution.Balance{
 			Currency:    "USD",
 			Cash:        profile.InitialCapital,
@@ -358,6 +360,9 @@ func (b *PaperBroker) ApplyOptionSettlement(ctx context.Context, positionID uuid
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, settled := b.settledOptions[positionID]; settled {
+		return nil
+	}
 	for ticker, position := range b.positions {
 		if position.ID != positionID {
 			continue
@@ -371,11 +376,29 @@ func (b *PaperBroker) ApplyOptionSettlement(ctx context.Context, positionID uuid
 			return errors.New("paper: option settlement position side is invalid")
 		}
 		delete(b.positions, ticker)
+		b.settledOptions[positionID] = struct{}{}
 		b.balance.BuyingPower = b.balance.Cash
 		b.balance.Equity = b.markToMarketEquityLocked()
 		return nil
 	}
-	// Idempotent replay after the broker state already reflects durable settlement.
+	return fmt.Errorf("paper: durable option position %s not found for settlement", positionID)
+}
+
+func (b *PaperBroker) BindDurableOptionPosition(ctx context.Context, ticker string, positionID uuid.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b == nil || positionID == uuid.Nil {
+		return errors.New("paper: durable option position binding is required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	key := canonicalPositionKey(domain.MarketTypeOptions, ticker, "")
+	position := b.positions[key]
+	if position == nil || position.AssetClass != domain.AssetClassOption {
+		return fmt.Errorf("paper: option position %q not found for durable binding", ticker)
+	}
+	position.ID = positionID
 	return nil
 }
 

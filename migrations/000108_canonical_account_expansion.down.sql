@@ -273,7 +273,7 @@ DROP INDEX uq_replay_events_fill_order;
 DROP INDEX uq_replay_events_position;
 DROP INDEX uq_orders_client_order_id;
 DROP INDEX idx_financial_fill_idempotency_account;
-DROP INDEX uq_positions_close_reservation_order;
+DROP INDEX idx_positions_close_reservation_order;
 DROP INDEX idx_prediction_settlement_idempotency_account;
 DROP INDEX idx_copy_subscriptions_account_status;
 DROP INDEX idx_copy_trade_intents_account_created;

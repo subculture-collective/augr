@@ -462,6 +462,11 @@ func TestProcessSpreadSignalPersistsAtomicPaperLegs(t *testing.T) {
 	if fillRepo.batches[0][0].Order.LegGroupID == nil || fillRepo.batches[0][1].Order.LegGroupID == nil || *fillRepo.batches[0][0].Order.LegGroupID != *fillRepo.batches[0][1].Order.LegGroupID {
 		t.Fatalf("spread legs not atomically grouped: %+v", fillRepo.batches[0])
 	}
+	groupID := fillRepo.batches[0][0].Order.LegGroupID.String()
+	parentID := fillRepo.batches[0][0].Order.ClientOrderID
+	if !strings.HasPrefix(parentID, "augr-option-spread-parent-") || strings.Contains(parentID, groupID) {
+		t.Fatalf("spread parent client id %q must be persisted and distinct from opening leg group %s", parentID, groupID)
+	}
 }
 
 func TestProcessSpreadSignalCompensatesPaperDebitWhenAtomicPersistenceFails(t *testing.T) {

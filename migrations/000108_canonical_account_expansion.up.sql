@@ -83,7 +83,7 @@ ALTER TABLE positions
     ADD COLUMN origin_id TEXT,
     ADD COLUMN close_reservation_order_id UUID REFERENCES orders(id) ON DELETE RESTRICT;
 
-CREATE UNIQUE INDEX uq_positions_close_reservation_order ON positions(close_reservation_order_id) WHERE close_reservation_order_id IS NOT NULL;
+CREATE INDEX idx_positions_close_reservation_order ON positions(close_reservation_order_id) WHERE close_reservation_order_id IS NOT NULL;
 ALTER TABLE trades
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),

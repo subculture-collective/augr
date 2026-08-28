@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -171,7 +172,7 @@ func (m *OptionsOrderManager) ReconcilePendingOptionOrders(ctx context.Context, 
 			if !ok {
 				return fmt.Errorf("options_manager: provider spread parent lookup is required for recovery")
 			}
-			parentClientID := "augr-option-spread-" + groupID.String()
+			parentClientID := optionSpreadParentClientID(group)
 			spreadResult, lookupErr := spreadProvider.GetSpreadOrderStatusByClientOrderIDResult(ctx, parentClientID)
 			if errors.Is(lookupErr, ErrBrokerOrderNotFound) {
 				spread, quantity, buildErr := recoveredSpread(group)
@@ -322,6 +323,10 @@ type optionFillCompensator interface {
 	RollbackOptionOrder(ctx context.Context, externalID string) error
 	RollbackOptionSpread(ctx context.Context, externalIDs []string) error
 	FinalizeOptionSpread(externalIDs []string) error
+}
+
+type optionPositionCommitter interface {
+	BindDurableOptionPosition(context.Context, string, uuid.UUID) error
 }
 
 var errOptionFillRollbackConfirmed = errors.New("option fill durable rollback confirmed")
@@ -971,6 +976,8 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 
 		legOrders = append(legOrders, legOrder)
 	}
+	parentClientOrderID := "augr-option-spread-parent-" + uuid.NewString()
+	legOrders[0].ClientOrderID = parentClientOrderID
 	var reservation repository.AtomicOptionCloseRepository
 	var reservedPositionIDs, reservedOrderIDs []uuid.UUID
 	if isClosing {
@@ -998,7 +1005,6 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 		}
 	}
 	// 3. Submit spread to broker.
-	parentClientOrderID := "augr-option-spread-" + legGroupID.String()
 	ids, err := m.broker.SubmitSpreadOrder(ctx, spread, quantity, parentClientOrderID)
 	if err != nil {
 		return fmt.Errorf("options_manager: submit spread outcome is ambiguous; orders and reservations retained for reconciliation: %w", err)
@@ -1074,23 +1080,55 @@ func (m *OptionsOrderManager) processSpreadSignal(ctx context.Context, scope Exe
 	return nil
 }
 
+func optionSpreadParentClientID(orders []*domain.Order) string {
+	ids := make([]string, 0, len(orders))
+	for _, order := range orders {
+		if order != nil && order.ID != uuid.Nil {
+			if strings.HasPrefix(order.ClientOrderID, "augr-option-spread-parent-") {
+				return order.ClientOrderID
+			}
+			ids = append(ids, order.ID.String())
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return ""
+	}
+	return "augr-option-spread-order-" + ids[0]
+}
+
 func (m *OptionsOrderManager) applyOptionFills(ctx context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
 	results, err := m.optionFillRepo.ApplyOptionFills(ctx, inputs)
-	if err == nil {
+	if err != nil {
+		resolver, ok := m.optionFillRepo.(repository.OptionFillCommitResolver)
+		if !ok {
+			return nil, err
+		}
+		resolved, committed, resolveErr := resolver.ResolveOptionFillCommit(ctx, inputs)
+		if resolveErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("options_manager: resolve option fill commit: %w", resolveErr))
+		}
+		if !committed {
+			return nil, errors.Join(errOptionFillRollbackConfirmed, err)
+		}
+		results = resolved
+	}
+	committer, ok := m.broker.(optionPositionCommitter)
+	if !ok {
 		return results, nil
 	}
-	resolver, ok := m.optionFillRepo.(repository.OptionFillCommitResolver)
-	if !ok {
-		return nil, err
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	for i := range inputs {
+		intent := inputs[i].Order.PositionIntent
+		if intent == nil || (*intent != domain.PositionIntentBuyToOpen && *intent != domain.PositionIntentSellToOpen) || i >= len(results) || results[i].PositionID == uuid.Nil {
+			continue
+		}
+		if err := committer.BindDurableOptionPosition(cleanupCtx, inputs[i].Order.Ticker, results[i].PositionID); err != nil {
+			return results, fmt.Errorf("options_manager: bind committed paper option position: %w", err)
+		}
 	}
-	resolved, committed, resolveErr := resolver.ResolveOptionFillCommit(ctx, inputs)
-	if resolveErr != nil {
-		return nil, errors.Join(err, fmt.Errorf("options_manager: resolve option fill commit: %w", resolveErr))
-	}
-	if committed {
-		return resolved, nil
-	}
-	return nil, errors.Join(errOptionFillRollbackConfirmed, err)
+	return results, nil
 }
 
 func (m *OptionsOrderManager) compensateOptionOrder(ctx context.Context, externalID string) error {

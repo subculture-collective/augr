@@ -192,12 +192,15 @@ func newRealStrategyRunner(
 	pm := cfg.Brokers.Polymarket
 	if cfg.Features.EnablePolymarketAutomation && strings.TrimSpace(pm.KeyID) != "" {
 		client := polymarketexecution.NewClient(pm.KeyID, pm.SecretKey, logger)
-		client.SetL2Auth(pm.Address, pm.KeyID, pm.SecretKey, pm.Passphrase)
+		liveAuthorized := polymarketLiveExecutionAuthorized(cfg, executionAccount)
+		if liveAuthorized {
+			client.SetL2Auth(pm.Address, pm.KeyID, pm.SecretKey, pm.Passphrase)
+		}
 		client.SetAPIBaseURL(pm.APIBaseURL)
 		client.SetGatewayBaseURL(pm.GatewayBaseURL)
 		runner.polymarketClient = client
 		runner.polymarketMarketData = client
-		if strings.TrimSpace(pm.SecretKey) != "" {
+		if liveAuthorized && strings.TrimSpace(pm.SecretKey) != "" {
 			exitRepo, _ := orderRepo.(repository.AtomicPredictionExitRepository)
 			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), ExitRepo: exitRepo, Logger: logger, Metrics: appMetrics}); err == nil {
 				runner.polymarketStopGuard = guard
@@ -216,6 +219,18 @@ func newRealStrategyRunner(
 	}
 
 	return runner
+}
+
+func polymarketLiveExecutionAuthorized(cfg config.Config, account domain.ExecutionAccountBinding) bool {
+	if !cfg.Features.EnableLiveTrading || account.Environment() != domain.AccountEnvironmentLive {
+		return false
+	}
+	for _, broker := range cfg.LiveTradingAllowedBrokers {
+		if strings.EqualFold(strings.TrimSpace(broker), "polymarket") {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {

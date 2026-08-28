@@ -324,6 +324,23 @@ func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Previ
 }
 
 func (s *Service) SetStatus(ctx context.Context, id uuid.UUID, next domain.CopySubscriptionStatus) (*domain.CopySubscription, error) {
+	var result *domain.CopySubscription
+	run := func() error {
+		var err error
+		result, err = s.setStatus(ctx, id, next)
+		return err
+	}
+	if locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker); ok {
+		if err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), run); err != nil {
+			return nil, err
+		}
+	} else if err := run(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Service) setStatus(ctx context.Context, id uuid.UUID, next domain.CopySubscriptionStatus) (*domain.CopySubscription, error) {
 	subscription, err := s.deps.Repo.GetSubscription(ctx, id)
 	if err != nil {
 		return nil, err
@@ -503,21 +520,23 @@ func (s *Service) executePlannedRun(ctx context.Context, subscription *domain.Co
 		if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
 			return result, err
 		}
-		if candidate.PolicyStatus != "approved" || candidate.Status != "received" {
+		retryable := candidate.Status == "received" || candidate.Status == "ordered" || candidate.Status == "partial" || (candidate.Status == "failed" && candidate.RiskStatus == "pending")
+		if candidate.PolicyStatus != "approved" || !retryable {
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
 		claimID := uuid.New()
-		claimed, claimErr := s.deps.Repo.ClaimIntentExecution(ctx, candidate.ID, claimID, s.deps.Now().UTC())
-		if claimErr != nil {
-			return result, fmt.Errorf("claim copy intent %s: %w", candidate.ID, claimErr)
-		}
-		if !claimed {
-			result.Intents = append(result.Intents, candidate)
-			continue
-		}
 		locked := false
+		claimed := false
 		run := func() error {
+			var claimErr error
+			claimed, claimErr = s.deps.Repo.ClaimIntentExecution(ctx, candidate.ID, claimID, s.deps.Now().UTC())
+			if claimErr != nil {
+				return fmt.Errorf("claim copy intent %s: %w", candidate.ID, claimErr)
+			}
+			if !claimed {
+				return nil
+			}
 			var runErr error
 			candidate, subscription, runErr = s.executeClaimedIntent(ctx, candidate, subscription, persistedOrigin.ID(), claimID, locked)
 			return runErr
@@ -529,6 +548,10 @@ func (s *Service) executePlannedRun(ctx context.Context, subscription *domain.Co
 			}
 		} else if err := run(); err != nil {
 			return result, err
+		}
+		if !claimed {
+			result.Intents = append(result.Intents, candidate)
+			continue
 		}
 		result.Intents = append(result.Intents, candidate)
 	}

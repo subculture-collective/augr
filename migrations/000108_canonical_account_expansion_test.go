@@ -48,6 +48,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"add column execution_claim_id uuid",
 		"add column execution_claimed_at timestamptz",
 		"add constraint copy_intent_execution_claim_pair check ((execution_claim_id is null) = (execution_claimed_at is null))",
+		"create index idx_positions_close_reservation_order on positions(close_reservation_order_id) where close_reservation_order_id is not null",
 		"create unique index orders_copy_origin_effect_once on orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) where origin_type='copy_subscription' and copy_origin_rebalance_run_id is not null",
 		"create unique index orders_allocation_effect_once on orders(account_id,allocation_opportunity_id) where allocation_opportunity_id is not null",
 		"create unique index uq_portfolio_opportunities_execution_dedupe on portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key)",
@@ -59,6 +60,9 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		if !strings.Contains(up, fragment) {
 			t.Errorf("up migration missing %q", fragment)
 		}
+	}
+	if strings.Contains(up, "create unique index uq_positions_close_reservation_order") {
+		t.Error("close reservation index must allow one aggregate exit order to reserve multiple lots")
 	}
 	for _, forbidden := range []string{"to_jsonb(s)::text", "on conflict", "alter column account_id set not null", "update pipeline_runs", "update orders"} {
 		if strings.Contains(up, forbidden) {

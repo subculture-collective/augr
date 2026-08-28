@@ -201,10 +201,10 @@ func (r *TradeDecisionJournalRepo) CreateOrderWithDecision(ctx context.Context, 
 		return fmt.Errorf("postgres: begin atomic order decision: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := reserveGenericExitPositions(ctx, tx, order); err != nil {
+	if err := (&OrderRepo{pool: r.pool, accountID: r.accountID}).create(ctx, tx, order); err != nil {
 		return err
 	}
-	if err := (&OrderRepo{pool: r.pool, accountID: r.accountID}).create(ctx, tx, order); err != nil {
+	if err := reserveGenericExitPositions(ctx, tx, order); err != nil {
 		return err
 	}
 	if err := r.create(ctx, tx, decision, true); err != nil {

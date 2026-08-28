@@ -1283,6 +1283,17 @@ func TestEffectivePolymarketExecutionStrategy_DefaultsToPaperUnlessLiveAllowlist
 	}
 }
 
+func TestPolymarketLiveExecutionAuthorizationRejectsCanonicalPaperAccount(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Features: config.FeatureFlags{EnableLiveTrading: true}, LiveTradingAllowedBrokers: []string{"polymarket"}}
+	if polymarketLiveExecutionAuthorized(cfg, binding) {
+		t.Fatal("canonical paper account must never receive an authenticated live Polymarket broker")
+	}
+}
+
 func TestPolymarketExecutionDefaultsToPaperForUnspecifiedStrategyMode(t *testing.T) {
 	t.Parallel()
 
