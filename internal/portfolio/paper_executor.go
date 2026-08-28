@@ -17,6 +17,11 @@ type PaperOrderProcessor interface {
 	ProcessPaperOrder(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error)
 }
 
+// PaperOrderReconciler resolves allocator-owned orders found after restart.
+type PaperOrderReconciler interface {
+	ReconcilePaperOrder(context.Context, domain.Opportunity, *domain.Order) (PaperOrderResult, error)
+}
+
 type PaperOrderRequest struct {
 	Signal        execution.FinalSignal
 	Plan          execution.TradingPlan

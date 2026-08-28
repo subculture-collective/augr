@@ -367,6 +367,21 @@ func (p *restartPaperProcessor) ProcessPaperOrder(ctx context.Context, req portf
 
 type portfolioRecoveryOrderRepo struct{ *recordingOrderRepo }
 
+type terminalRecoveryProcessor struct {
+	status domain.OrderStatus
+	calls  int
+}
+
+func (p *terminalRecoveryProcessor) ProcessPaperOrder(context.Context, portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
+	return portfolio.PaperOrderResult{}, errors.New("unexpected submit during recovery")
+}
+
+func (p *terminalRecoveryProcessor) ReconcilePaperOrder(_ context.Context, _ domain.Opportunity, order *domain.Order) (portfolio.PaperOrderResult, error) {
+	p.calls++
+	order.Status = p.status
+	return portfolio.PaperOrderResult{OrderID: &order.ID, Status: p.status}, nil
+}
+
 func (r *portfolioRecoveryOrderRepo) GetByAllocationOpportunity(_ context.Context, opportunity domain.Opportunity) (*domain.Order, error) {
 	for _, order := range r.list {
 		if order.AllocationOpportunityID != nil && *order.AllocationOpportunityID == opportunity.ID {
@@ -879,22 +894,23 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	}
 }
 
-func TestPortfolioAllocatorRestartKeepsNonterminalIntentPending(t *testing.T) {
+func TestPortfolioAllocatorRestartProgressesNonterminalIntentToCancelled(t *testing.T) {
 	now := time.Now().UTC()
 	runID, accountID, versionID, strategyID, opportunityID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{created: []*domain.AllocationDecision{{ID: uuid.New(), AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, CreatedOrderID: &orderID}}}
 	orders := &portfolioRecoveryOrderRepo{newRecordingOrderRepo(&domain.Order{ID: orderID, AccountID: accountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, StrategyID: &strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, AllocationOpportunityID: &opportunityID, Status: domain.OrderStatusSubmitted})}
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, OrderRepo: orders})
+	processor := &terminalRecoveryProcessor{status: domain.OrderStatusCancelled}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, OrderRepo: orders, PortfolioPaperProcessor: processor})
 	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
 		t.Fatal(err)
 	}
-	if opportunityRepo.items[0].Status != domain.OpportunityStatusSelected {
-		t.Fatalf("opportunity status = %s, want selected", opportunityRepo.items[0].Status)
+	if opportunityRepo.items[0].Status != domain.OpportunityStatusRejected {
+		t.Fatalf("opportunity status = %s, want rejected", opportunityRepo.items[0].Status)
 	}
-	if decisionRepo.created[0].Action != domain.AllocationDecisionActionPaperOrderIntent || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "recovery_nonterminal_order:submitted") {
-		t.Fatalf("pending decision did not remain recoverable: %+v", decisionRepo.created[0])
+	if decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || processor.calls != 1 {
+		t.Fatalf("pending decision did not terminally reconcile: %+v calls=%d", decisionRepo.created[0], processor.calls)
 	}
 }
 

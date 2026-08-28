@@ -84,7 +84,32 @@ func (r *TradeDecisionJournalRepo) create(ctx context.Context, db tradeDecisionQ
 		)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)`
 	if idempotent {
-		query += ` ON CONFLICT (id) DO UPDATE SET id=EXCLUDED.id WHERE trade_decisions.account_id=EXCLUDED.account_id AND trade_decisions.environment=EXCLUDED.environment AND trade_decisions.origin_type=EXCLUDED.origin_type AND trade_decisions.origin_id=EXCLUDED.origin_id AND trade_decisions.pipeline_run_id IS NOT DISTINCT FROM EXCLUDED.pipeline_run_id AND trade_decisions.pipeline_run_trade_date IS NOT DISTINCT FROM EXCLUDED.pipeline_run_trade_date`
+		query += ` ON CONFLICT (id) DO UPDATE SET id=EXCLUDED.id WHERE
+			trade_decisions.account_id=EXCLUDED.account_id AND
+			trade_decisions.environment=EXCLUDED.environment AND
+			trade_decisions.origin_type=EXCLUDED.origin_type AND
+			trade_decisions.origin_id=EXCLUDED.origin_id AND
+			trade_decisions.pipeline_run_trade_date IS NOT DISTINCT FROM EXCLUDED.pipeline_run_trade_date AND
+			trade_decisions.strategy_id IS NOT DISTINCT FROM EXCLUDED.strategy_id AND
+			trade_decisions.pipeline_run_id IS NOT DISTINCT FROM EXCLUDED.pipeline_run_id AND
+			trade_decisions.market_type=EXCLUDED.market_type AND
+			trade_decisions.instrument_key=EXCLUDED.instrument_key AND
+			trade_decisions.external_market_id IS NOT DISTINCT FROM EXCLUDED.external_market_id AND
+			trade_decisions.side=EXCLUDED.side AND trade_decisions.outcome IS NOT DISTINCT FROM EXCLUDED.outcome AND
+			trade_decisions.fair_value=EXCLUDED.fair_value AND trade_decisions.executable_price=EXCLUDED.executable_price AND
+			trade_decisions.spread=EXCLUDED.spread AND trade_decisions.depth=EXCLUDED.depth AND
+			trade_decisions.gross_ev=EXCLUDED.gross_ev AND trade_decisions.net_ev=EXCLUDED.net_ev AND
+			trade_decisions.kelly_fraction=EXCLUDED.kelly_fraction AND trade_decisions.proposed_size=EXCLUDED.proposed_size AND
+			trade_decisions.approved_size=EXCLUDED.approved_size AND trade_decisions.risk_status=EXCLUDED.risk_status AND
+			trade_decisions.risk_reasons=EXCLUDED.risk_reasons AND trade_decisions.evidence=EXCLUDED.evidence AND
+			trade_decisions.features=EXCLUDED.features AND trade_decisions.regime_tags=EXCLUDED.regime_tags AND
+			trade_decisions.prompt_text IS NOT DISTINCT FROM EXCLUDED.prompt_text AND
+			trade_decisions.llm_provider IS NOT DISTINCT FROM EXCLUDED.llm_provider AND
+			trade_decisions.llm_model IS NOT DISTINCT FROM EXCLUDED.llm_model AND
+			trade_decisions.prompt_tokens IS NOT DISTINCT FROM EXCLUDED.prompt_tokens AND
+			trade_decisions.completion_tokens IS NOT DISTINCT FROM EXCLUDED.completion_tokens AND
+			trade_decisions.latency_ms IS NOT DISTINCT FROM EXCLUDED.latency_ms AND
+			trade_decisions.cost_usd IS NOT DISTINCT FROM EXCLUDED.cost_usd`
 	}
 	query += ` RETURNING id, created_at, updated_at`
 	row := db.QueryRow(ctx, query,
@@ -122,6 +147,9 @@ func (r *TradeDecisionJournalRepo) create(ctx context.Context, db tradeDecisionQ
 	)
 
 	if err := row.Scan(&decision.ID, &decision.CreatedAt, &decision.UpdatedAt); err != nil {
+		if idempotent && errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: create trade decision: immutable payload changed: %w", repository.ErrIdempotencyConflict)
+		}
 		return fmt.Errorf("postgres: create trade decision: %w", err)
 	}
 

@@ -510,17 +510,43 @@ type mockDecisionRecorder struct {
 	decisions   []*domain.TradeDecision
 	paperAttach []struct{ decisionID, orderID uuid.UUID }
 	liveAttach  []struct{ decisionID, orderID uuid.UUID }
+	recordErr   error
 }
 
 func (r *mockDecisionRecorder) RecordDecision(_ context.Context, decision *domain.TradeDecision) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.recordErr != nil {
+		return r.recordErr
+	}
 	if decision == nil {
 		return nil
 	}
 	cp := *decision
 	r.decisions = append(r.decisions, &cp)
 	return nil
+}
+
+func TestProcessSignal_DecisionRecorderFailurePreventsBrokerEffects(t *testing.T) {
+	brokerCalls := 0
+	broker := &mockBroker{
+		submitOrderFn: func(context.Context, *domain.Order) (string, error) { brokerCalls++; return "", nil },
+		getOrderStatusFn: func(context.Context, string) (domain.OrderStatus, error) {
+			brokerCalls++
+			return domain.OrderStatusFilled, nil
+		},
+	}
+	recorderErr := errors.New("decision journal unavailable")
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).
+		WithDecisionRecorder(&mockDecisionRecorder{recordErr: recorderErr})
+
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
+	if !errors.Is(err, recorderErr) {
+		t.Fatalf("ProcessSignal() error = %v, want recorder error", err)
+	}
+	if brokerCalls != 0 {
+		t.Fatalf("broker calls = %d, want 0", brokerCalls)
+	}
 }
 
 func (r *mockDecisionRecorder) AttachPaperOrder(_ context.Context, decisionID, orderID uuid.UUID) error {

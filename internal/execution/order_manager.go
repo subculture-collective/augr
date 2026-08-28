@@ -259,7 +259,9 @@ func (m *OrderManager) ProcessSignal(
 		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
 		if !allowed {
 			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_version_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
-			m.recordTradeDecision(ctx, scope, m.newTradeDecision(scope, plan, marketType, strings.ToUpper(strings.TrimSpace(plan.Side)), 0, 0, domain.RiskDecisionRejected, []string{denial.Code + ": " + denial.Message}, domain.TradeDecisionStatusRejected))
+			if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(scope, plan, marketType, strings.ToUpper(strings.TrimSpace(plan.Side)), 0, 0, domain.RiskDecisionRejected, []string{denial.Code + ": " + denial.Message}, domain.TradeDecisionStatusRejected)); err != nil {
+				return err
+			}
 			return fmt.Errorf("order_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
 		}
 	}
@@ -296,7 +298,9 @@ func (m *OrderManager) ProcessSignal(
 				"pipeline_run_id": runID.String(),
 				"pipeline_signal": signal.Signal,
 			})
-			m.recordTradeDecision(ctx, scope, decision)
+			if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
+				return err
+			}
 
 			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
 				"ticker":      plan.Ticker,
@@ -345,7 +349,9 @@ func (m *OrderManager) ProcessSignal(
 				"pipeline_run_id":   runID.String(),
 				"pipeline_signal":   signal.Signal,
 			})
-			m.recordTradeDecision(ctx, scope, decision)
+			if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
+				return err
+			}
 
 			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
 				"ticker":          plan.Ticker,
@@ -471,7 +477,7 @@ func (m *OrderManager) ProcessSignal(
 
 	if !approved {
 		m.logger.WarnContext(ctx, "position limits rejected", "ticker", plan.Ticker, "reason", reason)
-		m.recordTradeDecision(ctx, scope, m.newTradeDecision(
+		if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(
 			scope,
 			plan,
 			marketType,
@@ -481,7 +487,9 @@ func (m *OrderManager) ProcessSignal(
 			domain.RiskDecisionRejected,
 			[]string{reason},
 			domain.TradeDecisionStatusRejected,
-		))
+		)); err != nil {
+			return err
+		}
 
 		if auditErr := m.audit(ctx, "risk_check_rejected", "order", nil, map[string]any{
 			"ticker":      plan.Ticker,
@@ -572,7 +580,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
 		}
 		m.recordOrderMetric(order.Side, order.Status)
-		m.recordTradeDecision(ctx, scope, m.newTradeDecision(
+		if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(
 			scope,
 			plan,
 			order.MarketType,
@@ -582,7 +590,9 @@ func (m *OrderManager) ProcessSignal(
 			domain.RiskDecisionRejected,
 			[]string{reason},
 			domain.TradeDecisionStatusRejected,
-		))
+		)); err != nil {
+			return err
+		}
 
 		if auditErr := m.audit(ctx, "pre_trade_rejected", "order", &order.ID, map[string]any{
 			"reason": reason,
@@ -604,7 +614,9 @@ func (m *OrderManager) ProcessSignal(
 		nil,
 		domain.TradeDecisionStatusCandidate,
 	)
-	m.recordTradeDecision(ctx, scope, decision)
+	if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
+		return err
+	}
 
 	// 6. Submit to broker (status = submitted).
 	externalID, err := m.broker.SubmitOrder(ctx, order)
@@ -799,9 +811,9 @@ func cloneFloatPtr(value *float64) *float64 {
 	return &cloned
 }
 
-func (m *OrderManager) recordTradeDecision(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision) {
+func (m *OrderManager) recordTradeDecision(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision) error {
 	if m == nil || m.decisionRecorder == nil || decision == nil {
-		return
+		return nil
 	}
 	var err error
 	if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok {
@@ -810,8 +822,9 @@ func (m *OrderManager) recordTradeDecision(ctx context.Context, scope ExecutionS
 		err = m.decisionRecorder.RecordDecision(ctx, decision)
 	}
 	if err != nil {
-		m.logger.ErrorContext(ctx, "order_manager: record trade decision", "error", err, "decision_id", decision.ID)
+		return fmt.Errorf("order_manager: record trade decision: %w", err)
 	}
+	return nil
 }
 
 func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, scope ExecutionScope, decisionID, orderID uuid.UUID, live bool) {
@@ -1010,6 +1023,62 @@ func SanitizedSubmittedOrder(order *domain.Order, externalID string, submittedAt
 	cp.FilledAvgPrice = nil
 	cp.FilledAt = nil
 	return &cp
+}
+
+// ReconcilePersistedOrder resolves an allocator-owned paper order without
+// submitting a replacement. Resting paper orders are cancelled so restart
+// recovery always reaches a durable terminal state.
+func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope ExecutionScope, order *domain.Order) (domain.OrderStatus, error) {
+	if order == nil {
+		return "", fmt.Errorf("order_manager: persisted order is required")
+	}
+	if _, _, _, err := scopeOriginIDs(scope); err != nil {
+		return "", fmt.Errorf("order_manager: reconcile execution scope: %w", err)
+	}
+	if strings.TrimSpace(order.ExternalID) == "" {
+		order.Status = domain.OrderStatusRejected
+		if err := m.orderRepo.Update(ctx, order); err != nil {
+			return "", fmt.Errorf("order_manager: reject unsubmitted persisted order: %w", err)
+		}
+		return order.Status, nil
+	}
+	status, err := m.broker.GetOrderStatus(ctx, order.ExternalID)
+	if err != nil {
+		return "", fmt.Errorf("order_manager: reconcile broker status: %w", err)
+	}
+	switch status {
+	case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
+		if err := m.broker.CancelOrder(ctx, order.ExternalID); err != nil {
+			return "", fmt.Errorf("order_manager: cancel recovered paper order: %w", err)
+		}
+		status, err = m.broker.GetOrderStatus(ctx, order.ExternalID)
+		if err != nil {
+			return "", fmt.Errorf("order_manager: verify recovered paper cancellation: %w", err)
+		}
+	}
+	order.Status = status
+	switch status {
+	case domain.OrderStatusFilled:
+		plan := TradingPlan{Ticker: order.Ticker, MarketType: order.MarketType, Side: order.PredictionSide}
+		if order.FilledAvgPrice != nil {
+			plan.EntryPrice = *order.FilledAvgPrice
+		} else if order.LimitPrice != nil {
+			plan.EntryPrice = *order.LimitPrice
+		}
+		if order.StopPrice != nil {
+			plan.StopLoss = *order.StopPrice
+		}
+		if err := m.handleFill(ctx, order, plan, scope, uuid.Nil); err != nil {
+			return "", err
+		}
+	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
+		if err := m.orderRepo.Update(ctx, order); err != nil {
+			return "", fmt.Errorf("order_manager: persist reconciled %s order: %w", status, err)
+		}
+	default:
+		return "", fmt.Errorf("order_manager: recovered paper order remained nonterminal: %s", status)
+	}
+	return status, nil
 }
 
 // handleFill creates a Trade and creates or updates the Position.

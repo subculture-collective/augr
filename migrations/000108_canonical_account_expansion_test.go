@@ -49,7 +49,6 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"add constraint copy_intent_execution_claim_pair check ((execution_claim_id is null) = (execution_claimed_at is null))",
 		"create unique index orders_copy_origin_effect_once on orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) where origin_type='copy_subscription' and copy_origin_rebalance_run_id is not null",
 		"create unique index orders_allocation_effect_once on orders(account_id,allocation_opportunity_id) where allocation_opportunity_id is not null",
-		"drop constraint portfolio_opportunities_dedupe_key_key",
 		"create unique index uq_portfolio_opportunities_execution_dedupe on portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key)",
 		"alter table allocation_decisions add column account_id",
 		"add column pipeline_run_id uuid, add column pipeline_run_trade_date date",
@@ -81,8 +80,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"drop index uq_strategies_paper_event_market_ticker",
 		"drop index orders_copy_origin_effect_once",
 		"drop index orders_allocation_effect_once",
-		"drop index uq_portfolio_opportunities_execution_dedupe",
-		"add constraint portfolio_opportunities_dedupe_key_key unique(dedupe_key)",
+		"drop index if exists uq_portfolio_opportunities_execution_dedupe",
 		"drop constraint copy_intent_execution_claim_pair",
 		"expected_through_transaction_id uuid",
 		"order by effective_at desc, observed_at desc, id desc",
@@ -350,6 +348,17 @@ func TestCanonicalAccountExpansionOldWriterCanary(t *testing.T) {
 	legacyGraph := insertLegacyPipelineCopyGraph(t, ctx, pool, strategyID, leaderID, sourceID, observationID)
 	before108 := snapshotCopyOriginFields(t, ctx, pool, legacyGraph)
 	applyCanonicalExpansion(t, ctx, pool)
+	legacyDedupeKey := "legacy-upsert-" + uuid.NewString()
+	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(strategy_id,pipeline_run_id,market_type,ticker,side,signal,status,expires_at,dedupe_key)
+		VALUES($1,$2,'stock','SPY','buy','buy','queued',now()+interval '1 day',$3)
+		ON CONFLICT(dedupe_key) DO UPDATE SET expires_at=EXCLUDED.expires_at`, strategyID, legacyGraph.runID, legacyDedupeKey); err != nil {
+		t.Fatalf("schema-107 exact upsert shape after migration 108: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(strategy_id,pipeline_run_id,market_type,ticker,side,signal,status,expires_at,dedupe_key)
+		VALUES($1,$2,'stock','SPY','buy','buy','queued',now()+interval '2 days',$3)
+		ON CONFLICT(dedupe_key) DO UPDATE SET expires_at=EXCLUDED.expires_at`, strategyID, legacyGraph.runID, legacyDedupeKey); err != nil {
+		t.Fatalf("schema-107 exact upsert retry after migration 108: %v", err)
+	}
 	assertExpansionColumnsRemainOptional(t, ctx, pool)
 	after108 := snapshotCopyOriginFields(t, ctx, pool, legacyGraph)
 	assertCopyOriginFieldsEqual(t, "schema 107 to 108", before108, after108)

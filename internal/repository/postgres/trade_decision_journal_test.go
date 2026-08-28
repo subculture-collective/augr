@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -325,6 +326,11 @@ func TestTradeDecisionJournalRepo_InitialReplayRollbackAndRestartRepair(t *testi
 	}
 	if err := repo.CreateWithInitialReplay(ctx, decision); err != nil {
 		t.Fatalf("idempotent retry: %v", err)
+	}
+	changed := *decision
+	changed.NetEV = decision.NetEV + 1
+	if err := repo.CreateWithInitialReplay(ctx, &changed); !errors.Is(err, repository.ErrIdempotencyConflict) {
+		t.Fatalf("changed same-ID payload error = %v, want ErrIdempotencyConflict", err)
 	}
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM trade_decisions),(SELECT count(*) FROM replay_events)`).Scan(&decisions, &events); err != nil {
 		t.Fatal(err)

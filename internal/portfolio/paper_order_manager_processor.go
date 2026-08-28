@@ -3,6 +3,7 @@ package portfolio
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -117,8 +118,30 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	return PaperOrderResult{Skipped: true, Reason: "paper_order_not_created"}, nil
 }
 
+func (p *PaperOrderManagerProcessor) ReconcilePaperOrder(ctx context.Context, opportunity domain.Opportunity, order *domain.Order) (PaperOrderResult, error) {
+	if p == nil || order == nil || p.deps.PaperBroker == nil || p.deps.OrderRepo == nil {
+		return PaperOrderResult{}, ErrPaperProcessorUnavailable
+	}
+	if opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil || order.StrategyID == nil {
+		return PaperOrderResult{}, errors.New("portfolio: complete recovered order scope is required")
+	}
+	versionID, err := uuid.Parse(opportunity.OriginID)
+	if err != nil {
+		return PaperOrderResult{}, fmt.Errorf("portfolio: recovered strategy version: %w", err)
+	}
+	scope, err := execution.NewStrategyExecutionScope(opportunity.AccountID, opportunity.Environment, versionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, *order.StrategyID)
+	if err != nil {
+		return PaperOrderResult{}, err
+	}
+	manager := execution.NewOrderManager(p.deps.PaperBroker, "paper", p.deps.RiskEngine, p.deps.PositionRepo, p.deps.OrderRepo, p.deps.TradeRepo, p.deps.AuditLogRepo, p.deps.AgentEventRepo, execution.SizingConfig{}, p.deps.Logger).
+		WithFinancialLifecycleRepo(p.deps.FinancialLifecycleRepo).WithLiveTrading(false)
+	status, err := manager.ReconcilePersistedOrder(ctx, scope, order)
+	return PaperOrderResult{OrderID: &order.ID, Status: status}, err
+}
+
 // Compile-time assertion that the processor stays on the paper execution boundary.
 var _ PaperOrderProcessor = (*PaperOrderManagerProcessor)(nil)
+var _ PaperOrderReconciler = (*PaperOrderManagerProcessor)(nil)
 
 // Avoid an unused import regression when domain constants move; this also keeps
 // the file colocated with portfolio market semantics.

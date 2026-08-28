@@ -86,7 +86,6 @@ ALTER TABLE trades
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
     ADD COLUMN origin_id TEXT;
 ALTER TABLE portfolio_opportunities
-    DROP CONSTRAINT portfolio_opportunities_dedupe_key_key,
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),

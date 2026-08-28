@@ -293,6 +293,9 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 			}
 			continue
 		}
+		if err := o.reconcileNonterminalPaperOrder(ctx, opportunity, order); err != nil {
+			return err
+		}
 		decision := recoveredAllocationDecision(opportunity, *order)
 		if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
 			return fmt.Errorf("portfolio_allocator: persist recovered decision: %w", err)
@@ -309,6 +312,9 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 	if !orderMatchesOpportunity(*order, opportunity) {
 		return fmt.Errorf("portfolio_allocator: recovered order lineage mismatch")
 	}
+	if err := o.reconcileNonterminalPaperOrder(ctx, opportunity, order); err != nil {
+		return err
+	}
 	if order.Status == domain.OrderStatusFilled {
 		decision.CreatedOrderID = &order.ID
 		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
@@ -316,8 +322,7 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 		decision.CreatedOrderID = &order.ID
 		action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
 	} else {
-		decision.CreatedOrderID = &order.ID
-		reason = "recovery_nonterminal_order:" + order.Status.String()
+		return fmt.Errorf("portfolio_allocator: recovered paper order remained nonterminal: %s", order.Status)
 	}
 	decision.Action = action
 	decision.Reasons = append(decision.Reasons, reason)
@@ -327,6 +332,28 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 	}
 	if !applied {
 		return fmt.Errorf("portfolio_allocator: reconcile pending paper intent: compare-and-swap failed")
+	}
+	return nil
+}
+
+func (o *JobOrchestrator) reconcileNonterminalPaperOrder(ctx context.Context, opportunity domain.Opportunity, order *domain.Order) error {
+	if order.Status == domain.OrderStatusFilled || order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+		return nil
+	}
+	reconciler, ok := o.deps.PortfolioPaperProcessor.(portfolio.PaperOrderReconciler)
+	if !ok {
+		return fmt.Errorf("portfolio_allocator: paper order reconciler is required for nonterminal recovery")
+	}
+	result, err := reconciler.ReconcilePaperOrder(ctx, opportunity, order)
+	if err != nil {
+		return fmt.Errorf("portfolio_allocator: reconcile broker paper order: %w", err)
+	}
+	if result.OrderID == nil || *result.OrderID != order.ID {
+		return fmt.Errorf("portfolio_allocator: reconciled paper order identity mismatch")
+	}
+	order.Status = result.Status
+	if order.Status != domain.OrderStatusFilled && order.Status != domain.OrderStatusRejected && order.Status != domain.OrderStatusCancelled {
+		return fmt.Errorf("portfolio_allocator: recovered paper order remained nonterminal: %s", order.Status)
 	}
 	return nil
 }
