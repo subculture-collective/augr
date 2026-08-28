@@ -1874,7 +1874,7 @@ func newSmokePipeline(
 			ResearchDebateRounds: 1,
 			RiskDebateRounds:     1,
 		},
-		agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger),
+		&strategyVersionPersister{delegate: agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)},
 		nil,
 		logger,
 	)
@@ -2028,7 +2028,7 @@ func newSmokeRunner(
 			},
 		},
 		agent.Dependencies{
-			Persister:   agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger),
+			Persister:   &strategyVersionPersister{delegate: agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)},
 			Logger:      logger,
 			RunRegistry: runRegistry,
 		},

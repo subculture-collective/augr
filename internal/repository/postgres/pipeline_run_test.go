@@ -235,6 +235,7 @@ func TestPipelineRunRepoIntegration_CreatePreservesIDAndGeneratesMissingID(t *te
 
 	providedID := uuid.New()
 	provided := &domain.PipelineRun{ID: providedID, StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: tradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(provided)
 	if err := repo.Create(ctx, provided); err != nil {
 		t.Fatal(err)
 	}
@@ -247,6 +248,7 @@ func TestPipelineRunRepoIntegration_CreatePreservesIDAndGeneratesMissingID(t *te
 	}
 
 	generated := &domain.PipelineRun{StrategyID: uuid.New(), Ticker: "MSFT", TradeDate: tradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(generated)
 	if err := repo.Create(ctx, generated); err != nil {
 		t.Fatal(err)
 	}
@@ -258,12 +260,25 @@ func TestPipelineRunRepoIntegration_CreatePreservesIDAndGeneratesMissingID(t *te
 	}
 }
 
+func TestPipelineRunRepoIntegration_Migration108OwnershipChecks(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	run := &domain.PipelineRun{StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: canonicalRepositoryTestTradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(run)
+	run.Environment = domain.AccountEnvironment("invalid")
+	if err := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, run); err == nil {
+		t.Fatal("Create() accepted an environment rejected by migration 108")
+	}
+}
+
 func TestPipelineRunRepoIntegration_RegisteredIDSurvivesCreateAndCancel(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
 	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	run := &domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC), Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(run)
 	registry := agent.NewRunContextRegistry()
 	runCtx, cancelRun := context.WithCancelCause(context.Background())
 	if err := registry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
@@ -412,6 +427,7 @@ func createRunningPipelineRun(t *testing.T, ctx context.Context, repo *PipelineR
 		TradeDate: time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC),
 		Status:    domain.PipelineStatusRunning, Signal: signal, StartedAt: time.Now(),
 	}
+	scopePipelineRunTestRow(run)
 	if err := repo.Create(ctx, run); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -462,6 +478,7 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	}
 
 	for _, run := range []*domain.PipelineRun{run1, run2, run3} {
+		scopePipelineRunTestRow(run)
 		if err := repo.Create(ctx, run); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
@@ -601,8 +618,8 @@ func TestPipelineRunRepoIntegration_GetUsesCompositeIdentity(t *testing.T) {
 		{tradeDate: tradeDate2, ticker: "MSFT", status: domain.PipelineStatusFailed, startedAt: startedAt2},
 	} {
 		if _, err := pool.Exec(ctx, `INSERT INTO pipeline_runs (
-			id, strategy_id, ticker, trade_date, status, signal, started_at, error_message, account_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			id, strategy_id, ticker, trade_date, status, signal, started_at, error_message, account_id, environment, origin_type, origin_id
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 			sharedID,
 			uuid.New(),
 			tc.ticker,
@@ -612,6 +629,7 @@ func TestPipelineRunRepoIntegration_GetUsesCompositeIdentity(t *testing.T) {
 			tc.startedAt,
 			"",
 			canonicalRepositoryTestAccountID,
+			domain.AccountEnvironmentPaperScored, "strategy_version", "00000000-0000-4000-8000-000000000108",
 		); err != nil {
 			t.Fatalf("failed to seed duplicate id rows: %v", err)
 		}
@@ -671,8 +689,8 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 	startedAt2 := time.Date(2027, time.January, 3, 11, 0, 0, 0, time.UTC)
 
 	insertSQL := `INSERT INTO pipeline_runs (
-		id, strategy_id, ticker, trade_date, status, signal, started_at, error_message
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+		id, strategy_id, ticker, trade_date, status, signal, started_at, error_message, account_id, environment, origin_type, origin_id
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`
 
 	for _, tc := range []struct {
 		tradeDate time.Time
@@ -692,6 +710,7 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 			"",
 			tc.startedAt,
 			"",
+			canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, "strategy_version", "00000000-0000-4000-8000-000000000108",
 		); err != nil {
 			t.Fatalf("failed to seed duplicate id rows: %v", err)
 		}
@@ -780,8 +799,14 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 
 	ddl := []string{
 		`CREATE TYPE pipeline_status AS ENUM ('running', 'completed', 'failed', 'cancelled')`,
+		`CREATE TABLE accounts (id UUID PRIMARY KEY)`,
+		`INSERT INTO accounts (id) VALUES ('00000000-0000-4000-8000-000000000064')`,
 		`CREATE TABLE pipeline_runs (
 			id              UUID            NOT NULL DEFAULT gen_random_uuid(),
+			account_id      UUID            REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment     TEXT            CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type     TEXT            CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+			origin_id       TEXT,
 			strategy_id     UUID            NOT NULL,
 			ticker          TEXT            NOT NULL,
 			trade_date      DATE            NOT NULL,
@@ -802,7 +827,10 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		`CREATE INDEX idx_pipeline_runs_status ON pipeline_runs (status)`,
 		`CREATE INDEX idx_pipeline_runs_trade_date ON pipeline_runs (trade_date)`,
 		`CREATE TABLE agent_events (
-			id UUID NOT NULL DEFAULT gen_random_uuid(), pipeline_run_id UUID, strategy_id UUID,
+			id UUID NOT NULL DEFAULT gen_random_uuid(), account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')), origin_id TEXT,
+			pipeline_run_id UUID, pipeline_run_trade_date DATE, strategy_id UUID,
 			agent_role TEXT, event_kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT,
 			tags TEXT[], metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (id, created_at)
@@ -826,4 +854,11 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 	}
 
 	return pool, cleanup
+}
+
+func scopePipelineRunTestRow(run *domain.PipelineRun) {
+	run.AccountID = canonicalRepositoryTestAccountID
+	run.Environment = domain.AccountEnvironmentPaperScored
+	run.OriginType = "strategy_version"
+	run.OriginID = "00000000-0000-4000-8000-000000000108"
 }

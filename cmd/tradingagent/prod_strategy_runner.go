@@ -1583,36 +1583,148 @@ type strategyVersionPersister struct {
 	delegate         agent.DecisionPersister
 	executionAccount domain.ExecutionAccountBinding
 	versionID        uuid.UUID
+	mu               sync.RWMutex
+	scopes           map[pipelineRunScopeKey]persistedRunScope
+}
+
+type pipelineRunScopeKey struct {
+	id        uuid.UUID
+	tradeDate string
+}
+
+type persistedRunScope struct {
+	scope       agent.PersistenceScope
+	finalizedAt time.Time
 }
 
 func (p *strategyVersionPersister) RecordRunStart(ctx context.Context, run *domain.PipelineRun) error {
-	if err := bindStrategyRunScope(run, p.executionAccount, p.versionID); err != nil {
+	if p.versionID != uuid.Nil {
+		if err := bindStrategyRunScope(run, p.executionAccount, p.versionID); err != nil {
+			return err
+		}
+	}
+	scope, err := persistenceScopeFromRun(run)
+	if err != nil {
 		return err
 	}
-	return p.delegate.RecordRunStart(ctx, run)
+	key := scopeKey(scope.Run)
+	p.mu.Lock()
+	if p.scopes == nil {
+		p.scopes = make(map[pipelineRunScopeKey]persistedRunScope)
+	}
+	cutoff := time.Now().Add(-time.Minute)
+	for stale, stored := range p.scopes {
+		if !stored.finalizedAt.IsZero() && stored.finalizedAt.Before(cutoff) {
+			delete(p.scopes, stale)
+		}
+	}
+	p.scopes[key] = persistedRunScope{scope: scope}
+	p.mu.Unlock()
+	if err := p.delegate.RecordRunStart(ctx, run); err != nil {
+		p.mu.Lock()
+		delete(p.scopes, key)
+		p.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (p *strategyVersionPersister) FinalizeRun(ctx context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
-	return p.delegate.FinalizeRun(ctx, runID, tradeDate, finalization)
+	scope, err := p.scope(domain.PipelineRunRef{ID: runID, TradeDate: tradeDate})
+	if err != nil {
+		return repository.PipelineRunFinalizationReceipt{}, err
+	}
+	if finalization.Event != nil {
+		applyEventPersistenceScope(finalization.Event, scope)
+	}
+	receipt, err := p.delegate.FinalizeRun(ctx, runID, tradeDate, finalization)
+	if err == nil {
+		p.mu.Lock()
+		stored := p.scopes[scopeKey(scope.Run)]
+		stored.finalizedAt = time.Now()
+		p.scopes[scopeKey(scope.Run)] = stored
+		p.mu.Unlock()
+	}
+	return receipt, err
 }
 
 func (p *strategyVersionPersister) SupportsSnapshots() bool { return p.delegate.SupportsSnapshots() }
 func (p *strategyVersionPersister) PersistSnapshot(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error {
-	snapshot.AccountID = p.executionAccount.AccountID()
-	snapshot.Environment = p.executionAccount.Environment()
-	snapshot.OriginType = "strategy_version"
-	snapshot.OriginID = p.versionID.String()
+	scope, err := p.scope(domain.PipelineRunRef{ID: snapshot.PipelineRunID, TradeDate: snapshot.PipelineRunTradeDate})
+	if err != nil {
+		return err
+	}
+	snapshot.AccountID = scope.AccountID
+	snapshot.Environment = scope.Environment
+	snapshot.OriginType = scope.OriginType
+	snapshot.OriginID = scope.OriginID
+	snapshot.PipelineRunID = scope.Run.ID
+	snapshot.PipelineRunTradeDate = scope.Run.TradeDate
 	return p.delegate.PersistSnapshot(ctx, snapshot)
 }
 func (p *strategyVersionPersister) PersistDecision(ctx context.Context, ref domain.PipelineRunRef, node agent.Node, roundNumber *int, output string, response *agent.DecisionLLMResponse) error {
-	return p.delegate.PersistDecision(ctx, ref, node, roundNumber, output, response)
+	scope, err := p.scope(ref)
+	if err != nil {
+		return err
+	}
+	delegate, ok := p.delegate.(agent.ScopedDecisionPersister)
+	if !ok {
+		return errors.New("strategy version persister requires scoped decision persistence")
+	}
+	return delegate.PersistDecisionScoped(ctx, scope, node, roundNumber, output, response)
 }
 func (p *strategyVersionPersister) PersistEvent(ctx context.Context, event *domain.AgentEvent) error {
-	event.AccountID = p.executionAccount.AccountID()
-	event.Environment = p.executionAccount.Environment()
-	event.OriginType = "strategy_version"
-	event.OriginID = p.versionID.String()
+	if event.PipelineRunID == nil || event.PipelineRunTradeDate == nil {
+		return errors.New("strategy version event requires complete pipeline run identity")
+	}
+	scope, err := p.scope(domain.PipelineRunRef{ID: *event.PipelineRunID, TradeDate: *event.PipelineRunTradeDate})
+	if err != nil {
+		return err
+	}
+	applyEventPersistenceScope(event, scope)
 	return p.delegate.PersistEvent(ctx, event)
+}
+
+func persistenceScopeFromRun(run *domain.PipelineRun) (agent.PersistenceScope, error) {
+	if run == nil || run.AccountID == uuid.Nil || run.Environment == "" || run.OriginType != "strategy_version" || strings.TrimSpace(run.OriginID) == "" {
+		return agent.PersistenceScope{}, errors.New("pipeline run has incomplete strategy ownership")
+	}
+	versionID, err := uuid.Parse(run.OriginID)
+	if err != nil || versionID == uuid.Nil {
+		return agent.PersistenceScope{}, errors.New("pipeline run has invalid strategy version origin")
+	}
+	executionScope, err := execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	if err != nil {
+		return agent.PersistenceScope{}, err
+	}
+	originType, originID := executionScope.Origin()
+	return agent.PersistenceScope{AccountID: executionScope.AccountID(), Environment: executionScope.Environment(), OriginType: string(originType), OriginID: originID, Run: domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}}, nil
+}
+
+func scopeKey(ref domain.PipelineRunRef) pipelineRunScopeKey {
+	return pipelineRunScopeKey{id: ref.ID, tradeDate: ref.TradeDate.Format("2006-01-02")}
+}
+
+func (p *strategyVersionPersister) scope(ref domain.PipelineRunRef) (agent.PersistenceScope, error) {
+	p.mu.RLock()
+	stored, ok := p.scopes[scopeKey(ref)]
+	p.mu.RUnlock()
+	scope := stored.scope
+	if !ok || scope.Run.ID != ref.ID || !scope.Run.TradeDate.Equal(ref.TradeDate) {
+		return agent.PersistenceScope{}, errors.New("untrusted or incomplete pipeline run scope")
+	}
+	return scope, nil
+}
+
+func applyEventPersistenceScope(event *domain.AgentEvent, scope agent.PersistenceScope) {
+	event.AccountID = scope.AccountID
+	event.Environment = scope.Environment
+	event.OriginType = scope.OriginType
+	event.OriginID = scope.OriginID
+	runID := scope.Run.ID
+	tradeDate := scope.Run.TradeDate
+	event.PipelineRunID = &runID
+	event.PipelineRunTradeDate = &tradeDate
 }
 
 func bindStrategyRunScope(run *domain.PipelineRun, executionAccount domain.ExecutionAccountBinding, versionID uuid.UUID) error {

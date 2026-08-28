@@ -3382,6 +3382,27 @@ func TestListEventsEndpoint(t *testing.T) {
 	}
 }
 
+func TestListEventsRequiresExactPipelineRunRef(t *testing.T) {
+	t.Parallel()
+	deps := testDeps()
+	deps.Events = &stubEventRepo{}
+	srv := newTestServerWithDeps(t, deps)
+	validID := uuid.NewString()
+	for _, query := range []string{
+		"?pipeline_run_id=" + validID,
+		"?pipeline_run_trade_date=2026-08-27",
+		"?pipeline_run_id=00000000-0000-0000-0000-000000000000&pipeline_run_trade_date=2026-08-27",
+		"?pipeline_run_id=invalid&pipeline_run_trade_date=2026-08-27",
+		"?pipeline_run_id=" + validID + "&pipeline_run_trade_date=invalid",
+		"?pipeline_run_id=" + validID + "&pipeline_run_trade_date=0001-01-01",
+	} {
+		rr := doRequest(t, srv, http.MethodGet, "/api/v1/events"+query, nil)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("query %q status = %d, want 400; body: %s", query, rr.Code, rr.Body.String())
+		}
+	}
+}
+
 func TestListAuditLogEndpoint(t *testing.T) {
 	t.Parallel()
 	deps := testDeps()

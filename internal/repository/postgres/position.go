@@ -463,7 +463,7 @@ func (r *PositionRepo) CountOpenByMarket(ctx context.Context, filter repository.
 		conditions = append(conditions, "p.opened_at <= "+nextArg(*filter.OpenedBefore))
 	}
 	query := `SELECT COALESCE(s.market_type::text, '') AS market_type, COUNT(*)
-		FROM positions p LEFT JOIN strategies s ON s.id = p.strategy_id AND s.account_id = p.account_id
+		FROM positions p LEFT JOIN strategies s ON s.id = p.strategy_id
 		WHERE ` + strings.Join(conditions, " AND ") + ` GROUP BY COALESCE(s.market_type::text, '') ORDER BY COALESCE(s.market_type::text, '')`
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {

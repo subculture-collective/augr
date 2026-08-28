@@ -86,13 +86,40 @@ func (p *RepoPersister) PersistDecision(
 	output string,
 	llmResponse *DecisionLLMResponse,
 ) error {
+	return p.persistDecision(ctx, PersistenceScope{Run: ref}, node, roundNumber, output, llmResponse)
+}
+
+// PersistDecisionScoped stores a decision with complete canonical ownership.
+func (p *RepoPersister) PersistDecisionScoped(
+	ctx context.Context,
+	scope PersistenceScope,
+	node Node,
+	roundNumber *int,
+	output string,
+	llmResponse *DecisionLLMResponse,
+) error {
+	return p.persistDecision(ctx, scope, node, roundNumber, output, llmResponse)
+}
+
+func (p *RepoPersister) persistDecision(
+	ctx context.Context,
+	scope PersistenceScope,
+	node Node,
+	roundNumber *int,
+	output string,
+	llmResponse *DecisionLLMResponse,
+) error {
 	if p.agentDecisionRepo == nil {
 		return nil
 	}
 
 	decision := &domain.AgentDecision{
-		PipelineRunID:        ref.ID,
-		PipelineRunTradeDate: ref.TradeDate,
+		AccountID:            scope.AccountID,
+		Environment:          scope.Environment,
+		OriginType:           scope.OriginType,
+		OriginID:             scope.OriginID,
+		PipelineRunID:        scope.Run.ID,
+		PipelineRunTradeDate: scope.Run.TradeDate,
 		AgentRole:            node.Role(),
 		Phase:                node.Phase(),
 		RoundNumber:          cloneRoundNumber(roundNumber),

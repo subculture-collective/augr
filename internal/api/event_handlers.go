@@ -21,15 +21,21 @@ func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	filter := repository.AgentEventFilter{
 		EventKind: q.Get("event_kind"),
 	}
-	if rawRunID := q.Get("pipeline_run_id"); rawRunID != "" {
-		runID, err := uuid.Parse(rawRunID)
-		if err != nil {
+	rawRunID, hasRunID := q["pipeline_run_id"]
+	rawTradeDate, hasTradeDate := q["pipeline_run_trade_date"]
+	if hasRunID != hasTradeDate || hasRunID && (len(rawRunID) != 1 || len(rawTradeDate) != 1) {
+		respondError(w, http.StatusBadRequest, "pipeline_run_id and pipeline_run_trade_date must be provided together", ErrCodeBadRequest)
+		return
+	}
+	if hasRunID {
+		runID, err := uuid.Parse(rawRunID[0])
+		if err != nil || runID == uuid.Nil {
 			respondError(w, http.StatusBadRequest, "invalid pipeline_run_id", ErrCodeBadRequest)
 			return
 		}
-		tradeDate, err := time.Parse("2006-01-02", q.Get("pipeline_run_trade_date"))
-		if err != nil {
-			respondError(w, http.StatusBadRequest, "pipeline_run_trade_date is required", ErrCodeBadRequest)
+		tradeDate, err := time.Parse("2006-01-02", rawTradeDate[0])
+		if err != nil || tradeDate.IsZero() {
+			respondError(w, http.StatusBadRequest, "invalid pipeline_run_trade_date", ErrCodeBadRequest)
 			return
 		}
 		filter.PipelineRunRef = &domain.PipelineRunRef{ID: runID, TradeDate: tradeDate}

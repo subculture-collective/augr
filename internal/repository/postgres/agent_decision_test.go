@@ -228,6 +228,7 @@ func TestAgentDecisionRepoIntegration_CreateAndGetByRun(t *testing.T) {
 	}
 
 	for _, d := range []*domain.AgentDecision{d1, d2, d3} {
+		prepareAgentDecisionTestRow(t, ctx, pool, d)
 		if err := repo.Create(ctx, d); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
@@ -316,6 +317,7 @@ func TestAgentDecisionRepoIntegration_FilterByRoleAndPhase(t *testing.T) {
 	}
 
 	for _, d := range decisions {
+		prepareAgentDecisionTestRow(t, ctx, pool, d)
 		if err := repo.Create(ctx, d); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
@@ -392,6 +394,7 @@ func TestAgentDecisionRepoIntegration_OrderByPhaseAndRound(t *testing.T) {
 	}
 
 	for _, d := range toInsert {
+		prepareAgentDecisionTestRow(t, ctx, pool, d)
 		if err := repo.Create(ctx, d); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
@@ -448,6 +451,7 @@ func TestAgentDecisionRepoIntegration_Pagination(t *testing.T) {
 			Phase:         domain.PhaseAnalysis,
 			OutputText:    "output",
 		}
+		prepareAgentDecisionTestRow(t, ctx, pool, d)
 		if err := repo.Create(ctx, d); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
@@ -498,6 +502,19 @@ func TestAgentDecisionRepoIntegration_EmptyResult(t *testing.T) {
 	}
 }
 
+func TestAgentDecisionRepoIntegration_RequiresExactParentRunRef(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newAgentDecisionIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewAgentDecisionRepo(pool, canonicalRepositoryTestAccountID)
+	decision := &domain.AgentDecision{PipelineRunID: uuid.New(), AgentRole: domain.AgentRoleTrader, Phase: domain.PhaseTrading, OutputText: "hold"}
+	prepareAgentDecisionTestRow(t, ctx, pool, decision)
+	decision.PipelineRunTradeDate = decision.PipelineRunTradeDate.AddDate(0, 0, 1)
+	if err := repo.Create(ctx, decision); err == nil {
+		t.Fatal("Create() accepted a decision without an exact parent run ref")
+	}
+}
+
 func TestAgentDecisionRepoIntegration_NullableFieldsRoundTrip(t *testing.T) {
 	t.Helper()
 
@@ -515,6 +532,7 @@ func TestAgentDecisionRepoIntegration_NullableFieldsRoundTrip(t *testing.T) {
 		Phase:         domain.PhaseRiskDebate,
 		OutputText:    "minimal decision",
 	}
+	prepareAgentDecisionTestRow(t, ctx, pool, d)
 
 	if err := repo.Create(ctx, d); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -607,9 +625,25 @@ func newAgentDecisionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpoo
 	}
 
 	ddl := []string{
+		`CREATE TABLE accounts (id UUID PRIMARY KEY)`,
+		`INSERT INTO accounts (id) VALUES ('00000000-0000-4000-8000-000000000064')`,
+		`CREATE TABLE pipeline_runs (
+			id UUID NOT NULL,
+			trade_date DATE NOT NULL,
+			account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+			origin_id TEXT,
+			PRIMARY KEY (id, trade_date)
+		)`,
 		`CREATE TABLE agent_decisions (
 			id                UUID        NOT NULL DEFAULT gen_random_uuid(),
+			account_id        UUID        REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment       TEXT        CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type       TEXT        CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+			origin_id         TEXT,
 			pipeline_run_id   UUID        NOT NULL,
+			pipeline_run_trade_date DATE,
 			agent_role        TEXT        NOT NULL,
 			phase             TEXT        NOT NULL,
 			round_number      INT,
@@ -650,4 +684,17 @@ func newAgentDecisionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpoo
 	}
 
 	return pool, cleanup
+}
+
+func prepareAgentDecisionTestRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, decision *domain.AgentDecision) {
+	t.Helper()
+	decision.AccountID = canonicalRepositoryTestAccountID
+	decision.Environment = domain.AccountEnvironmentPaperScored
+	decision.OriginType = "strategy_version"
+	decision.OriginID = "00000000-0000-4000-8000-000000000108"
+	decision.PipelineRunTradeDate = canonicalRepositoryTestTradeDate
+	if _, err := pool.Exec(ctx, `INSERT INTO pipeline_runs (id, trade_date, account_id, environment, origin_type, origin_id)
+		VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, decision.PipelineRunID, decision.PipelineRunTradeDate, decision.AccountID, decision.Environment, decision.OriginType, decision.OriginID); err != nil {
+		t.Fatalf("seed exact pipeline run parent: %v", err)
+	}
 }

@@ -491,6 +491,27 @@ func TestPositionRepoIntegration_CountOpenByMarketAndGrossExposureParity(t *test
 	}
 }
 
+func TestPositionRepoIntegration_Migration108StrategyHasNoAccountColumn(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPositionIntegrationPool(t, ctx)
+	defer cleanup()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='strategies' AND column_name='account_id'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("position test schema invented strategies.account_id")
+	}
+	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
+	position := &domain.Position{StrategyID: &strategyID, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 1}
+	if err := NewPositionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, position); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPositionRepo(pool, canonicalRepositoryTestAccountID).CountOpenByMarket(ctx, repository.PositionFilter{}); err != nil {
+		t.Fatalf("CountOpenByMarket() required nonexistent strategies.account_id: %v", err)
+	}
+}
+
 func TestPositionRepoIntegration_CountOpenByMarketHandlesNullAndEnumMarketTypes(t *testing.T) {
 	t.Helper()
 
@@ -582,6 +603,8 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 	}
 
 	ddl := []string{
+		`CREATE TABLE accounts (id UUID PRIMARY KEY)`,
+		`INSERT INTO accounts (id) VALUES ('00000000-0000-4000-8000-000000000064')`,
 		`CREATE TYPE market_type AS ENUM ('stock', 'crypto', 'polymarket', 'kalshi', 'options')`,
 		`CREATE TYPE position_side AS ENUM (
 			'long',
@@ -593,7 +616,6 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		)`,
 		`CREATE TABLE strategies (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064',
 			market_type market_type NOT NULL
 		)`,
 		`CREATE TABLE orders (
@@ -611,9 +633,9 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		)`,
 		`CREATE TABLE positions (
 			id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-			account_id      UUID,
-			environment     TEXT,
-			origin_type     TEXT,
+			account_id      UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment     TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type     TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
 			origin_id       TEXT,
 			strategy_id     UUID           REFERENCES strategies (id),
 			ticker          TEXT           NOT NULL,

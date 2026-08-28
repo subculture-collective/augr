@@ -130,6 +130,53 @@ func TestStrategyVersionPersisterRejectsInvalidExecutionAccountWithoutWriting(t 
 	}
 }
 
+func TestStrategyVersionPersisterPropagatesCompleteDecisionOwnership(t *testing.T) {
+	repo := &strategyDecisionCaptureRepo{}
+	versionID := uuid.New()
+	persister := &strategyVersionPersister{
+		delegate:         agent.NewRepoPersister(nil, nil, repo, nil, slogDiscardLogger()),
+		executionAccount: testExecutionAccountBinding,
+		versionID:        versionID,
+	}
+	run := &domain.PipelineRun{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}
+	if err := persister.RecordRunStart(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	ref := domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}
+	if err := persister.PersistDecision(context.Background(), ref, persisterDecisionNode{}, nil, "hold", nil); err != nil {
+		t.Fatal(err)
+	}
+	got := repo.decision
+	if got == nil || got.AccountID != testExecutionAccountBinding.AccountID() || got.Environment != testExecutionAccountBinding.Environment() || got.OriginType != "strategy_version" || got.OriginID != versionID.String() || got.PipelineRunID != ref.ID || !got.PipelineRunTradeDate.Equal(ref.TradeDate) {
+		t.Fatalf("decision ownership = %+v, want account/environment/origin/full run ref", got)
+	}
+	wrongRef := ref
+	wrongRef.TradeDate = wrongRef.TradeDate.AddDate(0, 0, 1)
+	if err := persister.PersistDecision(context.Background(), wrongRef, persisterDecisionNode{}, nil, "hold", nil); err == nil {
+		t.Fatal("PersistDecision() accepted untrusted run ref")
+	}
+}
+
+type strategyDecisionCaptureRepo struct{ decision *domain.AgentDecision }
+
+func (r *strategyDecisionCaptureRepo) Create(_ context.Context, decision *domain.AgentDecision) error {
+	r.decision = decision
+	return nil
+}
+func (*strategyDecisionCaptureRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
+	return nil, nil
+}
+func (*strategyDecisionCaptureRepo) CountByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter) (int, error) {
+	return 0, nil
+}
+
+type persisterDecisionNode struct{}
+
+func (persisterDecisionNode) Name() string                                        { return "test" }
+func (persisterDecisionNode) Role() agent.AgentRole                               { return agent.AgentRoleTrader }
+func (persisterDecisionNode) Phase() agent.Phase                                  { return agent.PhaseTrading }
+func (persisterDecisionNode) Execute(context.Context, *agent.PipelineState) error { return nil }
+
 type countingDecisionPersister struct{ runStarts int }
 
 func (p *countingDecisionPersister) RecordRunStart(context.Context, *domain.PipelineRun) error {

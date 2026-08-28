@@ -25,3 +25,17 @@ type DecisionPersister interface {
 	// PersistEvent persists a structured pipeline or agent event.
 	PersistEvent(ctx context.Context, event *domain.AgentEvent) error
 }
+
+// PersistenceScope is the complete ownership identity of one pipeline run.
+type PersistenceScope struct {
+	AccountID   uuid.UUID
+	Environment domain.AccountEnvironment
+	OriginType  string
+	OriginID    string
+	Run         domain.PipelineRunRef
+}
+
+// ScopedDecisionPersister persists decisions with their canonical ownership.
+type ScopedDecisionPersister interface {
+	PersistDecisionScoped(ctx context.Context, scope PersistenceScope, node Node, roundNumber *int, output string, llmResponse *DecisionLLMResponse) error
+}
