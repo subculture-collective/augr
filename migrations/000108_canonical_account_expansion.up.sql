@@ -74,7 +74,8 @@ ALTER TABLE orders
     ADD COLUMN origin_id TEXT,
     ADD COLUMN pipeline_run_trade_date DATE,
     ADD COLUMN copy_origin_rebalance_run_id UUID REFERENCES copy_origin_rebalance_runs(id) ON DELETE RESTRICT,
-    ADD COLUMN allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT;
+    ADD COLUMN allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT,
+    ADD COLUMN client_order_id TEXT;
 ALTER TABLE positions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
@@ -181,6 +182,9 @@ CREATE INDEX idx_allocation_decisions_account_created ON allocation_decisions(ac
 CREATE UNIQUE INDEX uq_allocation_decisions_opportunity ON allocation_decisions(opportunity_id) WHERE opportunity_id IS NOT NULL;
 CREATE INDEX idx_replay_events_account_occurred ON replay_events(account_id,occurred_at,id) WHERE account_id IS NOT NULL;
 CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed');
+CREATE UNIQUE INDEX uq_replay_events_fill_order ON replay_events(account_id,trade_decision_id,event_type,(payload->>'order_id')) WHERE event_type='fill_observed';
+CREATE UNIQUE INDEX uq_replay_events_position ON replay_events(account_id,trade_decision_id,event_type,(payload->>'position_id')) WHERE event_type='position_updated';
+CREATE UNIQUE INDEX uq_orders_client_order_id ON orders(client_order_id) WHERE client_order_id IS NOT NULL;
 CREATE INDEX idx_financial_fill_idempotency_account ON financial_fill_idempotency(account_id,created_at,idempotency_key) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_prediction_settlement_idempotency_account ON prediction_settlement_idempotency(account_id,created_at,idempotency_key) WHERE account_id IS NOT NULL;
 CREATE INDEX idx_copy_subscriptions_account_status ON copy_subscriptions(account_id,status,created_at,id) WHERE account_id IS NOT NULL;

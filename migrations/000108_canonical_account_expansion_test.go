@@ -63,7 +63,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		}
 	}
 	if !strings.Contains(up, "alter table orders add column account_id") ||
-		!strings.Contains(up, "add column allocation_opportunity_id uuid references portfolio_opportunities(id) on delete restrict; alter table positions") {
+		!strings.Contains(up, "add column allocation_opportunity_id uuid references portfolio_opportunities(id) on delete restrict, add column client_order_id text; alter table positions") {
 		t.Fatal("allocation_opportunity_id must be added to orders")
 	}
 	if strings.Contains(up, "alter table positions add column account_id uuid references accounts(id) on delete restrict, add column environment text check (environment in ('paper_scored','paper_stress','shadow','live')), add column origin_type text check (origin_type in ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')), add column origin_id text, add column allocation_opportunity_id") {
@@ -696,7 +696,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 		"idx_pipeline_runs_account_trade_date", "idx_pipeline_run_snapshots_account_run", "idx_agent_decisions_account_run",
 		"idx_agent_events_account_run", "idx_trade_decisions_account_created", "idx_orders_account_created",
 		"idx_positions_account_opened", "idx_trades_account_executed", "idx_portfolio_opportunities_account_created", "idx_portfolio_opportunities_allocation_claim", "uq_portfolio_opportunities_execution_dedupe",
-		"idx_allocation_decisions_account_created", "uq_allocation_decisions_opportunity", "idx_replay_events_account_occurred", "uq_replay_events_initial", "idx_financial_fill_idempotency_account",
+		"idx_allocation_decisions_account_created", "uq_allocation_decisions_opportunity", "idx_replay_events_account_occurred", "uq_replay_events_initial", "uq_replay_events_fill_order", "uq_replay_events_position", "uq_orders_client_order_id", "idx_financial_fill_idempotency_account",
 		"idx_prediction_settlement_idempotency_account", "idx_copy_subscriptions_account_status", "idx_copy_trade_intents_account_created",
 		"idx_copy_origin_rebalance_runs_account_created", "idx_copy_origin_rebalance_intents_account_run",
 		"idx_copy_target_drift_runs_account_created", "idx_copy_target_drift_legs_account_run",
@@ -734,7 +734,7 @@ func canonicalExpansionColumns() map[string][]string {
 		"agent_decisions":                   {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
 		"agent_events":                      {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
 		"trade_decisions":                   {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date"},
-		"orders":                            {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date", "copy_origin_rebalance_run_id", "allocation_opportunity_id"},
+		"orders":                            {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date", "copy_origin_rebalance_run_id", "allocation_opportunity_id", "client_order_id"},
 		"positions":                         {"account_id", "environment", "origin_type", "origin_id"},
 		"trades":                            {"account_id", "environment", "origin_type", "origin_id"},
 		"portfolio_opportunities":           {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date", "allocation_claim_id", "allocation_claimed_at", "allocation_claim_expires_at"},

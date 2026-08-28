@@ -574,6 +574,10 @@ func (m *OrderManager) ProcessSignal(
 	if err := m.orderRepo.Create(ctx, order); err != nil {
 		return fmt.Errorf("order_manager: create order: %w", err)
 	}
+	order.ClientOrderID = "augr-" + order.ID.String()
+	if err := m.orderRepo.Update(ctx, order); err != nil {
+		return fmt.Errorf("order_manager: persist client order id: %w", err)
+	}
 	m.recordOrderMetric(order.Side, order.Status)
 
 	if auditErr := m.audit(ctx, "order_created", "order", &order.ID, map[string]any{
@@ -874,13 +878,13 @@ func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, scope Execu
 	return nil
 }
 
-func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, scope ExecutionScope, decisionID uuid.UUID, eventType domain.ReplayEventType, payload any) {
+func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, scope ExecutionScope, decisionID uuid.UUID, eventType domain.ReplayEventType, payload any) error {
 	if m == nil || decisionID == uuid.Nil {
-		return
+		return fmt.Errorf("order_manager: replay event requires attached decision")
 	}
 	recorder, ok := m.decisionRecorder.(ReplayDecisionRecorder)
 	if !ok {
-		return
+		return nil
 	}
 	var err error
 	if scoped, ok := recorder.(ScopedDecisionRecorder); ok {
@@ -889,8 +893,24 @@ func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, scope Exec
 		err = recorder.RecordReplayEvent(ctx, decisionID, eventType, "order_manager", payload, m.currentTime())
 	}
 	if err != nil {
-		m.logger.ErrorContext(ctx, "order_manager: record replay event", "error", err, "decision_id", decisionID, "event_type", eventType)
+		return fmt.Errorf("order_manager: record %s replay event: %w", eventType, err)
 	}
+	return nil
+}
+
+func (m *OrderManager) resolveAttachedOrderDecision(ctx context.Context, scope ExecutionScope, orderID uuid.UUID) (uuid.UUID, error) {
+	resolver, ok := m.decisionRecorder.(AttachedOrderDecisionRecorder)
+	if !ok {
+		return uuid.Nil, fmt.Errorf("order_manager: attached order decision resolver is required for fill recovery")
+	}
+	decisionID, err := resolver.ResolveAttachedOrderDecision(ctx, scope, orderID, m.liveTrading)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("order_manager: resolve recovered fill decision: %w", err)
+	}
+	if decisionID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("order_manager: recovered fill has no attached decision")
+	}
+	return decisionID, nil
 }
 
 func (m *OrderManager) openLongPositionQuantity(ctx context.Context, scope ExecutionScope, ticker string) (float64, error) {
@@ -1063,7 +1083,11 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 	if _, _, _, err := scopeOriginIDs(scope); err != nil {
 		return "", fmt.Errorf("order_manager: reconcile execution scope: %w", err)
 	}
-	if strings.TrimSpace(order.ExternalID) == "" {
+	brokerOrderID := strings.TrimSpace(order.ExternalID)
+	if brokerOrderID == "" {
+		brokerOrderID = strings.TrimSpace(order.ClientOrderID)
+	}
+	if brokerOrderID == "" {
 		if err := m.fenceEffect(ctx); err != nil {
 			return "", err
 		}
@@ -1073,22 +1097,32 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		}
 		return order.Status, nil
 	}
-	status, err := m.broker.GetOrderStatus(ctx, order.ExternalID)
+	status, err := m.broker.GetOrderStatus(ctx, brokerOrderID)
 	if err != nil {
 		return "", fmt.Errorf("order_manager: reconcile broker status: %w", err)
+	}
+	if order.Status == domain.OrderStatusPending {
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
+		submittedAt := m.currentTime()
+		if err := m.orderRepo.Update(ctx, SanitizedSubmittedOrder(order, brokerOrderID, submittedAt)); err != nil {
+			return "", fmt.Errorf("order_manager: recover broker submission evidence: %w", err)
+		}
+		order.ExternalID, order.Status, order.SubmittedAt = brokerOrderID, domain.OrderStatusSubmitted, &submittedAt
 	}
 	switch status {
 	case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
 		if err := m.fenceEffect(ctx); err != nil {
 			return "", err
 		}
-		if err := m.broker.CancelOrder(ctx, order.ExternalID); err != nil {
+		if err := m.broker.CancelOrder(ctx, brokerOrderID); err != nil {
 			return "", fmt.Errorf("order_manager: cancel recovered paper order: %w", err)
 		}
 		if err := m.fenceEffect(ctx); err != nil {
 			return "", err
 		}
-		status, err = m.broker.GetOrderStatus(ctx, order.ExternalID)
+		status, err = m.broker.GetOrderStatus(ctx, brokerOrderID)
 		if err != nil {
 			return "", fmt.Errorf("order_manager: verify recovered paper cancellation: %w", err)
 		}
@@ -1108,7 +1142,11 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		if order.StopPrice != nil {
 			plan.StopLoss = *order.StopPrice
 		}
-		if err := m.handleFill(ctx, order, plan, scope, uuid.Nil); err != nil {
+		decisionID, err := m.resolveAttachedOrderDecision(ctx, scope, order.ID)
+		if err != nil {
+			return "", err
+		}
+		if err := m.handleFill(ctx, order, plan, scope, decisionID); err != nil {
 			return "", err
 		}
 	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
@@ -1175,11 +1213,13 @@ func (m *OrderManager) handleFill(
 		if position == nil && result.PositionID != nil {
 			position = &domain.Position{ID: *result.PositionID}
 		}
-		if !result.Replayed {
-			m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": fillPrice, "quantity": order.FilledQuantity, "prediction_side": order.PredictionSide})
+		if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": fillPrice, "quantity": order.FilledQuantity, "prediction_side": order.PredictionSide}); err != nil {
+			return err
 		}
-		if !result.Replayed && position != nil {
-			m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt})
+		if position != nil {
+			if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt}); err != nil {
+				return err
+			}
 		}
 		if !result.Replayed {
 			if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{"fill_price": fillPrice, "quantity": order.FilledQuantity, "trade_id": result.TradeID, "position_id": result.PositionID}); auditErr != nil {
@@ -1292,14 +1332,18 @@ func (m *OrderManager) handleFill(
 		return fmt.Errorf("order_manager: create trade: %w", err)
 	}
 
-	m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{
+	if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{
 		"order_id": order.ID, "trade_id": trade.ID, "price": fillPrice,
 		"quantity": order.FilledQuantity, "prediction_side": order.PredictionSide,
-	})
-	m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{
+	}); err != nil {
+		return err
+	}
+	if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{
 		"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity,
 		"realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt,
-	})
+	}); err != nil {
+		return err
+	}
 
 	if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{
 		"fill_price":  fillPrice,

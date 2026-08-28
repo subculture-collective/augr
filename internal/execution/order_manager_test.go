@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"slices"
@@ -621,9 +622,11 @@ func TestProcessSignal_SlowWorkerTakeoverFencesStaleBrokerEffect(t *testing.T) {
 func TestProcessSignal_PostSubmitLeaseLossLeavesRecoverableBrokerEvidence(t *testing.T) {
 	const externalID = "broker-order-lease-lost"
 	brokerSubmissions := 0
+	var submittedClientID string
 	broker := &mockBroker{
-		submitOrderFn: func(context.Context, *domain.Order) (string, error) {
+		submitOrderFn: func(_ context.Context, order *domain.Order) (string, error) {
 			brokerSubmissions++
+			submittedClientID = order.ClientOrderID
 			return externalID, nil
 		},
 		getOrderStatusFn: func(context.Context, string) (domain.OrderStatus, error) {
@@ -653,7 +656,10 @@ func TestProcessSignal_PostSubmitLeaseLossLeavesRecoverableBrokerEvidence(t *tes
 	if len(orderRepo.updates) == 0 {
 		t.Fatal("submitted broker order was not persisted")
 	}
-	persisted := orderRepo.updates[0]
+	if submittedClientID == "" || orderRepo.updates[0].ClientOrderID != submittedClientID || orderRepo.updates[0].ExternalID != "" {
+		t.Fatalf("client order id was not durably persisted before submit: submitted=%q first_update=%+v", submittedClientID, orderRepo.updates[0])
+	}
+	persisted := orderRepo.updates[len(orderRepo.updates)-1]
 	if persisted.ExternalID != externalID || persisted.Status != domain.OrderStatusSubmitted || persisted.SubmittedAt == nil {
 		t.Fatalf("persisted order = %+v, want recoverable submitted evidence", persisted)
 	}
@@ -756,6 +762,28 @@ type fakeFinancialLifecycleRepo struct {
 	err    error
 }
 
+type recoveryDecisionRecorder struct {
+	mockDecisionRecorder
+	decisionID uuid.UUID
+	events     []domain.ReplayEventType
+	replayErr  error
+}
+
+func (r *recoveryDecisionRecorder) ResolveAttachedOrderDecision(context.Context, execution.ExecutionScope, uuid.UUID, bool) (uuid.UUID, error) {
+	return r.decisionID, nil
+}
+
+func (r *recoveryDecisionRecorder) RecordReplayEvent(_ context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, _ string, _ any, _ time.Time) error {
+	if r.replayErr != nil {
+		return r.replayErr
+	}
+	if decisionID != r.decisionID {
+		return fmt.Errorf("wrong decision id %s", decisionID)
+	}
+	r.events = append(r.events, eventType)
+	return nil
+}
+
 func (f *fakeFinancialLifecycleRepo) ApplyOrderFill(_ context.Context, input repository.OrderFillInput) (repository.OrderFillResult, error) {
 	f.called++
 	f.input = input
@@ -822,6 +850,37 @@ func TestOrderManagerHandleFillUsesFinancialLifecycleRepository(t *testing.T) {
 	}
 	if len(orderRepo3.updates) != 0 || len(positionRepo3.positions) != 0 || len(tradeRepo3.trades) != 0 || len(auditRepo3.entries) != 0 {
 		t.Fatalf("failed financial fill should not persist legacy state: orders=%d positions=%d trades=%d audit=%d", len(orderRepo3.updates), len(positionRepo3.positions), len(tradeRepo3.trades), len(auditRepo3.entries))
+	}
+}
+
+func TestReconcilePersistedOrderRepairsReplayAfterCommittedFill(t *testing.T) {
+	strategyVersionID, runID, decisionID := uuid.New(), uuid.New(), uuid.New()
+	scope := strategyScope(strategyVersionID, runID)
+	originType, originID := scope.Origin()
+	run, _ := scope.PipelineRun()
+	orderID, positionID, tradeID := uuid.New(), uuid.New(), uuid.New()
+	price := 100.0
+	order := &domain.Order{ID: orderID, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, PipelineRunID: &run.ID, PipelineRunTradeDate: &run.TradeDate, ClientOrderID: "augr-" + orderID.String(), Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, FilledAvgPrice: &price, Status: domain.OrderStatusPending}
+	broker := &mockBroker{getOrderStatusFn: func(_ context.Context, id string) (domain.OrderStatus, error) {
+		if id != order.ClientOrderID {
+			t.Fatalf("broker lookup id=%q want client id %q", id, order.ClientOrderID)
+		}
+		return domain.OrderStatusFilled, nil
+	}}
+	financial := &fakeFinancialLifecycleRepo{result: repository.OrderFillResult{OrderID: orderID, PositionID: &positionID, TradeID: tradeID, Replayed: true}}
+	recorder := &recoveryDecisionRecorder{decisionID: decisionID}
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).WithFinancialLifecycleRepo(financial).WithDecisionRecorder(recorder)
+	status, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order)
+	if err != nil {
+		t.Fatalf("ReconcilePersistedOrder() error=%v", err)
+	}
+	if status != domain.OrderStatusFilled || !slices.Equal(recorder.events, []domain.ReplayEventType{domain.ReplayEventTypeFillObserved, domain.ReplayEventTypePositionUpdated}) {
+		t.Fatalf("status=%s replay events=%v", status, recorder.events)
+	}
+
+	recorder.replayErr = errors.New("replay unavailable")
+	if _, err := mgr.ReconcilePersistedOrder(context.Background(), scope, order); !errors.Is(err, recorder.replayErr) {
+		t.Fatalf("replay repair error=%v want %v", err, recorder.replayErr)
 	}
 }
 

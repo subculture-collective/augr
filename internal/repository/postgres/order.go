@@ -66,9 +66,9 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 			quantity, limit_price, stop_price, filled_quantity, filled_avg_price,
 			status, broker, submitted_at, filled_at, asset_class, underlying_ticker,
 			option_type, strike, expiry, contract_multiplier, position_intent, leg_group_id,
-			prediction_side, polymarket_intent, allocation_opportunity_id
+			prediction_side, polymarket_intent, allocation_opportunity_id, client_order_id
 		)
-		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33 FROM authorized
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35 FROM authorized
 		 RETURNING id, created_at`,
 		order.StrategyID,
 		order.PipelineRunID,
@@ -104,6 +104,7 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 		nullString(order.PolymarketIntent),
 		order.AllocationOpportunityID,
 		order.AllocationClaimID,
+		nullString(order.ClientOrderID),
 	)
 
 	if err := row.Scan(&order.ID, &order.CreatedAt); err != nil {
@@ -164,10 +165,10 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 	order.MarketType = marketType
 
 	row := r.pool.QueryRow(ctx,
-		`WITH locked AS (SELECT id FROM orders WHERE id=$33 AND account_id=$34 FOR UPDATE)
+		`WITH locked AS (SELECT id FROM orders WHERE id=$34 AND account_id=$35 FOR UPDATE)
 		 UPDATE orders o
 		 SET external_id = $9, filled_quantity = $17, filled_avg_price = $18, status = $19,
-		     broker = $20, submitted_at = $21, filled_at = $22
+		     broker = $20, submitted_at = $21, filled_at = $22, client_order_id=$33
 		 FROM locked
 		 WHERE o.id = locked.id
 		   AND o.strategy_id IS NOT DISTINCT FROM $1 AND o.pipeline_run_id IS NOT DISTINCT FROM $2
@@ -213,6 +214,7 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 		order.LegGroupID,
 		nullString(order.PredictionSide),
 		nullString(order.PolymarketIntent),
+		nullString(order.ClientOrderID),
 		order.ID, r.accountID,
 	)
 
@@ -283,7 +285,7 @@ const orderSelectSQL = `SELECT id, strategy_id, pipeline_run_id, account_id, env
 		filled_at, created_at, asset_class, underlying_ticker, option_type,
 		strike::double precision, expiry, contract_multiplier::double precision,
 		position_intent, leg_group_id, COALESCE(prediction_side, ''),
-		COALESCE(polymarket_intent, ''), allocation_opportunity_id
+		COALESCE(polymarket_intent, ''), allocation_opportunity_id, COALESCE(client_order_id, '')
 	 FROM orders`
 
 func (r *OrderRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.Order, error) {
@@ -369,6 +371,7 @@ func scanOrder(sc scanner) (*domain.Order, error) {
 		&order.PredictionSide,
 		&order.PolymarketIntent,
 		&order.AllocationOpportunityID,
+		&order.ClientOrderID,
 	)
 	if err != nil {
 		return nil, err

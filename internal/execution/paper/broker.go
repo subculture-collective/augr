@@ -243,7 +243,16 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 	defer b.mu.Unlock()
 
 	now := b.currentTime().UTC()
-	externalID := b.nextExternalIDLocked()
+	externalID := strings.TrimSpace(order.ClientOrderID)
+	if externalID == "" {
+		externalID = b.nextExternalIDLocked()
+	} else if existing := b.orders[externalID]; existing != nil {
+		if existing.Ticker != order.Ticker || existing.Side != order.Side || existing.OrderType != order.OrderType || existing.Quantity != order.Quantity {
+			return "", errors.New("paper: client order id reused with different order")
+		}
+		*order = *cloneOrder(existing)
+		return externalID, nil
+	}
 
 	order.ExternalID = externalID
 	order.Status = domain.OrderStatusSubmitted

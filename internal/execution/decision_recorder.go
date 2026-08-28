@@ -37,6 +37,10 @@ type ScopedDecisionRecorder interface {
 	RecordReplayEventScoped(context.Context, ExecutionScope, uuid.UUID, domain.ReplayEventType, string, any, time.Time) error
 }
 
+type AttachedOrderDecisionRecorder interface {
+	ResolveAttachedOrderDecision(context.Context, ExecutionScope, uuid.UUID, bool) (uuid.UUID, error)
+}
+
 type tradeDecisionJournalRecorder struct {
 	repo       repository.TradeDecisionJournalRepository
 	replayRepo repository.ReplayEventRepository
@@ -186,6 +190,21 @@ func (r *tradeDecisionJournalRecorder) RecordReplayEventScoped(ctx context.Conte
 		return err
 	}
 	return r.RecordReplayEvent(ctx, decisionID, eventType, source, payload, occurredAt)
+}
+
+func (r *tradeDecisionJournalRecorder) ResolveAttachedOrderDecision(ctx context.Context, scope ExecutionScope, orderID uuid.UUID, live bool) (uuid.UUID, error) {
+	repo, ok := r.repo.(repository.AttachedOrderDecisionRepository)
+	if !ok {
+		return uuid.Nil, fmt.Errorf("decision recorder: attached order decision repository is required")
+	}
+	decision, err := repo.GetByOrderScoped(ctx, orderID, live, decisionOrderAttachmentScope(scope))
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("decision recorder: resolve attached order decision: %w", err)
+	}
+	if decision == nil || decision.ID == uuid.Nil || !tradeDecisionMatchesScope(*decision, scope) {
+		return uuid.Nil, fmt.Errorf("decision recorder: attached order decision scope is invalid")
+	}
+	return decision.ID, nil
 }
 
 func (r *tradeDecisionJournalRecorder) persistedDecisionScope(ctx context.Context, decisionID uuid.UUID, supplied *ExecutionScope) (*domain.TradeDecision, error) {

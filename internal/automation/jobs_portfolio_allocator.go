@@ -188,8 +188,19 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 	for i := range opportunities {
 		opportunity := opportunities[i]
 		reason := ""
-		if opportunity.PipelineRunID == nil || *opportunity.PipelineRunID == uuid.Nil || opportunity.PipelineRunTradeDate == nil {
-			reason = "source_run_missing"
+		malformedSource := opportunity.PipelineRunID == nil || opportunity.PipelineRunID != nil && *opportunity.PipelineRunID == uuid.Nil || opportunity.PipelineRunTradeDate == nil
+		if malformedSource {
+			if o.deps.OpportunityRepo == nil {
+				return nil, nil, fmt.Errorf("portfolio_allocator: opportunity repository is required to quarantine malformed source")
+			}
+			applied, err := o.deps.OpportunityRepo.TransitionStatus(ctx, opportunity.ID, domain.OpportunityStatusQueued, domain.OpportunityStatusRejected, "source_run_missing")
+			if err != nil {
+				return nil, nil, fmt.Errorf("portfolio_allocator: quarantine malformed opportunity: %w", err)
+			}
+			if applied {
+				o.logger.Warn("portfolio_allocator: quarantined malformed opportunity", "opportunity_id", opportunity.ID, "reason", "source_run_missing")
+			}
+			continue
 		} else {
 			run, err := o.deps.RunRepo.Get(ctx, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
 			switch {
@@ -208,6 +219,19 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 			case run.Signal != opportunity.Signal || (run.Signal != domain.PipelineSignalBuy && run.Signal != domain.PipelineSignalSell):
 				reason = "source_signal_mismatch"
 			}
+		}
+		if reason == "source_run_missing" {
+			if o.deps.OpportunityRepo == nil {
+				return nil, nil, fmt.Errorf("portfolio_allocator: opportunity repository is required to quarantine missing source")
+			}
+			applied, err := o.deps.OpportunityRepo.TransitionStatus(ctx, opportunity.ID, domain.OpportunityStatusQueued, domain.OpportunityStatusRejected, reason)
+			if err != nil {
+				return nil, nil, fmt.Errorf("portfolio_allocator: quarantine missing-source opportunity: %w", err)
+			}
+			if applied {
+				o.logger.Warn("portfolio_allocator: quarantined missing-source opportunity", "opportunity_id", opportunity.ID, "reason", reason)
+			}
+			continue
 		}
 		if reason == "" {
 			valid = append(valid, opportunity)

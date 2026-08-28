@@ -3,9 +3,11 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -52,6 +54,7 @@ func (r *ReplayEventRepo) CreateReplayEvent(ctx context.Context, event *domain.R
 			account_id, environment, origin_type, origin_id, trade_decision_id, event_type, source, payload, occurred_at
 		)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		 ON CONFLICT DO NOTHING
 		 RETURNING id, created_at`,
 		r.accountID, event.Environment, event.OriginType, event.OriginID, event.TradeDecisionID,
 		event.EventType,
@@ -60,7 +63,9 @@ func (r *ReplayEventRepo) CreateReplayEvent(ctx context.Context, event *domain.R
 		event.OccurredAt,
 	)
 
-	if err := row.Scan(&event.ID, &event.CreatedAt); err != nil {
+	if err := row.Scan(&event.ID, &event.CreatedAt); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
 		return fmt.Errorf("postgres: create replay event: %w", err)
 	}
 

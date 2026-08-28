@@ -813,6 +813,10 @@ type ScopedDecisionOrderRepository interface {
 	AttachLiveOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope DecisionOrderAttachmentScope) (bool, error)
 }
 
+type AttachedOrderDecisionRepository interface {
+	GetByOrderScoped(ctx context.Context, orderID uuid.UUID, live bool, scope DecisionOrderAttachmentScope) (*domain.TradeDecision, error)
+}
+
 // OpportunityRepository provides CRUD operations for portfolio opportunities.
 type OpportunityRepository interface {
 	Create(ctx context.Context, opportunity *domain.Opportunity) error

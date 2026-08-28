@@ -526,18 +526,22 @@ func TestValidatePortfolioOpportunitySourcesRejectsFailedAndMismatchedRuns(t *te
 	validRunID := uuid.New()
 	failedRunID := uuid.New()
 	mismatchedRunID := uuid.New()
+	missingRunID := uuid.New()
 	runRepo := &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{
 		validRunID:      scopeFields(validRunID, domain.PipelineStatusCompleted, domain.PipelineSignalBuy),
 		failedRunID:     scopeFields(failedRunID, domain.PipelineStatusFailed, domain.PipelineSignalHold),
 		mismatchedRunID: scopeFields(mismatchedRunID, domain.PipelineStatusCompleted, domain.PipelineSignalSell),
 	}}
-	orch := NewJobOrchestrator(OrchestratorDeps{RunRepo: runRepo})
+	opportunityRepo := &portfolioAllocatorOpportunityRepo{}
+	orch := NewJobOrchestrator(OrchestratorDeps{RunRepo: runRepo, OpportunityRepo: opportunityRepo})
 	opportunities := []domain.Opportunity{
 		{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &validRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
 		{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &failedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
 		{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &mismatchedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
-		{ID: uuid.New(), StrategyID: strategyID, Signal: domain.PipelineSignalBuy},
+		{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &missingRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued},
+		{ID: uuid.New(), StrategyID: strategyID, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued},
 	}
+	opportunityRepo.items = append([]domain.Opportunity(nil), opportunities...)
 
 	valid, rejected, err := orch.validatePortfolioOpportunitySources(context.Background(), opportunities, portfolio.AllocatorModeShadow)
 	if err != nil {
@@ -546,14 +550,20 @@ func TestValidatePortfolioOpportunitySourcesRejectsFailedAndMismatchedRuns(t *te
 	if len(valid) != 1 || valid[0].ID != opportunities[0].ID {
 		t.Fatalf("valid opportunities = %#v, want only completed matching source", valid)
 	}
-	if len(rejected) != 3 {
-		t.Fatalf("rejected decisions = %#v, want three", rejected)
+	if len(rejected) != 2 {
+		t.Fatalf("rejected decisions = %#v, want two lineage-valid rejections", rejected)
 	}
-	wantReasons := []string{"source_run_not_completed", "source_signal_mismatch", "source_run_missing"}
+	wantReasons := []string{"source_run_not_completed", "source_signal_mismatch"}
 	for i, want := range wantReasons {
 		if len(rejected[i].Reasons) != 1 || rejected[i].Reasons[0] != want {
 			t.Fatalf("rejected[%d] reasons = %v, want %q", i, rejected[i].Reasons, want)
 		}
+	}
+	if opportunityRepo.lastStatus != domain.OpportunityStatusRejected || opportunityRepo.lastRejectReason != "source_run_missing" {
+		t.Fatalf("malformed opportunity status=%q reason=%q", opportunityRepo.lastStatus, opportunityRepo.lastRejectReason)
+	}
+	if len(opportunityRepo.statusHistory) != 2 {
+		t.Fatalf("quarantined status history=%v, want missing row and malformed row", opportunityRepo.statusHistory)
 	}
 }
 

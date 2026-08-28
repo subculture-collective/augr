@@ -295,6 +295,29 @@ func (r *TradeDecisionJournalRepo) AttachLiveOrderScoped(ctx context.Context, de
 	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true, &scope)
 }
 
+func (r *TradeDecisionJournalRepo) GetByOrderScoped(ctx context.Context, orderID uuid.UUID, live bool, scope repository.DecisionOrderAttachmentScope) (*domain.TradeDecision, error) {
+	column := "paper_order_id"
+	if live {
+		column = "live_order_id"
+	}
+	query := fmt.Sprintf(`%s WHERE account_id=$1 AND %s=$2 AND EXISTS (
+		SELECT 1 FROM orders o WHERE o.id=$2 AND o.account_id=trade_decisions.account_id
+		AND o.environment=trade_decisions.environment AND o.origin_type=trade_decisions.origin_type AND o.origin_id=trade_decisions.origin_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM trade_decisions.pipeline_run_id
+		AND o.pipeline_run_trade_date IS NOT DISTINCT FROM trade_decisions.pipeline_run_trade_date
+		AND o.strategy_id IS NOT DISTINCT FROM trade_decisions.strategy_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM $3 AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $4
+		AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $5 AND o.strategy_id IS NOT DISTINCT FROM $6)`, tradeDecisionSelectSQL, column)
+	decision, err := scanTradeDecision(r.pool.QueryRow(ctx, query, r.accountID, orderID, scope.PipelineRunID, scope.PipelineRunTradeDate, scope.CopyOriginRebalanceRunID, scope.StrategyID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: get decision by scoped order: %w", ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get decision by scoped order: %w", err)
+	}
+	return decision, nil
+}
+
 // AttachOrderWithReplay atomically links an order and persists the matching
 // ordered replay event. The decision row lock serializes same-decision retries.
 func (r *TradeDecisionJournalRepo) AttachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error {
@@ -323,6 +346,13 @@ func (r *TradeDecisionJournalRepo) attachOrderWithReplay(ctx context.Context, de
 	}
 	if attached != nil && *attached != orderID {
 		return fmt.Errorf("postgres: attach %s: different order already attached", column)
+	}
+	if attached != nil && scope != nil {
+		query, args := buildTradeDecisionAttachmentValidationQuery(column, r.accountID, decisionID, orderID, live, *scope)
+		var validatedID uuid.UUID
+		if err := tx.QueryRow(ctx, query, args...).Scan(&validatedID); err != nil {
+			return fmt.Errorf("postgres: validate idempotent %s attachment scope: %w", column, err)
+		}
 	}
 	if attached == nil {
 		query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live, scope)
@@ -380,6 +410,13 @@ func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, 
 				attached = decision.LiveOrderID
 			}
 			if attached != nil && *attached == orderID {
+				if scope != nil {
+					query, args := buildTradeDecisionAttachmentValidationQuery(column, r.accountID, decisionID, orderID, live, *scope)
+					var validatedID uuid.UUID
+					if validateErr := r.pool.QueryRow(ctx, query, args...).Scan(&validatedID); validateErr != nil {
+						return false, fmt.Errorf("postgres: validate idempotent %s attachment scope: %w", column, validateErr)
+					}
+				}
 				return false, nil
 			}
 			if attached != nil {
@@ -537,6 +574,18 @@ func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID
 			AND (($5 AND o.environment='live') OR (NOT $5 AND o.environment IN ('paper_scored','paper_stress'))))
 		RETURNING td.id`, column, column, lineage)
 	return query, args
+}
+
+func buildTradeDecisionAttachmentValidationQuery(column string, accountID, decisionID, orderID uuid.UUID, live bool, scope repository.DecisionOrderAttachmentScope) (string, []any) {
+	query := fmt.Sprintf(`SELECT td.id FROM trade_decisions td JOIN orders o ON o.id=$3
+		WHERE td.id=$1 AND td.account_id=$2 AND td.%s=$3
+		AND o.account_id=td.account_id AND o.environment=td.environment AND o.origin_type=td.origin_type AND o.origin_id=td.origin_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM td.pipeline_run_id AND o.pipeline_run_trade_date IS NOT DISTINCT FROM td.pipeline_run_trade_date
+		AND o.strategy_id IS NOT DISTINCT FROM td.strategy_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM $5 AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $6
+		AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $7 AND o.strategy_id IS NOT DISTINCT FROM $8
+		AND (($4 AND o.environment='live') OR (NOT $4 AND o.environment IN ('paper_scored','paper_stress')))`, column)
+	return query, []any{decisionID, accountID, orderID, live, scope.PipelineRunID, scope.PipelineRunTradeDate, scope.CopyOriginRebalanceRunID, scope.StrategyID}
 }
 
 func buildTradeDecisionFilteredQuery(accountID uuid.UUID, base string, filter repository.TradeDecisionFilter, limit, offset int, includePagination bool) (string, []any) {

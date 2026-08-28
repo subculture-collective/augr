@@ -111,6 +111,19 @@ func TestBuildTradeDecisionAttachQuery_StrategyFreeCopyScope(t *testing.T) {
 	}
 }
 
+func TestBuildTradeDecisionAttachmentValidationQueryIncludesFullCopyScope(t *testing.T) {
+	copyRunID := uuid.New()
+	query, args := buildTradeDecisionAttachmentValidationQuery("paper_order_id", canonicalRepositoryTestAccountID, uuid.New(), uuid.New(), false, repository.DecisionOrderAttachmentScope{CopyOriginRebalanceRunID: &copyRunID})
+	assertContains(t, query, "td.paper_order_id=$3")
+	assertContains(t, query, "o.pipeline_run_id IS NOT DISTINCT FROM $5")
+	assertContains(t, query, "o.pipeline_run_trade_date IS NOT DISTINCT FROM $6")
+	assertContains(t, query, "o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $7")
+	assertContains(t, query, "o.strategy_id IS NOT DISTINCT FROM $8")
+	if len(args) != 8 || args[6] != &copyRunID {
+		t.Fatalf("validation args = %#v", args)
+	}
+}
+
 func TestMarshalTradeDecisionJSON(t *testing.T) {
 	got, err := marshalTradeDecisionJSON(json.RawMessage(`{"a":1}`))
 	if err != nil {
