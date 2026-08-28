@@ -508,6 +508,7 @@ func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID
 		AND EXISTS (SELECT 1 FROM orders o WHERE o.id=$3 AND o.account_id=td.account_id
 			AND o.environment=td.environment AND o.origin_type=td.origin_type AND o.origin_id=td.origin_id
 			AND o.pipeline_run_id=td.pipeline_run_id AND o.pipeline_run_trade_date=td.pipeline_run_trade_date
+			AND o.strategy_id IS NOT DISTINCT FROM td.strategy_id
 			AND (($5 AND o.environment='live') OR (NOT $5 AND o.environment IN ('paper_scored','paper_stress'))))
 		RETURNING td.id`, column, column)
 	return query, []any{decisionID, accountID, orderID, status, live}

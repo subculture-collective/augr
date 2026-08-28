@@ -109,6 +109,25 @@ type OrderManager struct {
 	nowMu            sync.RWMutex
 	nowFunc          func() time.Time
 	metrics          OrderMetricsRecorder
+	effectFence      func(context.Context) error
+}
+
+// WithEffectFence requires an ownership check immediately before execution effects.
+func (m *OrderManager) WithEffectFence(fence func(context.Context) error) *OrderManager {
+	if m != nil {
+		m.effectFence = fence
+	}
+	return m
+}
+
+func (m *OrderManager) fenceEffect(ctx context.Context) error {
+	if m == nil || m.effectFence == nil {
+		return nil
+	}
+	if err := m.effectFence(ctx); err != nil {
+		return fmt.Errorf("order_manager: execution ownership fence: %w", err)
+	}
+	return nil
 }
 
 // OrderMetricsRecorder records order lifecycle metrics.
@@ -617,17 +636,27 @@ func (m *OrderManager) ProcessSignal(
 	if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
 		return err
 	}
+	if err := m.fenceEffect(ctx); err != nil {
+		return err
+	}
+	if err := m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading); err != nil {
+		return err
+	}
 
 	// 6. Submit to broker (status = submitted).
+	if err := m.fenceEffect(ctx); err != nil {
+		return err
+	}
 	externalID, err := m.broker.SubmitOrder(ctx, order)
+	if fenceErr := m.fenceEffect(ctx); fenceErr != nil {
+		return fenceErr
+	}
 	if err != nil {
 		order.Status = domain.OrderStatusRejected
 		if updateErr := m.orderRepo.Update(ctx, order); updateErr != nil {
 			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
 		}
 		m.recordOrderMetric(order.Side, order.Status)
-		m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading)
-
 		if auditErr := m.audit(ctx, "order_rejected", "order", &order.ID, map[string]any{
 			"error": err.Error(),
 		}); auditErr != nil {
@@ -647,8 +676,6 @@ func (m *OrderManager) ProcessSignal(
 	order.Status = domain.OrderStatusSubmitted
 	order.SubmittedAt = &submittedAt
 	m.recordOrderMetric(order.Side, order.Status)
-	m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading)
-
 	if auditErr := m.audit(ctx, "order_submitted", "order", &order.ID, map[string]any{
 		"external_id": externalID,
 	}); auditErr != nil {
@@ -664,6 +691,9 @@ func (m *OrderManager) ProcessSignal(
 	}
 
 	order.Status = status
+	if err := m.fenceEffect(ctx); err != nil {
+		return err
+	}
 
 	switch status {
 	case domain.OrderStatusFilled:
@@ -827,9 +857,9 @@ func (m *OrderManager) recordTradeDecision(ctx context.Context, scope ExecutionS
 	return nil
 }
 
-func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, scope ExecutionScope, decisionID, orderID uuid.UUID, live bool) {
+func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, scope ExecutionScope, decisionID, orderID uuid.UUID, live bool) error {
 	if m == nil || m.decisionRecorder == nil || decisionID == uuid.Nil || orderID == uuid.Nil {
-		return
+		return nil
 	}
 	var err error
 	if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok && live {
@@ -842,8 +872,9 @@ func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, scope Execu
 		err = m.decisionRecorder.AttachPaperOrder(ctx, decisionID, orderID)
 	}
 	if err != nil {
-		m.logger.ErrorContext(ctx, "order_manager: attach trade decision order", "error", err, "decision_id", decisionID, "order_id", orderID, "live", live)
+		return fmt.Errorf("order_manager: attach trade decision order: %w", err)
 	}
+	return nil
 }
 
 func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, scope ExecutionScope, decisionID uuid.UUID, eventType domain.ReplayEventType, payload any) {
@@ -1036,6 +1067,9 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		return "", fmt.Errorf("order_manager: reconcile execution scope: %w", err)
 	}
 	if strings.TrimSpace(order.ExternalID) == "" {
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
 		order.Status = domain.OrderStatusRejected
 		if err := m.orderRepo.Update(ctx, order); err != nil {
 			return "", fmt.Errorf("order_manager: reject unsubmitted persisted order: %w", err)
@@ -1048,8 +1082,14 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 	}
 	switch status {
 	case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
 		if err := m.broker.CancelOrder(ctx, order.ExternalID); err != nil {
 			return "", fmt.Errorf("order_manager: cancel recovered paper order: %w", err)
+		}
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
 		}
 		status, err = m.broker.GetOrderStatus(ctx, order.ExternalID)
 		if err != nil {
@@ -1057,6 +1097,9 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		}
 	}
 	order.Status = status
+	if err := m.fenceEffect(ctx); err != nil {
+		return "", err
+	}
 	switch status {
 	case domain.OrderStatusFilled:
 		plan := TradingPlan{Ticker: order.Ticker, MarketType: order.MarketType, Side: order.PredictionSide}

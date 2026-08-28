@@ -802,6 +802,7 @@ type OpportunityRepository interface {
 	ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error)
 	ClaimQueuedForAllocation(ctx context.Context, id, claimID uuid.UUID, claimedAt, claimExpiresAt time.Time) (bool, error)
 	TakeOverExpiredAllocationClaim(ctx context.Context, id, claimID uuid.UUID, asOf, claimExpiresAt time.Time) (bool, error)
+	RenewAllocationClaim(ctx context.Context, id, claimID uuid.UUID, lease time.Duration) (bool, error)
 	TransitionClaimedStatus(ctx context.Context, id, claimID uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error)
 	TransitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error)
 	// Count returns the total number of opportunities matching the filter.
@@ -821,7 +822,7 @@ type AllocationDecisionRepository interface {
 	List(ctx context.Context, filter AllocationDecisionFilter, limit, offset int) ([]domain.AllocationDecision, error)
 	// Count returns the total number of decisions matching the filter.
 	Count(ctx context.Context, filter AllocationDecisionFilter) (int, error)
-	RecordPaperOrderResult(ctx context.Context, id uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error)
+	RecordPaperOrderResult(ctx context.Context, id, claimID uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error)
 }
 
 // ReplayEventRepository provides access to persisted replay events.

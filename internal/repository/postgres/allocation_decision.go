@@ -2,10 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -62,6 +64,7 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 				opportunity_id, strategy_id, mode, action, score, notional_usd, quantity, reasons, created_order_id
 			)
 			SELECT $1,$2,$3,$4,$6,$7,$5,$8,$9,$10,$11,$12,$13,$14,$15 FROM authorized
+			WHERE $16::uuid IS NULL OR EXISTS (SELECT 1 FROM portfolio_opportunities claimed WHERE claimed.id=$5 AND claimed.account_id=$1 AND claimed.status='selected' AND claimed.allocation_claim_id=$16 AND claimed.allocation_claim_expires_at>clock_timestamp())
 			ON CONFLICT (opportunity_id) WHERE opportunity_id IS NOT NULL DO NOTHING
 			RETURNING id, created_at
 		)
@@ -75,6 +78,12 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 		  AND d.pipeline_run_id IS NOT DISTINCT FROM $6
 		  AND d.pipeline_run_trade_date IS NOT DISTINCT FROM $7
 		  AND d.strategy_id IS NOT DISTINCT FROM $8
+		  AND d.mode IS NOT DISTINCT FROM $9
+		  AND d.action IS NOT DISTINCT FROM $10
+		  AND d.score IS NOT DISTINCT FROM $11
+		  AND d.notional_usd IS NOT DISTINCT FROM $12
+		  AND d.quantity IS NOT DISTINCT FROM $13
+		  AND d.reasons IS NOT DISTINCT FROM $14
 		  AND d.created_order_id IS NOT DISTINCT FROM $15
 		LIMIT 1`,
 		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.OpportunityID,
@@ -86,11 +95,22 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 		decision.Quantity,
 		stringSliceOrEmpty(decision.Reasons),
 		decision.CreatedOrderID,
+		nullableUUIDValue(decision.ExecutionClaimID),
 	)
 	if err := row.Scan(&decision.ID, &decision.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: create allocation decision: immutable payload changed: %w", repository.ErrIdempotencyConflict)
+		}
 		return fmt.Errorf("postgres: create allocation decision: %w", err)
 	}
 	return nil
+}
+
+func nullableUUIDValue(id uuid.UUID) any {
+	if id == uuid.Nil {
+		return nil
+	}
+	return id
 }
 
 // List returns allocation decisions matching the filter.
@@ -127,19 +147,20 @@ func (r *AllocationDecisionRepo) Count(ctx context.Context, filter repository.Al
 }
 
 // RecordPaperOrderResult attaches the durable effect and resolves it only when terminal.
-func (r *AllocationDecisionRepo) RecordPaperOrderResult(ctx context.Context, id uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
+func (r *AllocationDecisionRepo) RecordPaperOrderResult(ctx context.Context, id, claimID uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
 	if action != domain.AllocationDecisionActionPaperOrderIntent && action != domain.AllocationDecisionActionExecuted && action != domain.AllocationDecisionActionExecutionRejected {
 		return false, fmt.Errorf("postgres: record paper order result: paper action required")
 	}
 	tag, err := r.pool.Exec(ctx, `UPDATE allocation_decisions d SET action=$1, reasons=$2, created_order_id=COALESCE(d.created_order_id,$3)
 		WHERE d.id=$4 AND d.account_id=$5 AND d.action=$6 AND (d.created_order_id IS NULL OR d.created_order_id=$3)
+		  AND EXISTS (SELECT 1 FROM portfolio_opportunities claimed WHERE claimed.id=d.opportunity_id AND claimed.account_id=d.account_id AND claimed.status='selected' AND claimed.allocation_claim_id=$7 AND claimed.allocation_claim_expires_at>clock_timestamp())
 		  AND (($3::uuid IS NULL AND $1 IN ('paper_order_intent','execution_rejected')) OR ($3::uuid IS NOT NULL AND EXISTS (
 			SELECT 1 FROM orders o
 			WHERE o.id=$3 AND o.account_id=d.account_id AND o.allocation_opportunity_id=d.opportunity_id
 			  AND o.environment IS NOT DISTINCT FROM d.environment AND o.origin_type IS NOT DISTINCT FROM d.origin_type AND o.origin_id IS NOT DISTINCT FROM d.origin_id
 			  AND o.pipeline_run_id IS NOT DISTINCT FROM d.pipeline_run_id AND o.pipeline_run_trade_date IS NOT DISTINCT FROM d.pipeline_run_trade_date
 			  AND o.strategy_id IS NOT DISTINCT FROM d.strategy_id
-		  )))`, action, stringSliceOrEmpty(reasons), orderID, id, r.accountID, domain.AllocationDecisionActionPaperOrderIntent)
+		  )))`, action, stringSliceOrEmpty(reasons), orderID, id, r.accountID, domain.AllocationDecisionActionPaperOrderIntent, claimID)
 	if err != nil {
 		return false, fmt.Errorf("postgres: record paper order result: %w", err)
 	}

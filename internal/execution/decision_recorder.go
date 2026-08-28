@@ -215,8 +215,14 @@ func bindTradeDecisionScope(scope ExecutionScope, decision *domain.TradeDecision
 func tradeDecisionMatchesScope(decision domain.TradeDecision, scope ExecutionScope) bool {
 	originType, originID := scope.Origin()
 	run, ok := scope.PipelineRun()
+	legacyStrategyID := scope.LegacyStrategyID()
 	return ok && decision.AccountID == scope.AccountID() && decision.Environment == scope.Environment() &&
 		decision.OriginType == string(originType) && decision.OriginID == originID &&
 		decision.PipelineRunID != nil && *decision.PipelineRunID == run.ID &&
-		decision.PipelineRunTradeDate != nil && decision.PipelineRunTradeDate.Equal(run.TradeDate)
+		decision.PipelineRunTradeDate != nil && decision.PipelineRunTradeDate.Equal(run.TradeDate) &&
+		uuidPointersEqual(decision.StrategyID, legacyStrategyID)
+}
+
+func uuidPointersEqual(left, right *uuid.UUID) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }

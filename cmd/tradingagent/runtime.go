@@ -1107,6 +1107,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					AuditLogRepo:           auditLogRepo,
 					AgentEventRepo:         eventRepo,
 					DecisionRecorder:       tradeDecisionRecorder,
+					OpportunityRepo:        opportunityRepo,
 					FinancialLifecycleRepo: db,
 					Metrics:                appMetrics,
 					Logger:                 logger,

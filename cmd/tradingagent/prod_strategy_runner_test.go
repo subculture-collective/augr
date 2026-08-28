@@ -798,6 +798,10 @@ func (*recordingOpportunityRepo) TakeOverExpiredAllocationClaim(context.Context,
 	return true, nil
 }
 
+func (*recordingOpportunityRepo) RenewAllocationClaim(context.Context, uuid.UUID, uuid.UUID, time.Duration) (bool, error) {
+	return true, nil
+}
+
 func (*recordingOpportunityRepo) TransitionClaimedStatus(context.Context, uuid.UUID, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
 	return true, nil
 }

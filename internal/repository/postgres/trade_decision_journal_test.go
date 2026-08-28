@@ -86,6 +86,7 @@ func TestBuildTradeDecisionAttachQuery(t *testing.T) {
 	assertContains(t, query, "RETURNING td.id")
 	assertContains(t, query, "o.account_id=td.account_id")
 	assertContains(t, query, "o.pipeline_run_id=td.pipeline_run_id")
+	assertContains(t, query, "o.strategy_id IS NOT DISTINCT FROM td.strategy_id")
 	if len(args) != 5 || args[0] != decisionID || args[1] != canonicalRepositoryTestAccountID || args[2] != orderID || args[3] != domain.TradeDecisionStatusPaper || args[4] != false {
 		t.Fatalf("unexpected attach args: %#v", args)
 	}

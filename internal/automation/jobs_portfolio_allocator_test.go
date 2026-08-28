@@ -149,6 +149,14 @@ func (r *portfolioAllocatorOpportunityRepo) TakeOverExpiredAllocationClaim(_ con
 	return false, nil
 }
 
+func (r *portfolioAllocatorOpportunityRepo) RenewAllocationClaim(_ context.Context, id, claimID uuid.UUID, lease time.Duration) (bool, error) {
+	if r.claims[id] != claimID || !r.claimExpires[id].After(time.Now()) {
+		return false, nil
+	}
+	r.claimExpires[id] = time.Now().Add(lease)
+	return true, nil
+}
+
 func (r *portfolioAllocatorOpportunityRepo) TransitionClaimedStatus(ctx context.Context, id, claimID uuid.UUID, from, to domain.OpportunityStatus, reason string) (bool, error) {
 	if r.claims[id] != claimID {
 		return false, nil
@@ -270,7 +278,7 @@ func (r *portfolioAllocatorDecisionRepo) List(_ context.Context, filter reposito
 	return out, nil
 }
 
-func (r *portfolioAllocatorDecisionRepo) RecordPaperOrderResult(_ context.Context, id uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
+func (r *portfolioAllocatorDecisionRepo) RecordPaperOrderResult(_ context.Context, id, _ uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error) {
 	for _, decision := range r.created {
 		if decision.ID == id && decision.Action == domain.AllocationDecisionActionPaperOrderIntent {
 			decision.Action, decision.Reasons, decision.CreatedOrderID = action, append([]string(nil), reasons...), orderID
@@ -376,7 +384,7 @@ func (p *terminalRecoveryProcessor) ProcessPaperOrder(context.Context, portfolio
 	return portfolio.PaperOrderResult{}, errors.New("unexpected submit during recovery")
 }
 
-func (p *terminalRecoveryProcessor) ReconcilePaperOrder(_ context.Context, _ domain.Opportunity, order *domain.Order) (portfolio.PaperOrderResult, error) {
+func (p *terminalRecoveryProcessor) ReconcilePaperOrder(_ context.Context, _ domain.Opportunity, order *domain.Order, _ uuid.UUID) (portfolio.PaperOrderResult, error) {
 	p.calls++
 	order.Status = p.status
 	return portfolio.PaperOrderResult{OrderID: &order.ID, Status: p.status}, nil
@@ -462,6 +470,12 @@ func (r *concurrentClaimOpportunityRepo) TakeOverExpiredAllocationClaim(ctx cont
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.portfolioAllocatorOpportunityRepo.TakeOverExpiredAllocationClaim(ctx, id, claimID, asOf, expires)
+}
+
+func (r *concurrentClaimOpportunityRepo) RenewAllocationClaim(ctx context.Context, id, claimID uuid.UUID, lease time.Duration) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.portfolioAllocatorOpportunityRepo.RenewAllocationClaim(ctx, id, claimID, lease)
 }
 
 func (r *concurrentClaimOpportunityRepo) ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error) {

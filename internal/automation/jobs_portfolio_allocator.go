@@ -23,7 +23,7 @@ var portfolioAllocatorSpec = scheduler.ScheduleSpec{
 	SkipHolidays: true,
 }
 
-const portfolioAllocationClaimLease = 5 * time.Minute
+const portfolioAllocationClaimLease = portfolio.AllocationClaimLease
 
 // PortfolioAccountBalanceSource supplies the restored paper account state used
 // to size paper allocator decisions.
@@ -110,8 +110,10 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 				return fmt.Errorf("portfolio_allocator: persist paper intent: %w", err)
 			}
 			persisted = true
-			decision, err = o.executePaperAllocatorDecision(ctx, decision, opportunityByID)
-			applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, decision.CreatedOrderID, decision.Action, decision.Reasons)
+			decision, err = withAllocationClaim(ctx, o.deps.OpportunityRepo, *decision.OpportunityID, claimID, func(effectCtx context.Context) (domain.AllocationDecision, error) {
+				return o.executePaperAllocatorDecision(effectCtx, decision, opportunityByID)
+			})
+			applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, claimID, decision.CreatedOrderID, decision.Action, decision.Reasons)
 			if recordErr != nil {
 				return fmt.Errorf("portfolio_allocator: record paper result: %w", recordErr)
 			}
@@ -258,8 +260,10 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 				}
 				if order == nil {
 					decision.ExecutionClaimID = claimID
-					decision, err = o.executePaperAllocatorDecision(ctx, decision, map[uuid.UUID]domain.Opportunity{opportunity.ID: opportunity})
-					applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, decision.CreatedOrderID, decision.Action, decision.Reasons)
+					decision, err = withAllocationClaim(ctx, o.deps.OpportunityRepo, opportunity.ID, claimID, func(effectCtx context.Context) (domain.AllocationDecision, error) {
+						return o.executePaperAllocatorDecision(effectCtx, decision, map[uuid.UUID]domain.Opportunity{opportunity.ID: opportunity})
+					})
+					applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, claimID, decision.CreatedOrderID, decision.Action, decision.Reasons)
 					if recordErr != nil {
 						return fmt.Errorf("portfolio_allocator: record recovered paper result: %w", recordErr)
 					}
@@ -269,7 +273,7 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 					if err != nil {
 						return fmt.Errorf("portfolio_allocator: recovered paper execution ambiguous: %w", err)
 					}
-				} else if err := o.reconcilePendingPaperDecision(ctx, opportunity, &decision, order); err != nil {
+				} else if err := o.reconcilePendingPaperDecision(ctx, opportunity, &decision, order, claimID); err != nil {
 					return err
 				}
 			}
@@ -293,10 +297,13 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 			}
 			continue
 		}
-		if err := o.reconcileNonterminalPaperOrder(ctx, opportunity, order); err != nil {
+		if _, err := withAllocationClaim(ctx, o.deps.OpportunityRepo, opportunity.ID, claimID, func(effectCtx context.Context) (struct{}, error) {
+			return struct{}{}, o.reconcileNonterminalPaperOrder(effectCtx, opportunity, order, claimID)
+		}); err != nil {
 			return err
 		}
 		decision := recoveredAllocationDecision(opportunity, *order)
+		decision.ExecutionClaimID = claimID
 		if err := o.deps.AllocationDecisionRepo.Create(ctx, &decision); err != nil {
 			return fmt.Errorf("portfolio_allocator: persist recovered decision: %w", err)
 		}
@@ -307,12 +314,14 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 	return nil
 }
 
-func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opportunity domain.Opportunity, decision *domain.AllocationDecision, order *domain.Order) error {
+func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opportunity domain.Opportunity, decision *domain.AllocationDecision, order *domain.Order, claimID uuid.UUID) error {
 	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovery_order_pending"
 	if !orderMatchesOpportunity(*order, opportunity) {
 		return fmt.Errorf("portfolio_allocator: recovered order lineage mismatch")
 	}
-	if err := o.reconcileNonterminalPaperOrder(ctx, opportunity, order); err != nil {
+	if _, err := withAllocationClaim(ctx, o.deps.OpportunityRepo, opportunity.ID, claimID, func(effectCtx context.Context) (struct{}, error) {
+		return struct{}{}, o.reconcileNonterminalPaperOrder(effectCtx, opportunity, order, claimID)
+	}); err != nil {
 		return err
 	}
 	if order.Status == domain.OrderStatusFilled {
@@ -326,7 +335,7 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 	}
 	decision.Action = action
 	decision.Reasons = append(decision.Reasons, reason)
-	applied, err := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, decision.CreatedOrderID, action, decision.Reasons)
+	applied, err := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, claimID, decision.CreatedOrderID, action, decision.Reasons)
 	if err != nil {
 		return fmt.Errorf("portfolio_allocator: reconcile pending paper intent: %w", err)
 	}
@@ -336,7 +345,7 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 	return nil
 }
 
-func (o *JobOrchestrator) reconcileNonterminalPaperOrder(ctx context.Context, opportunity domain.Opportunity, order *domain.Order) error {
+func (o *JobOrchestrator) reconcileNonterminalPaperOrder(ctx context.Context, opportunity domain.Opportunity, order *domain.Order, claimID uuid.UUID) error {
 	if order.Status == domain.OrderStatusFilled || order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
 		return nil
 	}
@@ -344,7 +353,7 @@ func (o *JobOrchestrator) reconcileNonterminalPaperOrder(ctx context.Context, op
 	if !ok {
 		return fmt.Errorf("portfolio_allocator: paper order reconciler is required for nonterminal recovery")
 	}
-	result, err := reconciler.ReconcilePaperOrder(ctx, opportunity, order)
+	result, err := reconciler.ReconcilePaperOrder(ctx, opportunity, order, claimID)
 	if err != nil {
 		return fmt.Errorf("portfolio_allocator: reconcile broker paper order: %w", err)
 	}
@@ -441,6 +450,60 @@ func (o *JobOrchestrator) preclaimPaperOpportunity(ctx context.Context, decision
 		return false, fmt.Errorf("portfolio_allocator: preclaim opportunity selected: %w", err)
 	}
 	return claimed, nil
+}
+
+func withAllocationClaim[T any](ctx context.Context, repo repository.OpportunityRepository, opportunityID, claimID uuid.UUID, effect func(context.Context) (T, error)) (T, error) {
+	var zero T
+	renew := func() error {
+		owned, err := repo.RenewAllocationClaim(ctx, opportunityID, claimID, portfolioAllocationClaimLease)
+		if err != nil {
+			return fmt.Errorf("portfolio_allocator: renew allocation claim: %w", err)
+		}
+		if !owned {
+			return fmt.Errorf("portfolio_allocator: allocation claim ownership lost")
+		}
+		return nil
+	}
+	if err := renew(); err != nil {
+		return zero, err
+	}
+	effectCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(portfolioAllocationClaimLease / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			case <-effectCtx.Done():
+				done <- effectCtx.Err()
+				return
+			case <-ticker.C:
+				if err := renew(); err != nil {
+					cancel()
+					done <- err
+					return
+				}
+			}
+		}
+	}()
+	result, effectErr := effect(effectCtx)
+	close(stop)
+	renewErr := <-done
+	if renewErr != nil {
+		return zero, renewErr
+	}
+	if effectErr != nil {
+		return result, effectErr
+	}
+	if err := renew(); err != nil {
+		return zero, err
+	}
+	return result, nil
 }
 
 func countDecisionActions(decisions []domain.AllocationDecision, action domain.AllocationDecisionAction) int {

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -117,6 +118,10 @@ func TestAllocationDecisionRepoIntegration_ConflictNeverReturnsForeignLineage(t 
 	if err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, opportunity); err != nil {
 		t.Fatal(err)
 	}
+	claimID := uuid.New()
+	if claimed, err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, time.Now(), time.Now().Add(time.Minute)); err != nil || !claimed {
+		t.Fatalf("claim opportunity = %t, %v", claimed, err)
+	}
 	decision := &domain.AllocationDecision{AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}
 	if err := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, decision); err != nil {
 		t.Fatal(err)
@@ -129,6 +134,27 @@ func TestAllocationDecisionRepoIntegration_ConflictNeverReturnsForeignLineage(t 
 	if foreign.ID != uuid.Nil {
 		t.Fatalf("foreign decision received ID %s", foreign.ID)
 	}
+	mutations := map[string]func(*domain.AllocationDecision){
+		"mode":     func(d *domain.AllocationDecision) { d.Mode = domain.AllocationDecisionModeShadow },
+		"action":   func(d *domain.AllocationDecision) { d.Action = domain.AllocationDecisionActionExecuted },
+		"score":    func(d *domain.AllocationDecision) { d.Score = 1 },
+		"notional": func(d *domain.AllocationDecision) { d.NotionalUSD = 10 },
+		"quantity": func(d *domain.AllocationDecision) { d.Quantity = 2 },
+		"reasons":  func(d *domain.AllocationDecision) { d.Reasons = []string{"changed"} },
+		"lineage":  func(d *domain.AllocationDecision) { id := uuid.New(); d.PipelineRunID = &id },
+		"order":    func(d *domain.AllocationDecision) { id := uuid.New(); d.CreatedOrderID = &id },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			retry := *decision
+			retry.ID, retry.CreatedAt = uuid.Nil, time.Time{}
+			mutate(&retry)
+			err := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, &retry)
+			if !errors.Is(err, repository.ErrIdempotencyConflict) {
+				t.Fatalf("Create() error = %v, want ErrIdempotencyConflict", err)
+			}
+		})
+	}
 }
 
 func TestAllocationDecisionRepoIntegration_RecordPaperOrderResultFencesFullLineage(t *testing.T) {
@@ -140,6 +166,10 @@ func TestAllocationDecisionRepoIntegration_RecordPaperOrderResultFencesFullLinea
 	if err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, opportunity); err != nil {
 		t.Fatal(err)
 	}
+	claimID := uuid.New()
+	if claimed, err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, time.Now(), time.Now().Add(time.Minute)); err != nil || !claimed {
+		t.Fatalf("claim opportunity = %t, %v", claimed, err)
+	}
 	decision := &domain.AllocationDecision{AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}
 	repo := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	if err := repo.Create(ctx, decision); err != nil {
@@ -149,13 +179,13 @@ func TestAllocationDecisionRepoIntegration_RecordPaperOrderResultFencesFullLinea
 	if _, err := pool.Exec(ctx, `INSERT INTO orders(id,account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,allocation_opportunity_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, orderID, canonicalRepositoryTestAccountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, runID, canonicalRepositoryTestTradeDate, wrongStrategyID, opportunity.ID); err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || applied {
+	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, claimID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || applied {
 		t.Fatalf("mismatched strategy attachment = %t, %v", applied, err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE orders SET strategy_id=$1 WHERE id=$2`, strategyID, orderID); err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || !applied {
+	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, claimID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || !applied {
 		t.Fatalf("matching attachment = %t, %v", applied, err)
 	}
 }

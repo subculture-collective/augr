@@ -73,7 +73,7 @@ func TestPersistedExecutionGraphIntegration_SurvivesCancellationAndRestart(t *te
 	if err := postgres.NewOrderRepo(db.Pool, accountID).Create(ctx, order); err != nil {
 		t.Fatal(err)
 	}
-	if recorded, err := allocationRepo.RecordPaperOrderResult(ctx, allocation.ID, &order.ID, domain.AllocationDecisionActionExecuted, []string{"paper order persisted"}); err != nil || !recorded {
+	if recorded, err := allocationRepo.RecordPaperOrderResult(ctx, allocation.ID, claimID, &order.ID, domain.AllocationDecisionActionExecuted, []string{"paper order persisted"}); err != nil || !recorded {
 		t.Fatalf("record order result = %t, %v", recorded, err)
 	}
 	if err := journal.AttachOrderWithReplay(ctx, tradeDecision.ID, order.ID, false, "allocator", startedAt.Add(time.Minute)); err != nil {

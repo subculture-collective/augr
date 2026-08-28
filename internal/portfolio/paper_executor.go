@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/google/uuid"
 )
+
+const AllocationClaimLease = 5 * time.Minute
 
 // PaperOrderProcessor executes a validated paper trading plan.
 // The implementation must be configured to use a paper broker and must not
@@ -19,7 +22,7 @@ type PaperOrderProcessor interface {
 
 // PaperOrderReconciler resolves allocator-owned orders found after restart.
 type PaperOrderReconciler interface {
-	ReconcilePaperOrder(context.Context, domain.Opportunity, *domain.Order) (PaperOrderResult, error)
+	ReconcilePaperOrder(context.Context, domain.Opportunity, *domain.Order, uuid.UUID) (PaperOrderResult, error)
 }
 
 type PaperOrderRequest struct {

@@ -294,13 +294,18 @@ func TestOpportunityRepoIntegration_TakesOverLegacySelectedNullClaim(t *testing.
 	if err != nil || len(selected) != 1 || selected[0].ID != opportunity.ID {
 		t.Fatalf("ListSelectedForAllocation() = %+v, %v", selected, err)
 	}
-	won, err := repo.TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, now, now.Add(time.Minute))
+	staleRunStart := now.Add(-time.Hour)
+	won, err := repo.TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, staleRunStart, staleRunStart.Add(time.Minute))
 	if err != nil || !won {
 		t.Fatalf("TakeOverExpiredAllocationClaim() = %v, %v", won, err)
 	}
 	var storedClaim uuid.UUID
-	if err := pool.QueryRow(ctx, `SELECT allocation_claim_id FROM portfolio_opportunities WHERE id=$1`, opportunity.ID).Scan(&storedClaim); err != nil || storedClaim != claimID {
+	var claimExpiresAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT allocation_claim_id,allocation_claim_expires_at FROM portfolio_opportunities WHERE id=$1`, opportunity.ID).Scan(&storedClaim, &claimExpiresAt); err != nil || storedClaim != claimID {
 		t.Fatalf("stored claim = %s, %v; want %s", storedClaim, err, claimID)
+	}
+	if !claimExpiresAt.After(time.Now().Add(50 * time.Second)) {
+		t.Fatalf("claim expiry = %s, want DB-current lease despite stale run start", claimExpiresAt)
 	}
 }
 

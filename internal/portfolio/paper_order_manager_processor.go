@@ -32,6 +32,7 @@ type PaperOrderManagerProcessorDeps struct {
 	AuditLogRepo           repository.AuditLogRepository
 	AgentEventRepo         repository.AgentEventRepository
 	DecisionRecorder       execution.DecisionRecorder
+	OpportunityRepo        repository.OpportunityRepository
 	Metrics                execution.OrderMetricsRecorder
 	Logger                 *slog.Logger
 	InitialBalance         float64
@@ -90,6 +91,12 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: fractionPct},
 		p.deps.Logger,
 	).WithFinancialLifecycleRepo(p.deps.FinancialLifecycleRepo).WithLiveTrading(false)
+	if request.OpportunityID != uuid.Nil && request.ClaimID != uuid.Nil {
+		if p.deps.OpportunityRepo == nil {
+			return PaperOrderResult{}, errors.New("portfolio: allocation claim repository is required")
+		}
+		manager = manager.WithEffectFence(p.claimFence(request.OpportunityID, request.ClaimID))
+	}
 	if p.deps.Metrics != nil {
 		manager = manager.WithMetrics(p.deps.Metrics)
 	}
@@ -118,7 +125,7 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	return PaperOrderResult{Skipped: true, Reason: "paper_order_not_created"}, nil
 }
 
-func (p *PaperOrderManagerProcessor) ReconcilePaperOrder(ctx context.Context, opportunity domain.Opportunity, order *domain.Order) (PaperOrderResult, error) {
+func (p *PaperOrderManagerProcessor) ReconcilePaperOrder(ctx context.Context, opportunity domain.Opportunity, order *domain.Order, claimID uuid.UUID) (PaperOrderResult, error) {
 	if p == nil || order == nil || p.deps.PaperBroker == nil || p.deps.OrderRepo == nil {
 		return PaperOrderResult{}, ErrPaperProcessorUnavailable
 	}
@@ -133,10 +140,27 @@ func (p *PaperOrderManagerProcessor) ReconcilePaperOrder(ctx context.Context, op
 	if err != nil {
 		return PaperOrderResult{}, err
 	}
+	if claimID == uuid.Nil || p.deps.OpportunityRepo == nil {
+		return PaperOrderResult{}, errors.New("portfolio: allocation claim repository is required")
+	}
 	manager := execution.NewOrderManager(p.deps.PaperBroker, "paper", p.deps.RiskEngine, p.deps.PositionRepo, p.deps.OrderRepo, p.deps.TradeRepo, p.deps.AuditLogRepo, p.deps.AgentEventRepo, execution.SizingConfig{}, p.deps.Logger).
-		WithFinancialLifecycleRepo(p.deps.FinancialLifecycleRepo).WithLiveTrading(false)
+		WithFinancialLifecycleRepo(p.deps.FinancialLifecycleRepo).WithLiveTrading(false).
+		WithEffectFence(p.claimFence(opportunity.ID, claimID))
 	status, err := manager.ReconcilePersistedOrder(ctx, scope, order)
 	return PaperOrderResult{OrderID: &order.ID, Status: status}, err
+}
+
+func (p *PaperOrderManagerProcessor) claimFence(opportunityID, claimID uuid.UUID) func(context.Context) error {
+	return func(ctx context.Context) error {
+		owned, err := p.deps.OpportunityRepo.RenewAllocationClaim(ctx, opportunityID, claimID, AllocationClaimLease)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return errors.New("allocation claim ownership lost")
+		}
+		return nil
+	}
 }
 
 // Compile-time assertion that the processor stays on the paper execution boundary.

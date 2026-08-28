@@ -434,6 +434,10 @@ func (s *portfolioAllocatorOpportunityRepo) TakeOverExpiredAllocationClaim(conte
 	return true, nil
 }
 
+func (s *portfolioAllocatorOpportunityRepo) RenewAllocationClaim(context.Context, uuid.UUID, uuid.UUID, time.Duration) (bool, error) {
+	return true, nil
+}
+
 func (s *portfolioAllocatorOpportunityRepo) TransitionClaimedStatus(context.Context, uuid.UUID, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
 	return true, nil
 }
@@ -468,7 +472,7 @@ func (s *portfolioAllocatorDecisionRepo) Count(_ context.Context, filter reposit
 	return len(filterAllocationDecisions(s.items, filter)), nil
 }
 
-func (s *portfolioAllocatorDecisionRepo) RecordPaperOrderResult(context.Context, uuid.UUID, *uuid.UUID, domain.AllocationDecisionAction, []string) (bool, error) {
+func (s *portfolioAllocatorDecisionRepo) RecordPaperOrderResult(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, domain.AllocationDecisionAction, []string) (bool, error) {
 	return true, nil
 }
 

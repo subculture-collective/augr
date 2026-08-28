@@ -511,6 +511,7 @@ type mockDecisionRecorder struct {
 	paperAttach []struct{ decisionID, orderID uuid.UUID }
 	liveAttach  []struct{ decisionID, orderID uuid.UUID }
 	recordErr   error
+	attachErr   error
 }
 
 func (r *mockDecisionRecorder) RecordDecision(_ context.Context, decision *domain.TradeDecision) error {
@@ -552,8 +553,69 @@ func TestProcessSignal_DecisionRecorderFailurePreventsBrokerEffects(t *testing.T
 func (r *mockDecisionRecorder) AttachPaperOrder(_ context.Context, decisionID, orderID uuid.UUID) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.attachErr != nil {
+		return r.attachErr
+	}
 	r.paperAttach = append(r.paperAttach, struct{ decisionID, orderID uuid.UUID }{decisionID: decisionID, orderID: orderID})
 	return nil
+}
+
+func TestProcessSignal_AttachmentFailurePreventsBrokerSubmission(t *testing.T) {
+	brokerCalls := 0
+	broker := &mockBroker{submitOrderFn: func(context.Context, *domain.Order) (string, error) {
+		brokerCalls++
+		return "", nil
+	}}
+	orderRepo := &mockOrderRepo{}
+	attachErr := errors.New("decision attachment unavailable")
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).
+		WithDecisionRecorder(&mockDecisionRecorder{attachErr: attachErr})
+
+	err := mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
+	if !errors.Is(err, attachErr) {
+		t.Fatalf("ProcessSignal() error = %v, want attachment error", err)
+	}
+	if len(orderRepo.orders) != 1 || orderRepo.orders[0].Status != domain.OrderStatusPending {
+		t.Fatalf("durable orders = %+v, want one pending order", orderRepo.orders)
+	}
+	if brokerCalls != 0 {
+		t.Fatalf("broker calls = %d, want 0", brokerCalls)
+	}
+}
+
+func TestProcessSignal_SlowWorkerTakeoverFencesStaleBrokerEffect(t *testing.T) {
+	brokerCalls := 0
+	broker := &mockBroker{submitOrderFn: func(context.Context, *domain.Order) (string, error) {
+		brokerCalls++
+		return "external", nil
+	}}
+	atBrokerFence := make(chan struct{})
+	takeover := make(chan struct{})
+	fenceCalls := 0
+	mgr := newTestOrderManager(broker, &mockRiskEngine{}, &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}, &mockAuditLogRepo{}).
+		WithDecisionRecorder(&mockDecisionRecorder{}).
+		WithEffectFence(func(context.Context) error {
+			fenceCalls++
+			if fenceCalls == 2 {
+				close(atBrokerFence)
+				<-takeover
+				return errors.New("allocation claim ownership lost")
+			}
+			return nil
+		})
+	done := make(chan error, 1)
+	go func() {
+		done <- mgr.ProcessSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan())
+	}()
+	<-atBrokerFence
+	close(takeover)
+	err := <-done
+	if err == nil || !strings.Contains(err.Error(), "allocation claim ownership lost") {
+		t.Fatalf("ProcessSignal() error = %v, want lost ownership", err)
+	}
+	if brokerCalls != 0 {
+		t.Fatalf("stale worker broker calls = %d, want 0", brokerCalls)
+	}
 }
 
 func (r *mockDecisionRecorder) AttachLiveOrder(_ context.Context, decisionID, orderID uuid.UUID) error {

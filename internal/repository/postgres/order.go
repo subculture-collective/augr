@@ -53,7 +53,7 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 			SELECT 1 WHERE ($33::uuid IS NULL AND $34::uuid IS NULL) OR EXISTS (
 				SELECT 1 FROM portfolio_opportunities
 				WHERE id=$33 AND account_id=$3 AND status='selected'
-				  AND allocation_claim_id=$34 AND allocation_claim_expires_at>NOW()
+				  AND allocation_claim_id=$34 AND allocation_claim_expires_at>clock_timestamp()
 				  AND environment=$4 AND origin_type=$5 AND origin_id=$6
 				  AND strategy_id=$1 AND pipeline_run_id=$2 AND pipeline_run_trade_date=$7
 				  AND $4::text IS NOT NULL AND $5::text IS NOT NULL AND $6::text IS NOT NULL

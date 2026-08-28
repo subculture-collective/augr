@@ -195,6 +195,22 @@ func TestTradeDecisionJournalRecorderRejectsConflictingAccountRetry(t *testing.T
 	}
 }
 
+func TestTradeDecisionJournalRecorderRejectsConflictingLegacyStrategyAttachment(t *testing.T) {
+	journal := &decisionJournalStub{replay: &replayEventStub{}}
+	recorder := NewTradeDecisionJournalRecorder(journal, journal.replay).(ScopedDecisionRecorder)
+	run := domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}
+	accountID, versionID := uuid.New(), uuid.New()
+	first, _ := NewStrategyExecutionScope(accountID, domain.AccountEnvironmentPaperScored, versionID, run, uuid.New())
+	conflicting, _ := NewStrategyExecutionScope(accountID, domain.AccountEnvironmentPaperScored, versionID, run, uuid.New())
+	decision := &domain.TradeDecision{ID: uuid.New(), MarketType: domain.MarketTypeStock, InstrumentKey: "AAPL", Status: domain.TradeDecisionStatusCandidate}
+	if err := recorder.RecordDecisionScoped(context.Background(), first, decision); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.AttachPaperOrderScoped(context.Background(), conflicting, decision.ID, uuid.New()); err == nil {
+		t.Fatal("AttachPaperOrderScoped() accepted conflicting legacy strategy")
+	}
+}
+
 func TestTradeDecisionJournalRecorderRestartRetryUsesPersistedParentScope(t *testing.T) {
 	journal, replay := &decisionJournalStub{}, &replayEventStub{}
 	journal.replay = replay
