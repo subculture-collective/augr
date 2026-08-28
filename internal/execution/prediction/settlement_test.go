@@ -191,6 +191,21 @@ func TestSettlerClosesWinningPaperContractAndIsIdempotent(t *testing.T) {
 
 }
 
+func TestSettlerPreviewAcceptsMultiFillPositionResidual(t *testing.T) {
+	strategyID, orderID, decisionID, positionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{{ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-MULTI", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}}}
+	positions := &settlementPositionStub{position: domain.Position{ID: positionID, StrategyID: &strategyID, MarketType: domain.MarketTypeKalshi, Ticker: "KX-MULTI:YES", Side: domain.PositionSideLong, Quantity: 3, AvgEntry: .40}}
+	trades := &settlementTradeStub{trades: []domain.Trade{
+		{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Quantity: 2, Price: .39},
+		{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Quantity: 2, Price: .41},
+	}}
+	settler := NewSettler(testExecutionAccountBinding, &atomicLifecycleStub{}, decisions, positions, trades, &settlementReplayStub{})
+	preview, err := settler.SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-MULTI")
+	if err != nil || preview.Count != 1 {
+		t.Fatalf("multi-fill residual preview = %+v, err=%v", preview, err)
+	}
+}
+
 type atomicLifecycleStub struct{ called int }
 
 func (s *atomicLifecycleStub) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {

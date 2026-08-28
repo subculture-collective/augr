@@ -714,6 +714,17 @@ func (m *OrderManager) processSignal(
 		}
 		return fmt.Errorf("order_manager: submit order outcome is ambiguous; pending order %s retained for provider lookup by client id %s: %w", order.ID, order.ClientOrderID, err)
 	}
+	if order.Status == domain.OrderStatusFilled || order.Status == domain.OrderStatusPartial {
+		order.ExternalID = strings.TrimSpace(externalID)
+		if order.SubmittedAt == nil {
+			submittedAt := m.currentTime()
+			order.SubmittedAt = &submittedAt
+		}
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return fmt.Errorf("order_manager: synchronous broker fill: %w", err)
+		}
+		return m.handleFill(ctx, order, plan, scope, decision.ID)
+	}
 
 	submittedAt := m.currentTime()
 	if err := m.orderRepo.Update(ctx, SanitizedSubmittedOrder(order, externalID, submittedAt)); err != nil {
@@ -1472,7 +1483,9 @@ func (m *OrderManager) handleFill(
 		result, err := m.financialRepo.ApplyOrderFill(ctx, fillInput)
 		if err != nil {
 			if resolver, ok := m.financialRepo.(repository.OrderFillCommitResolver); ok {
-				resolved, committed, resolveErr := resolver.ResolveOrderFillCommit(ctx, fillInput)
+				resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				resolved, committed, resolveErr := resolver.ResolveOrderFillCommit(resolveCtx, fillInput)
+				cancel()
 				if resolveErr != nil {
 					return fmt.Errorf("order_manager: persist fill: %v; resolve ambiguous commit: %w", err, resolveErr)
 				}

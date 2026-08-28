@@ -732,12 +732,8 @@ func marketTypeFromAssetClass(assetClass domain.AssetClass) domain.MarketType {
 	}
 }
 
-func applyOrderSnapshot(order *domain.Order, snapshot BrokerOrderSnapshot, strategyID *uuid.UUID) bool {
+func applyOrderSnapshot(order *domain.Order, snapshot BrokerOrderSnapshot, _ *uuid.UUID) bool {
 	changed := false
-	if !uuidPtrEqual(order.StrategyID, strategyID) {
-		order.StrategyID = cloneUUIDPtr(strategyID)
-		changed = true
-	}
 	if order.Ticker != snapshot.Ticker {
 		order.Ticker = snapshot.Ticker
 		changed = true
@@ -795,12 +791,8 @@ func applyOrderSnapshot(order *domain.Order, snapshot BrokerOrderSnapshot, strat
 	return changed
 }
 
-func applyPositionSnapshot(position *domain.Position, snapshot domain.Position, strategyID *uuid.UUID) bool {
+func applyPositionSnapshot(position *domain.Position, snapshot domain.Position, _ *uuid.UUID) bool {
 	changed := false
-	if !uuidPtrEqual(position.StrategyID, strategyID) {
-		position.StrategyID = cloneUUIDPtr(strategyID)
-		changed = true
-	}
 	if position.Side != snapshot.Side {
 		position.Side = snapshot.Side
 		changed = true

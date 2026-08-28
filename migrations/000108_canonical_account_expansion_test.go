@@ -51,6 +51,10 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"add column execution_claim_id uuid",
 		"add column execution_claimed_at timestamptz",
 		"add constraint copy_intent_execution_claim_pair check ((execution_claim_id is null) = (execution_claimed_at is null))",
+		"add column copy_intent_id uuid references copy_trade_intents(id) on delete restrict",
+		"add column copy_execution_claim_id uuid",
+		"add constraint orders_copy_execution_claim_pair check ((copy_intent_id is null) = (copy_execution_claim_id is null))",
+		"create index idx_orders_copy_intent on orders(copy_intent_id) where copy_intent_id is not null",
 		"create index idx_positions_close_reservation_order on positions(close_reservation_order_id) where close_reservation_order_id is not null",
 		"create unique index orders_copy_origin_effect_once on orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) where origin_type='copy_subscription' and copy_origin_rebalance_run_id is not null",
 		"create unique index orders_allocation_effect_once on orders(account_id,allocation_opportunity_id) where allocation_opportunity_id is not null",
@@ -73,7 +77,7 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		}
 	}
 	if !strings.Contains(up, "alter table orders add column account_id") ||
-		!strings.Contains(up, "add column allocation_opportunity_id uuid references portfolio_opportunities(id) on delete restrict, add column client_order_id text, add column spread_max_risk numeric(20,8), add column spread_max_reward numeric(20,8); alter table positions") {
+		!strings.Contains(up, "add column allocation_opportunity_id uuid references portfolio_opportunities(id) on delete restrict") {
 		t.Fatal("allocation_opportunity_id must be added to orders")
 	}
 	if strings.Contains(up, "alter table positions add column account_id uuid references accounts(id) on delete restrict, add column environment text check (environment in ('paper_scored','paper_stress','shadow','live')), add column origin_type text check (origin_type in ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')), add column origin_id text, add column allocation_opportunity_id") {
@@ -92,6 +96,8 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"drop index orders_allocation_effect_once",
 		"drop index if exists uq_portfolio_opportunities_execution_dedupe",
 		"drop constraint copy_intent_execution_claim_pair",
+		"drop index idx_orders_copy_intent",
+		"drop constraint orders_copy_execution_claim_pair",
 		"spread_max_risk is not null or spread_max_reward is not null",
 		"cumulative_fee is not null or cumulative_premium is not null or cumulative_filled_at is not null or cumulative_status is not null or cumulative_exit_reason is not null",
 		"expected_through_transaction_id uuid",

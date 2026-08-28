@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
@@ -25,6 +26,15 @@ type fakeLiveClient struct {
 	positionsErr  error
 	balance       BalanceResponse
 	balanceErr    error
+}
+
+func TestRichOrderStatusMapsRestingFillToPartial(t *testing.T) {
+	price := 0.42
+	filledAt := time.Now().UTC()
+	status, err := richOrderStatus(OrderResponse{Status: "resting", FilledCount: 2, AveragePrice: &price, FilledAt: &filledAt})
+	if err != nil || status.Status != domain.OrderStatusPartial || status.FilledQuantity != 2 {
+		t.Fatalf("resting fill status = %+v, err=%v", status, err)
+	}
 }
 
 func (f *fakeLiveClient) CreateOrder(_ context.Context, req CreateOrderRequest) (CreateOrderResponse, error) {

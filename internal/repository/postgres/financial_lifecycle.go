@@ -985,7 +985,7 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	if persisted.Status != domain.TradeDecisionStatusPaper {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: settlement decision %s is not open", persisted.ID)
 	}
-	rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.quantity::double precision, p.avg_entry::double precision, p.realized_pnl::double precision, p.close_reservation_order_id FROM positions p INNER JOIN trades t ON t.position_id = p.id AND t.order_id = $1 AND t.account_id=$2 WHERE p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.ticker=$6 AND p.closed_at IS NULL AND p.quantity > 0 FOR UPDATE OF p`, input.Decision.PaperOrderID, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.PositionTicker)
+	rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.quantity::double precision, p.avg_entry::double precision, p.realized_pnl::double precision, p.close_reservation_order_id FROM positions p WHERE p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.ticker=$6 AND p.closed_at IS NULL AND p.quantity > 0 AND EXISTS (SELECT 1 FROM trades t WHERE t.position_id=p.id AND t.order_id=$1 AND t.account_id=$2) FOR UPDATE OF p`, input.Decision.PaperOrderID, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.PositionTicker)
 	if err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: lock settlement position: %w", err)
 	}

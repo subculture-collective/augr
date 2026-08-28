@@ -809,7 +809,20 @@ func (m *OptionsOrderManager) closeLegacyStrategyOptionPositions(ctx context.Con
 		if spreadErr != nil {
 			return spreadErr
 		}
-		if err := m.processSpreadSignal(ctx, scope, spread, quantity); err != nil {
+		versionID, parseErr := uuid.Parse(legs[0].OriginID)
+		if legs[0].OriginType != string(ledger.ExecutionOriginStrategyVersion) || parseErr != nil || legs[0].StrategyID == nil {
+			return fmt.Errorf("options_manager: option leg group %s lacks strategy-version ownership", groupID)
+		}
+		positionScope, scopeErr := NewStrategyExecutionScope(legs[0].AccountID, legs[0].Environment, versionID, run, *legs[0].StrategyID)
+		if scopeErr != nil {
+			return scopeErr
+		}
+		for i := range legs[1:] {
+			if err := validatePositionScope(&legs[i+1], positionScope); err != nil {
+				return fmt.Errorf("options_manager: option leg group %s mixes execution ownership: %w", groupID, err)
+			}
+		}
+		if err := m.processSpreadSignal(ctx, positionScope, spread, quantity); err != nil {
 			return err
 		}
 		closed += len(legs)
@@ -1458,7 +1471,9 @@ func (m *OptionsOrderManager) applyOptionFills(ctx context.Context, inputs []rep
 		if !ok {
 			return nil, err
 		}
-		resolved, committed, resolveErr := resolver.ResolveOptionFillCommit(ctx, inputs)
+		resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		resolved, committed, resolveErr := resolver.ResolveOptionFillCommit(resolveCtx, inputs)
+		cancel()
 		if resolveErr != nil {
 			return nil, errors.Join(err, fmt.Errorf("options_manager: resolve option fill commit: %w", resolveErr))
 		}

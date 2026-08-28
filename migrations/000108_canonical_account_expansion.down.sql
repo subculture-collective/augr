@@ -61,7 +61,7 @@ BEGIN
        OR EXISTS(SELECT 1 FROM agent_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM agent_events WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trade_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM orders WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR copy_origin_rebalance_run_id IS NOT NULL OR allocation_opportunity_id IS NOT NULL OR spread_max_risk IS NOT NULL OR spread_max_reward IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM orders WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR copy_origin_rebalance_run_id IS NOT NULL OR copy_intent_id IS NOT NULL OR copy_execution_claim_id IS NOT NULL OR allocation_opportunity_id IS NOT NULL OR spread_max_risk IS NOT NULL OR spread_max_reward IS NOT NULL)
        OR EXISTS(SELECT 1 FROM positions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR close_reservation_order_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trades WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR allocation_claim_id IS NOT NULL OR allocation_claimed_at IS NOT NULL OR allocation_claim_expires_at IS NOT NULL)
@@ -278,6 +278,7 @@ DROP INDEX uq_replay_events_position;
 DROP INDEX uq_orders_client_order_id;
 DROP INDEX idx_financial_fill_idempotency_account;
 DROP INDEX idx_positions_close_reservation_order;
+DROP INDEX idx_orders_copy_intent;
 DROP INDEX idx_prediction_settlement_idempotency_account;
 DROP INDEX idx_copy_subscriptions_account_status;
 DROP INDEX idx_copy_trade_intents_account_created;
@@ -308,7 +309,7 @@ ALTER TABLE allocation_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN
 ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trades DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE positions DROP COLUMN close_reservation_order_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE orders DROP COLUMN spread_max_reward,DROP COLUMN spread_max_risk,DROP COLUMN client_order_id,DROP COLUMN allocation_opportunity_id,DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE orders DROP CONSTRAINT orders_copy_execution_claim_pair,DROP COLUMN spread_max_reward,DROP COLUMN spread_max_risk,DROP COLUMN client_order_id,DROP COLUMN allocation_opportunity_id,DROP COLUMN copy_execution_claim_id,DROP COLUMN copy_intent_id,DROP COLUMN copy_origin_rebalance_run_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trade_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE agent_events DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE agent_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

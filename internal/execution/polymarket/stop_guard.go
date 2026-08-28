@@ -680,7 +680,9 @@ func (g *StopGuard) persistRecoveredExitFillLocked(ctx context.Context, entry *g
 	_, err := g.financialLifecycle.ApplyOrderFill(ctx, input)
 	if err != nil {
 		if resolver, ok := g.financialLifecycle.(repository.OrderFillCommitResolver); ok {
-			_, committed, resolveErr := resolver.ResolveOrderFillCommit(ctx, input)
+			resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_, committed, resolveErr := resolver.ResolveOrderFillCommit(resolveCtx, input)
+			cancel()
 			if resolveErr != nil || !committed {
 				return false
 			}

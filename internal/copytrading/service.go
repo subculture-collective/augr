@@ -339,9 +339,21 @@ func (s *Service) previewLocked(ctx context.Context, subscriptionID uuid.UUID) (
 		if !ok {
 			return nil, fmt.Errorf("copy trading: execution-scoped position repository is required")
 		}
-		positions, err = scoped.GetByExecutionScope(ctx, subscription.AccountID, subscription.Environment, subscription.OriginType, subscription.OriginID.String(), repository.PositionFilter{}, 1000, 0)
-		if err != nil {
-			return nil, err
+		const pageSize = 250
+		for offset := 0; ; offset += pageSize {
+			page, pageErr := scoped.GetByExecutionScope(ctx, subscription.AccountID, subscription.Environment, subscription.OriginType, subscription.OriginID.String(), repository.PositionFilter{}, pageSize, offset)
+			if pageErr != nil {
+				return nil, pageErr
+			}
+			for i := range page {
+				if page[i].AccountID != subscription.AccountID || page[i].Environment != subscription.Environment || page[i].OriginType != subscription.OriginType || page[i].OriginID != subscription.OriginID.String() {
+					return nil, fmt.Errorf("copy trading: preview position %s belongs to a foreign execution scope", page[i].ID)
+				}
+			}
+			positions = append(positions, page...)
+			if len(page) < pageSize {
+				break
+			}
 		}
 	}
 	preview := Build13FTarget(TargetInput{Subscription: *subscription, Observation: *observation, Snapshot: *snapshot, Mappings: mappings, Prices: prices, Positions: positions, DecisionAt: decisionAt})

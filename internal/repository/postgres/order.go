@@ -131,14 +131,14 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 		)
 		INSERT INTO orders (
 			id, strategy_id, pipeline_run_id, account_id, environment, origin_type, origin_id,
-			pipeline_run_trade_date, copy_origin_rebalance_run_id, external_id, ticker, market_type, side, order_type,
+			pipeline_run_trade_date, copy_origin_rebalance_run_id, copy_intent_id, copy_execution_claim_id, external_id, ticker, market_type, side, order_type,
 			quantity, limit_price, stop_price, filled_quantity, filled_avg_price,
 			status, broker, submitted_at, filled_at, asset_class, underlying_ticker,
 			option_type, strike, expiry, contract_multiplier, position_intent, leg_group_id,
 			prediction_side, polymarket_intent, allocation_opportunity_id, client_order_id,
 			spread_max_risk, spread_max_reward
 		)
-		 SELECT $40, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35, $38, $39 FROM authorized,copy_authorized
+		 SELECT $40, $1, $2, $3, $4, $5, $6, $7, $8, $36, $37, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35, $38, $39 FROM authorized,copy_authorized
 		 ON CONFLICT (id) DO NOTHING
 		 RETURNING id, created_at`,
 		order.StrategyID,

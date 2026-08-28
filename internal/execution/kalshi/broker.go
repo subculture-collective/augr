@@ -107,6 +107,9 @@ func richOrderStatus(resp OrderResponse) (execution.BrokerOrderStatus, error) {
 	if err != nil {
 		return execution.BrokerOrderStatus{}, err
 	}
+	if resp.FilledCount > 0 && (status == domain.OrderStatusPending || status == domain.OrderStatusSubmitted) {
+		status = domain.OrderStatusPartial
+	}
 	return execution.BrokerOrderStatus{Status: status, FilledQuantity: float64(resp.FilledCount), FilledAvgPrice: resp.AveragePrice, FilledAt: resp.FilledAt}, nil
 }
 

@@ -282,17 +282,22 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 		return fmt.Errorf("prediction settlement: load paper order %s trades: %w", decision.PaperOrderID.String(), err)
 	}
 	var opening *domain.Trade
+	openingQuantity := 0.0
 	for i := range trades {
 		if trades[i].OrderID != nil && *trades[i].OrderID == *decision.PaperOrderID {
-			opening = &trades[i]
-			break
+			if trades[i].PositionID == nil || trades[i].AccountID != decision.AccountID || trades[i].Environment != decision.Environment || trades[i].OriginType != decision.OriginType || trades[i].OriginID != decision.OriginID || trades[i].Quantity <= 0 {
+				return fmt.Errorf("prediction settlement: opening trade ownership does not match decision %s", decision.ID)
+			}
+			if opening == nil {
+				opening = &trades[i]
+			} else if *opening.PositionID != *trades[i].PositionID {
+				return fmt.Errorf("prediction settlement: paper order %s fills multiple positions", decision.PaperOrderID.String())
+			}
+			openingQuantity += trades[i].Quantity
 		}
 	}
 	if opening == nil || opening.PositionID == nil {
 		return fmt.Errorf("prediction settlement: opening trade for paper order %s not found", decision.PaperOrderID.String())
-	}
-	if opening.AccountID != decision.AccountID || opening.Environment != decision.Environment || opening.OriginType != decision.OriginType || opening.OriginID != decision.OriginID || opening.Quantity <= 0 {
-		return fmt.Errorf("prediction settlement: opening trade ownership does not match decision %s", decision.ID)
 	}
 	position, err := s.positions.Get(ctx, *opening.PositionID)
 	if err != nil {
@@ -310,8 +315,8 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 	if !strings.EqualFold(strings.TrimSpace(position.Ticker), strings.TrimSpace(decision.InstrumentKey)+":"+held) {
 		return fmt.Errorf("prediction settlement: position %s does not match decision %s", position.ID, decision.ID)
 	}
-	if math.Abs(position.Quantity-opening.Quantity) > 1e-9 {
-		return fmt.Errorf("prediction settlement: position %s does not exactly match opening trade quantity", position.ID)
+	if position.Quantity-openingQuantity > 1e-9 {
+		return fmt.Errorf("prediction settlement: position %s exceeds total opening fill quantity", position.ID)
 	}
 	if mutate && position.ID == uuid.Nil {
 		return fmt.Errorf("prediction settlement: invalid position identifiers")
