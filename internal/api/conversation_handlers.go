@@ -26,15 +26,23 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 	if !ParseEnumParam(w, q, "agent_role", &filter.AgentRole) {
 		return
 	}
-	if v := q.Get("pipeline_run_id"); v != "" {
-		if id, err := uuid.Parse(v); err == nil {
-			tradeDate, dateErr := time.Parse("2006-01-02", q.Get("pipeline_run_trade_date"))
-			if dateErr != nil {
-				respondError(w, http.StatusBadRequest, "pipeline_run_trade_date is required", ErrCodeBadRequest)
-				return
-			}
-			filter.PipelineRunRef = &domain.PipelineRunRef{ID: id, TradeDate: tradeDate}
+	runIDValue, tradeDateValue := q.Get("pipeline_run_id"), q.Get("pipeline_run_trade_date")
+	if (runIDValue == "") != (tradeDateValue == "") {
+		respondError(w, http.StatusBadRequest, "pipeline_run_id and pipeline_run_trade_date must be provided together", ErrCodeBadRequest)
+		return
+	}
+	if runIDValue != "" {
+		id, err := uuid.Parse(runIDValue)
+		if err != nil || id == uuid.Nil {
+			respondError(w, http.StatusBadRequest, "pipeline_run_id must be a valid UUID", ErrCodeBadRequest)
+			return
 		}
+		tradeDate, err := time.Parse("2006-01-02", tradeDateValue)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "pipeline_run_trade_date must be a valid date", ErrCodeBadRequest)
+			return
+		}
+		filter.PipelineRunRef = &domain.PipelineRunRef{ID: id, TradeDate: tradeDate}
 	}
 
 	conversations, err := s.conversations.ListConversations(r.Context(), filter, limit, offset)
@@ -124,6 +132,10 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 	}
 	if body.PipelineRunID == uuid.Nil {
 		respondError(w, http.StatusBadRequest, "pipeline_run_id is required", ErrCodeValidation)
+		return
+	}
+	if body.PipelineRunTradeDate.IsZero() {
+		respondError(w, http.StatusBadRequest, "pipeline_run_trade_date is required", ErrCodeValidation)
 		return
 	}
 	if body.AgentRole == "" {

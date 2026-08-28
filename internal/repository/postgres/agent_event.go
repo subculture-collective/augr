@@ -32,6 +32,9 @@ func NewAgentEventRepo(pool *pgxpool.Pool, accountID uuid.UUID) *AgentEventRepo 
 // Create inserts a new agent event and populates the generated ID and CreatedAt
 // on the provided struct.
 func (r *AgentEventRepo) Create(ctx context.Context, event *domain.AgentEvent) error {
+	if err := validateOptionalPipelineRunRef(event.PipelineRunID, event.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create agent event: %w", err)
+	}
 	if event.AccountID != uuid.Nil && event.AccountID != r.accountID {
 		return fmt.Errorf("postgres: create agent event: account mismatch")
 	}

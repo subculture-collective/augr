@@ -32,6 +32,9 @@ func NewOrderRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OrderRepo {
 // Create inserts a new order and populates the generated ID and CreatedAt on
 // the provided struct.
 func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	if err := validateOptionalPipelineRunRef(order.PipelineRunID, order.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create order: %w", err)
+	}
 	if order.AccountID != uuid.Nil && order.AccountID != r.accountID {
 		return fmt.Errorf("postgres: create order: account mismatch")
 	}
@@ -118,6 +121,9 @@ func (r *OrderRepo) List(ctx context.Context, filter repository.OrderFilter, lim
 // Update persists changes to an existing order. It returns ErrNotFound when no
 // row matches the order ID.
 func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
+	if err := validateOptionalPipelineRunRef(order.PipelineRunID, order.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: update order: %w", err)
+	}
 	marketType := order.MarketType.Normalize()
 	if marketType == "" {
 		marketType = domain.MarketTypeStock

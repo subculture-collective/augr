@@ -43,6 +43,9 @@ const tradeDecisionSelectSQL = `SELECT id, account_id, environment, origin_type,
 
 // Create inserts a new trade decision and populates the generated ID and timestamps.
 func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.TradeDecision) error {
+	if err := validateOptionalPipelineRunRef(decision.PipelineRunID, decision.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create trade decision: %w", err)
+	}
 	if decision.AccountID != uuid.Nil && decision.AccountID != r.accountID {
 		return fmt.Errorf("postgres: create trade decision: account mismatch")
 	}

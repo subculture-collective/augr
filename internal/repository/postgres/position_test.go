@@ -32,7 +32,7 @@ func TestBuildPositionListQuery_NoFilters(t *testing.T) {
 	assertContains(t, query, "FROM positions")
 	assertContains(t, query, "ORDER BY p.opened_at DESC, p.id DESC")
 	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertNotContains(t, query, " WHERE p.closed_at")
 }
 
 func TestPositionReloadGetsMarketTypeFromOriginatingOrder(t *testing.T) {
@@ -285,6 +285,30 @@ func TestPositionRepoIntegration_UpdateNotFound(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestPositionRepoIntegration_UpdatePreservesImmutableStrategy(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPositionIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
+	originalStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
+	otherStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeCrypto)
+	position := &domain.Position{StrategyID: &originalStrategy, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100}
+	if err := repo.Create(ctx, position); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	position.StrategyID = &otherStrategy
+	if err := repo.Update(ctx, position); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Update() error = %v, want ErrNotFound", err)
+	}
+	got, err := repo.Get(ctx, position.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.StrategyID == nil || *got.StrategyID != originalStrategy {
+		t.Fatalf("stored strategy = %v, want %s", got.StrategyID, originalStrategy)
 	}
 }
 
@@ -569,10 +593,13 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		)`,
 		`CREATE TABLE strategies (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064',
 			market_type market_type NOT NULL
 		)`,
 		`CREATE TABLE orders (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064',
+			market_type market_type NOT NULL DEFAULT 'stock',
 			broker TEXT,
 			external_id TEXT,
 			ticker TEXT NOT NULL,
@@ -584,6 +611,10 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		)`,
 		`CREATE TABLE positions (
 			id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id      UUID,
+			environment     TEXT,
+			origin_type     TEXT,
+			origin_id       TEXT,
 			strategy_id     UUID           REFERENCES strategies (id),
 			ticker          TEXT           NOT NULL,
 			side            position_side  NOT NULL,
@@ -610,6 +641,7 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		)`,
 		`CREATE TABLE trades (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064',
 			order_id UUID REFERENCES orders (id),
 			position_id UUID REFERENCES positions (id),
 			ticker TEXT NOT NULL,
@@ -685,6 +717,41 @@ func TestPositionRepoIntegration_ListOpenAlpacaOwned(t *testing.T) {
 	}
 	if len(open) != 1 || open[0].Ticker != "AAPL" {
 		t.Fatalf("ListOpenAlpacaOwned() = %#v, want only proven alpaca position", open)
+	}
+}
+
+func TestPositionRepoIntegration_ForeignAndLegacyTradesCannotClassifyCanonicalPosition(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPositionIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
+
+	for _, accountID := range []any{uuid.New(), nil} {
+		position := &domain.Position{Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100}
+		if err := repo.Create(ctx, position); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		var orderID uuid.UUID
+		if err := pool.QueryRow(ctx, `INSERT INTO orders (account_id, broker, ticker, market_type, side, quantity, status) VALUES ($1,'alpaca','AAPL','crypto','buy',1,'filled') RETURNING id`, accountID).Scan(&orderID); err != nil {
+			t.Fatalf("insert order: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO trades (account_id, order_id, position_id, ticker, side, quantity, price) VALUES ($1,$2,$3,'AAPL','buy',1,100)`, accountID, orderID, position.ID); err != nil {
+			t.Fatalf("insert trade: %v", err)
+		}
+		got, err := repo.Get(ctx, position.ID)
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if got.MarketType != "" {
+			t.Fatalf("MarketType = %q, want unclassified", got.MarketType)
+		}
+	}
+	owned, err := repo.ListOpenAlpacaOwned(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("ListOpenAlpacaOwned() error = %v", err)
+	}
+	if len(owned) != 0 {
+		t.Fatalf("ListOpenAlpacaOwned() = %#v, want no foreign/legacy evidence", owned)
 	}
 }
 

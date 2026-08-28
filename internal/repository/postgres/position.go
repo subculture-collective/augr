@@ -92,7 +92,7 @@ func (r *PositionRepo) CreateAlpacaOwned(ctx context.Context, position *domain.P
 
 	row := tx.QueryRow(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.ticker = $1 AND p.side = $2 AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
-		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND o.broker = 'alpaca')
+		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND t.account_id = p.account_id AND o.account_id = p.account_id AND o.broker = 'alpaca')
 	) ORDER BY p.opened_at ASC, p.id ASC LIMIT 1`, position.Ticker, position.Side, r.accountID)
 	if existing, err := scanPosition(row); err == nil {
 		*position = *existing
@@ -153,8 +153,7 @@ func (r *PositionRepo) List(ctx context.Context, filter repository.PositionFilte
 func (r *PositionRepo) Update(ctx context.Context, position *domain.Position) error {
 	row := r.pool.QueryRow(ctx,
 		`UPDATE positions
-		 SET strategy_id = $1,
-		     ticker = $2,
+		 SET ticker = $2,
 		     side = $3,
 		     quantity = $4,
 		     avg_entry = $5,
@@ -167,7 +166,7 @@ func (r *PositionRepo) Update(ctx context.Context, position *domain.Position) er
 		     , asset_class = $12, underlying_ticker = $13, option_type = $14
 		     , strike = $15, expiry = $16, contract_multiplier = $17, leg_group_id = $18
 		     , delta = $19, gamma = $20, theta = $21, vega = $22
-		 WHERE id = $23 AND account_id = $24
+		 WHERE id = $23 AND account_id = $24 AND strategy_id IS NOT DISTINCT FROM $1
 		 RETURNING id`,
 		position.StrategyID,
 		position.Ticker,
@@ -223,7 +222,7 @@ func (r *PositionRepo) GetOpen(ctx context.Context, filter repository.PositionFi
 func (r *PositionRepo) ListOpenAlpacaOwned(ctx context.Context, limit, offset int) ([]domain.Position, error) {
 	rows, err := r.pool.Query(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
-		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND o.broker = 'alpaca')
+		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND t.account_id = p.account_id AND o.account_id = p.account_id AND o.broker = 'alpaca')
 	) ORDER BY p.opened_at ASC, p.id ASC LIMIT $1 OFFSET $2`, limit, offset, r.accountID)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list open alpaca-owned positions: %w", err)
@@ -271,7 +270,7 @@ func (r *PositionRepo) GetByAccount(ctx context.Context, accountID uuid.UUID, en
 	return r.list(ctx, query, args, "get positions by account")
 }
 
-const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id AND t.position_id=p.id ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,
+const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id WHERE t.position_id=p.id AND t.account_id=p.account_id AND o.account_id=p.account_id ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,
 		p.quantity::double precision, p.avg_entry::double precision,
 		p.current_price::double precision, p.unrealized_pnl::double precision,
 		p.realized_pnl::double precision, p.stop_loss::double precision,
@@ -281,7 +280,7 @@ const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environme
 		p.delta::double precision, p.gamma::double precision, p.theta::double precision,
 		p.vega::double precision
 	 FROM positions p
-	 LEFT JOIN strategies s ON s.id = p.strategy_id`
+	 LEFT JOIN strategies s ON s.id = p.strategy_id AND s.account_id = p.account_id`
 
 func (r *PositionRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.Position, error) {
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -460,7 +459,7 @@ func (r *PositionRepo) CountOpenByMarket(ctx context.Context, filter repository.
 		conditions = append(conditions, "p.opened_at <= "+nextArg(*filter.OpenedBefore))
 	}
 	query := `SELECT COALESCE(s.market_type::text, '') AS market_type, COUNT(*)
-		FROM positions p LEFT JOIN strategies s ON s.id = p.strategy_id
+		FROM positions p LEFT JOIN strategies s ON s.id = p.strategy_id AND s.account_id = p.account_id
 		WHERE ` + strings.Join(conditions, " AND ") + ` GROUP BY COALESCE(s.market_type::text, '') ORDER BY COALESCE(s.market_type::text, '')`
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {

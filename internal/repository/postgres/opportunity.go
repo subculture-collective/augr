@@ -115,6 +115,9 @@ func (r *OpportunityRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status
 }
 
 func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportunity, upsert bool) error {
+	if err := validateOptionalPipelineRunRef(opportunity.PipelineRunID, opportunity.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: save opportunity: %w", err)
+	}
 	if opportunity.AccountID != uuid.Nil && opportunity.AccountID != r.accountID {
 		return fmt.Errorf("postgres: save opportunity: account mismatch")
 	}

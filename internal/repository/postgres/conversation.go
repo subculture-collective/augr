@@ -30,6 +30,9 @@ func NewConversationRepo(pool *pgxpool.Pool, accountID uuid.UUID) *ConversationR
 // CreateConversation inserts a new conversation and populates generated fields on
 // the provided struct.
 func (r *ConversationRepo) CreateConversation(ctx context.Context, conv *domain.Conversation) error {
+	if err := validatePipelineRunRef(conv.PipelineRunID, conv.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create conversation: %w", err)
+	}
 	if conv.AccountID != uuid.Nil && conv.AccountID != r.accountID {
 		return fmt.Errorf("postgres: create conversation: account mismatch")
 	}

@@ -3419,6 +3419,7 @@ func TestGetConversationMessages_SyntheticDecisionUsesConversationAccount(t *tes
 func TestCreateConversationEndpoint(t *testing.T) {
 	t.Parallel()
 	deps := testDeps()
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
 
 	// Seed a pipeline run so the handler can verify it exists.
 	runID := uuid.New()
@@ -3427,6 +3428,7 @@ func TestCreateConversationEndpoint(t *testing.T) {
 			ID:         runID,
 			StrategyID: stratA.ID,
 			Ticker:     "AAPL",
+			TradeDate:  tradeDate,
 			Status:     domain.PipelineStatusCompleted,
 		}},
 	}
@@ -3434,8 +3436,9 @@ func TestCreateConversationEndpoint(t *testing.T) {
 	srv := newTestServerWithDeps(t, deps)
 
 	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations", map[string]any{
-		"pipeline_run_id": runID.String(),
-		"agent_role":      "bull_researcher",
+		"pipeline_run_id":         runID.String(),
+		"pipeline_run_trade_date": tradeDate.Format(time.RFC3339),
+		"agent_role":              "bull_researcher",
 	})
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusCreated, rr.Body.String())
@@ -3457,10 +3460,41 @@ func TestCreateConversationUnknownPipelineRunReturnsValidationError(t *testing.T
 	srv := newTestServerWithDeps(t, deps)
 
 	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations", map[string]any{
-		"pipeline_run_id": uuid.New().String(),
-		"agent_role":      "bull_researcher",
+		"pipeline_run_id":         uuid.New().String(),
+		"pipeline_run_trade_date": "2026-08-27T00:00:00Z",
+		"agent_role":              "bull_researcher",
 	})
 	assertValidationError(t, rr, "pipeline_run_id does not reference an existing run")
+}
+
+func TestListConversationsRejectsInvalidOrUnpairedPipelineRunFilter(t *testing.T) {
+	t.Parallel()
+	deps := testDeps()
+	deps.Conversations = newStubConversationRepo()
+	srv := newTestServerWithDeps(t, deps)
+	base := "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations"
+	for _, query := range []string{
+		"?pipeline_run_id=not-a-uuid&pipeline_run_trade_date=2026-08-27",
+		"?pipeline_run_id=" + uuid.NewString(),
+		"?pipeline_run_trade_date=2026-08-27",
+	} {
+		rr := doRequest(t, srv, http.MethodGet, base+query, nil)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("GET %s status = %d, want 400; body: %s", query, rr.Code, rr.Body.String())
+		}
+	}
+}
+
+func TestCreateConversationRequiresPipelineRunTradeDate(t *testing.T) {
+	t.Parallel()
+	deps := testDeps()
+	deps.Conversations = newStubConversationRepo()
+	srv := newTestServerWithDeps(t, deps)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/conversations", map[string]any{
+		"pipeline_run_id": uuid.NewString(),
+		"agent_role":      "bull_researcher",
+	})
+	assertValidationError(t, rr, "pipeline_run_trade_date is required")
 }
 
 // ---------------------------------------------------------------------------

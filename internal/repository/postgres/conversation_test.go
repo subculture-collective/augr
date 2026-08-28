@@ -57,9 +57,10 @@ func TestConversationRepoIntegration_CreateAndGetConversation(t *testing.T) {
 
 	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := &domain.Conversation{
-		PipelineRunID: uuid.New(),
-		AgentRole:     domain.AgentRoleTrader,
-		Title:         "Trader thread",
+		PipelineRunID:        uuid.New(),
+		PipelineRunTradeDate: canonicalRepositoryTestTradeDate,
+		AgentRole:            domain.AgentRoleTrader,
+		Title:                "Trader thread",
 	}
 
 	if err := repo.CreateConversation(ctx, conv); err != nil {
@@ -206,6 +207,27 @@ func TestConversationRepoIntegration_ListConversationsFiltersAndPagination(t *te
 	}
 }
 
+func TestConversationRepoIntegration_ListExcludesForeignAndLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newConversationIntegrationPool(t, ctx)
+	defer cleanup()
+
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
+	canonical := createTestConversation(t, ctx, repo, uuid.New(), domain.AgentRoleTrader, "canonical")
+	for _, accountID := range []any{uuid.New(), nil} {
+		if _, err := pool.Exec(ctx, `INSERT INTO conversations (account_id, environment, pipeline_run_id, pipeline_run_trade_date, agent_role, title) VALUES ($1,$2,$3,$4,$5,$6)`, accountID, domain.AccountEnvironmentPaperScored, uuid.New(), canonicalRepositoryTestTradeDate, domain.AgentRoleTrader, "not canonical"); err != nil {
+			t.Fatalf("insert non-canonical conversation: %v", err)
+		}
+	}
+	got, err := repo.ListConversations(ctx, repository.ConversationFilter{}, 10, 0)
+	if err != nil {
+		t.Fatalf("ListConversations() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != canonical.ID {
+		t.Fatalf("ListConversations() = %#v, want canonical row only", got)
+	}
+}
+
 func TestConversationRepoIntegration_MessagePagination(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
@@ -261,10 +283,11 @@ func createTestConversationWithID(t *testing.T, ctx context.Context, repo *Conve
 	t.Helper()
 
 	conv := &domain.Conversation{
-		ID:            id,
-		PipelineRunID: runID,
-		AgentRole:     role,
-		Title:         title,
+		ID:                   id,
+		PipelineRunID:        runID,
+		PipelineRunTradeDate: canonicalRepositoryTestTradeDate,
+		AgentRole:            role,
+		Title:                title,
 	}
 	if err := repo.CreateConversation(ctx, conv); err != nil {
 		t.Fatalf("CreateConversation() error = %v", err)
@@ -333,7 +356,10 @@ func newConversationIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 	ddl := []string{
 		`CREATE TABLE conversations (
 			id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id      UUID,
+			environment     TEXT,
 			pipeline_run_id UUID        NOT NULL,
+			pipeline_run_trade_date DATE,
 			agent_role      TEXT        NOT NULL,
 			title           TEXT,
 			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -341,6 +367,7 @@ func newConversationIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 		)`,
 		`CREATE TABLE conversation_messages (
 			id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id      UUID,
 			conversation_id UUID        NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
 			role            TEXT        NOT NULL CHECK (role IN ('user', 'assistant')),
 			content         TEXT        NOT NULL,

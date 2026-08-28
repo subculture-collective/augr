@@ -31,6 +31,9 @@ func NewMemoryRepo(pool *pgxpool.Pool, accountID uuid.UUID) *MemoryRepo {
 // CreatedAt on the provided struct. The situation_tsv column is populated
 // automatically by the database trigger.
 func (r *MemoryRepo) Create(ctx context.Context, memory *domain.AgentMemory) error {
+	if err := validateOptionalPipelineRunRef(memory.PipelineRunID, memory.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create agent memory: %w", err)
+	}
 	if memory.AccountID != uuid.Nil && memory.AccountID != r.accountID {
 		return fmt.Errorf("postgres: create agent memory: account mismatch")
 	}

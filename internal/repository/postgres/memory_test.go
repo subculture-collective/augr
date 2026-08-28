@@ -183,11 +183,12 @@ func TestMemoryRepoIntegration_CreateAndSearch(t *testing.T) {
 
 	runID := uuid.New()
 	m1 := &domain.AgentMemory{
-		AgentRole:      domain.AgentRoleMarketAnalyst,
-		Situation:      "AAPL showing a strong bullish reversal with increasing volume",
-		Recommendation: "Consider buying AAPL",
-		Outcome:        "Price increased 5%",
-		PipelineRunID:  &runID,
+		AgentRole:            domain.AgentRoleMarketAnalyst,
+		Situation:            "AAPL showing a strong bullish reversal with increasing volume",
+		Recommendation:       "Consider buying AAPL",
+		Outcome:              "Price increased 5%",
+		PipelineRunID:        &runID,
+		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 	}
 	m2 := &domain.AgentMemory{
 		AgentRole:      domain.AgentRoleMarketAnalyst,
@@ -560,6 +561,30 @@ func TestMemoryRepoIntegration_SearchWithDateFilter(t *testing.T) {
 	}
 }
 
+func TestMemoryRepoIntegration_SearchExcludesForeignAndLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMemoryIntegrationPool(t, ctx)
+	defer cleanup()
+
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
+	canonical := &domain.AgentMemory{AgentRole: domain.AgentRoleTrader, Situation: "canonical memory", Recommendation: "hold"}
+	if err := repo.Create(ctx, canonical); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for _, accountID := range []any{uuid.New(), nil} {
+		if _, err := pool.Exec(ctx, `INSERT INTO agent_memories (account_id, environment, agent_role, situation, recommendation) VALUES ($1,$2,$3,$4,$5)`, accountID, domain.AccountEnvironmentPaperScored, domain.AgentRoleTrader, "noncanonical memory", "ignore"); err != nil {
+			t.Fatalf("insert non-canonical memory: %v", err)
+		}
+	}
+	got, err := repo.Search(ctx, "", repository.MemorySearchFilter{}, 10, 0)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != canonical.ID {
+		t.Fatalf("Search() = %#v, want canonical row only", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration test helper
 // ---------------------------------------------------------------------------
@@ -613,12 +638,15 @@ func newMemoryIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool,
 	ddl := []string{
 		`CREATE TABLE agent_memories (
 			id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id       UUID,
+			environment      TEXT,
 			agent_role       TEXT        NOT NULL,
 			situation        TEXT        NOT NULL,
 			situation_tsv    TSVECTOR,
 			recommendation   TEXT        NOT NULL DEFAULT '',
 			outcome          TEXT,
 			pipeline_run_id  UUID,
+			pipeline_run_trade_date DATE,
 			relevance_score  NUMERIC(5, 4),
 			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
