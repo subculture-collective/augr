@@ -39,7 +39,7 @@ func TestPortfolioValuationUsesOneAccountScopedSnapshot(t *testing.T) {
 		ReconciliationAvailable: true, ReconciliationPassed: true,
 	}}
 	server := &Server{projections: reader, projectionAccountID: &accountID, logger: slog.Default()}
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/portfolio/summary", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/summary", nil)
 	recorder := httptest.NewRecorder()
 	server.handlePortfolioSummary(recorder, request)
 
@@ -118,7 +118,7 @@ func TestPortfolioSummaryFailsClosedWithoutServerAccountBinding(t *testing.T) {
 	reader := &stubProjectionReader{}
 	server := &Server{projections: reader, logger: slog.Default()}
 	recorder := httptest.NewRecorder()
-	server.handlePortfolioSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/portfolio/summary", nil))
+	server.handlePortfolioSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/summary", nil))
 	result := decodeJSON[PortfolioSummary](t, recorder)
 	if result.AccountID != nil || result.TotalPnL != nil || result.OpenPositions != nil || result.MarkCoverageComplete != nil || len(reader.accounts) != 0 || len(result.UnavailableReasons) != 1 || result.UnavailableReasons[0] != "server_account_binding_unavailable" {
 		t.Fatalf("result = %+v reads=%+v", result, reader.accounts)
@@ -129,7 +129,7 @@ func TestPortfolioSummaryRejectsCallerControlledAccount(t *testing.T) {
 	accountID := uuid.New()
 	server := &Server{projectionAccountID: &accountID, logger: slog.Default()}
 	recorder := httptest.NewRecorder()
-	server.handlePortfolioSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/portfolio/summary?account_id="+uuid.NewString(), nil))
+	server.handlePortfolioSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/summary?account_id="+uuid.NewString(), nil))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
 	}

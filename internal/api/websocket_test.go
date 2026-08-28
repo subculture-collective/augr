@@ -20,7 +20,8 @@ import (
 func TestHubRegisterUnregister(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub(slog.Default())
+	accountID := uuid.New()
+	hub := NewHub(slog.Default(), accountID)
 	go hub.Run()
 	defer hub.Stop()
 
@@ -44,7 +45,8 @@ func TestHubRegisterUnregister(t *testing.T) {
 func TestHubBroadcastToSubscribers(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub(slog.Default())
+	accountID := uuid.New()
+	hub := NewHub(slog.Default(), accountID)
 	go hub.Run()
 	defer hub.Stop()
 
@@ -53,8 +55,9 @@ func TestHubBroadcastToSubscribers(t *testing.T) {
 
 	// Client subscribed to a specific strategy.
 	cStrategy := &Client{
-		hub:  hub,
-		send: make(chan []byte, sendBufferSize),
+		hub:       hub,
+		send:      make(chan []byte, sendBufferSize),
+		accountID: accountID,
 		subscriptions: Subscriptions{
 			StrategyIDs: map[uuid.UUID]bool{stratID: true},
 			RunIDs:      make(map[uuid.UUID]bool),
@@ -63,8 +66,9 @@ func TestHubBroadcastToSubscribers(t *testing.T) {
 
 	// Client subscribed to a specific run.
 	cRun := &Client{
-		hub:  hub,
-		send: make(chan []byte, sendBufferSize),
+		hub:       hub,
+		send:      make(chan []byte, sendBufferSize),
+		accountID: accountID,
 		subscriptions: Subscriptions{
 			StrategyIDs: make(map[uuid.UUID]bool),
 			RunIDs:      map[uuid.UUID]bool{runID: true},
@@ -73,8 +77,9 @@ func TestHubBroadcastToSubscribers(t *testing.T) {
 
 	// Client subscribed to all events.
 	cAll := &Client{
-		hub:  hub,
-		send: make(chan []byte, sendBufferSize),
+		hub:       hub,
+		send:      make(chan []byte, sendBufferSize),
+		accountID: accountID,
 		subscriptions: Subscriptions{
 			StrategyIDs: make(map[uuid.UUID]bool),
 			RunIDs:      make(map[uuid.UUID]bool),
@@ -84,8 +89,9 @@ func TestHubBroadcastToSubscribers(t *testing.T) {
 
 	// Client with no matching subscriptions.
 	cNone := &Client{
-		hub:  hub,
-		send: make(chan []byte, sendBufferSize),
+		hub:       hub,
+		send:      make(chan []byte, sendBufferSize),
+		accountID: accountID,
 		subscriptions: Subscriptions{
 			StrategyIDs: map[uuid.UUID]bool{uuid.New(): true},
 			RunIDs:      make(map[uuid.UUID]bool),
@@ -101,6 +107,8 @@ func TestHubBroadcastToSubscribers(t *testing.T) {
 	// Broadcast a message matching stratID.
 	hub.Broadcast(WSMessage{
 		Type:       EventPipelineStart,
+		AccountID:  accountID,
+		Scope:      "account",
 		StrategyID: stratID,
 		RunID:      runID,
 		Timestamp:  time.Now(),
@@ -116,7 +124,8 @@ func TestHubBroadcastToSubscribers(t *testing.T) {
 func TestHubBroadcastFiltering(t *testing.T) {
 	t.Parallel()
 
-	hub := NewHub(slog.Default())
+	accountID := uuid.New()
+	hub := NewHub(slog.Default(), accountID)
 	go hub.Run()
 	defer hub.Stop()
 
@@ -124,8 +133,9 @@ func TestHubBroadcastFiltering(t *testing.T) {
 	otherStratID := uuid.New()
 
 	c := &Client{
-		hub:  hub,
-		send: make(chan []byte, sendBufferSize),
+		hub:       hub,
+		send:      make(chan []byte, sendBufferSize),
+		accountID: accountID,
 		subscriptions: Subscriptions{
 			StrategyIDs: map[uuid.UUID]bool{stratID: true},
 			RunIDs:      make(map[uuid.UUID]bool),
@@ -137,6 +147,8 @@ func TestHubBroadcastFiltering(t *testing.T) {
 	// Message for other strategy should not be received.
 	hub.Broadcast(WSMessage{
 		Type:       EventOrderSubmitted,
+		AccountID:  accountID,
+		Scope:      "account",
 		StrategyID: otherStratID,
 		Timestamp:  time.Now(),
 	})
@@ -145,10 +157,32 @@ func TestHubBroadcastFiltering(t *testing.T) {
 	// Message for subscribed strategy should be received.
 	hub.Broadcast(WSMessage{
 		Type:       EventOrderFilled,
+		AccountID:  accountID,
+		Scope:      "account",
 		StrategyID: stratID,
 		Timestamp:  time.Now(),
 	})
 	assertReceive(t, c.send, "c (subscribed strategy)")
+}
+
+func TestHubIsolatesAccountEvents(t *testing.T) {
+	t.Parallel()
+	accountID, foreignAccountID := uuid.New(), uuid.New()
+	hub := NewHub(slog.Default(), accountID)
+	go hub.Run()
+	defer hub.Stop()
+	newClient := func(id uuid.UUID) *Client {
+		return &Client{hub: hub, accountID: id, send: make(chan []byte, sendBufferSize), subscriptions: Subscriptions{
+			StrategyIDs: map[uuid.UUID]bool{}, RunIDs: map[uuid.UUID]bool{}, AllEvents: true,
+		}}
+	}
+	local, foreign := newClient(accountID), newClient(foreignAccountID)
+	hub.register <- local
+	hub.register <- foreign
+	waitFor(t, func() bool { return hub.ClientCount() == 2 })
+	hub.Broadcast(WSMessage{Type: EventSignal, Scope: "account", AccountID: accountID, Timestamp: time.Now()})
+	assertReceive(t, local.send, "local account")
+	assertNoReceive(t, foreign.send, "foreign account")
 }
 
 func TestHubStop(t *testing.T) {
@@ -389,7 +423,7 @@ func wsTestToken(t *testing.T, srv *Server) string {
 func wsDialWithAuth(t *testing.T, srv *Server, baseURL string) (*websocket.Conn, *http.Response) {
 	t.Helper()
 	token := wsTestToken(t, srv)
-	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws?token=" + token
+	wsURL := "ws" + strings.TrimPrefix(baseURL, "http") + "/ws?token=" + token + "&account_id=" + testAPIAccountID.String()
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -418,6 +452,26 @@ func TestWebSocketRejectsUnauthenticated(t *testing.T) {
 	}
 	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestWebSocketRequiresConfiguredAccountBeforeUpgrade(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	go srv.hub.Run()
+	defer srv.hub.Stop()
+	ts := httptest.NewServer(srv.Router())
+	defer ts.Close()
+	token := wsTestToken(t, srv)
+	base := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws?token=" + token
+	for _, endpoint := range []string{base, base + "&account_id=" + uuid.NewString()} {
+		conn, resp, err := websocket.DefaultDialer.Dial(endpoint, nil)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if err == nil || resp == nil || resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("dial %s error=%v status=%v, want 404", endpoint, err, resp)
+		}
 	}
 }
 
@@ -462,6 +516,8 @@ func TestWebSocketEndpoint(t *testing.T) {
 	// Broadcast an event.
 	srv.hub.Broadcast(WSMessage{
 		Type:       EventPipelineStart,
+		AccountID:  testAPIAccountID,
+		Scope:      "account",
 		StrategyID: uuid.New(),
 		Timestamp:  time.Now(),
 		Data:       map[string]string{"ticker": "AAPL"},
@@ -518,6 +574,8 @@ func TestWebSocketSubscriptionFiltering(t *testing.T) {
 	// Broadcast an event for a different strategy (should not arrive).
 	srv.hub.Broadcast(WSMessage{
 		Type:       EventOrderSubmitted,
+		AccountID:  testAPIAccountID,
+		Scope:      "account",
 		StrategyID: uuid.New(),
 		Timestamp:  time.Now(),
 	})
@@ -525,6 +583,8 @@ func TestWebSocketSubscriptionFiltering(t *testing.T) {
 	// Broadcast an event for the subscribed strategy (should arrive).
 	srv.hub.Broadcast(WSMessage{
 		Type:       EventOrderFilled,
+		AccountID:  testAPIAccountID,
+		Scope:      "account",
 		StrategyID: targetStrategy,
 		Timestamp:  time.Now(),
 	})
@@ -591,6 +651,8 @@ func TestWSMessageTypes(t *testing.T) {
 	// Verify WSMessage serialization.
 	msg := WSMessage{
 		Type:       EventPipelineStart,
+		AccountID:  testAPIAccountID,
+		Scope:      "account",
 		StrategyID: uuid.New(),
 		RunID:      uuid.New(),
 		Timestamp:  time.Now(),

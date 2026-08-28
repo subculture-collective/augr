@@ -293,7 +293,7 @@ func TestPortfolioAllocatorDiagnosticsReturnsSummary(t *testing.T) {
 	deps.PaperEvaluation = &paperProfile
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/diagnostics", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/diagnostics", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -356,7 +356,7 @@ func TestPortfolioAllocatorDiagnosticsWarningsWhenReposMissing(t *testing.T) {
 	srv.strategies = nil
 	srv.positions = nil
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/diagnostics", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/diagnostics", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -508,7 +508,7 @@ func TestPortfolioAllocatorListAndSummaryRoutes(t *testing.T) {
 	deps.AllocationDecisionRepo = decRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/opportunities?status=queued", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/opportunities?status=queued", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -520,7 +520,7 @@ func TestPortfolioAllocatorListAndSummaryRoutes(t *testing.T) {
 		t.Fatalf("unexpected opportunity list metadata: total=%d filter=%+v", opps.Total, oppRepo.lastFilter)
 	}
 
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/decisions?mode=shadow", nil)
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/decisions?mode=shadow", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -529,7 +529,7 @@ func TestPortfolioAllocatorListAndSummaryRoutes(t *testing.T) {
 		t.Fatalf("decisions = %+v, filter=%+v", decisions.Data, decRepo.lastFilter)
 	}
 
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/summary", nil)
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/summary", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}

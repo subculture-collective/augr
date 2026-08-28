@@ -111,7 +111,7 @@ func TestCapitalLadderSchemaCompatibility(t *testing.T) {
 	for _, test := range []struct {
 		version int
 		wantErr bool
-	}{{version: 107, wantErr: true}, {version: 108}, {version: 109}, {version: 110, wantErr: true}} {
+	}{{version: 107, wantErr: true}, {version: 108, wantErr: true}, {version: 109}, {version: 110, wantErr: true}} {
 		err := validateCapitalLadderSchemaVersion(test.version)
 		if (err != nil) != test.wantErr {
 			t.Errorf("validateCapitalLadderSchemaVersion(%d) error=%v, wantErr=%t", test.version, err, test.wantErr)
@@ -120,6 +120,8 @@ func TestCapitalLadderSchemaCompatibility(t *testing.T) {
 }
 
 func TestCLICommands(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	accountBase := "/api/v1/accounts/" + accountID.String()
 	strategyID := uuid.New()
 	runID := uuid.New()
 	positionID := uuid.New()
@@ -173,6 +175,8 @@ func TestCLICommands(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/me/accounts":
+			_ = json.NewEncoder(w).Encode([]domain.Account{{ID: accountID, Name: "canonical"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/strategies":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.Strategy]{
 				Data:  []domain.Strategy{strategy},
@@ -189,19 +193,19 @@ func TestCLICommands(t *testing.T) {
 			created.UpdatedAt = now
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(created)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/strategies/"+strategyID.String()+"/run":
+		case r.Method == http.MethodPost && r.URL.Path == accountBase+"/strategies/"+strategyID.String()+"/run":
 			_ = json.NewEncoder(w).Encode(runResult)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/portfolio/summary":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/portfolio/summary":
 			_ = json.NewEncoder(w).Encode(portfolioSummary{
 				OpenPositions: 1,
 				UnrealizedPnL: 12.5,
 				RealizedPnL:   2.5,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/portfolio/positions/open":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/portfolio/positions/open":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.Position]{
 				Data: runResult.Positions,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/risk/status":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/risk/status":
 			_ = json.NewEncoder(w).Encode(risk.EngineStatus{
 				RiskStatus: domain.RiskStatusNormal,
 				CircuitBreaker: risk.CircuitBreakerStatus{
@@ -218,7 +222,7 @@ func TestCLICommands(t *testing.T) {
 				},
 				UpdatedAt: now,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/runs":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.PipelineRun]{
 				Data: []domain.PipelineRun{{
 					ID:         runID,

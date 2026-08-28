@@ -1,13 +1,12 @@
-package postgres_test
+package postgres
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-
-	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 )
 
 func TestReportArtifact_RoundTrip(t *testing.T) {
@@ -16,7 +15,7 @@ func TestReportArtifact_RoundTrip(t *testing.T) {
 	report := json.RawMessage(`{"decision":"GO"}`)
 	completed := now
 
-	a := &pgrepo.ReportArtifact{
+	a := &ReportArtifact{
 		ID:               uuid.New(),
 		StrategyID:       uuid.New(),
 		ReportType:       "paper_validation",
@@ -37,7 +36,7 @@ func TestReportArtifact_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var got pgrepo.ReportArtifact
+	var got ReportArtifact
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -59,7 +58,7 @@ func TestReportArtifact_RoundTrip(t *testing.T) {
 }
 
 func TestReportArtifactFilter_Defaults(t *testing.T) {
-	f := pgrepo.ReportArtifactFilter{}
+	f := ReportArtifactFilter{}
 	if f.StrategyID != nil {
 		t.Error("expected nil StrategyID")
 	}
@@ -68,5 +67,30 @@ func TestReportArtifactFilter_Defaults(t *testing.T) {
 	}
 	if f.Status != "" {
 		t.Error("expected empty Status")
+	}
+}
+
+func TestBuildReportArtifactListQueryRequiresExactCanonicalKey(t *testing.T) {
+	accountID, scopeID, strategyID := uuid.New(), uuid.New(), uuid.New()
+	query, args := buildReportArtifactListQuery(ReportArtifactFilter{
+		AccountID: &accountID, ScopeID: &scopeID, StrategyID: &strategyID, ReportType: "paper_validation",
+	}, 25, 5)
+	for _, fragment := range []string{
+		"LEFT JOIN paper_evaluation_scopes s ON s.id=a.scope_id",
+		"a.strategy_id = $1", "a.scope_id = $2", "s.account_id = $3", "a.report_type = $4",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("query missing %q: %s", fragment, query)
+		}
+	}
+	if len(args) != 6 || args[0] != strategyID || args[1] != scopeID || args[2] != accountID || args[3] != "paper_validation" {
+		t.Fatalf("args=%v", args)
+	}
+}
+
+func TestReportArtifactListRejectsIncompleteCanonicalKey(t *testing.T) {
+	t.Parallel()
+	if _, err := (&ReportArtifactRepo{}).List(t.Context(), uuid.Nil, uuid.New(), uuid.New(), "paper_validation", "", 10, 0); err == nil {
+		t.Fatal("expected incomplete canonical report key to fail before database access")
 	}
 }

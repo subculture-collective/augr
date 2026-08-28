@@ -371,7 +371,7 @@ func (s *rootState) newRunCommand() *cobra.Command {
 			}
 
 			var result api.StrategyRunResult
-			if err := client.post(cmd.Context(), "/api/v1/strategies/"+strategy.ID.String()+"/run", nil, nil, &result); err != nil {
+			if err := client.postAccount(cmd.Context(), "/strategies/"+strategy.ID.String()+"/run", nil, nil, &result); err != nil {
 				return err
 			}
 
@@ -478,12 +478,12 @@ func (s *rootState) newPortfolioCommand() *cobra.Command {
 			}
 
 			var summary portfolioSummary
-			if err := client.get(cmd.Context(), "/api/v1/portfolio/summary", nil, &summary); err != nil {
+			if err := client.getAccount(cmd.Context(), "/portfolio/summary", nil, &summary); err != nil {
 				return err
 			}
 
 			var positions listResponse[domain.Position]
-			if err := client.get(cmd.Context(), "/api/v1/portfolio/positions/open", nil, &positions); err != nil {
+			if err := client.getAccount(cmd.Context(), "/portfolio/positions/open", nil, &positions); err != nil {
 				return err
 			}
 
@@ -522,7 +522,7 @@ func (s *rootState) newRiskCommand() *cobra.Command {
 			}
 
 			var status risk.EngineStatus
-			if err := client.get(cmd.Context(), "/api/v1/risk/status", nil, &status); err != nil {
+			if err := client.getAccount(cmd.Context(), "/risk/status", nil, &status); err != nil {
 				return err
 			}
 
@@ -750,30 +750,34 @@ func (s *rootState) tuiSnapshot(
 	ctx context.Context,
 	client *apiClient,
 ) (tui.Snapshot, error) {
+	accountID, err := client.canonicalAccountID(ctx)
+	if err != nil {
+		return tui.Snapshot{}, err
+	}
 	var strategies listResponse[domain.Strategy]
 	if err := client.get(ctx, "/api/v1/strategies", nil, &strategies); err != nil {
 		return tui.Snapshot{}, err
 	}
 
 	var summary portfolioSummary
-	if err := client.get(ctx, "/api/v1/portfolio/summary", nil, &summary); err != nil {
+	if err := client.getAccount(ctx, "/portfolio/summary", nil, &summary); err != nil {
 		return tui.Snapshot{}, err
 	}
 
 	var positions listResponse[domain.Position]
-	if err := client.get(ctx, "/api/v1/portfolio/positions/open", nil, &positions); err != nil {
+	if err := client.getAccount(ctx, "/portfolio/positions/open", nil, &positions); err != nil {
 		return tui.Snapshot{}, err
 	}
 
 	var status risk.EngineStatus
-	if err := client.get(ctx, "/api/v1/risk/status", nil, &status); err != nil {
+	if err := client.getAccount(ctx, "/risk/status", nil, &status); err != nil {
 		return tui.Snapshot{}, err
 	}
 
 	var runs listResponse[domain.PipelineRun]
 	runQuery := url.Values{}
 	runQuery.Set("limit", "10")
-	if err := client.get(ctx, "/api/v1/runs", runQuery, &runs); err != nil {
+	if err := client.getAccount(ctx, "/runs", runQuery, &runs); err != nil {
 		return tui.Snapshot{}, err
 	}
 
@@ -783,6 +787,7 @@ func (s *rootState) tuiSnapshot(
 	}
 
 	snapshot := tui.Snapshot{
+		AccountID: accountID,
 		Portfolio: tui.PortfolioSummary{
 			OpenPositions: summary.OpenPositions,
 			UnrealizedPnL: summary.UnrealizedPnL,

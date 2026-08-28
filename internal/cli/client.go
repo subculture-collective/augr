@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/api"
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/google/uuid"
 )
 
 type apiClient struct {
@@ -19,6 +22,52 @@ type apiClient struct {
 	token      string
 	apiKey     string
 	httpClient *http.Client
+	accountMu  sync.Mutex
+	accountID  uuid.UUID
+}
+
+func (c *apiClient) canonicalAccountID(ctx context.Context) (uuid.UUID, error) {
+	c.accountMu.Lock()
+	defer c.accountMu.Unlock()
+	if c.accountID != uuid.Nil {
+		return c.accountID, nil
+	}
+	var accounts []domain.Account
+	if err := c.get(ctx, "/api/v1/me/accounts", nil, &accounts); err != nil {
+		return uuid.Nil, err
+	}
+	if len(accounts) != 1 || accounts[0].ID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("GET /api/v1/me/accounts: expected exactly one execution account")
+	}
+	c.accountID = accounts[0].ID
+	return c.accountID, nil
+}
+
+func (c *apiClient) accountPath(ctx context.Context, suffix string) (string, error) {
+	accountID, err := c.canonicalAccountID(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !strings.HasPrefix(suffix, "/") {
+		return "", fmt.Errorf("account path suffix must start with /")
+	}
+	return "/api/v1/accounts/" + accountID.String() + suffix, nil
+}
+
+func (c *apiClient) getAccount(ctx context.Context, suffix string, query url.Values, dst any) error {
+	path, err := c.accountPath(ctx, suffix)
+	if err != nil {
+		return err
+	}
+	return c.get(ctx, path, query, dst)
+}
+
+func (c *apiClient) postAccount(ctx context.Context, suffix string, query url.Values, body, dst any) error {
+	path, err := c.accountPath(ctx, suffix)
+	if err != nil {
+		return err
+	}
+	return c.post(ctx, path, query, body, dst)
 }
 
 type listResponse[T any] struct {

@@ -2800,7 +2800,7 @@ func latestSocialSnapshot(snapshots []data.SocialSentiment) *data.SocialSentimen
 // broadcasts them to the WebSocket hub. It exits when the channel is closed.
 func (r *realStrategyRunner) drainPipelineEvents(events <-chan agent.PipelineEvent) {
 	for e := range events {
-		msg := pipelineEventToWSMessage(e)
+		msg := pipelineEventToWSMessage(e, r.executionAccount.AccountID())
 		if msg.Type == "" {
 			continue // unmapped event type — skip
 		}
@@ -2810,11 +2810,13 @@ func (r *realStrategyRunner) drainPipelineEvents(events <-chan agent.PipelineEve
 
 // pipelineEventToWSMessage converts an agent.PipelineEvent to an api.WSMessage
 // using the event-type vocabulary defined in internal/api/hub.go.
-func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
+func pipelineEventToWSMessage(e agent.PipelineEvent, accountID uuid.UUID) api.WSMessage {
 	switch e.Type {
 	case agent.PipelineStarted:
 		return api.WSMessage{
 			Type:       api.EventPipelineStart,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"phase": e.Phase, "ticker": e.Ticker},
@@ -2823,6 +2825,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 	case agent.AgentDecisionMade:
 		return api.WSMessage{
 			Type:       api.EventAgentDecision,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"agent_role": e.AgentRole, "phase": e.Phase},
@@ -2831,6 +2835,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 	case agent.DebateRoundCompleted:
 		return api.WSMessage{
 			Type:       api.EventDebateRound,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"phase": e.Phase, "round": e.Round},
@@ -2839,6 +2845,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 	case agent.PipelineError:
 		return api.WSMessage{
 			Type:       api.EventError,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"error": e.Error, "timed_out": e.TimedOut, "used_fallback": e.UsedFallback},
@@ -2850,6 +2858,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 		}
 		return api.WSMessage{
 			Type:       api.EventPipelineHealth,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"timed_out": e.TimedOut, "used_fallback": e.UsedFallback},

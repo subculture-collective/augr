@@ -13,6 +13,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/google/uuid"
 )
 
 var (
@@ -51,6 +52,7 @@ type ActivityItem struct {
 }
 
 type Snapshot struct {
+	AccountID  uuid.UUID
 	Portfolio  PortfolioSummary
 	Positions  []domain.Position
 	Strategies []domain.Strategy
@@ -225,6 +227,9 @@ func waitForEvent(ch <-chan internalapi.WSMessage) tea.Cmd {
 }
 
 func (m *Model) applyEvent(event internalapi.WSMessage) {
+	if event.Scope == "account" && (event.AccountID == uuid.Nil || event.AccountID != m.snapshot.AccountID) {
+		return
+	}
 	m.appendActivity(ActivityItem{
 		OccurredAt: event.Timestamp,
 		Title:      formatEventType(event.Type),

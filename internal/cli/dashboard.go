@@ -42,7 +42,11 @@ func (s *rootState) newDashboardCommand() *cobra.Command {
 				Width:    width,
 				Height:   height,
 				Connect: func(ctx context.Context) (tui.EventSource, error) {
-					wsURL, err := websocketURL(s.apiURL)
+					accountID, err := client.canonicalAccountID(ctx)
+					if err != nil {
+						return nil, err
+					}
+					wsURL, err := websocketURL(s.apiURL, accountID.String())
 					if err != nil {
 						return nil, err
 					}
@@ -68,7 +72,7 @@ func (s *rootState) newDashboardCommand() *cobra.Command {
 	return cmd
 }
 
-func websocketURL(apiURL string) (string, error) {
+func websocketURL(apiURL, accountID string) (string, error) {
 	parsed, err := url.Parse(apiURL)
 	if err != nil {
 		return "", fmt.Errorf("invalid api url: %w", err)
@@ -85,7 +89,9 @@ func websocketURL(apiURL string) (string, error) {
 	}
 
 	parsed.Path = "/ws"
-	parsed.RawQuery = ""
+	query := url.Values{}
+	query.Set("account_id", accountID)
+	parsed.RawQuery = query.Encode()
 	parsed.Fragment = ""
 	return parsed.String(), nil
 }

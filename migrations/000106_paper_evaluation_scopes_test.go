@@ -147,7 +147,7 @@ func TestPaperEvaluationScopesMigrationEnforcesScopedEvidenceEndToEnd(t *testing
 	if err := reportRepo.Upsert(ctx, artifact); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := reportRepo.List(ctx, pgrepo.ReportArtifactFilter{StrategyID: &strategyID, ScopeID: &scope.ID, AccountID: &account.ID}, 10, 0)
+	rows, err := reportRepo.List(ctx, account.ID, scope.ID, strategyID, "paper_validation", "", 10, 0)
 	if err != nil || len(rows) != 1 || rows[0].ReportSHA256 != artifact.ReportSHA256 || string(rows[0].ReportBytes) != string(reportBytes) {
 		t.Fatalf("scoped report rows=%+v err=%v", rows, err)
 	}

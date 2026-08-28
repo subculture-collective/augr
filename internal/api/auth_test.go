@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
 func TestAuthManagerGenerateAndValidateAccessToken(t *testing.T) {
@@ -133,6 +135,28 @@ func TestProtectedEndpointAcceptsAPIKey(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d\nbody: %s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+}
+
+func TestCanonicalAccountEndpointAcceptsJWTAndAPIKey(t *testing.T) {
+	t.Parallel()
+	deps := testDeps()
+	deps.EconomicAccounts = &stubEconomicAccountReader{accounts: []domain.Account{{ID: testAPIAccountID, Name: "canonical"}}}
+	srv := newTestServerWithDeps(t, deps)
+	path := "/api/v1/accounts/" + testAPIAccountID.String() + "/economic/account"
+	if rr := doRequest(t, srv, http.MethodGet, path, nil); rr.Code != http.StatusOK {
+		t.Fatalf("JWT status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rawKey, _, err := srv.auth.CreateAPIKey(context.Background(), "account-reader", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("X-API-Key", rawKey)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("API key status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

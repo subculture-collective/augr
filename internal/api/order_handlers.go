@@ -55,6 +55,11 @@ func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to get order", ErrCodeInternal)
 		return
 	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	if order == nil || order.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "order not found", ErrCodeNotFound)
+		return
+	}
 
 	fills, fillErr := s.trades.GetByOrder(r.Context(), id, repository.TradeFilter{}, maxLimit, 0)
 	if fillErr != nil {

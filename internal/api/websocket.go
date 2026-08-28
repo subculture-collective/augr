@@ -67,9 +67,10 @@ type Subscriptions struct {
 
 // Client is a middleman between the WebSocket connection and the Hub.
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub       *Hub
+	conn      *websocket.Conn
+	send      chan []byte
+	accountID uuid.UUID
 
 	mu                   sync.RWMutex
 	subscriptions        Subscriptions
@@ -300,6 +301,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
+	accountID, err := uuid.Parse(r.URL.Query().Get("account_id"))
+	if err != nil || s.projectionAccountID == nil || accountID != *s.projectionAccountID {
+		http.Error(w, "account not found", http.StatusNotFound)
+		return
+	}
 
 	conn, err := s.wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -308,9 +314,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		hub:  s.hub,
-		conn: conn,
-		send: make(chan []byte, sendBufferSize),
+		hub:       s.hub,
+		conn:      conn,
+		send:      make(chan []byte, sendBufferSize),
+		accountID: accountID,
 		subscriptions: Subscriptions{
 			StrategyIDs: make(map[uuid.UUID]bool),
 			RunIDs:      make(map[uuid.UUID]bool),

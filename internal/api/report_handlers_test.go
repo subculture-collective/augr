@@ -23,7 +23,10 @@ type stubReportArtifactStore struct {
 	filter pgrepo.ReportArtifactFilter
 }
 
-type stubPaperEvaluationScopeStore struct{ scope *pgrepo.PaperEvaluationScope }
+type stubPaperEvaluationScopeStore struct {
+	scope  *pgrepo.PaperEvaluationScope
+	scopes []pgrepo.PaperEvaluationScope
+}
 
 func (s *stubPaperEvaluationScopeStore) RegisterScope(_ context.Context, scope *pgrepo.PaperEvaluationScope) error {
 	s.scope = scope
@@ -31,6 +34,10 @@ func (s *stubPaperEvaluationScopeStore) RegisterScope(_ context.Context, scope *
 		scope.ID = uuid.New()
 	}
 	return nil
+}
+
+func (s *stubPaperEvaluationScopeStore) ListScopes(context.Context, uuid.UUID, int, int) ([]pgrepo.PaperEvaluationScope, error) {
+	return s.scopes, nil
 }
 
 func (s *stubPaperEvaluationScopeStore) ValidateBacktestConfigScope(context.Context, *domain.BacktestConfig) error {
@@ -41,8 +48,10 @@ func (s *stubPaperEvaluationScopeStore) ScopedExecutionBinding(context.Context, 
 	return false, "test runtime has no immutable dataset binding", nil
 }
 
-func (s *stubReportArtifactStore) List(_ context.Context, filter pgrepo.ReportArtifactFilter, _, _ int) ([]pgrepo.ReportArtifact, error) {
-	s.filter = filter
+func (s *stubReportArtifactStore) List(_ context.Context, accountID, scopeID, strategyID uuid.UUID, reportType, status string, _, _ int) ([]pgrepo.ReportArtifact, error) {
+	s.filter = pgrepo.ReportArtifactFilter{
+		AccountID: &accountID, ScopeID: &scopeID, StrategyID: &strategyID, ReportType: reportType, Status: status,
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -70,12 +79,12 @@ func TestHandleCreatePaperEvaluationScopeCanonicalizesAndRegisters(t *testing.T)
 	deps.PaperEvaluationScopes = store
 	srv := newTestServerWithDeps(t, deps)
 	body := map[string]any{
-		"account_id": uuid.New(), "capital_binding_id": uuid.New(),
+		"account_id": testAPIAccountID, "capital_binding_id": uuid.New(),
 		"manifest_sha256": strings.Repeat("1", 64), "quality_sha256": strings.Repeat("2", 64),
 		"simulation_policy_sha256": strings.Repeat("3", 64), "capital_policy_sha256": strings.Repeat("4", 64),
 		"evaluation_start": "2026-01-01T00:00:00Z", "evaluation_end": "2026-02-01T00:00:00Z",
 	}
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/paper-evaluation-scopes", body)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/paper-evaluation-scopes", body)
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -84,12 +93,55 @@ func TestHandleCreatePaperEvaluationScopeCanonicalizesAndRegisters(t *testing.T)
 	}
 }
 
+func TestHandleCreatePaperEvaluationScopeHidesAccountMismatch(t *testing.T) {
+	t.Parallel()
+	deps := testDeps()
+	deps.PaperEvaluationScopes = &stubPaperEvaluationScopeStore{}
+	srv := newTestServerWithDeps(t, deps)
+	body := map[string]any{
+		"account_id": uuid.New(), "capital_binding_id": uuid.New(),
+		"manifest_sha256": strings.Repeat("1", 64), "quality_sha256": strings.Repeat("2", 64),
+		"simulation_policy_sha256": strings.Repeat("3", 64), "capital_policy_sha256": strings.Repeat("4", 64),
+		"evaluation_start": "2026-01-01T00:00:00Z", "evaluation_end": "2026-02-01T00:00:00Z",
+	}
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/"+testAPIAccountID.String()+"/paper-evaluation-scopes", body)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleListPaperEvaluationScopesReturnsAccountEvidence(t *testing.T) {
+	t.Parallel()
+	scopeID := uuid.New()
+	store := &stubPaperEvaluationScopeStore{scopes: []pgrepo.PaperEvaluationScope{{
+		ID: scopeID, AccountID: testAPIAccountID,
+		EvaluationStart: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		EvaluationEnd:   time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC),
+		ManifestSHA256:  strings.Repeat("1", 64), QualitySHA256: strings.Repeat("2", 64),
+		SimulationPolicySHA256: strings.Repeat("3", 64), CapitalPolicySHA256: strings.Repeat("4", 64),
+		CanonicalSHA256: strings.Repeat("5", 64),
+	}}}
+	deps := testDeps()
+	deps.PaperEvaluationScopes = store
+	srv := newTestServerWithDeps(t, deps)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/"+testAPIAccountID.String()+"/paper-evaluation-scopes", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	response := decodeJSON[struct {
+		Data []paperEvaluationScopeResponse `json:"data"`
+	}](t, rr)
+	if len(response.Data) != 1 || response.Data[0].ID != scopeID || response.Data[0].Label != "2026-01-01 to 2026-02-01" || response.Data[0].CanonicalSHA256 == "" {
+		t.Fatalf("response=%+v", response.Data)
+	}
+}
+
 func TestHandleGetLatestReport_NotConfigured(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t)
 	// reportArtifacts is nil by default → 501
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/strategies/"+stratA.ID.String()+"/reports/latest?legacy=legacy_unscoped", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/reports/latest", nil)
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
 	}
@@ -99,7 +151,7 @@ func TestHandleListReports_NotConfigured(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t)
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/strategies/"+stratA.ID.String()+"/reports", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/reports", nil)
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
 	}
@@ -109,7 +161,7 @@ func TestHandleGetLatestReport_InvalidUUID(t *testing.T) {
 	t.Parallel()
 
 	srv := newTestServer(t)
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/strategies/not-a-uuid/reports/latest", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/not-a-uuid/reports/latest", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
@@ -155,12 +207,15 @@ func TestHandleGetLatestReport_RecordsStalenessMetricWithResponseValue(t *testin
 	t.Parallel()
 
 	completed := time.Now().Add(-5 * time.Minute)
+	scopeID := uuid.New()
 	metricsSink := &stubReportMetrics{}
 	deps := testDeps()
 	deps.ReportArtifacts = &stubReportArtifactStore{
 		latest: &pgrepo.ReportArtifact{
 			ID:          uuid.New(),
 			StrategyID:  stratA.ID,
+			ScopeID:     &scopeID,
+			AccountID:   &testAPIAccountID,
 			ReportType:  "paper_validation",
 			TimeBucket:  time.Now().Truncate(24 * time.Hour),
 			Status:      "completed",
@@ -171,7 +226,7 @@ func TestHandleGetLatestReport_RecordsStalenessMetricWithResponseValue(t *testin
 	deps.ReportMetrics = metricsSink
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/strategies/"+stratA.ID.String()+"/reports/latest?legacy=legacy_unscoped", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/reports/latest?evidence_scope_id="+scopeID.String(), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
@@ -193,7 +248,7 @@ func TestHandleGetLatestReportRequiresExplicitScopeOrLegacy(t *testing.T) {
 	deps := testDeps()
 	deps.ReportArtifacts = &stubReportArtifactStore{}
 	srv := newTestServerWithDeps(t, deps)
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/strategies/"+stratA.ID.String()+"/reports/latest", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/reports/latest", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -201,12 +256,12 @@ func TestHandleGetLatestReportRequiresExplicitScopeOrLegacy(t *testing.T) {
 
 func TestHandleGetLatestReportPassesAccountAndScopeBoundary(t *testing.T) {
 	t.Parallel()
-	accountID, scopeID := uuid.New(), uuid.New()
+	accountID, scopeID := testAPIAccountID, uuid.New()
 	store := &stubReportArtifactStore{latest: &pgrepo.ReportArtifact{ID: uuid.New(), StrategyID: stratA.ID, ScopeID: &scopeID, AccountID: &accountID, Status: "completed", CreatedAt: time.Now()}}
 	deps := testDeps()
 	deps.ReportArtifacts = store
 	srv := newTestServerWithDeps(t, deps)
-	path := "/api/v1/strategies/" + stratA.ID.String() + "/reports/latest?account_id=" + accountID.String() + "&scope_id=" + scopeID.String()
+	path := "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/" + stratA.ID.String() + "/reports/latest?evidence_scope_id=" + scopeID.String()
 	rr := doRequest(t, srv, http.MethodGet, path, nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
@@ -216,15 +271,33 @@ func TestHandleGetLatestReportPassesAccountAndScopeBoundary(t *testing.T) {
 	}
 }
 
+func TestHandleGetLatestReportHidesCrossStrategyArtifact(t *testing.T) {
+	t.Parallel()
+	scopeID := uuid.New()
+	store := &stubReportArtifactStore{latest: &pgrepo.ReportArtifact{
+		ID: uuid.New(), StrategyID: uuid.New(), ScopeID: &scopeID, AccountID: &testAPIAccountID, Status: "completed", CreatedAt: time.Now(),
+	}}
+	deps := testDeps()
+	deps.ReportArtifacts = store
+	srv := newTestServerWithDeps(t, deps)
+	path := "/api/v1/accounts/" + testAPIAccountID.String() + "/strategies/" + stratA.ID.String() + "/reports/latest?evidence_scope_id=" + scopeID.String()
+	if rr := doRequest(t, srv, http.MethodGet, path, nil); rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestHandleGetLatestReportReturnsCurrentPendingArtifact(t *testing.T) {
 	t.Parallel()
 
 	created := time.Now().Add(-2 * time.Minute)
+	scopeID := uuid.New()
 	deps := testDeps()
 	deps.ReportArtifacts = &stubReportArtifactStore{
 		latest: &pgrepo.ReportArtifact{
 			ID:         uuid.New(),
 			StrategyID: stratA.ID,
+			ScopeID:    &scopeID,
+			AccountID:  &testAPIAccountID,
 			ReportType: "paper_validation",
 			TimeBucket: time.Now().Truncate(24 * time.Hour),
 			Status:     "pending",
@@ -234,7 +307,7 @@ func TestHandleGetLatestReportReturnsCurrentPendingArtifact(t *testing.T) {
 	}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/strategies/"+stratA.ID.String()+"/reports/latest?legacy=legacy_unscoped", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/reports/latest?evidence_scope_id="+scopeID.String(), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}

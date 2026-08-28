@@ -64,7 +64,7 @@ func (s *stubReplayTradeDecisionRepo) AttachLiveOrder(context.Context, uuid.UUID
 
 func TestReplayRouteReturnsNotImplementedWithoutDeps(t *testing.T) {
 	srv := newTestServer(t)
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/replay/decisions/11111111-1111-1111-1111-111111111111", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/replay/decisions/11111111-1111-1111-1111-111111111111", nil)
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotImplemented, rr.Body.String())
 	}
@@ -78,6 +78,7 @@ func TestReplayRouteReturnsWorkbench(t *testing.T) {
 	decisionID := uuid.New()
 	repo := &stubReplayTradeDecisionRepo{getResult: &domain.TradeDecision{
 		ID:           decisionID,
+		AccountID:    testAPIAccountID,
 		ApprovedSize: 12,
 		NetEV:        2.5,
 		Status:       domain.TradeDecisionStatusPaper,
@@ -96,7 +97,7 @@ func TestReplayRouteReturnsWorkbench(t *testing.T) {
 	deps.ReplayEvents = eventsRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/replay/decisions/"+decisionID.String(), nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/replay/decisions/"+decisionID.String(), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -122,20 +123,20 @@ func TestReplayRouteMapsErrors(t *testing.T) {
 	deps.ReplayEvents = &stubReplayEventRepo{listErr: errors.New("boom")}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/replay/decisions/invalid-uuid", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/replay/decisions/invalid-uuid", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("invalid UUID status = %d, want %d", rr.Code, http.StatusBadRequest)
 	}
 
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/replay/decisions/"+decisionID.String(), nil)
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/replay/decisions/"+decisionID.String(), nil)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("missing decision status = %d, want %d", rr.Code, http.StatusNotFound)
 	}
 
-	deps.TradeDecisions = &stubReplayTradeDecisionRepo{getResult: &domain.TradeDecision{ID: decisionID}}
+	deps.TradeDecisions = &stubReplayTradeDecisionRepo{getResult: &domain.TradeDecision{ID: decisionID, AccountID: testAPIAccountID}}
 	deps.ReplayEvents = &stubReplayEventRepo{listErr: errors.New("boom")}
 	srv = newTestServerWithDeps(t, deps)
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/replay/decisions/"+decisionID.String(), nil)
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/replay/decisions/"+decisionID.String(), nil)
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("event repo error status = %d, want %d", rr.Code, http.StatusInternalServerError)
 	}

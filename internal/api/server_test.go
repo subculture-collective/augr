@@ -54,6 +54,22 @@ func newTestServerWithDepsAndLogger(t *testing.T, deps Deps, logger *slog.Logger
 
 var testAPIAccountID = uuid.MustParse("00000000-0000-4000-8000-000000000064")
 
+func TestServerCopiesConfiguredExecutionAccount(t *testing.T) {
+	t.Parallel()
+	configured := testAPIAccountID
+	cfg := DefaultServerConfig()
+	cfg.JWTSecret = "test-jwt-secret"
+	cfg.ProjectionAccountID = &configured
+	srv, err := NewServer(cfg, testDeps(), slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured = uuid.New()
+	if srv.projectionAccountID == nil || *srv.projectionAccountID != testAPIAccountID || srv.hub.accountID != testAPIAccountID {
+		t.Fatalf("server account=%v hub account=%s", srv.projectionAccountID, srv.hub.accountID)
+	}
+}
+
 func testDeps() Deps {
 	strategyA := stratA
 	strategyAVersionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyA.ID.String()))
@@ -302,14 +318,14 @@ func TestGuestObservationRoutesAllowReadOnlyRequests(t *testing.T) {
 
 	for _, path := range []string{
 		"/api/v1/strategies",
-		"/api/v1/runs",
-		"/api/v1/runs/11111111-1111-1111-1111-111111111111/decisions?include_prompt=true",
-		"/api/v1/runs/11111111-1111-1111-1111-111111111111/snapshot",
-		"/api/v1/portfolio/summary",
-		"/api/v1/orders",
-		"/api/v1/trades",
-		"/api/v1/risk/status",
-		"/api/v1/events",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/11111111-1111-1111-1111-111111111111/decisions?include_prompt=true",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/11111111-1111-1111-1111-111111111111/snapshot",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/summary",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/orders",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/trades",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/risk/status",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/events",
 		"/api/v1/backtests/configs",
 		"/api/v1/discovery/results",
 		"/api/v1/automation/status",
@@ -1044,7 +1060,7 @@ func TestListPositionsRejectsBadSide(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/positions?side=sideways", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/positions?side=sideways", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -1054,7 +1070,7 @@ func TestGetOpenPositionsRejectsBadSide(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/positions/open?side=sideways", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/positions/open?side=sideways", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -1078,7 +1094,7 @@ func TestRunStrategy(t *testing.T) {
 	}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d\nbody: %s", rr.Code, http.StatusAccepted, rr.Body.String())
@@ -1099,7 +1115,7 @@ func TestRunStrategyRoutesResolvedExecutionVersion(t *testing.T) {
 	deps.Runner = &stubStrategyRunner{called: called}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusAccepted)
 	}
@@ -1123,7 +1139,7 @@ func TestRunStrategyRejectsMissingExecutionVersionBeforeAdmission(t *testing.T) 
 	deps.RunGroup = group
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusConflict)
 	}
@@ -1142,7 +1158,7 @@ func TestRunStrategyRejectsChangedExecutionVersionBeforeAdmission(t *testing.T) 
 	deps.RunGroup = group
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
@@ -1161,7 +1177,7 @@ func TestRunStrategyRejectsDuringDrain(t *testing.T) {
 	deps.RunGroup.Stop(runcontrol.Shutdown)
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
 	}
@@ -1175,7 +1191,7 @@ func TestRunStrategyDrainWaitsForDetachedRun(t *testing.T) {
 	deps.RunGroup = group
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 	if rr.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusAccepted)
 	}
@@ -1199,7 +1215,7 @@ func TestRunStrategyRequiresRunner(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
@@ -1217,7 +1233,7 @@ func TestRunStrategyNotFound(t *testing.T) {
 	deps.Runner = &stubStrategyRunner{}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+uuid.New().String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+uuid.New().String()+"/run", nil)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
@@ -1233,7 +1249,7 @@ func TestRunStrategyRejectsLiveOrInactiveStrategies(t *testing.T) {
 	deps.Strategies.(*stubStrategyRepo).items[liveActive.ID] = liveActive
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+liveActive.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+liveActive.ID.String()+"/run", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("live status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
@@ -1242,7 +1258,7 @@ func TestRunStrategyRejectsLiveOrInactiveStrategies(t *testing.T) {
 	inactivePaper.ID = uuid.MustParse("33333333-3333-3333-3333-333333333333")
 	inactivePaper.Status = domain.StrategyStatusInactive
 	deps.Strategies.(*stubStrategyRepo).items[inactivePaper.ID] = inactivePaper
-	rr = doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+inactivePaper.ID.String()+"/run", nil)
+	rr = doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+inactivePaper.ID.String()+"/run", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("inactive status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
@@ -1255,7 +1271,7 @@ func TestRunStrategyNilResultAccepted(t *testing.T) {
 	deps.Runner = &stubStrategyRunner{}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/run", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/run", nil)
 
 	// Async handler always returns 202 for valid strategy+runner; nil result
 	// is handled in the background goroutine (no broadcast, no HTTP error).
@@ -1277,6 +1293,7 @@ func TestBroadcastRunResultUsesRunningStatusForStartEvent(t *testing.T) {
 	result := &StrategyRunResult{
 		Run: domain.PipelineRun{
 			ID:         runID,
+			AccountID:  testAPIAccountID,
 			StrategyID: strategyID,
 			Status:     domain.PipelineStatusCompleted,
 		},
@@ -1292,6 +1309,9 @@ func TestBroadcastRunResultUsesRunningStatusForStartEvent(t *testing.T) {
 		}
 		if decoded.Type != EventPipelineStart {
 			t.Fatalf("event type = %q, want %q", decoded.Type, EventPipelineStart)
+		}
+		if decoded.Scope != "account" || decoded.AccountID != testAPIAccountID {
+			t.Fatalf("event boundary scope=%q account=%s", decoded.Scope, decoded.AccountID)
 		}
 		payload, ok := decoded.Data.(map[string]any)
 		if !ok {
@@ -1544,7 +1564,7 @@ func TestListRuns(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -1563,7 +1583,7 @@ func TestListRunsRejectsBadStatus(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs?status=bogus", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs?status=bogus", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -1574,7 +1594,7 @@ func TestListRunsAcceptsValidStatus(t *testing.T) {
 	srv := newTestServer(t)
 
 	for _, s := range []string{"running", "completed", "failed", "cancelled"} {
-		rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs?status="+s, nil)
+		rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs?status="+s, nil)
 		if rr.Code != http.StatusOK {
 			t.Errorf("status=%s: got %d, want 200", s, rr.Code)
 		}
@@ -1585,7 +1605,7 @@ func TestListRunsAcceptsTradeDate(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs?trade_date=2026-01-15T00:00:00Z", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs?trade_date=2026-01-15T00:00:00Z", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
@@ -1595,7 +1615,7 @@ func TestListRunsRejectsBadTradeDate(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs?trade_date=not-a-date", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs?trade_date=not-a-date", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -1616,7 +1636,7 @@ func TestListRunsAppliesDateRangeFilters(t *testing.T) {
 		srv,
 		http.MethodGet,
 		fmt.Sprintf(
-			"/api/v1/runs?status=completed&strategy_id=%s&start_date=%s&end_date=%s",
+			"/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs?status=completed&strategy_id=%s&start_date=%s&end_date=%s",
 			stratA.ID,
 			startDate,
 			endDate,
@@ -1661,6 +1681,7 @@ func TestGetRunIncludesPhaseTimings(t *testing.T) {
 	runRepo := &stubRunRepo{
 		runs: []domain.PipelineRun{{
 			ID:           runID,
+			AccountID:    testAPIAccountID,
 			StrategyID:   stratA.ID,
 			Ticker:       stratA.Ticker,
 			TradeDate:    tradeDate,
@@ -1674,7 +1695,7 @@ func TestGetRunIncludesPhaseTimings(t *testing.T) {
 	deps.Runs = runRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"?trade_date=2026-03-14", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+runID.String()+"?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -1687,7 +1708,7 @@ func TestGetRunIncludesPhaseTimings(t *testing.T) {
 		t.Fatalf("phase_timings missing from response: %+v", body)
 	}
 
-	rrList := doRequest(t, srv, http.MethodGet, "/api/v1/runs", nil)
+	rrList := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs", nil)
 	if rrList.Code != http.StatusOK {
 		t.Fatalf("list status = %d, want %d; body: %s", rrList.Code, http.StatusOK, rrList.Body.String())
 	}
@@ -1713,7 +1734,7 @@ func TestGetRunNotFound(t *testing.T) {
 
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String()+"?trade_date=2026-03-14", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+uuid.New().String()+"?trade_date=2026-03-14", nil)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
@@ -1737,7 +1758,7 @@ func TestPortfolioSummary(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/summary", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/summary", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -1777,7 +1798,7 @@ func TestPortfolioSummaryNeverFallsBackToLegacyPnL(t *testing.T) {
 	deps.Positions = positionRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/summary", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/summary", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
@@ -1806,7 +1827,7 @@ func TestPortfolioSummaryDoesNotRenderUnknownValuationAsZero(t *testing.T) {
 	deps.Positions = positionRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/summary", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/summary", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -1827,7 +1848,7 @@ func TestListOrders(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/orders", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/orders", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -1848,7 +1869,7 @@ func TestListOrdersRejectsBadEnums(t *testing.T) {
 		{"order_type", "weird"},
 	}
 	for _, tc := range cases {
-		rr := doRequest(t, srv, http.MethodGet, "/api/v1/orders?"+tc.param+"="+tc.value, nil)
+		rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/orders?"+tc.param+"="+tc.value, nil)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("param %s=%s: status = %d, want 400", tc.param, tc.value, rr.Code)
 		}
@@ -1860,7 +1881,7 @@ func TestListOrdersAcceptsValidFilters(t *testing.T) {
 	srv := newTestServer(t)
 
 	// Valid enum values should return 200, not 400.
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/orders?ticker=AAPL&status=filled&side=buy&broker=alpaca&order_type=market&market_type=stock", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/orders?ticker=AAPL&status=filled&side=buy&broker=alpaca&order_type=market&market_type=stock", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
@@ -1874,7 +1895,7 @@ func TestGetOpenPositions(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/positions/open", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/positions/open", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
@@ -1885,7 +1906,7 @@ func TestGetOpenPositionsAcceptsFilters(t *testing.T) {
 	srv := newTestServer(t)
 
 	// ticker and side params should be accepted without error.
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/positions/open?ticker=TSLA&side=long", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/positions/open?ticker=TSLA&side=long", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
 	}
@@ -1915,7 +1936,7 @@ func TestListTrades(t *testing.T) {
 	deps.Trades = tradeRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/trades?limit=1&offset=2", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/trades?limit=1&offset=2", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -1967,7 +1988,7 @@ func TestListTradesByOrderID(t *testing.T) {
 	deps.Trades = tradeRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/trades?order_id="+orderID.String(), nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/trades?order_id="+orderID.String(), nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -2016,7 +2037,7 @@ func TestListTradesByPositionID(t *testing.T) {
 	deps.Trades = tradeRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/trades?position_id="+positionID.String(), nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/trades?position_id="+positionID.String(), nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -2052,7 +2073,7 @@ func TestListTradesRejectsOrderIDAndPositionIDTogether(t *testing.T) {
 	deps.Trades = tradeRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/trades?order_id="+orderID.String()+"&position_id="+positionID.String(), nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/trades?order_id="+orderID.String()+"&position_id="+positionID.String(), nil)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
@@ -2074,7 +2095,7 @@ func TestListTradesEmptyDatabaseReturnsEmptyArray(t *testing.T) {
 	deps.Trades = tradeRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/trades", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/trades", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -2093,7 +2114,7 @@ func TestListTradesInvalidSide(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/trades?side=invalid", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/trades?side=invalid", nil)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
@@ -2192,6 +2213,18 @@ func TestAccountScopedRoutesHideForeignAccounts(t *testing.T) {
 		{"create conversation message", http.MethodPost, "/api/v1/accounts/" + foreignAccountID + "/conversations/" + resourceID + "/messages", map[string]string{"content": "secret"}},
 		{"search memories", http.MethodPost, "/api/v1/accounts/" + foreignAccountID + "/memories/search", map[string]string{"query": "secret"}},
 		{"delete memory", http.MethodDelete, "/api/v1/accounts/" + foreignAccountID + "/memories/" + resourceID, nil},
+		{"list runs", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/runs", nil},
+		{"list portfolio", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/portfolio/positions", nil},
+		{"list orders", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/orders", nil},
+		{"list trades", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/trades", nil},
+		{"list journal", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/journal/decisions", nil},
+		{"get replay", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/replay/decisions/" + resourceID, nil},
+		{"list events", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/events", nil},
+		{"risk status", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/risk/status", nil},
+		{"list copy subscriptions", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/copy-trading/subscriptions", nil},
+		{"run strategy", http.MethodPost, "/api/v1/accounts/" + foreignAccountID + "/strategies/" + resourceID + "/run", nil},
+		{"list scopes", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/paper-evaluation-scopes", nil},
+		{"economic account", http.MethodGet, "/api/v1/accounts/" + foreignAccountID + "/economic/account", nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2204,6 +2237,39 @@ func TestAccountScopedRoutesHideForeignAccounts(t *testing.T) {
 				t.Fatalf("error = %#v, want account-level non-disclosure", body)
 			}
 		})
+	}
+}
+
+func TestRetiredGlobalOperationalRoutesReturnNotFound(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+	resourceID := uuid.NewString()
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/runs"},
+		{http.MethodGet, "/api/v1/portfolio/positions"},
+		{http.MethodGet, "/api/v1/orders"},
+		{http.MethodGet, "/api/v1/trades"},
+		{http.MethodGet, "/api/v1/journal/decisions"},
+		{http.MethodGet, "/api/v1/replay/decisions/" + resourceID},
+		{http.MethodGet, "/api/v1/events"},
+		{http.MethodGet, "/api/v1/risk/status"},
+		{http.MethodGet, "/api/v1/risk/cockpit"},
+		{http.MethodGet, "/api/v1/economic/accounts"},
+		{http.MethodGet, "/api/v1/copy-trading/subscriptions"},
+		{http.MethodPost, "/api/v1/paper-evaluation-scopes"},
+		{http.MethodGet, "/api/v1/conversations"},
+		{http.MethodGet, "/api/v1/memories"},
+		{http.MethodPost, "/api/v1/strategies/" + resourceID + "/run"},
+		{http.MethodPost, "/api/v1/strategies/" + resourceID + "/pause"},
+		{http.MethodGet, "/api/v1/strategies/" + resourceID + "/reports"},
+	} {
+		rr := doRequest(t, srv, test.method, test.path, nil)
+		if rr.Code != http.StatusNotFound {
+			t.Errorf("%s %s status=%d body=%s", test.method, test.path, rr.Code, rr.Body.String())
+		}
 	}
 }
 
@@ -2233,7 +2299,7 @@ func TestRiskStatus(t *testing.T) {
 	}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/risk/status", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/risk/status", nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
@@ -3271,7 +3337,7 @@ func TestPauseStrategy(t *testing.T) {
 	srv := newTestServer(t)
 
 	// stratA is status=active by default in testDeps.
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/pause", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/pause", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3290,7 +3356,7 @@ func TestPauseStrategyAlreadyPaused(t *testing.T) {
 	deps.Strategies.(*stubStrategyRepo).items[pausedStrat.ID] = pausedStrat
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+pausedStrat.ID.String()+"/pause", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+pausedStrat.ID.String()+"/pause", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
@@ -3304,7 +3370,7 @@ func TestPauseStrategyRejectsLiveStrategy(t *testing.T) {
 	deps.Strategies.(*stubStrategyRepo).items[liveActive.ID] = liveActive
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+liveActive.ID.String()+"/pause", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+liveActive.ID.String()+"/pause", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
@@ -3318,7 +3384,7 @@ func TestResumeStrategy(t *testing.T) {
 	deps.Strategies.(*stubStrategyRepo).items[pausedStrat.ID] = pausedStrat
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+pausedStrat.ID.String()+"/resume", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+pausedStrat.ID.String()+"/resume", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3336,7 +3402,7 @@ func TestResumeStrategyRejectsLiveStrategy(t *testing.T) {
 	deps.Strategies.(*stubStrategyRepo).items[livePaused.ID] = livePaused
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+livePaused.ID.String()+"/resume", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+livePaused.ID.String()+"/resume", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
@@ -3346,7 +3412,7 @@ func TestSkipNextStrategy(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+stratA.ID.String()+"/skip-next", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+stratA.ID.String()+"/skip-next", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3364,7 +3430,7 @@ func TestSkipNextStrategyRejectsLiveStrategy(t *testing.T) {
 	deps.Strategies.(*stubStrategyRepo).items[liveActive.ID] = liveActive
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodPost, "/api/v1/strategies/"+liveActive.ID.String()+"/skip-next", nil)
+	rr := doRequest(t, srv, http.MethodPost, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/strategies/"+liveActive.ID.String()+"/skip-next", nil)
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusConflict, rr.Body.String())
 	}
@@ -3376,7 +3442,7 @@ func TestListEventsEndpoint(t *testing.T) {
 	deps.Events = &stubEventRepo{}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/events", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/events", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3396,7 +3462,7 @@ func TestListEventsRequiresExactPipelineRunRef(t *testing.T) {
 		"?pipeline_run_id=" + validID + "&pipeline_run_trade_date=invalid",
 		"?pipeline_run_id=" + validID + "&pipeline_run_trade_date=0001-01-01",
 	} {
-		rr := doRequest(t, srv, http.MethodGet, "/api/v1/events"+query, nil)
+		rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/events"+query, nil)
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("query %q status = %d, want 400; body: %s", query, rr.Code, rr.Body.String())
 		}
@@ -3479,6 +3545,7 @@ func TestCreateConversationEndpoint(t *testing.T) {
 	deps.Runs = &stubRunRepo{
 		runs: []domain.PipelineRun{{
 			ID:         runID,
+			AccountID:  testAPIAccountID,
 			StrategyID: stratA.ID,
 			Ticker:     "AAPL",
 			TradeDate:  tradeDate,
@@ -3592,6 +3659,7 @@ func TestGetRunDecisions_IncludesCostUSD(t *testing.T) {
 
 	runID := uuid.New()
 	deps := testDeps()
+	deps.Runs = &stubRunRepo{runs: []domain.PipelineRun{{ID: runID, AccountID: testAPIAccountID, TradeDate: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC)}}}
 	deps.Decisions = &stubDecisionRepo{
 		decisions: []domain.AgentDecision{
 			{
@@ -3606,7 +3674,7 @@ func TestGetRunDecisions_IncludesCostUSD(t *testing.T) {
 	}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions?trade_date=2026-03-14", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+runID.String()+"/decisions?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3630,11 +3698,27 @@ func TestGetRunDecisions_IncludesCostUSD(t *testing.T) {
 	}
 }
 
+func TestGetRunDecisionsRequiresAccountOwnedCompositeRun(t *testing.T) {
+	t.Parallel()
+	runID := uuid.New()
+	deps := testDeps()
+	deps.Runs = &stubRunRepo{runs: []domain.PipelineRun{{
+		ID: runID, AccountID: uuid.New(), TradeDate: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC),
+	}}}
+	deps.Decisions = &stubDecisionRepo{decisions: []domain.AgentDecision{{ID: uuid.New(), PipelineRunID: runID}}}
+	srv := newTestServerWithDeps(t, deps)
+	path := "/api/v1/accounts/" + testAPIAccountID.String() + "/runs/" + runID.String() + "/decisions?trade_date=2026-03-14"
+	if rr := doRequest(t, srv, http.MethodGet, path, nil); rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestGetRunDecisions_IncludePromptText(t *testing.T) {
 	t.Parallel()
 
 	runID := uuid.New()
 	deps := testDeps()
+	deps.Runs = &stubRunRepo{runs: []domain.PipelineRun{{ID: runID, AccountID: testAPIAccountID, TradeDate: time.Date(2026, 3, 14, 0, 0, 0, 0, time.UTC)}}}
 	deps.Decisions = &stubDecisionRepo{
 		decisions: []domain.AgentDecision{
 			{
@@ -3650,7 +3734,7 @@ func TestGetRunDecisions_IncludePromptText(t *testing.T) {
 	srv := newTestServerWithDeps(t, deps)
 
 	// With include_prompt=true, prompt_text should appear.
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions?trade_date=2026-03-14&include_prompt=true", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+runID.String()+"/decisions?trade_date=2026-03-14&include_prompt=true", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3672,7 +3756,7 @@ func TestGetRunDecisions_IncludePromptText(t *testing.T) {
 	}
 
 	// Without include_prompt, prompt_text should be absent (omitempty).
-	rr2 := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/decisions?trade_date=2026-03-14", nil)
+	rr2 := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+runID.String()+"/decisions?trade_date=2026-03-14", nil)
 	if rr2.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr2.Code, http.StatusOK)
 	}
@@ -3688,7 +3772,7 @@ func TestGetRunDecisions_IncludePromptText(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// #471 — GET /api/v1/runs/{id}/snapshot
+// #471 — GET /api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/{id}/snapshot
 // ---------------------------------------------------------------------------
 
 func TestGetRunSnapshot(t *testing.T) {
@@ -3715,7 +3799,7 @@ func TestGetRunSnapshot(t *testing.T) {
 	}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+runID.String()+"/snapshot?trade_date=2026-03-14", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+runID.String()+"/snapshot?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -3739,7 +3823,7 @@ func TestGetRunSnapshot_NotConfigured(t *testing.T) {
 	// Snapshots is nil by default.
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String()+"/snapshot?trade_date=2026-03-14", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+uuid.New().String()+"/snapshot?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
 	}
@@ -3756,7 +3840,7 @@ func TestGetRunSnapshot_MissingParentReturnsNotFound(t *testing.T) {
 	deps.Snapshots = &stubSnapshotRepo{}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/runs/"+uuid.New().String()+"/snapshot?trade_date=2026-03-14", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/runs/"+uuid.New().String()+"/snapshot?trade_date=2026-03-14", nil)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
 	}
@@ -3772,6 +3856,7 @@ func TestCreateConversationMessage(t *testing.T) {
 	runID := uuid.New()
 	convRepo := newStubConversationRepo()
 	conv := &domain.Conversation{
+		AccountID:     testAPIAccountID,
 		PipelineRunID: runID,
 		AgentRole:     "market_analyst",
 		Title:         "Test conversation",
@@ -3820,6 +3905,7 @@ func TestCreateConversationMessage_NoLLM(t *testing.T) {
 	runID := uuid.New()
 	convRepo := newStubConversationRepo()
 	conv := &domain.Conversation{
+		AccountID:     testAPIAccountID,
 		PipelineRunID: runID,
 		AgentRole:     "market_analyst",
 		Title:         "Test conversation",
@@ -3986,7 +4072,7 @@ func TestListEventsRejectsBadAgentRole(t *testing.T) {
 	deps.Events = &stubEventRepo{}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/events?agent_role=not_a_role", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/events?agent_role=not_a_role", nil)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body: %s", rr.Code, rr.Body.String())
 	}

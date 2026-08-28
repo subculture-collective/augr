@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/agent"
+	apiserver "github.com/PatrickFanella/get-rich-quick/internal/api"
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -26,6 +27,23 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
+
+func TestPipelineEventWebSocketMessagesAreAccountScoped(t *testing.T) {
+	t.Parallel()
+	accountID := uuid.New()
+	for _, eventType := range []agent.PipelineEventType{
+		agent.PipelineStarted, agent.AgentDecisionMade, agent.DebateRoundCompleted, agent.PipelineError,
+	} {
+		message := pipelineEventToWSMessage(agent.PipelineEvent{Type: eventType, PipelineRunID: uuid.New(), StrategyID: uuid.New(), OccurredAt: time.Now()}, accountID)
+		if message.Type == "" || message.Scope != "account" || message.AccountID != accountID {
+			t.Fatalf("event %s mapped to %+v", eventType, message)
+		}
+	}
+	message := pipelineEventToWSMessage(agent.PipelineEvent{Type: agent.PipelineCompleted, UsedFallback: true, OccurredAt: time.Now()}, accountID)
+	if message.Type != apiserver.EventPipelineHealth || message.Scope != "account" || message.AccountID != accountID {
+		t.Fatalf("pipeline health mapped to %+v", message)
+	}
+}
 
 func TestNewRealStrategyRunnerRetainsExecutionAccount(t *testing.T) {
 	runner := newRealStrategyRunner(

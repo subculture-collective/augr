@@ -198,3 +198,30 @@ func (r *ReportArtifactRepo) GetScopeBySHA256(ctx context.Context, sha string) (
 	}
 	return &scope, nil
 }
+
+func (r *ReportArtifactRepo) ListScopes(ctx context.Context, accountID uuid.UUID, limit, offset int) ([]PaperEvaluationScope, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id,account_id,capital_binding_id,manifest_sha256,quality_sha256,simulation_policy_sha256,
+		capital_policy_sha256,evaluation_start,evaluation_end,canonical_bytes,canonical_sha256,created_at
+		FROM paper_evaluation_scopes WHERE account_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`, accountID, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list paper evaluation scopes: %w", err)
+	}
+	defer rows.Close()
+	var scopes []PaperEvaluationScope
+	for rows.Next() {
+		var scope PaperEvaluationScope
+		if err := rows.Scan(&scope.ID, &scope.AccountID, &scope.CapitalBindingID, &scope.ManifestSHA256, &scope.QualitySHA256,
+			&scope.SimulationPolicySHA256, &scope.CapitalPolicySHA256, &scope.EvaluationStart, &scope.EvaluationEnd,
+			&scope.CanonicalBytes, &scope.CanonicalSHA256, &scope.CreatedAt); err != nil {
+			return nil, fmt.Errorf("postgres: scan paper evaluation scope: %w", err)
+		}
+		scopes = append(scopes, scope)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list paper evaluation scopes rows: %w", err)
+	}
+	return scopes, nil
+}

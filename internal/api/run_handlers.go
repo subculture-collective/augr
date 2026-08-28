@@ -66,6 +66,11 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
 		return
 	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	if run.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
+		return
+	}
 	respondJSON(w, http.StatusOK, run)
 }
 
@@ -73,6 +78,20 @@ func (s *Server) handleGetRunDecisions(w http.ResponseWriter, r *http.Request) {
 	ref, err := parsePipelineRunRef(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
+		return
+	}
+	run, err := s.runs.Get(r.Context(), ref)
+	if err != nil || run == nil {
+		if err == nil || isNotFound(err) {
+			respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to get run", ErrCodeInternal)
+		return
+	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	if run.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "run not found", ErrCodeNotFound)
 		return
 	}
 	limit, offset := parsePagination(r)

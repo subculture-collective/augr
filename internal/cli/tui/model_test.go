@@ -149,3 +149,21 @@ func TestModelFormatsPipelineHealthEventsWithHumanLabel(t *testing.T) {
 		t.Fatalf("activity title = %q, want %q", got, "Pipeline health")
 	}
 }
+
+func TestModelRejectsForeignAccountEvents(t *testing.T) {
+	t.Parallel()
+	accountID := uuid.New()
+	model := NewModel(Snapshot{AccountID: accountID}, 120, 34)
+	foreign, _ := model.Update(wsEventMsg{event: internalapi.WSMessage{
+		Type: internalapi.EventSignal, Scope: "account", AccountID: uuid.New(), RunID: uuid.New(), Timestamp: time.Now().UTC(),
+	}})
+	if got := foreign.(Model); len(got.snapshot.Activity) != 0 || got.latestRun != nil {
+		t.Fatalf("foreign account event mutated model: %+v", got.snapshot.Activity)
+	}
+	local, _ := foreign.(Model).Update(wsEventMsg{event: internalapi.WSMessage{
+		Type: internalapi.EventSignal, Scope: "account", AccountID: accountID, RunID: uuid.New(), Timestamp: time.Now().UTC(),
+	}})
+	if got := local.(Model); len(got.snapshot.Activity) != 1 || got.latestRun == nil {
+		t.Fatalf("local account event was not applied: %+v", got.snapshot.Activity)
+	}
+}

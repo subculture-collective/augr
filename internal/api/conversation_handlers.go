@@ -50,6 +50,13 @@ func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusInternalServerError, "failed to list conversations", ErrCodeInternal)
 		return
 	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	for _, conversation := range conversations {
+		if conversation.AccountID != accountID {
+			respondError(w, http.StatusNotFound, "conversation not found", ErrCodeNotFound)
+			return
+		}
+	}
 	total, err := s.conversations.CountConversations(r.Context(), filter)
 	if err != nil {
 		s.logger.Warn("count conversations", "error", err.Error())
@@ -75,6 +82,11 @@ func (s *Server) handleGetConversationMessages(w http.ResponseWriter, r *http.Re
 			return
 		}
 		respondError(w, http.StatusInternalServerError, "failed to get conversation", ErrCodeInternal)
+		return
+	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	if conv == nil || conv.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "conversation not found", ErrCodeNotFound)
 		return
 	}
 
@@ -156,11 +168,17 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		respondError(w, http.StatusBadRequest, "pipeline_run_id does not reference an existing run", ErrCodeValidation)
 		return
 	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	if run.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "pipeline run not found", ErrCodeNotFound)
+		return
+	}
 
 	roleLabel := strings.ReplaceAll(string(body.AgentRole), "_", " ")
 	title := fmt.Sprintf("Chat with %s \u2014 %s", titleCase(roleLabel), run.Ticker)
 
 	conv := &domain.Conversation{
+		AccountID:            accountID,
 		PipelineRunID:        body.PipelineRunID,
 		PipelineRunTradeDate: body.PipelineRunTradeDate,
 		Environment:          run.Environment,
@@ -182,6 +200,20 @@ func (s *Server) handleCreateConversationMessage(w http.ResponseWriter, r *http.
 	convID, err := parseUUID(r, "id")
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
+		return
+	}
+	conv, err := s.conversations.GetConversation(r.Context(), convID)
+	if err != nil {
+		if isNotFound(err) {
+			respondError(w, http.StatusNotFound, "conversation not found", ErrCodeNotFound)
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "failed to get conversation", ErrCodeInternal)
+		return
+	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	if conv == nil || conv.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "conversation not found", ErrCodeNotFound)
 		return
 	}
 

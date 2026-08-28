@@ -103,12 +103,12 @@ func TestSmokeEndToEnd(t *testing.T) {
 		t.Fatalf("saved strategy ticker = %q, want %q", savedStrategy.Ticker, createdStrategy.Ticker)
 	}
 
-	wsConn := openSmokeWebSocket(t, baseURL, createdStrategy.ID, tokenPair.AccessToken)
+	wsConn := openSmokeWebSocket(t, baseURL, accountID, createdStrategy.ID, tokenPair.AccessToken)
 	defer func() {
 		_ = wsConn.Close()
 	}()
 
-	runResp := doSmokeJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/api/v1/strategies/%s/run", baseURL, createdStrategy.ID), nil, tokenPair.AccessToken)
+	runResp := doSmokeJSONRequest(t, http.MethodPost, fmt.Sprintf("%s/api/v1/accounts/%s/strategies/%s/run", baseURL, accountID, createdStrategy.ID), nil, tokenPair.AccessToken)
 	defer func() {
 		_ = runResp.Body.Close()
 	}()
@@ -255,7 +255,7 @@ func decodeSmokeJSON(t *testing.T, resp *http.Response, target any) {
 	}
 }
 
-func openSmokeWebSocket(t *testing.T, baseURL string, strategyID uuid.UUID, accessToken string) *websocket.Conn {
+func openSmokeWebSocket(t *testing.T, baseURL string, accountID, strategyID uuid.UUID, accessToken string) *websocket.Conn {
 	t.Helper()
 
 	u, err := url.Parse(baseURL)
@@ -270,6 +270,7 @@ func openSmokeWebSocket(t *testing.T, baseURL string, strategyID uuid.UUID, acce
 	u.Path = "/ws"
 	query := u.Query()
 	query.Set("token", accessToken)
+	query.Set("account_id", accountID.String())
 	u.RawQuery = query.Encode()
 
 	conn, _, err := websocket.DefaultDialer.Dial(u.String(), http.Header{

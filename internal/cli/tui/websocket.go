@@ -3,10 +3,13 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"sync"
 
 	internalapi "github.com/PatrickFanella/get-rich-quick/internal/api"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
@@ -24,6 +27,14 @@ type websocketAck struct {
 }
 
 func ConnectWebSocket(ctx context.Context, endpoint string, headers http.Header) (EventSource, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse websocket endpoint: %w", err)
+	}
+	accountID, err := uuid.Parse(parsed.Query().Get("account_id"))
+	if err != nil || accountID == uuid.Nil {
+		return nil, errors.New("websocket endpoint requires account_id")
+	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, endpoint, headers)
 	if err != nil {
 		return nil, err
