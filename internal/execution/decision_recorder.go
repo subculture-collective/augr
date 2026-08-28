@@ -27,6 +27,16 @@ type ReplayDecisionRecorder interface {
 	RecordReplayEvent(ctx context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, source string, payload any, occurredAt time.Time) error
 }
 
+// ScopedDecisionRecorder carries the authoritative execution scope across
+// journal updates and replay writes.
+type ScopedDecisionRecorder interface {
+	DecisionRecorder
+	RecordDecisionScoped(context.Context, ExecutionScope, *domain.TradeDecision) error
+	AttachPaperOrderScoped(context.Context, ExecutionScope, uuid.UUID, uuid.UUID) error
+	AttachLiveOrderScoped(context.Context, ExecutionScope, uuid.UUID, uuid.UUID) error
+	RecordReplayEventScoped(context.Context, ExecutionScope, uuid.UUID, domain.ReplayEventType, string, any, time.Time) error
+}
+
 type tradeDecisionJournalRecorder struct {
 	repo       repository.TradeDecisionJournalRepository
 	replayRepo repository.ReplayEventRepository
@@ -63,6 +73,16 @@ func (r *tradeDecisionJournalRecorder) RecordDecision(ctx context.Context, decis
 	}, decision.UpdatedAt)
 }
 
+func (r *tradeDecisionJournalRecorder) RecordDecisionScoped(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision) error {
+	if decision == nil {
+		return nil
+	}
+	if err := bindTradeDecisionScope(scope, decision); err != nil {
+		return err
+	}
+	return r.RecordDecision(ctx, decision)
+}
+
 func (r *tradeDecisionJournalRecorder) AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
 	if r == nil || r.repo == nil {
 		return nil
@@ -73,6 +93,13 @@ func (r *tradeDecisionJournalRecorder) AttachPaperOrder(ctx context.Context, dec
 	return r.RecordReplayEvent(ctx, decisionID, domain.ReplayEventTypePaperOrdered, "order_manager", map[string]any{"order_id": orderID}, time.Now().UTC())
 }
 
+func (r *tradeDecisionJournalRecorder) AttachPaperOrderScoped(ctx context.Context, scope ExecutionScope, decisionID, orderID uuid.UUID) error {
+	if _, err := r.persistedDecisionScope(ctx, decisionID, &scope); err != nil {
+		return err
+	}
+	return r.AttachPaperOrder(ctx, decisionID, orderID)
+}
+
 func (r *tradeDecisionJournalRecorder) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
 	if r == nil || r.repo == nil {
 		return nil
@@ -81,6 +108,13 @@ func (r *tradeDecisionJournalRecorder) AttachLiveOrder(ctx context.Context, deci
 		return err
 	}
 	return r.RecordReplayEvent(ctx, decisionID, domain.ReplayEventTypeLiveOrdered, "order_manager", map[string]any{"order_id": orderID}, time.Now().UTC())
+}
+
+func (r *tradeDecisionJournalRecorder) AttachLiveOrderScoped(ctx context.Context, scope ExecutionScope, decisionID, orderID uuid.UUID) error {
+	if _, err := r.persistedDecisionScope(ctx, decisionID, &scope); err != nil {
+		return err
+	}
+	return r.AttachLiveOrder(ctx, decisionID, orderID)
 }
 
 func (r *tradeDecisionJournalRecorder) RecordReplayEvent(ctx context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, source string, payload any, occurredAt time.Time) error {
@@ -94,8 +128,78 @@ func (r *tradeDecisionJournalRecorder) RecordReplayEvent(ctx context.Context, de
 	if occurredAt.IsZero() {
 		occurredAt = time.Now().UTC()
 	}
+	decision, err := r.persistedDecisionScope(ctx, decisionID, nil)
+	if err != nil {
+		return err
+	}
 	return r.replayRepo.CreateReplayEvent(ctx, &domain.ReplayEvent{
+		AccountID: decision.AccountID, Environment: decision.Environment,
+		OriginType: decision.OriginType, OriginID: decision.OriginID,
 		TradeDecisionID: decisionID, EventType: eventType, Source: source,
 		Payload: raw, OccurredAt: occurredAt,
 	})
+}
+
+func (r *tradeDecisionJournalRecorder) RecordReplayEventScoped(ctx context.Context, scope ExecutionScope, decisionID uuid.UUID, eventType domain.ReplayEventType, source string, payload any, occurredAt time.Time) error {
+	if _, err := r.persistedDecisionScope(ctx, decisionID, &scope); err != nil {
+		return err
+	}
+	return r.RecordReplayEvent(ctx, decisionID, eventType, source, payload, occurredAt)
+}
+
+func (r *tradeDecisionJournalRecorder) persistedDecisionScope(ctx context.Context, decisionID uuid.UUID, supplied *ExecutionScope) (*domain.TradeDecision, error) {
+	if r == nil || r.repo == nil {
+		return nil, fmt.Errorf("decision recorder: journal repository is required")
+	}
+	decision, err := r.repo.Get(ctx, decisionID)
+	if err != nil {
+		return nil, fmt.Errorf("decision recorder: load persisted decision: %w", err)
+	}
+	if decision == nil {
+		return nil, fmt.Errorf("decision recorder: persisted decision is missing")
+	}
+	if supplied != nil && !tradeDecisionMatchesScope(*decision, *supplied) {
+		return nil, fmt.Errorf("decision recorder: supplied execution scope conflicts with persisted decision")
+	}
+	return decision, nil
+}
+
+func bindTradeDecisionScope(scope ExecutionScope, decision *domain.TradeDecision) error {
+	if decision == nil {
+		return fmt.Errorf("decision recorder: decision is required")
+	}
+	originType, originID := scope.Origin()
+	run, hasRun := scope.PipelineRun()
+	if scope.AccountID() == uuid.Nil || !scope.Environment().IsValid() || originID == "" || !hasRun {
+		return fmt.Errorf("decision recorder: complete execution scope is required")
+	}
+	if decision.AccountID != uuid.Nil && decision.AccountID != scope.AccountID() ||
+		decision.Environment != "" && decision.Environment != scope.Environment() ||
+		decision.OriginType != "" && decision.OriginType != string(originType) ||
+		decision.OriginID != "" && decision.OriginID != originID ||
+		decision.PipelineRunID != nil && *decision.PipelineRunID != run.ID ||
+		decision.PipelineRunTradeDate != nil && !decision.PipelineRunTradeDate.Equal(run.TradeDate) {
+		return fmt.Errorf("decision recorder: decision scope conflicts with execution scope")
+	}
+	decision.AccountID, decision.Environment = scope.AccountID(), scope.Environment()
+	decision.OriginType, decision.OriginID = string(originType), originID
+	decision.PipelineRunID = &run.ID
+	tradeDate := run.TradeDate
+	decision.PipelineRunTradeDate = &tradeDate
+	if strategyID := scope.LegacyStrategyID(); strategyID != nil {
+		if decision.StrategyID != nil && *decision.StrategyID != *strategyID {
+			return fmt.Errorf("decision recorder: decision strategy conflicts with execution scope")
+		}
+		decision.StrategyID = strategyID
+	}
+	return nil
+}
+
+func tradeDecisionMatchesScope(decision domain.TradeDecision, scope ExecutionScope) bool {
+	originType, originID := scope.Origin()
+	run, ok := scope.PipelineRun()
+	return ok && decision.AccountID == scope.AccountID() && decision.Environment == scope.Environment() &&
+		decision.OriginType == string(originType) && decision.OriginID == originID &&
+		decision.PipelineRunID != nil && *decision.PipelineRunID == run.ID &&
+		decision.PipelineRunTradeDate != nil && decision.PipelineRunTradeDate.Equal(run.TradeDate)
 }

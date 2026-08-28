@@ -227,12 +227,14 @@ type portfolioPaperProcessorStub struct {
 	called int
 	signal execution.FinalSignal
 	plan   execution.TradingPlan
+	scope  execution.ExecutionScope
 }
 
 func (p *portfolioPaperProcessorStub) ProcessPaperOrder(_ context.Context, req portfolio.PaperOrderRequest) (portfolio.PaperOrderResult, error) {
 	p.called++
 	p.signal = req.Signal
 	p.plan = req.Plan
+	p.scope = req.Scope
 	id := uuid.New()
 	return portfolio.PaperOrderResult{OrderID: &id, Status: domain.OrderStatusFilled}, nil
 }
@@ -266,19 +268,23 @@ func TestValidatePortfolioOpportunitySourcesRejectsFailedAndMismatchedRuns(t *te
 	t.Parallel()
 
 	strategyID := uuid.New()
+	accountID, versionID := uuid.New(), uuid.New()
+	scopeFields := func(runID uuid.UUID, status domain.PipelineStatus, signal domain.PipelineSignal) domain.PipelineRun {
+		return domain.PipelineRun{ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: allocatorRunTradeDate, Status: status, Signal: signal}
+	}
 	validRunID := uuid.New()
 	failedRunID := uuid.New()
 	mismatchedRunID := uuid.New()
 	runRepo := &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{
-		validRunID:      {ID: validRunID, StrategyID: strategyID, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
-		failedRunID:     {ID: failedRunID, StrategyID: strategyID, Status: domain.PipelineStatusFailed, Signal: domain.PipelineSignalHold},
-		mismatchedRunID: {ID: mismatchedRunID, StrategyID: strategyID, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalSell},
+		validRunID:      scopeFields(validRunID, domain.PipelineStatusCompleted, domain.PipelineSignalBuy),
+		failedRunID:     scopeFields(failedRunID, domain.PipelineStatusFailed, domain.PipelineSignalHold),
+		mismatchedRunID: scopeFields(mismatchedRunID, domain.PipelineStatusCompleted, domain.PipelineSignalSell),
 	}}
 	orch := NewJobOrchestrator(OrchestratorDeps{RunRepo: runRepo})
 	opportunities := []domain.Opportunity{
-		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &validRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
-		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &failedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
-		{ID: uuid.New(), StrategyID: strategyID, PipelineRunID: &mismatchedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
+		{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &validRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
+		{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &failedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
+		{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &mismatchedRunID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: domain.PipelineSignalBuy},
 		{ID: uuid.New(), StrategyID: strategyID, Signal: domain.PipelineSignalBuy},
 	}
 
@@ -308,6 +314,20 @@ func TestValidatePortfolioOpportunitySourcesFailsClosedOnRunRepositoryError(t *t
 	_, _, err := orch.validatePortfolioOpportunitySources(context.Background(), []domain.Opportunity{{ID: uuid.New(), PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate}}, portfolio.AllocatorModeShadow)
 	if err == nil || !strings.Contains(err.Error(), "load source run") {
 		t.Fatalf("validatePortfolioOpportunitySources() error = %v, want repository failure", err)
+	}
+}
+
+func TestValidatePortfolioOpportunitySourcesRejectsConflictingAccountRetry(t *testing.T) {
+	runID, strategyID, accountID, versionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	run := domain.PipelineRun{ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
+	opportunity := domain.Opportunity{ID: uuid.New(), AccountID: uuid.New(), Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID, StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Signal: run.Signal}
+	orch := NewJobOrchestrator(OrchestratorDeps{RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: run}}})
+	valid, rejected, err := orch.validatePortfolioOpportunitySources(context.Background(), []domain.Opportunity{opportunity}, portfolio.AllocatorModePaper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(valid) != 0 || len(rejected) != 1 || len(rejected[0].Reasons) != 1 || rejected[0].Reasons[0] != "source_scope_mismatch" {
+		t.Fatalf("valid=%+v rejected=%+v", valid, rejected)
 	}
 }
 
@@ -488,8 +508,8 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 	accountID, versionID := uuid.New(), uuid.New()
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{
 		{
-			ID:            uuid.MustParse("11111111-1111-1111-1111-111111111111"),
-			StrategyID:    uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+			ID:                   uuid.MustParse("11111111-1111-1111-1111-111111111111"),
+			StrategyID:           uuid.MustParse("22222222-2222-2222-2222-222222222222"),
 			PipelineRunID:        &runID,
 			PipelineRunTradeDate: &tradeDate,
 			AccountID:            accountID,
@@ -541,7 +561,7 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 		PositionRepo:            positionRepo,
 		PortfolioAccountBalance: accountBalance,
 		RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{
-			runID: {ID: runID, StrategyID: opportunityRepo.items[0].StrategyID, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
+			runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: opportunityRepo.items[0].StrategyID, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
 		}},
 	})
 	orch.registerPortfolioAllocatorJobs()
@@ -572,6 +592,9 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 	if decision.CreatedOrderID == nil {
 		t.Fatal("CreatedOrderID = nil, want created paper order id")
 	}
+	if decision.AccountID != accountID || decision.Environment != domain.AccountEnvironmentPaperScored || decision.OriginID != versionID.String() || processor.scope.AccountID() != accountID {
+		t.Fatalf("paper graph lineage decision=%+v scope=%s/%s", decision, processor.scope.AccountID(), processor.scope.Environment())
+	}
 	if decisionRepo.created[0].OpportunityID == nil || *decisionRepo.created[0].OpportunityID != opportunityRepo.items[0].ID {
 		t.Fatalf("unexpected opportunity id on decision: %+v", decisionRepo.created[0])
 	}
@@ -591,10 +614,12 @@ func TestPortfolioAllocatorJobPaperModeRejectsWithoutStrategyRepo(t *testing.T) 
 
 	now := time.Now()
 	runID := uuid.New()
+	accountID, versionID := uuid.New(), uuid.New()
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{
 		ID:            uuid.MustParse("33333333-3333-3333-3333-333333333333"),
 		StrategyID:    uuid.MustParse("44444444-4444-4444-4444-444444444444"),
 		PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate,
+		AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(),
 		Status:            domain.OpportunityStatusQueued,
 		MarketType:        domain.MarketTypeStock,
 		Ticker:            "MSFT",
@@ -623,7 +648,7 @@ func TestPortfolioAllocatorJobPaperModeRejectsWithoutStrategyRepo(t *testing.T) 
 		PositionRepo:            positionRepo,
 		PortfolioAccountBalance: accountBalance,
 		RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{
-			runID: {ID: runID, StrategyID: opportunityRepo.items[0].StrategyID, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
+			runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: opportunityRepo.items[0].StrategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
 		}},
 	})
 	orch.registerPortfolioAllocatorJobs()
@@ -651,12 +676,13 @@ func TestPortfolioAllocatorJobPaperModeStopsWhenPreclaimFails(t *testing.T) {
 
 	now := time.Now()
 	runID := uuid.New()
-	opportunityRepo := &preclaimFailOpportunityRepo{portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), StrategyID: uuid.New(), PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.05, EntryPrice: 100, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: 0.001, ProposedNotional: 2_000, ExpiresAt: now.Add(24 * time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "aapl-paper-1"}}}}
+	accountID, versionID := uuid.New(), uuid.New()
+	opportunityRepo := &preclaimFailOpportunityRepo{portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: uuid.New(), PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.05, EntryPrice: 100, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: 0.001, ProposedNotional: 2_000, ExpiresAt: now.Add(24 * time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "aapl-paper-1"}}}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	strategyRepo := &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: opportunityRepo.items[0].StrategyID, Name: "paper-aapl", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}}
 	processor := &portfolioPaperProcessorStub{}
 	positionRepo, accountBalance := paperAllocatorStateDeps()
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: strategyRepo, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, PortfolioAccountBalance: accountBalance, RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, StrategyID: opportunityRepo.items[0].StrategyID, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}})
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: strategyRepo, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, PortfolioAccountBalance: accountBalance, RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: opportunityRepo.items[0].StrategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}})
 	orch.registerPortfolioAllocatorJobs()
 	err := orch.jobs["portfolio_allocator"].Fn(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "preclaim opportunity selected") {

@@ -88,9 +88,17 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if !ok {
 		return PaperOrderResult{Skipped: true, Reason: "missing_pipeline_run"}, nil
 	}
-	orders, err := p.deps.OrderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
-	if err != nil {
-		return PaperOrderResult{}, err
+	const pageSize = 100
+	orders := make([]domain.Order, 0)
+	for offset := 0; ; offset += pageSize {
+		page, err := p.deps.OrderRepo.GetByRun(ctx, run, repository.OrderFilter{}, pageSize, offset)
+		if err != nil {
+			return PaperOrderResult{}, err
+		}
+		orders = append(orders, page...)
+		if len(page) < pageSize {
+			break
+		}
 	}
 	if len(orders) == 0 {
 		return PaperOrderResult{Skipped: true, Reason: "paper_order_not_created"}, nil

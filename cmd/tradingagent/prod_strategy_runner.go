@@ -355,7 +355,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		if err != nil {
 			return canonical, err
 		}
-		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
+		scope, err := executionScopeFromPersistedRun(run, strategy)
 		if err != nil {
 			return canonical, err
 		}
@@ -375,7 +375,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		r.logger.WarnContext(ctx, "notification dispatch failed (non-fatal)", "error", err, "run_id", run.ID)
 	}
 
-	orders, err := r.orderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
+	orders, err := loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {
 		return canonical, err
 	}
@@ -737,7 +737,11 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		return failRun(fmt.Errorf("polymarket native: fetch market data for %s: %w", strategy.Ticker, err))
 	}
 	snapshot := polymarketexecution.SnapshotFromPredictionMarketData(marketData, time.Now().UTC())
-	if err := r.persistPolymarketNativeSnapshot(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, snapshot); err != nil {
+	scope, err := executionScopeFromPersistedRun(&run, strategy)
+	if err != nil {
+		return failRun(err)
+	}
+	if err := r.persistPolymarketNativeSnapshot(ctx, scope, snapshot); err != nil {
 		return failRun(err)
 	}
 
@@ -797,10 +801,6 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
-		if err != nil {
-			return canonical, err
-		}
 		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
@@ -808,7 +808,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
 		return canonical, err
 	}
-	orders, err := r.orderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
+	orders, err := loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {
 		return canonical, err
 	}
@@ -884,7 +884,11 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	if err != nil {
 		return failRun(fmt.Errorf("kalshi native: fetch snapshot for %s: %w", strategy.Ticker, err))
 	}
-	if err := r.persistKalshiNativeSnapshot(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, snapshot); err != nil {
+	scope, err := executionScopeFromPersistedRun(&run, strategy)
+	if err != nil {
+		return failRun(err)
+	}
+	if err := r.persistKalshiNativeSnapshot(ctx, scope, snapshot); err != nil {
 		return failRun(err)
 	}
 
@@ -947,10 +951,6 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		scope, err := execution.NewStrategyExecutionScope(r.executionAccount.AccountID(), r.executionAccount.Environment(), executionVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
-		if err != nil {
-			return canonical, err
-		}
 		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
@@ -961,7 +961,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 
 	var orders []domain.Order
 	if r.orderRepo != nil {
-		orders, err = r.orderRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.OrderFilter{}, 10, 0)
+		orders, err = loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 		if err != nil {
 			return canonical, err
 		}
@@ -1027,6 +1027,9 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 		Summary:              "Native deterministic pipeline admitted for evaluation.",
 		Tags:                 []string{"pipeline", "native", source},
 		Metadata:             metadata,
+	}
+	if scope, scopeErr := persistenceScopeFromRun(run); scopeErr == nil {
+		applyEventPersistenceScope(event, scope)
 	}
 	eventCtx, eventCancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	eventErr := r.eventRepo.Create(eventCtx, event)
@@ -1161,6 +1164,9 @@ func nativeTerminalEvent(
 		Tags:                 tags,
 		Metadata:             metadata,
 	}
+	if scope, scopeErr := persistenceScopeFromRun(run); scopeErr == nil {
+		applyEventPersistenceScope(event, scope)
+	}
 	return event, nil
 }
 
@@ -1212,7 +1218,7 @@ func predictionNativeFeatures(decision any) json.RawMessage {
 	return raw
 }
 
-func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context, ref domain.PipelineRunRef, snapshot polymarketexecution.Snapshot) error {
+func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context, scope execution.ExecutionScope, snapshot polymarketexecution.Snapshot) error {
 	if r.snapshotRepo == nil {
 		return errors.New("polymarket native: snapshot repository is required")
 	}
@@ -1222,13 +1228,17 @@ func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context
 	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	defer cancel()
-	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: ref.ID, PipelineRunTradeDate: ref.TradeDate, DataType: "polymarket_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
+	item, err := pipelineSnapshotFromScope(scope, "polymarket_native_snapshot", payload)
+	if err != nil {
+		return err
+	}
+	if err := r.snapshotRepo.Create(persistCtx, item); err != nil {
 		return fmt.Errorf("polymarket native: persist snapshot: %w", err)
 	}
 	return nil
 }
 
-func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, ref domain.PipelineRunRef, snapshot kalshiexecution.Snapshot) error {
+func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, scope execution.ExecutionScope, snapshot kalshiexecution.Snapshot) error {
 	if r.snapshotRepo == nil {
 		return errors.New("kalshi native: snapshot repository is required")
 	}
@@ -1238,7 +1248,11 @@ func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, re
 	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	defer cancel()
-	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: ref.ID, PipelineRunTradeDate: ref.TradeDate, DataType: "kalshi_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
+	item, err := pipelineSnapshotFromScope(scope, "kalshi_native_snapshot", payload)
+	if err != nil {
+		return err
+	}
+	if err := r.snapshotRepo.Create(persistCtx, item); err != nil {
 		return fmt.Errorf("kalshi native: persist snapshot: %w", err)
 	}
 	return nil
@@ -1741,6 +1755,36 @@ func bindStrategyRunScope(run *domain.PipelineRun, executionAccount domain.Execu
 	run.OriginType = string(originType)
 	run.OriginID = originID
 	return nil
+}
+
+func executionScopeFromPersistedRun(run *domain.PipelineRun, strategy domain.Strategy) (execution.ExecutionScope, error) {
+	if run == nil {
+		return execution.ExecutionScope{}, errors.New("persisted run is required")
+	}
+	versionID, err := uuid.Parse(run.OriginID)
+	if err != nil || versionID == uuid.Nil || run.StrategyID != strategy.ID || run.OriginType != string(ledger.ExecutionOriginStrategyVersion) {
+		return execution.ExecutionScope{}, errors.New("persisted run ownership does not match strategy")
+	}
+	if strategy.ExecutionStrategyVersionID != nil && *strategy.ExecutionStrategyVersionID != versionID {
+		return execution.ExecutionScope{}, errors.New("persisted run version does not match strategy binding")
+	}
+	if strategy.ID == uuid.Nil {
+		return execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	}
+	return execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
+}
+
+func pipelineSnapshotFromScope(scope execution.ExecutionScope, dataType string, payload json.RawMessage) (*domain.PipelineRunSnapshot, error) {
+	run, ok := scope.PipelineRun()
+	if !ok {
+		return nil, errors.New("pipeline snapshot requires run-scoped execution ownership")
+	}
+	originType, originID := scope.Origin()
+	return &domain.PipelineRunSnapshot{
+		ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(),
+		OriginType: string(originType), OriginID: originID, PipelineRunID: run.ID,
+		PipelineRunTradeDate: run.TradeDate, DataType: dataType, Payload: payload, CreatedAt: time.Now().UTC(),
+	}, nil
 }
 
 func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig) (agent.InitialStateSeed, error) {
@@ -2294,7 +2338,12 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 	}
 	maxLossPct := opportunityMaxLossPct(finalSignal.Signal, plan.EntryPrice, plan.StopLoss)
 	proposedNotional := plan.PositionSize * plan.EntryPrice
+	scope, err := executionScopeFromPersistedRun(run, strategy)
+	if err != nil {
+		return fmt.Errorf("portfolio opportunity: derive source scope: %w", err)
+	}
 	opportunity, reason, err := portfolio.BuildOpportunity(portfolio.OpportunityBuildInput{
+		Scope:             scope,
 		Strategy:          strategy,
 		Run:               run,
 		Signal:            finalSignal.Signal,
@@ -2427,11 +2476,34 @@ func loadResultPositions(ctx context.Context, repo repository.PositionRepository
 	if !ok {
 		return nil, fmt.Errorf("canonical execution-scoped position repository is required")
 	}
-	positions, err := scoped.GetByExecutionScope(ctx, binding.AccountID(), binding.Environment(), string(ledger.ExecutionOriginStrategyVersion), versionID.String(), repository.PositionFilter{}, 10, 0)
-	if err == nil {
-		err = validatePositionOrigins(positions, binding, versionID)
+	const pageSize = 100
+	positions := make([]domain.Position, 0)
+	for offset := 0; ; offset += pageSize {
+		page, err := scoped.GetByExecutionScope(ctx, binding.AccountID(), binding.Environment(), string(ledger.ExecutionOriginStrategyVersion), versionID.String(), repository.PositionFilter{}, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		positions = append(positions, page...)
+		if len(page) < pageSize {
+			break
+		}
 	}
-	return positions, err
+	return positions, validatePositionOrigins(positions, binding, versionID)
+}
+
+func loadResultOrders(ctx context.Context, repo repository.OrderRepository, ref domain.PipelineRunRef) ([]domain.Order, error) {
+	const pageSize = 100
+	orders := make([]domain.Order, 0)
+	for offset := 0; ; offset += pageSize {
+		page, err := repo.GetByRun(ctx, ref, repository.OrderFilter{}, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, page...)
+		if len(page) < pageSize {
+			return orders, nil
+		}
+	}
 }
 
 func validateResultOrders(orders []domain.Order, binding domain.ExecutionAccountBinding, versionID, runID uuid.UUID, tradeDate time.Time) error {

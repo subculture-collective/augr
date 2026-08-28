@@ -77,6 +77,12 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 	for i := range result.Decisions {
 		decision := result.Decisions[i]
 		decision.Mode = domain.AllocationDecisionMode(mode)
+		if opportunity, ok := opportunityByIDValue(decision, opportunityByID); ok {
+			decision.AccountID = opportunity.AccountID
+			decision.Environment = opportunity.Environment
+			decision.OriginType = opportunity.OriginType
+			decision.OriginID = opportunity.OriginID
+		}
 
 		if mode == portfolio.AllocatorModePaper && decision.Action == domain.AllocationDecisionActionShadowSelected {
 			if err := o.preclaimPaperOpportunity(ctx, decision); err != nil {
@@ -158,6 +164,8 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 				return nil, nil, fmt.Errorf("portfolio_allocator: load source run: %w", err)
 			case run.Status != domain.PipelineStatusCompleted:
 				reason = "source_run_not_completed"
+			case run.AccountID != opportunity.AccountID || run.Environment != opportunity.Environment || run.OriginType != opportunity.OriginType || run.OriginID != opportunity.OriginID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate):
+				reason = "source_scope_mismatch"
 			case run.StrategyID != opportunity.StrategyID:
 				reason = "source_strategy_mismatch"
 			case run.Signal != opportunity.Signal || (run.Signal != domain.PipelineSignalBuy && run.Signal != domain.PipelineSignalSell):
@@ -171,6 +179,10 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 		opportunityID := opportunity.ID
 		strategyID := opportunity.StrategyID
 		rejected = append(rejected, domain.AllocationDecision{
+			AccountID:     opportunity.AccountID,
+			Environment:   opportunity.Environment,
+			OriginType:    opportunity.OriginType,
+			OriginID:      opportunity.OriginID,
 			OpportunityID: &opportunityID,
 			StrategyID:    &strategyID,
 			Mode:          domain.AllocationDecisionMode(mode),
@@ -250,8 +262,12 @@ func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, dec
 		return paperAllocatorRejected(decision, "missing_strategy")
 	}
 
+	scope, err := opportunityExecutionScope(opportunity, *strategy)
+	if err != nil {
+		return paperAllocatorRejected(decision, "execution_scope_mismatch")
+	}
 	executor := portfolio.NewPaperExecutor(portfolio.PaperExecutorDeps{Processor: o.deps.PortfolioPaperProcessor, ExecutionAccount: o.deps.ExecutionAccount})
-	result, err := executor.ExecutePaperDecision(ctx, opportunity, decision, *strategy)
+	result, err := executor.ExecutePaperDecisionScoped(ctx, scope, opportunity, decision, *strategy)
 	if err != nil {
 		return paperAllocatorRejected(decision, "paper_execution_error")
 	}
@@ -265,6 +281,24 @@ func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, dec
 		decision.Reasons = append(decision.Reasons, result.Reason)
 	}
 	return decision
+}
+
+func opportunityByIDValue(decision domain.AllocationDecision, opportunities map[uuid.UUID]domain.Opportunity) (domain.Opportunity, bool) {
+	if decision.OpportunityID == nil {
+		return domain.Opportunity{}, false
+	}
+	opportunity, ok := opportunities[*decision.OpportunityID]
+	return opportunity, ok
+}
+
+func opportunityExecutionScope(opportunity domain.Opportunity, strategy domain.Strategy) (execution.ExecutionScope, error) {
+	if opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil || strategy.ExecutionStrategyVersionID == nil {
+		return execution.ExecutionScope{}, errors.New("complete opportunity ownership is required")
+	}
+	if opportunity.OriginID != strategy.ExecutionStrategyVersionID.String() || opportunity.StrategyID != strategy.ID {
+		return execution.ExecutionScope{}, errors.New("opportunity ownership does not match strategy")
+	}
+	return execution.NewStrategyExecutionScope(opportunity.AccountID, opportunity.Environment, *strategy.ExecutionStrategyVersionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, strategy.ID)
 }
 
 func paperAllocatorRejected(decision domain.AllocationDecision, reason string) domain.AllocationDecision {

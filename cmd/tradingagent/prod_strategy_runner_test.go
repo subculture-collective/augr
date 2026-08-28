@@ -733,6 +733,36 @@ func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 	if len(repo.queued) != 1 || repo.queued[0].PipelineRunID == nil || *repo.queued[0].PipelineRunID != completed.ID {
 		t.Fatalf("queued opportunities = %#v, want one linked to completed run %s", repo.queued, completed.ID)
 	}
+	got := repo.queued[0]
+	if got.AccountID != completed.AccountID || got.Environment != completed.Environment || got.OriginType != completed.OriginType || got.OriginID != completed.OriginID || got.PipelineRunTradeDate == nil || !got.PipelineRunTradeDate.Equal(completed.TradeDate) {
+		t.Fatalf("opportunity lineage = %+v, want persisted run lineage %+v", got, completed)
+	}
+}
+
+type pagedResultOrderRepo struct {
+	repository.OrderRepository
+	items   []domain.Order
+	offsets []int
+}
+
+func (r *pagedResultOrderRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.OrderFilter, limit, offset int) ([]domain.Order, error) {
+	r.offsets = append(r.offsets, offset)
+	if offset >= len(r.items) {
+		return nil, nil
+	}
+	end := min(offset+limit, len(r.items))
+	return append([]domain.Order(nil), r.items[offset:end]...), nil
+}
+
+func TestLoadResultOrdersHydratesEveryPage(t *testing.T) {
+	repo := &pagedResultOrderRepo{items: make([]domain.Order, 205)}
+	orders, err := loadResultOrders(context.Background(), repo, domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 205 || !reflect.DeepEqual(repo.offsets, []int{0, 100, 200}) {
+		t.Fatalf("hydration = %d orders, offsets %v; want 205 and all pages", len(orders), repo.offsets)
+	}
 }
 
 func TestRecordPortfolioOpportunitySurfacesRequiredPersistenceLoss(t *testing.T) {

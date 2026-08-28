@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/google/uuid"
 )
 
@@ -22,6 +23,7 @@ type OpportunityBuilderConfig struct {
 }
 
 type OpportunityBuildInput struct {
+	Scope             execution.ExecutionScope
 	Strategy          domain.Strategy
 	Run               *domain.PipelineRun
 	Decision          *domain.TradeDecision
@@ -75,6 +77,15 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 	if input.Strategy.ExecutionStrategyVersionID == nil || input.Run.OriginID != input.Strategy.ExecutionStrategyVersionID.String() || input.Run.StrategyID != input.Strategy.ID {
 		return nil, NoActionReasonUnknown, fmt.Errorf("source run scope does not match strategy binding")
 	}
+	runRef, ok := input.Scope.PipelineRun()
+	originType, originID := input.Scope.Origin()
+	if !ok || input.Scope.AccountID() != input.Run.AccountID || input.Scope.Environment() != input.Run.Environment || string(originType) != input.Run.OriginType || originID != input.Run.OriginID || runRef.ID != input.Run.ID || !runRef.TradeDate.Equal(input.Run.TradeDate) {
+		return nil, NoActionReasonUnknown, fmt.Errorf("execution scope does not match persisted source run")
+	}
+	legacyStrategyID := input.Scope.LegacyStrategyID()
+	if legacyStrategyID == nil || *legacyStrategyID != input.Strategy.ID {
+		return nil, NoActionReasonUnknown, fmt.Errorf("execution scope does not match strategy binding")
+	}
 
 	side := orderSideFromSignal(input.Signal)
 	if input.Decision != nil && input.Decision.Side.IsValid() {
@@ -83,10 +94,10 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 
 	createdAt := now().UTC()
 	opportunity := &domain.Opportunity{
-		AccountID:         input.Run.AccountID,
-		Environment:       input.Run.Environment,
-		OriginType:        input.Run.OriginType,
-		OriginID:          input.Run.OriginID,
+		AccountID:         input.Scope.AccountID(),
+		Environment:       input.Scope.Environment(),
+		OriginType:        string(originType),
+		OriginID:          originID,
 		StrategyID:        input.Strategy.ID,
 		MarketType:        marketType,
 		Ticker:            ticker,
@@ -108,7 +119,7 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		UpdatedAt:         createdAt,
 	}
 
-	runID, tradeDate := input.Run.ID, input.Run.TradeDate
+	runID, tradeDate := runRef.ID, runRef.TradeDate
 	opportunity.PipelineRunID = &runID
 	opportunity.PipelineRunTradeDate = &tradeDate
 

@@ -6,24 +6,30 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/google/uuid"
 )
 
-func scopedOpportunitySource(market domain.MarketType, ticker string) (domain.Strategy, *domain.PipelineRun) {
+func scopedOpportunitySource(market domain.MarketType, ticker string) (domain.Strategy, *domain.PipelineRun, execution.ExecutionScope) {
 	strategyID, versionID := uuid.New(), uuid.New()
 	strategy := domain.Strategy{ID: strategyID, Ticker: ticker, MarketType: market, Status: domain.StrategyStatusActive, ExecutionStrategyVersionID: &versionID}
 	run := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC)}
-	return strategy, run
+	scope, err := execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategyID)
+	if err != nil {
+		panic(err)
+	}
+	return strategy, run, scope
 }
 
 func TestBuildOpportunityBuyStock(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 19, 15, 4, 5, 0, time.UTC)
-	strategy, run := scopedOpportunitySource(domain.MarketTypeStock, "AAPL")
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeStock, "AAPL")
 	strategyID, runID := strategy.ID, run.ID
 
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
+		Scope:             scope,
 		Strategy:          strategy,
 		Run:               run,
 		Signal:            domain.PipelineSignalBuy,
@@ -106,8 +112,9 @@ func TestBuildOpportunityKalshiTTL(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 19, 15, 4, 5, 0, time.UTC)
-	strategy, run := scopedOpportunitySource(domain.MarketTypeKalshi, "ELECTION")
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeKalshi, "ELECTION")
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
+		Scope:    scope,
 		Strategy: strategy,
 		Run:      run,
 		Signal:   domain.PipelineSignalSell,
@@ -155,9 +162,10 @@ func TestBuildOpportunityInactiveStrategy(t *testing.T) {
 
 func TestBuildOpportunityDecisionSideOverridesSignal(t *testing.T) {
 	t.Parallel()
-	strategy, run := scopedOpportunitySource(domain.MarketTypeStock, "TSLA")
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeStock, "TSLA")
 
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
+		Scope:    scope,
 		Strategy: strategy,
 		Run:      run,
 		Decision: &domain.TradeDecision{Side: domain.OrderSideSell},
@@ -179,9 +187,10 @@ func TestBuildOpportunityDecisionSideOverridesSignal(t *testing.T) {
 
 func TestBuildOpportunityClampsNegativeMetrics(t *testing.T) {
 	t.Parallel()
-	strategy, run := scopedOpportunitySource(domain.MarketTypeOptions, "SPY")
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeOptions, "SPY")
 
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
+		Scope:             scope,
 		Strategy:          strategy,
 		Run:               run,
 		Signal:            domain.PipelineSignalSell,
@@ -233,6 +242,19 @@ func TestBuildOpportunityRejectsUnsupportedSignal(t *testing.T) {
 	}
 	if reason != NoActionReasonUnknown {
 		t.Fatalf("reason = %q, want %q", reason, NoActionReasonUnknown)
+	}
+}
+
+func TestBuildOpportunityRejectsScopeThatConflictsWithPersistedRun(t *testing.T) {
+	t.Parallel()
+	strategy, run, _ := scopedOpportunitySource(domain.MarketTypeStock, "AAPL")
+	conflicting, err := execution.NewStrategyExecutionScope(uuid.New(), run.Environment, *strategy.ExecutionStrategyVersionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opportunity, _, err := BuildOpportunity(OpportunityBuildInput{Scope: conflicting, Strategy: strategy, Run: run, Signal: domain.PipelineSignalBuy}, OpportunityBuilderConfig{})
+	if err == nil || opportunity != nil {
+		t.Fatalf("BuildOpportunity() = %#v, %v; want scope mismatch", opportunity, err)
 	}
 }
 

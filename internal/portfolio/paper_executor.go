@@ -61,6 +61,14 @@ func NewPaperExecutor(deps PaperExecutorDeps) *PaperExecutor {
 // ExecutePaperDecision validates the decision/strategy pair and, when allowed,
 // submits a paper order intent through the configured processor.
 func (e *PaperExecutor) ExecutePaperDecision(ctx context.Context, opportunity domain.Opportunity, decision domain.AllocationDecision, strategy domain.Strategy) (PaperExecutionResult, error) {
+	scope, err := scopeFromOpportunity(opportunity, strategy)
+	if err != nil {
+		return e.rejected("invalid_execution_scope"), nil
+	}
+	return e.ExecutePaperDecisionScoped(ctx, scope, opportunity, decision, strategy)
+}
+
+func (e *PaperExecutor) ExecutePaperDecisionScoped(ctx context.Context, scope execution.ExecutionScope, opportunity domain.Opportunity, decision domain.AllocationDecision, strategy domain.Strategy) (PaperExecutionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return PaperExecutionResult{}, err
 	}
@@ -132,9 +140,10 @@ func (e *PaperExecutor) ExecutePaperDecision(ctx context.Context, opportunity do
 	if err != nil || strategy.ExecutionStrategyVersionID == nil || *strategy.ExecutionStrategyVersionID != versionID {
 		return e.rejected("execution_scope_mismatch"), nil
 	}
-	scope, err := execution.NewStrategyExecutionScope(e.deps.ExecutionAccount.AccountID(), e.deps.ExecutionAccount.Environment(), versionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, strategy.ID)
-	if err != nil {
-		return e.rejected("invalid_execution_scope"), nil
+	originType, originID := scope.Origin()
+	run, hasRun := scope.PipelineRun()
+	if !hasRun || scope.AccountID() != opportunity.AccountID || scope.Environment() != opportunity.Environment || string(originType) != opportunity.OriginType || originID != opportunity.OriginID || run.ID != *opportunity.PipelineRunID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate) {
+		return e.rejected("execution_scope_mismatch"), nil
 	}
 	orderResult, err := e.deps.Processor.ProcessPaperOrder(ctx, PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD})
 	if err != nil {
@@ -155,6 +164,13 @@ func (e *PaperExecutor) ExecutePaperDecision(ctx context.Context, opportunity do
 		FinalSignal: finalSignal,
 		TradingPlan: plan,
 	}, nil
+}
+
+func scopeFromOpportunity(opportunity domain.Opportunity, strategy domain.Strategy) (execution.ExecutionScope, error) {
+	if opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil || strategy.ExecutionStrategyVersionID == nil {
+		return execution.ExecutionScope{}, fmt.Errorf("complete opportunity ownership is required")
+	}
+	return execution.NewStrategyExecutionScope(opportunity.AccountID, opportunity.Environment, *strategy.ExecutionStrategyVersionID, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate}, strategy.ID)
 }
 
 func paperPlanSide(opportunity domain.Opportunity) string {

@@ -259,7 +259,7 @@ func (m *OrderManager) ProcessSignal(
 		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
 		if !allowed {
 			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_version_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
-			m.recordTradeDecision(ctx, m.newTradeDecision(scope, plan, marketType, strings.ToUpper(strings.TrimSpace(plan.Side)), 0, 0, domain.RiskDecisionRejected, []string{denial.Code + ": " + denial.Message}, domain.TradeDecisionStatusRejected))
+			m.recordTradeDecision(ctx, scope, m.newTradeDecision(scope, plan, marketType, strings.ToUpper(strings.TrimSpace(plan.Side)), 0, 0, domain.RiskDecisionRejected, []string{denial.Code + ": " + denial.Message}, domain.TradeDecisionStatusRejected))
 			return fmt.Errorf("order_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
 		}
 	}
@@ -296,7 +296,7 @@ func (m *OrderManager) ProcessSignal(
 				"pipeline_run_id": runID.String(),
 				"pipeline_signal": signal.Signal,
 			})
-			m.recordTradeDecision(ctx, decision)
+			m.recordTradeDecision(ctx, scope, decision)
 
 			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
 				"ticker":      plan.Ticker,
@@ -345,7 +345,7 @@ func (m *OrderManager) ProcessSignal(
 				"pipeline_run_id":   runID.String(),
 				"pipeline_signal":   signal.Signal,
 			})
-			m.recordTradeDecision(ctx, decision)
+			m.recordTradeDecision(ctx, scope, decision)
 
 			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
 				"ticker":          plan.Ticker,
@@ -471,7 +471,7 @@ func (m *OrderManager) ProcessSignal(
 
 	if !approved {
 		m.logger.WarnContext(ctx, "position limits rejected", "ticker", plan.Ticker, "reason", reason)
-		m.recordTradeDecision(ctx, m.newTradeDecision(
+		m.recordTradeDecision(ctx, scope, m.newTradeDecision(
 			scope,
 			plan,
 			marketType,
@@ -572,7 +572,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
 		}
 		m.recordOrderMetric(order.Side, order.Status)
-		m.recordTradeDecision(ctx, m.newTradeDecision(
+		m.recordTradeDecision(ctx, scope, m.newTradeDecision(
 			scope,
 			plan,
 			order.MarketType,
@@ -604,7 +604,7 @@ func (m *OrderManager) ProcessSignal(
 		nil,
 		domain.TradeDecisionStatusCandidate,
 	)
-	m.recordTradeDecision(ctx, decision)
+	m.recordTradeDecision(ctx, scope, decision)
 
 	// 6. Submit to broker (status = submitted).
 	externalID, err := m.broker.SubmitOrder(ctx, order)
@@ -614,7 +614,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
 		}
 		m.recordOrderMetric(order.Side, order.Status)
-		m.attachTradeDecisionOrder(ctx, decision.ID, order.ID, m.liveTrading)
+		m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading)
 
 		if auditErr := m.audit(ctx, "order_rejected", "order", &order.ID, map[string]any{
 			"error": err.Error(),
@@ -635,7 +635,7 @@ func (m *OrderManager) ProcessSignal(
 	order.Status = domain.OrderStatusSubmitted
 	order.SubmittedAt = &submittedAt
 	m.recordOrderMetric(order.Side, order.Status)
-	m.attachTradeDecisionOrder(ctx, decision.ID, order.ID, m.liveTrading)
+	m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading)
 
 	if auditErr := m.audit(ctx, "order_submitted", "order", &order.ID, map[string]any{
 		"external_id": externalID,
@@ -799,21 +799,31 @@ func cloneFloatPtr(value *float64) *float64 {
 	return &cloned
 }
 
-func (m *OrderManager) recordTradeDecision(ctx context.Context, decision *domain.TradeDecision) {
+func (m *OrderManager) recordTradeDecision(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision) {
 	if m == nil || m.decisionRecorder == nil || decision == nil {
 		return
 	}
-	if err := m.decisionRecorder.RecordDecision(ctx, decision); err != nil {
+	var err error
+	if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok {
+		err = recorder.RecordDecisionScoped(ctx, scope, decision)
+	} else {
+		err = m.decisionRecorder.RecordDecision(ctx, decision)
+	}
+	if err != nil {
 		m.logger.ErrorContext(ctx, "order_manager: record trade decision", "error", err, "decision_id", decision.ID)
 	}
 }
 
-func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, decisionID, orderID uuid.UUID, live bool) {
+func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, scope ExecutionScope, decisionID, orderID uuid.UUID, live bool) {
 	if m == nil || m.decisionRecorder == nil || decisionID == uuid.Nil || orderID == uuid.Nil {
 		return
 	}
 	var err error
-	if live {
+	if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok && live {
+		err = recorder.AttachLiveOrderScoped(ctx, scope, decisionID, orderID)
+	} else if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok {
+		err = recorder.AttachPaperOrderScoped(ctx, scope, decisionID, orderID)
+	} else if live {
 		err = m.decisionRecorder.AttachLiveOrder(ctx, decisionID, orderID)
 	} else {
 		err = m.decisionRecorder.AttachPaperOrder(ctx, decisionID, orderID)
@@ -823,7 +833,7 @@ func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, decisionID,
 	}
 }
 
-func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, payload any) {
+func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, scope ExecutionScope, decisionID uuid.UUID, eventType domain.ReplayEventType, payload any) {
 	if m == nil || decisionID == uuid.Nil {
 		return
 	}
@@ -831,7 +841,13 @@ func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, decisionID
 	if !ok {
 		return
 	}
-	if err := recorder.RecordReplayEvent(ctx, decisionID, eventType, "order_manager", payload, m.currentTime()); err != nil {
+	var err error
+	if scoped, ok := recorder.(ScopedDecisionRecorder); ok {
+		err = scoped.RecordReplayEventScoped(ctx, scope, decisionID, eventType, "order_manager", payload, m.currentTime())
+	} else {
+		err = recorder.RecordReplayEvent(ctx, decisionID, eventType, "order_manager", payload, m.currentTime())
+	}
+	if err != nil {
 		m.logger.ErrorContext(ctx, "order_manager: record replay event", "error", err, "decision_id", decisionID, "event_type", eventType)
 	}
 }
@@ -1051,10 +1067,10 @@ func (m *OrderManager) handleFill(
 			position = &domain.Position{ID: *result.PositionID}
 		}
 		if !result.Replayed {
-			m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": fillPrice, "quantity": order.FilledQuantity, "prediction_side": order.PredictionSide})
+			m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": fillPrice, "quantity": order.FilledQuantity, "prediction_side": order.PredictionSide})
 		}
 		if !result.Replayed && position != nil {
-			m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt})
+			m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt})
 		}
 		if !result.Replayed {
 			if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{"fill_price": fillPrice, "quantity": order.FilledQuantity, "trade_id": result.TradeID, "position_id": result.PositionID}); auditErr != nil {
@@ -1167,11 +1183,11 @@ func (m *OrderManager) handleFill(
 		return fmt.Errorf("order_manager: create trade: %w", err)
 	}
 
-	m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{
+	m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{
 		"order_id": order.ID, "trade_id": trade.ID, "price": fillPrice,
 		"quantity": order.FilledQuantity, "prediction_side": order.PredictionSide,
 	})
-	m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{
+	m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{
 		"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity,
 		"realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt,
 	})

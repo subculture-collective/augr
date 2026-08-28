@@ -11,15 +11,26 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-type decisionJournalStub struct{ created *domain.TradeDecision }
+type decisionJournalStub struct {
+	created *domain.TradeDecision
+	stored  map[uuid.UUID]domain.TradeDecision
+}
 
 func (s *decisionJournalStub) Create(_ context.Context, decision *domain.TradeDecision) error {
 	s.created = decision
+	if s.stored == nil {
+		s.stored = make(map[uuid.UUID]domain.TradeDecision)
+	}
+	s.stored[decision.ID] = *decision
 	return nil
 }
 
-func (*decisionJournalStub) Get(context.Context, uuid.UUID) (*domain.TradeDecision, error) {
-	return nil, nil
+func (s *decisionJournalStub) Get(_ context.Context, id uuid.UUID) (*domain.TradeDecision, error) {
+	decision, ok := s.stored[id]
+	if !ok {
+		return nil, repository.ErrNotFound
+	}
+	return &decision, nil
 }
 
 func (*decisionJournalStub) List(context.Context, repository.TradeDecisionFilter, int, int) ([]domain.TradeDecision, error) {
@@ -50,17 +61,24 @@ func TestTradeDecisionJournalRecorderWritesReplayLifecycle(t *testing.T) {
 	replay := &replayEventStub{}
 	recorder := NewTradeDecisionJournalRecorder(journal, replay)
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	accountID, versionID, runID := uuid.New(), uuid.New(), uuid.New()
+	tradeDate := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	scope, err := NewStrategyExecutionScope(accountID, domain.AccountEnvironmentPaperScored, versionID, domain.PipelineRunRef{ID: runID, TradeDate: tradeDate})
+	if err != nil {
+		t.Fatal(err)
+	}
 	decision := &domain.TradeDecision{
 		ID: uuid.New(), MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST",
 		RiskStatus: domain.RiskDecisionApproved, Status: domain.TradeDecisionStatusCandidate,
 		CreatedAt: now, UpdatedAt: now,
 	}
 
-	if err := recorder.RecordDecision(context.Background(), decision); err != nil {
+	scoped := recorder.(ScopedDecisionRecorder)
+	if err := scoped.RecordDecisionScoped(context.Background(), scope, decision); err != nil {
 		t.Fatalf("RecordDecision() error = %v", err)
 	}
 	orderID := uuid.New()
-	if err := recorder.AttachPaperOrder(context.Background(), decision.ID, orderID); err != nil {
+	if err := scoped.AttachPaperOrderScoped(context.Background(), scope, decision.ID, orderID); err != nil {
 		t.Fatalf("AttachPaperOrder() error = %v", err)
 	}
 
@@ -78,5 +96,43 @@ func TestTradeDecisionJournalRecorderWritesReplayLifecycle(t *testing.T) {
 		if replay.events[i].TradeDecisionID != decision.ID {
 			t.Fatalf("events[%d] decision id mismatch", i)
 		}
+		if replay.events[i].AccountID != accountID || replay.events[i].Environment != scope.Environment() || replay.events[i].OriginID != versionID.String() {
+			t.Fatalf("events[%d] scope = %+v, want persisted decision scope", i, replay.events[i])
+		}
+	}
+}
+
+func TestTradeDecisionJournalRecorderRejectsConflictingAccountRetry(t *testing.T) {
+	journal := &decisionJournalStub{}
+	recorder := NewTradeDecisionJournalRecorder(journal, &replayEventStub{}).(ScopedDecisionRecorder)
+	run := domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}
+	versionID := uuid.New()
+	first, _ := NewStrategyExecutionScope(uuid.New(), domain.AccountEnvironmentPaperScored, versionID, run)
+	conflicting, _ := NewStrategyExecutionScope(uuid.New(), domain.AccountEnvironmentPaperScored, versionID, run)
+	decision := &domain.TradeDecision{ID: uuid.New(), MarketType: domain.MarketTypeStock, InstrumentKey: "AAPL", Status: domain.TradeDecisionStatusCandidate}
+	if err := recorder.RecordDecisionScoped(context.Background(), first, decision); err != nil {
+		t.Fatal(err)
+	}
+	if err := recorder.AttachPaperOrderScoped(context.Background(), conflicting, decision.ID, uuid.New()); err == nil {
+		t.Fatal("AttachPaperOrderScoped() accepted conflicting account retry")
+	}
+}
+
+func TestTradeDecisionJournalRecorderRestartRetryUsesPersistedParentScope(t *testing.T) {
+	journal, replay := &decisionJournalStub{}, &replayEventStub{}
+	run := domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}
+	scope, _ := NewStrategyExecutionScope(uuid.New(), domain.AccountEnvironmentPaperScored, uuid.New(), run)
+	decision := &domain.TradeDecision{ID: uuid.New(), MarketType: domain.MarketTypeStock, InstrumentKey: "AAPL", Status: domain.TradeDecisionStatusCandidate}
+	first := NewTradeDecisionJournalRecorder(journal, replay).(ScopedDecisionRecorder)
+	if err := first.RecordDecisionScoped(context.Background(), scope, decision); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewTradeDecisionJournalRecorder(journal, replay).(ScopedDecisionRecorder)
+	if err := restarted.AttachPaperOrderScoped(context.Background(), scope, decision.ID, uuid.New()); err != nil {
+		t.Fatalf("restart retry error = %v", err)
+	}
+	last := replay.events[len(replay.events)-1]
+	if last.AccountID != scope.AccountID() || last.Environment != scope.Environment() {
+		t.Fatalf("restart replay scope = %+v", last)
 	}
 }
