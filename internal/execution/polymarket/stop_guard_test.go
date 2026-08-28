@@ -368,7 +368,7 @@ func TestStopGuardBootstrapResumesReservedOrderIdentity(t *testing.T) {
 	stop := 0.40
 	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
 	intent := domain.PositionIntentSellToClose
-	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, Quantity: 2, Status: domain.OrderStatusPending, PositionIntent: &intent, ClientOrderID: "reserved-stop-client"}
+	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", ClientOrderID: "reserved-stop-client"}
 	repo := &sharedExitClaims{reservedOrder: reserved}
 	broker := &fakeBroker{lookupStatus: domain.OrderStatusSubmitted, lookupExternalID: "reserved-venue-id"}
 	g, err := NewStopGuard(StopGuardConfig{ExecutionAccount: testStopGuardBinding, Broker: broker, ExitRepo: repo})
@@ -392,7 +392,7 @@ func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
 	stop := 0.40
 	pos := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 0.50, StopLoss: &stop}
 	intent := domain.PositionIntentSellToClose
-	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, Quantity: 2, Status: domain.OrderStatusSubmitted, PositionIntent: &intent, ClientOrderID: "reserved-stop-client"}
+	reserved := &domain.Order{ID: uuid.New(), AccountID: pos.AccountID, Environment: pos.Environment, OriginType: pos.OriginType, OriginID: pos.OriginID, Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusSubmitted, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", ClientOrderID: "reserved-stop-client"}
 	price := 0.41
 	filledAt := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
 	broker := &fakeBroker{lookupStatus: domain.OrderStatusFilled, lookupExternalID: "filled-venue-id", lookupFilledQuantity: 2, lookupFilledAvgPrice: &price, lookupFilledAt: &filledAt}

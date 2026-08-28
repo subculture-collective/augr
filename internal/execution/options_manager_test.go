@@ -285,6 +285,18 @@ func TestProcessOptionSignal_PreTradeRiskRejection(t *testing.T) {
 	}
 }
 
+func TestProcessOptionSignalDefinitiveRejectionUsesAtomicTerminalizer(t *testing.T) {
+	orderRepo := &mockOrderRepo{}
+	broker := &mockOptionsBroker{submitOptionOrderFn: func(context.Context, *domain.Order) (string, error) {
+		return "", errors.Join(execution.ErrBrokerOrderRejected, errors.New("insufficient buying power"))
+	}}
+	mgr := newTestOptionsManager(broker, orderRepo, &mockPositionRepo{}, &mockTradeRepo{}, &mockRiskEngine{})
+	err := mgr.ProcessOptionSignal(context.Background(), optionExecutionScope(uuid.New(), uuid.New()), execution.FinalSignal{Signal: domain.PipelineSignalBuy}, execution.TradingPlan{Ticker: "AAPL271217C00150000", EntryPrice: 2.5, PositionSize: 1})
+	if err == nil || len(orderRepo.rejectedOptionOrderIDs) != 1 || len(orderRepo.orders) != 1 || orderRepo.rejectedOptionOrderIDs[0] != orderRepo.orders[0].ID {
+		t.Fatalf("definitive rejection err=%v rejected=%v orders=%v", err, orderRepo.rejectedOptionOrderIDs, orderRepo.orders)
+	}
+}
+
 func TestProcessOptionSignal_PositionLimitUsesContractMultiplier(t *testing.T) {
 	var exposure float64
 	riskEng := &mockRiskEngine{checkPositionLimitsFn: func(_ context.Context, _ string, quantity float64, _ risk.Portfolio) (bool, string, error) {

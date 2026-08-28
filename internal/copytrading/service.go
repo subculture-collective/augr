@@ -245,6 +245,20 @@ func (s *Service) GetSubscription(ctx context.Context, id uuid.UUID) (*domain.Co
 }
 
 func (s *Service) UpdateSubscription(ctx context.Context, id uuid.UUID, replacement *domain.CopySubscription) (*domain.CopySubscription, error) {
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy subscription update requires execution account locker")
+	}
+	var result *domain.CopySubscription
+	err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), func() error {
+		var updateErr error
+		result, updateErr = s.updateSubscriptionLocked(ctx, id, replacement)
+		return updateErr
+	})
+	return result, err
+}
+
+func (s *Service) updateSubscriptionLocked(ctx context.Context, id uuid.UUID, replacement *domain.CopySubscription) (*domain.CopySubscription, error) {
 	current, err := s.deps.Repo.GetSubscription(ctx, id)
 	if err != nil {
 		return nil, err
@@ -269,6 +283,20 @@ func (s *Service) UpdateSubscription(ctx context.Context, id uuid.UUID, replacem
 }
 
 func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Preview, error) {
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy subscription preview requires execution account locker")
+	}
+	var result *Preview
+	err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), func() error {
+		var previewErr error
+		result, previewErr = s.previewLocked(ctx, subscriptionID)
+		return previewErr
+	})
+	return result, err
+}
+
+func (s *Service) previewLocked(ctx context.Context, subscriptionID uuid.UUID) (*Preview, error) {
 	subscription, err := s.deps.Repo.GetSubscription(ctx, subscriptionID)
 	if err != nil {
 		return nil, err
@@ -330,11 +358,11 @@ func (s *Service) SetStatus(ctx context.Context, id uuid.UUID, next domain.CopyS
 		result, err = s.setStatus(ctx, id, next)
 		return err
 	}
-	if locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker); ok {
-		if err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), run); err != nil {
-			return nil, err
-		}
-	} else if err := run(); err != nil {
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy subscription status update requires execution account locker")
+	}
+	if err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), run); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -352,7 +380,7 @@ func (s *Service) setStatus(ctx context.Context, id uuid.UUID, next domain.CopyS
 		return nil, err
 	}
 	if next == domain.CopySubscriptionPaperActive && subscription.Status == domain.CopySubscriptionDraft {
-		if _, err := s.Preview(ctx, id); err != nil {
+		if _, err := s.previewLocked(ctx, id); err != nil {
 			return nil, fmt.Errorf("activation preview: %w", err)
 		}
 		subscription, err = s.deps.Repo.GetSubscription(ctx, id)
@@ -592,6 +620,17 @@ func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.Cop
 	} else {
 		executionResult, err = s.deps.Executor.ExecuteCopyOrder(ctx, request)
 	}
+	if validationErr := validatePaperOrderResult(executionResult, scope); (executionResult.OrderID != nil || executionResult.Status.IsValid()) && validationErr != nil {
+		candidate.Status, candidate.RiskStatus, candidate.OrderID, candidate.RiskReasons = "failed", "pending", nil, []string{validationErr.Error()}
+		if err != nil {
+			candidate.RiskReasons = append(candidate.RiskReasons, err.Error())
+		}
+		completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+		if completeErr != nil || !completed {
+			return candidate, subscription, fmt.Errorf("update copy intent %s: applied=%t: %w", candidate.ID, completed, completeErr)
+		}
+		return candidate, subscription, nil
+	}
 	candidate.OrderID = executionResult.OrderID
 	terminalMapped := false
 	if executionResult.Status == domain.OrderStatusFilled {
@@ -605,20 +644,16 @@ func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.Cop
 			candidate.Status = "received"
 		}
 	} else if err == nil && !terminalMapped {
-		if validationErr := validatePaperOrderResult(executionResult, scope); validationErr != nil {
-			candidate.Status, candidate.RiskStatus, candidate.OrderID, candidate.RiskReasons = "failed", "pending", nil, []string{validationErr.Error()}
-		} else {
-			candidate.RiskStatus = "approved"
-			switch executionResult.Status {
-			case domain.OrderStatusFilled:
-				candidate.Status = "filled"
-			case domain.OrderStatusSubmitted:
-				candidate.Status = "ordered"
-			case domain.OrderStatusPartial, domain.OrderStatusPending:
-				candidate.Status = "partial"
-			default:
-				candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
-			}
+		candidate.RiskStatus = "approved"
+		switch executionResult.Status {
+		case domain.OrderStatusFilled:
+			candidate.Status = "filled"
+		case domain.OrderStatusSubmitted:
+			candidate.Status = "ordered"
+		case domain.OrderStatusPartial, domain.OrderStatusPending:
+			candidate.Status = "partial"
+		default:
+			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
 		}
 	} else if err != nil {
 		candidate.RiskReasons = []string{err.Error()}

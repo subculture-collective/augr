@@ -28,6 +28,7 @@ var _ repository.OrderRepository = (*OrderRepo)(nil)
 var _ repository.ExecutionAccountLocker = (*OrderRepo)(nil)
 var _ repository.AtomicOptionCloseRepository = (*OrderRepo)(nil)
 var _ repository.AtomicOptionOrderRepository = (*OrderRepo)(nil)
+var _ repository.OptionDefinitiveRejectionRepository = (*OrderRepo)(nil)
 var _ repository.OptionCloseReservationLookup = (*OrderRepo)(nil)
 
 // NewOrderRepo returns an OrderRepo backed by the given connection pool.
@@ -232,6 +233,30 @@ func (r *OrderRepo) CreateOptionOrders(ctx context.Context, accountID uuid.UUID,
 		return fmt.Errorf("postgres: atomic option orders commit: %w", err)
 	}
 	return nil
+}
+
+func (r *OrderRepo) RejectOptionOrdersAndRelease(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, orderIDs []uuid.UUID) error {
+	if accountID == uuid.Nil || accountID != r.accountID || !environment.IsValid() || len(orderIDs) == 0 {
+		return fmt.Errorf("postgres: reject option orders: complete scope and orders are required")
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("postgres: reject option orders begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, orderID := range orderIDs {
+		tag, updateErr := tx.Exec(ctx, `UPDATE orders SET status='rejected' WHERE id=$1 AND account_id=$2 AND environment=$3 AND market_type='options' AND status='pending' AND filled_quantity=0`, orderID, accountID, environment)
+		if updateErr != nil {
+			return fmt.Errorf("postgres: reject option order %s: %w", orderID, updateErr)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("postgres: option order %s changed before definitive rejection", orderID)
+		}
+		if _, updateErr = tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=NULL WHERE account_id=$1 AND environment=$2 AND close_reservation_order_id=$3`, accountID, environment, orderID); updateErr != nil {
+			return fmt.Errorf("postgres: release rejected option order %s: %w", orderID, updateErr)
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *OrderRepo) GetOptionClosePositionByOrder(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, orderID uuid.UUID) (*domain.Position, error) {

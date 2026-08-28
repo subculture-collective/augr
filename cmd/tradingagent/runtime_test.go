@@ -1856,6 +1856,10 @@ func (stubPositionRepo) GrossExposureOpen(context.Context, repository.PositionFi
 
 type stubPaperAccountRepo struct{}
 
+func (stubPaperAccountRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 type failingPaperAccountRepo struct {
 	stubPaperAccountRepo
 	err error

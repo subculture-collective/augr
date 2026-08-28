@@ -53,6 +53,10 @@ type fakePaperAccountRepo struct {
 	max       uint64
 }
 
+func (f fakePaperAccountRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func (f fakePaperAccountRepo) ListPaperTrades(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Trade, error) {
 	return f.trades, nil
 }

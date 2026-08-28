@@ -22,6 +22,16 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 	if broker == nil || paperRepo == nil {
 		return fmt.Errorf("paper options account dependencies are required")
 	}
+	locker, ok := paperRepo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return fmt.Errorf("paper options bootstrap requires execution account locker")
+	}
+	return locker.WithExecutionAccountLock(ctx, binding.AccountID(), func() error {
+		return bootstrapPaperOptionsAccountLocked(ctx, binding, broker, paperRepo, closeRepos, recovery...)
+	})
+}
+
+func bootstrapPaperOptionsAccountLocked(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos []repository.AtomicOptionCloseRepository, recovery ...optionRecoveryDependencies) error {
 	var allTrades []domain.Trade
 	for offset := 0; ; offset += 250 {
 		trades, err := paperRepo.ListPaperTrades(ctx, binding.AccountID(), binding.Environment(), 250, offset)
@@ -87,7 +97,7 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 	}
 	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].Fills != nil {
 		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, nil, nil, nil).WithOptionFillRepo(recovery[0].Fills)
-		if err := manager.ReconcilePendingOptionOrders(ctx, binding, allOrders, allPositions); err != nil {
+		if err := manager.ReconcilePendingOptionOrdersWithAccountLockHeld(ctx, binding, allOrders, allPositions); err != nil {
 			return fmt.Errorf("reconcile pending option orders: %w", err)
 		}
 	}
@@ -103,7 +113,7 @@ func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionA
 			if scopeErr != nil {
 				return fmt.Errorf("rebuild pending paper order %s scope: %w", order.ID, scopeErr)
 			}
-			if _, reconcileErr := manager.ReconcilePersistedOrder(ctx, scope, order); reconcileErr != nil {
+			if _, reconcileErr := manager.ReconcilePersistedOrderWithAccountLockHeld(ctx, scope, order); reconcileErr != nil {
 				return fmt.Errorf("reconcile pending paper order %s: %w", order.ID, reconcileErr)
 			}
 		}

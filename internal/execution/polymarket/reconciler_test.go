@@ -81,8 +81,12 @@ func (r *reconcilerPositionRepoStub) GetOpen(_ context.Context, _ repository.Pos
 	return append([]domain.Position(nil), r.positions[offset:end]...), nil
 }
 
-func (r *reconcilerPositionRepoStub) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
-	return r.GetOpen(ctx, filter, limit, offset)
+func (r *reconcilerPositionRepoStub) GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	positions, err := r.GetOpen(ctx, filter, limit, offset)
+	for i := range positions {
+		positions[i].AccountID, positions[i].Environment = accountID, environment
+	}
+	return positions, err
 }
 
 func (r *reconcilerPositionRepoStub) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {
@@ -207,6 +211,20 @@ func TestReconcilerQuantityMismatch(t *testing.T) {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
 	assertSingleDrift(t, auditRepo.entries, "quantity_mismatch", "market-five:YES", 3, 2)
+}
+
+func TestReconcilerRejectsForeignScopedRows(t *testing.T) {
+	repo := &reconcilerPositionRepoStub{positions: []domain.Position{{AccountID: uuid.New(), Environment: domain.AccountEnvironmentLive, MarketType: domain.MarketTypePolymarket, Ticker: "foreign:YES", Side: domain.PositionSideLong, Quantity: 1}}}
+	reconciler := NewReconciler(ReconcilerDeps{ExecutionAccount: reconcilerTestBinding, Broker: &reconcilerBrokerStub{}, PositionRepo: &foreignPreservingPolymarketRepo{reconcilerPositionRepoStub: repo}})
+	if _, err := reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("foreign account row was accepted")
+	}
+}
+
+type foreignPreservingPolymarketRepo struct{ *reconcilerPositionRepoStub }
+
+func (r *foreignPreservingPolymarketRepo) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	return r.GetOpen(ctx, filter, limit, offset)
 }
 
 func TestReconcilerKeyNormalizationYesNo(t *testing.T) {

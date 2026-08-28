@@ -106,6 +106,10 @@ type cancellationRaceCopyRepo struct {
 	completed       *domain.CopyTradeIntent
 }
 
+func (r *cancellationRaceCopyRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func (r *cancellationRaceCopyRepo) GetSubscription(context.Context, uuid.UUID) (*domain.CopySubscription, error) {
 	value := r.subscription
 	return &value, nil
@@ -204,6 +208,10 @@ type effectCopyRepo struct {
 	intents   map[uuid.UUID]domain.CopyTradeIntent
 }
 
+func (r *effectCopyRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func (r *effectCopyRepo) CreateIntent(_ context.Context, intent *domain.CopyTradeIntent) (bool, error) {
 	r.intentWrites++
 	if r.createErr != nil {
@@ -262,8 +270,9 @@ type resultCopyExecutor struct {
 	err    error
 }
 
-func (e *resultCopyExecutor) ExecuteCopyOrder(context.Context, PaperOrderRequest) (PaperOrderResult, error) {
+func (e *resultCopyExecutor) ExecuteCopyOrder(_ context.Context, request PaperOrderRequest) (PaperOrderResult, error) {
 	e.calls++
+	e.result.Scope = request.Scope
 	return e.result, e.err
 }
 

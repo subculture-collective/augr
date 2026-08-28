@@ -375,9 +375,6 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 	defer func() { _ = tx.Rollback(ctx) }()
 	lockKeys := make([]string, 0, len(inputs))
 	for _, input := range inputs {
-		if input.StatusOnly {
-			continue
-		}
 		lockKeys = append(lockKeys, input.IdempotencyKey)
 	}
 	sort.Strings(lockKeys)
@@ -391,6 +388,31 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 	replayed := 0
 	for index, input := range inputs {
 		if input.StatusOnly {
+			var existingKey string
+			var orderID uuid.UUID
+			var accountID uuid.UUID
+			var environment domain.AccountEnvironment
+			var originType, originID, externalID string
+			var status domain.OrderStatus
+			var quantity float64
+			err := tx.QueryRow(ctx, `SELECT idempotency_key,order_id,account_id,environment,origin_type,origin_id,status,filled_quantity::double precision,COALESCE(external_id,'') FROM option_status_idempotency WHERE idempotency_key=$1 OR order_id=$2 FOR UPDATE`, input.IdempotencyKey, input.Order.ID).Scan(&existingKey, &orderID, &accountID, &environment, &originType, &originID, &status, &quantity, &externalID)
+			if err == nil {
+				if existingKey != input.IdempotencyKey || orderID != input.Order.ID || accountID != input.AccountID || environment != input.Environment || originType != input.OriginType || originID != input.OriginID || status != input.Order.Status || !numeric8Equal(quantity, input.FillQuantity) || externalID != strings.TrimSpace(input.Order.ExternalID) {
+					return nil, fmt.Errorf("postgres: option status idempotency mismatch for order %s", input.Order.ID)
+				}
+				results[index].OrderID = orderID
+				continue
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("postgres: select option status idempotency: %w", err)
+			}
+			if err := applyOptionStatusTx(ctx, tx, input); err != nil {
+				return nil, err
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO option_status_idempotency(idempotency_key,account_id,environment,origin_type,origin_id,order_id,status,filled_quantity,external_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.Order.ID, input.Order.Status, input.FillQuantity, nullString(input.Order.ExternalID)); err != nil {
+				return nil, fmt.Errorf("postgres: persist option status idempotency: %w", err)
+			}
+			results[index].OrderID = input.Order.ID
 			continue
 		}
 		key := input.IdempotencyKey
@@ -442,9 +464,6 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 
 	for index, input := range inputs {
 		if input.StatusOnly {
-			if err := applyOptionStatusTx(ctx, tx, input); err != nil {
-				return nil, err
-			}
 			continue
 		}
 		if replayed != 0 {
@@ -469,13 +488,17 @@ func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.O
 	results := make([]repository.OptionFillResult, len(inputs))
 	for index, input := range inputs {
 		if input.StatusOnly {
+			var orderID uuid.UUID
 			var status domain.OrderStatus
 			var quantity float64
-			if err := db.Pool.QueryRow(ctx, `SELECT status,filled_quantity::double precision FROM orders WHERE id=$1 AND account_id=$2 AND environment=$3`, input.Order.ID, input.AccountID, input.Environment).Scan(&status, &quantity); err != nil {
+			var externalID string
+			if err := db.Pool.QueryRow(ctx, `SELECT order_id,status,filled_quantity::double precision,COALESCE(external_id,'') FROM option_status_idempotency WHERE idempotency_key=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID).Scan(&orderID, &status, &quantity, &externalID); errors.Is(err, pgx.ErrNoRows) {
+				return nil, false, nil
+			} else if err != nil {
 				return nil, false, fmt.Errorf("postgres: resolve option recovery status: %w", err)
 			}
-			if status != input.Order.Status || !numeric8Equal(quantity, input.FillQuantity) {
-				return nil, false, nil
+			if orderID != input.Order.ID || status != input.Order.Status || !numeric8Equal(quantity, input.FillQuantity) || externalID != strings.TrimSpace(input.Order.ExternalID) {
+				return nil, false, fmt.Errorf("postgres: resolved option status payload mismatch for order %s", input.Order.ID)
 			}
 			results[index].OrderID = input.Order.ID
 			continue
@@ -509,7 +532,7 @@ func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.O
 func validateOptionFillInput(input repository.OptionFillInput) error {
 	order := input.Order
 	if input.StatusOnly {
-		if order == nil || input.AccountID == uuid.Nil || order.ID == uuid.Nil || order.AccountID != input.AccountID || order.Environment != input.Environment || order.OriginType != input.OriginType || order.OriginID != input.OriginID || order.MarketType.Normalize() != domain.MarketTypeOptions || !terminalOrderStatusPostgres(order.Status) || input.FillQuantity < 0 {
+		if order == nil || strings.TrimSpace(input.IdempotencyKey) == "" || input.AccountID == uuid.Nil || !input.Environment.IsValid() || strings.TrimSpace(input.OriginType) == "" || strings.TrimSpace(input.OriginID) == "" || order.ID == uuid.Nil || order.AccountID != input.AccountID || order.Environment != input.Environment || order.OriginType != input.OriginType || order.OriginID != input.OriginID || order.MarketType.Normalize() != domain.MarketTypeOptions || !terminalOrderStatusPostgres(order.Status) || input.FillQuantity < 0 {
 			return fmt.Errorf("postgres: invalid option recovery status input")
 		}
 		return nil
@@ -552,7 +575,7 @@ func validateOptionFillInput(input repository.OptionFillInput) error {
 
 func applyOptionStatusTx(ctx context.Context, tx pgx.Tx, input repository.OptionFillInput) error {
 	order := input.Order
-	tag, err := tx.Exec(ctx, `UPDATE orders SET external_id=COALESCE(NULLIF($1,''),external_id),status=$2,submitted_at=COALESCE(submitted_at,$3) WHERE id=$4 AND account_id=$5 AND environment=$6 AND filled_quantity=$7 AND status IN ('pending','submitted','partial','filled','cancelled','rejected')`, strings.TrimSpace(order.ExternalID), order.Status, order.SubmittedAt, order.ID, input.AccountID, input.Environment, input.FillQuantity)
+	tag, err := tx.Exec(ctx, `UPDATE orders SET external_id=COALESCE(NULLIF(external_id,''),NULLIF($1,'')),status=$2,submitted_at=COALESCE(submitted_at,$3) WHERE id=$4 AND account_id=$5 AND environment=$6 AND filled_quantity=$7 AND (status IN ('pending','submitted','partial') OR status=$2) AND (external_id IS NULL OR external_id='' OR $1='' OR external_id=$1)`, strings.TrimSpace(order.ExternalID), order.Status, order.SubmittedAt, order.ID, input.AccountID, input.Environment, input.FillQuantity)
 	if err != nil {
 		return fmt.Errorf("postgres: persist option recovery status: %w", err)
 	}
@@ -926,20 +949,23 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	if persisted.Status != domain.TradeDecisionStatusPaper {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: settlement decision %s is not open", persisted.ID)
 	}
-	rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.quantity::double precision, p.avg_entry::double precision, p.realized_pnl::double precision FROM positions p INNER JOIN trades t ON t.position_id = p.id AND t.order_id = $1 AND t.account_id=$2 WHERE p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.closed_at IS NULL AND p.quantity > 0 FOR UPDATE OF p`, input.Decision.PaperOrderID, input.AccountID, input.Environment, input.OriginType, input.OriginID)
+	rows, err := tx.Query(ctx, `SELECT p.id, p.strategy_id, p.quantity::double precision, p.avg_entry::double precision, p.realized_pnl::double precision, p.close_reservation_order_id FROM positions p INNER JOIN trades t ON t.position_id = p.id AND t.order_id = $1 AND t.account_id=$2 WHERE p.account_id=$2 AND p.environment=$3 AND p.origin_type=$4 AND p.origin_id=$5 AND p.ticker=$6 AND p.closed_at IS NULL AND p.quantity > 0 FOR UPDATE OF p`, input.Decision.PaperOrderID, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.PositionTicker)
 	if err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: lock settlement position: %w", err)
 	}
 	defer rows.Close()
 	var positions []domain.Position
+	var reservations []*uuid.UUID
 	for rows.Next() {
 		var position domain.Position
 		var strategyID uuid.UUID
-		if err := rows.Scan(&position.ID, &strategyID, &position.Quantity, &position.AvgEntry, &position.RealizedPnL); err != nil {
+		var reservation *uuid.UUID
+		if err := rows.Scan(&position.ID, &strategyID, &position.Quantity, &position.AvgEntry, &position.RealizedPnL, &reservation); err != nil {
 			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: scan settlement position: %w", err)
 		}
 		position.StrategyID = &strategyID
 		positions = append(positions, position)
+		reservations = append(reservations, reservation)
 	}
 	if err := rows.Err(); err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: iterate settlement positions: %w", err)
@@ -948,6 +974,18 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: expected exactly one open position for decision %s, got %d", input.Decision.ID, len(positions))
 	}
 	position := positions[0]
+	if position.StrategyID == nil || input.Decision.StrategyID == nil || *position.StrategyID != *input.Decision.StrategyID {
+		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: settlement position strategy linkage mismatch")
+	}
+	if reservations[0] != nil {
+		tag, err := tx.Exec(ctx, `UPDATE orders SET status='rejected' WHERE id=$1 AND account_id=$2 AND environment=$3 AND status IN ('pending','submitted') AND filled_quantity=0`, *reservations[0], input.AccountID, input.Environment)
+		if err != nil {
+			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: terminalize active prediction close: %w", err)
+		}
+		if tag.RowsAffected() != 1 {
+			return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: active prediction close cannot be safely terminalized")
+		}
+	}
 	quantity := position.Quantity
 	position.Quantity = 0
 	position.CurrentPrice = &input.Payout
@@ -955,7 +993,7 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 	position.UnrealizedPnL = nil
 	closedAt := input.ResolvedAt.UTC()
 	position.ClosedAt = &closedAt
-	if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = 0, current_price = $1, realized_pnl = $2, unrealized_pnl = NULL, closed_at = $3 WHERE id = $4 AND account_id=$5`, input.Payout, position.RealizedPnL, closedAt, position.ID, input.AccountID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE positions SET quantity = 0, current_price = $1, realized_pnl = $2, unrealized_pnl = NULL, closed_at = $3, close_reservation_order_id=NULL WHERE id = $4 AND account_id=$5`, input.Payout, position.RealizedPnL, closedAt, position.ID, input.AccountID); err != nil {
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: update position: %w", err)
 	}
 	tradeID = uuid.New()
@@ -979,6 +1017,20 @@ func (db *DB) SettlePredictionDecision(ctx context.Context, input repository.Pre
 		return repository.PredictionDecisionSettlementResult{}, fmt.Errorf("postgres: commit settlement: %w", err)
 	}
 	return repository.PredictionDecisionSettlementResult{DecisionID: input.Decision.ID, PositionID: &position.ID, TradeID: tradeID, ReplayEventID: replayEventID, CreatedAt: createdAt}, nil
+}
+
+func (db *DB) RecordOptionSettlementSyncFailure(ctx context.Context, input repository.OptionPositionSettlementInput, syncErr error) error {
+	if input.PositionID == uuid.Nil || input.AccountID == uuid.Nil || !input.Environment.IsValid() || strings.TrimSpace(input.OriginType) == "" || strings.TrimSpace(input.OriginID) == "" || input.SettledAt.IsZero() || syncErr == nil {
+		return fmt.Errorf("postgres: invalid option broker sync retry evidence")
+	}
+	tag, err := db.Pool.Exec(ctx, `INSERT INTO option_broker_sync_retries(position_id,account_id,environment,origin_type,origin_id,settlement_price,settled_at,last_error,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'retry') ON CONFLICT(position_id) DO UPDATE SET last_error=EXCLUDED.last_error,status='retry',updated_at=NOW() WHERE option_broker_sync_retries.account_id=EXCLUDED.account_id AND option_broker_sync_retries.environment=EXCLUDED.environment AND option_broker_sync_retries.origin_type=EXCLUDED.origin_type AND option_broker_sync_retries.origin_id=EXCLUDED.origin_id AND option_broker_sync_retries.settlement_price=EXCLUDED.settlement_price AND option_broker_sync_retries.settled_at=EXCLUDED.settled_at`, input.PositionID, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.SettlementPrice, input.SettledAt.UTC(), syncErr.Error())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("postgres: conflicting option broker sync retry evidence")
+	}
+	return nil
 }
 
 func numeric8Equal(left, right float64) bool {

@@ -165,6 +165,11 @@ func (r *Reconciler) fetchOpenKalshiPositions(ctx context.Context) ([]domain.Pos
 		if err != nil {
 			return nil, err
 		}
+		for i := range page {
+			if page[i].AccountID != r.executionAccount.AccountID() || page[i].Environment != r.executionAccount.Environment() {
+				return nil, fmt.Errorf("position %s belongs to a foreign execution account", page[i].ID)
+			}
+		}
 		if len(page) == 0 {
 			break
 		}

@@ -206,9 +206,10 @@ func (r *mockRiskEngine) DeactivateMarketKillSwitch(_ context.Context, _ domain.
 
 // mockOrderRepo implements repository.OrderRepository.
 type mockOrderRepo struct {
-	mu      sync.Mutex
-	orders  []*domain.Order
-	updates []*domain.Order
+	mu                     sync.Mutex
+	orders                 []*domain.Order
+	updates                []*domain.Order
+	rejectedOptionOrderIDs []uuid.UUID
 
 	createFn        func(ctx context.Context, order *domain.Order) error
 	getFn           func(ctx context.Context, id uuid.UUID) (*domain.Order, error)
@@ -322,6 +323,11 @@ func (r *mockOrderRepo) ReleaseOptionClosePositions(context.Context, uuid.UUID, 
 }
 
 func (r *mockOrderRepo) ReconcileOptionCloseReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	return nil
+}
+
+func (r *mockOrderRepo) RejectOptionOrdersAndRelease(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, orderIDs []uuid.UUID) error {
+	r.rejectedOptionOrderIDs = append(r.rejectedOptionOrderIDs, orderIDs...)
 	return nil
 }
 

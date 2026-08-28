@@ -269,6 +269,10 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 		g.Cancel(positionID)
 		return fmt.Errorf("polymarket: load reserved stop order: %w", err)
 	}
+	if err := validateRecoveredStopReservation(order, pos, entry); err != nil {
+		g.Cancel(positionID)
+		return err
+	}
 	if order.Status != domain.OrderStatusPending && order.Status != domain.OrderStatusSubmitted && order.Status != domain.OrderStatusPartial {
 		g.Cancel(positionID)
 		return fmt.Errorf("polymarket: reserved stop order has non-recoverable status %s", order.Status)
@@ -286,6 +290,25 @@ func (g *StopGuard) RegisterPositionContext(ctx context.Context, pos domain.Posi
 		guard.state.Store(int32(guardArmed))
 	}
 	g.mu.Unlock()
+	return nil
+}
+
+func validateRecoveredStopReservation(order *domain.Order, position domain.Position, expected Position) error {
+	if order == nil || order.ID == uuid.Nil || order.AccountID == uuid.Nil || !order.Environment.IsValid() || strings.TrimSpace(order.OriginType) == "" || strings.TrimSpace(order.OriginID) == "" || strings.TrimSpace(order.ClientOrderID) == "" || order.PositionIntent == nil {
+		return errors.New("polymarket: recovered stop reservation lacks complete order identity")
+	}
+	wantSide, wantIntent := domain.OrderSideSell, domain.PositionIntentSellToClose
+	wantPolymarketIntent := "ORDER_INTENT_SELL_LONG"
+	if position.Side == domain.PositionSideShort {
+		wantSide, wantIntent = domain.OrderSideBuy, domain.PositionIntentBuyToClose
+		wantPolymarketIntent = "ORDER_INTENT_BUY_SHORT"
+	} else if strings.EqualFold(expected.OutcomeSide, "NO") {
+		wantPolymarketIntent = "ORDER_INTENT_SELL_SHORT"
+	}
+	wantTicker := strings.TrimSpace(expected.Slug)
+	if order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType.Normalize() != domain.MarketTypePolymarket || order.OrderType != domain.OrderTypeMarket || strings.TrimSpace(order.Ticker) != wantTicker || !strings.EqualFold(strings.TrimSpace(order.PredictionSide), expected.OutcomeSide) || strings.TrimSpace(order.PolymarketIntent) != wantPolymarketIntent || order.Side != wantSide || *order.PositionIntent != wantIntent || order.Quantity != position.Quantity || position.Quantity <= 0 || position.ClosedAt != nil {
+		return errors.New("polymarket: recovered stop reservation does not close the exact persisted position")
+	}
 	return nil
 }
 

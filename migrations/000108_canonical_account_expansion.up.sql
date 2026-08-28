@@ -144,6 +144,32 @@ CREATE TABLE option_settlement_idempotency (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE option_status_idempotency (
+    idempotency_key TEXT PRIMARY KEY,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+    environment TEXT NOT NULL CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+    origin_type TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    order_id UUID NOT NULL UNIQUE REFERENCES orders(id) ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK (status IN ('filled','cancelled','rejected')),
+    filled_quantity NUMERIC(20,8) NOT NULL CHECK (filled_quantity>=0),
+    external_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE option_broker_sync_retries (
+    position_id UUID PRIMARY KEY REFERENCES positions(id) ON DELETE RESTRICT,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+    environment TEXT NOT NULL CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+    origin_type TEXT NOT NULL,
+    origin_id TEXT NOT NULL,
+    settlement_price NUMERIC(20,8) NOT NULL CHECK (settlement_price>=0),
+    settled_at TIMESTAMPTZ NOT NULL,
+    last_error TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'retry' CHECK (status IN ('retry','resolved')),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 ALTER TABLE conversations
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),

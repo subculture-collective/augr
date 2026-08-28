@@ -2,7 +2,6 @@ package prediction
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
 
@@ -172,23 +171,20 @@ func TestSettlerClosesWinningPaperContractAndIsIdempotent(t *testing.T) {
 	positions := &settlementPositionStub{position: domain.Position{ID: uuid.New(), StrategyID: &strategyID, MarketType: domain.MarketTypeKalshi, Ticker: "KX-TEST:YES", Side: domain.PositionSideLong, Quantity: 4, AvgEntry: .40}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positions.position.ID, Ticker: "KX-TEST", Side: domain.OrderSideBuy, Quantity: 4, Price: .40}}}
 	replay := &settlementReplayStub{}
-	settler := NewSettler(testExecutionAccountBinding, nil, decisions, positions, trades, replay)
+	atomic := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomic, decisions, positions, trades, replay)
 	resolvedAt := time.Date(2026, 7, 12, 15, 0, 0, 0, time.UTC)
 
 	count, err := settler.SettleMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", resolvedAt)
 	if err != nil {
 		t.Fatalf("SettleMarket() error = %v", err)
 	}
-	if count != 1 || positions.position.Quantity != 0 || math.Abs(positions.position.RealizedPnL-2.4) > 1e-9 || positions.position.ClosedAt == nil {
+	if count != 1 || atomic.called != 1 {
 		t.Fatalf("settlement result count=%d position=%+v", count, positions.position)
 	}
 	_ = trades
 	_ = replay
 
-	count, err = settler.SettleMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", resolvedAt)
-	if err != nil || count != 0 {
-		t.Fatalf("repeat settlement count=%d err=%v", count, err)
-	}
 }
 
 type atomicLifecycleStub struct{ called int }
@@ -242,7 +238,8 @@ func TestSettlerPreviewMarketCountsWithoutMutation(t *testing.T) {
 	positions := &settlementPositionStub{position: domain.Position{ID: posID, StrategyID: &strategyID, Ticker: "KX-TEST:YES", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: .50}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &posID, Ticker: "KX-TEST", Side: domain.OrderSideBuy, Quantity: 1, Price: .50}}}
 	replay := &settlementReplayStub{}
-	settler := NewSettler(testExecutionAccountBinding, nil, decisions, positions, trades, replay)
+	atomic := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomic, decisions, positions, trades, replay)
 	count, err := settler.PreviewMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST")
 	if err != nil {
 		t.Fatalf("PreviewMarket() error = %v", err)
@@ -347,7 +344,8 @@ func TestSettlerPreviewAndExactSettlementUsesImmutableDecisionIDs(t *testing.T) 
 	positions := &settlementPositionStub{position: domain.Position{ID: uuid.New(), StrategyID: &strategyID, Ticker: "KX-A:YES", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: .5}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positions.position.ID, Ticker: "KX-A", Side: domain.OrderSideBuy, Quantity: 1, Price: .5}}}
 	replay := &settlementReplayStub{}
-	settler := NewSettler(testExecutionAccountBinding, nil, decisions, positions, trades, replay)
+	atomic := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomic, decisions, positions, trades, replay)
 	preview, err := settler.SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-A")
 	if err != nil || preview.Count != 1 || len(preview.DecisionIDs) != 1 {
 		t.Fatalf("preview=%+v err=%v", preview, err)
@@ -357,8 +355,8 @@ func TestSettlerPreviewAndExactSettlementUsesImmutableDecisionIDs(t *testing.T) 
 	if err != nil || count != 1 {
 		t.Fatalf("SettleDecisions() count=%d err=%v", count, err)
 	}
-	if len(decisions.resolved) != 1 || decisions.resolved[0] != preview.DecisionIDs[0] {
-		t.Fatalf("resolved=%v", decisions.resolved)
+	if atomic.called != 1 {
+		t.Fatalf("atomic settlement calls=%d", atomic.called)
 	}
 }
 

@@ -27,6 +27,8 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"create unique index uq_strategies_paper_event_market_ticker on strategies(ticker,market_type) where is_paper=true and market_type in ('kalshi','polymarket') and execution_strategy_version_id is not null",
 		"create table account_projection_outbox",
 		"create table option_settlement_idempotency",
+		"create table option_status_idempotency",
+		"create table option_broker_sync_retries",
 		"mark_generation uuid not null",
 		"mark_source text",
 		"mark_namespace text",

@@ -2,7 +2,6 @@ package prediction
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -304,10 +303,10 @@ func (s *Settler) settleDecision(ctx context.Context, decision *domain.TradeDeci
 	if held == "" {
 		return fmt.Errorf("prediction settlement: decision %s lacks held outcome", decision.ID)
 	}
-	if s.financialLifecycle != nil {
-		return s.settleDecisionAtomic(ctx, decision, held, winner, resolvedAt)
+	if s.financialLifecycle == nil {
+		return fmt.Errorf("prediction settlement: scoped atomic financial lifecycle repository is required")
 	}
-	return s.settleDecisionLegacy(ctx, decision, held, winner, resolvedAt)
+	return s.settleDecisionAtomic(ctx, decision, held, winner, resolvedAt)
 }
 
 func (s *Settler) settleDecisionAtomic(ctx context.Context, decision *domain.TradeDecision, held, winner string, resolvedAt time.Time) error {
@@ -352,45 +351,4 @@ func executionScopeFromDecision(decision *domain.TradeDecision) (execution.Execu
 		return execution.NewStrategyExecutionScope(decision.AccountID, decision.Environment, versionID, domain.PipelineRunRef{ID: *decision.PipelineRunID, TradeDate: *decision.PipelineRunTradeDate}, legacy...)
 	}
 	return execution.NewNonRunExecutionScope(decision.AccountID, decision.Environment, ledger.ExecutionOriginType(originType), originID)
-}
-
-func (s *Settler) settleDecisionLegacy(ctx context.Context, decision *domain.TradeDecision, held, winner string, resolvedAt time.Time) error {
-	key := strings.TrimSpace(decision.InstrumentKey) + ":" + held
-	positions, err := s.positions.GetByStrategy(ctx, *decision.StrategyID, repository.PositionFilter{Ticker: key, Side: domain.PositionSideLong}, 10, 0)
-	if err != nil {
-		return fmt.Errorf("prediction settlement: load %s position: %w", key, err)
-	}
-	var position *domain.Position
-	for i := range positions {
-		if positions[i].ClosedAt == nil && positions[i].Quantity > 0 {
-			position = &positions[i]
-			break
-		}
-	}
-	if position == nil {
-		return fmt.Errorf("prediction settlement: open position %s not found", key)
-	}
-	quantity := position.Quantity
-	payout := 0.0
-	if held == winner {
-		payout = 1
-	}
-	position.CurrentPrice = &payout
-	position.RealizedPnL += (payout - position.AvgEntry) * quantity
-	position.UnrealizedPnL = nil
-	position.Quantity = 0
-	closedAt := resolvedAt.UTC()
-	position.ClosedAt = &closedAt
-	if err := s.positions.Update(ctx, position); err != nil {
-		return fmt.Errorf("prediction settlement: close position: %w", err)
-	}
-	trade := &domain.Trade{ID: uuid.New(), OrderID: decision.PaperOrderID, PositionID: &position.ID, Ticker: decision.InstrumentKey, Side: domain.OrderSideSell, Quantity: quantity, Price: payout, ExecutedAt: closedAt, CreatedAt: closedAt}
-	if err := s.trades.Create(ctx, trade); err != nil {
-		return fmt.Errorf("prediction settlement: record payout trade: %w", err)
-	}
-	if err := s.decisions.ResolvePredictionOutcome(ctx, decision.ID); err != nil {
-		return err
-	}
-	payload, _ := json.Marshal(map[string]any{"instrument": decision.InstrumentKey, "held_outcome": held, "winning_outcome": winner, "payout": payout, "quantity": quantity, "realized_pnl": position.RealizedPnL, "position_id": position.ID, "trade_id": trade.ID})
-	return s.replay.CreateReplayEvent(ctx, &domain.ReplayEvent{TradeDecisionID: decision.ID, EventType: domain.ReplayEventTypeOutcomeResolved, Source: "prediction_settler", Payload: payload, OccurredAt: closedAt})
 }

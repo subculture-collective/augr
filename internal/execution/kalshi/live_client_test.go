@@ -100,7 +100,12 @@ func TestHTTPClientGetOrder_InfersExecutedWhenRemainingZero(t *testing.T) {
 }
 
 func TestHTTPClientGetOrderByClientOrderID(t *testing.T) {
-	client := &fakeSignedClient{getResp: []byte(`{"orders":[{"order_id":"ord-123","client_order_id":"client-123","status":"resting"}]}`)}
+	client := &fakeSignedClient{getHandler: func(path string, _ map[string]string) ([]byte, error) {
+		if path == "/historical/orders" {
+			return []byte(`{"orders":[]}`), nil
+		}
+		return []byte(`{"orders":[{"order_id":"ord-123","client_order_id":"client-123","status":"resting"}]}`), nil
+	}}
 	adapter, err := NewLiveHTTPClient(client)
 	if err != nil {
 		t.Fatal(err)
@@ -109,8 +114,19 @@ func TestHTTPClientGetOrderByClientOrderID(t *testing.T) {
 	if err != nil || order.OrderID != "ord-123" || order.ClientOrderID != "client-123" {
 		t.Fatalf("GetOrderByClientOrderID() = (%+v, %v)", order, err)
 	}
-	if client.getPath != "/portfolio/orders" || client.getQueries[0]["client_order_id"] != "client-123" {
+	if client.getQueries[0]["client_order_id"] != "client-123" {
 		t.Fatalf("lookup request = %q %+v", client.getPath, client.getQueries)
+	}
+}
+
+func TestHTTPClientGetOrderByClientOrderIDRejectsMultipleMatches(t *testing.T) {
+	client := &fakeSignedClient{getResp: []byte(`{"orders":[{"order_id":"ord-1","client_order_id":"client-123","status":"resting"},{"order_id":"ord-2","client_order_id":"client-123","status":"resting"}]}`)}
+	adapter, err := NewLiveHTTPClient(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.GetOrderByClientOrderID(context.Background(), "client-123"); err == nil {
+		t.Fatal("multiple client-id matches were accepted")
 	}
 }
 

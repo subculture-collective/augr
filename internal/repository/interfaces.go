@@ -666,6 +666,12 @@ type AtomicOptionOrderRepository interface {
 	CreateOptionOrders(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []*domain.Order) error
 }
 
+// OptionDefinitiveRejectionRepository records provider-authoritative rejection
+// and releases any linked close reservations in one transaction.
+type OptionDefinitiveRejectionRepository interface {
+	RejectOptionOrdersAndRelease(context.Context, uuid.UUID, domain.AccountEnvironment, []uuid.UUID) error
+}
+
 type OptionCloseReservationLookup interface {
 	GetOptionClosePositionByOrder(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID) (*domain.Position, error)
 }

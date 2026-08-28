@@ -337,7 +337,11 @@ func (r *CopyTradingRepo) CountSubscriptions(ctx context.Context, filter reposit
 }
 
 func (r *CopyTradingRepo) UpdateSubscription(ctx context.Context, s *domain.CopySubscription) error {
-	return r.pool.QueryRow(ctx, `UPDATE copy_subscriptions SET status=$2,method=$3,capital_budget=$4,cash_buffer_pct=$5,top_n=$6,min_source_weight=$7,max_position_weight=$8,max_turnover_pct=$9,min_price=$10,min_avg_dollar_volume=$11,max_spread_bps=$12,max_quote_age_seconds=$13,allowed_sessions=$14,stock_allowlist=$15,stock_blocklist=$16,stopped_at=$17,updated_at=NOW() WHERE id=$1 AND account_id=$18 RETURNING updated_at`, s.ID, s.Status, s.Method, s.CapitalBudget, s.CashBufferPct, s.TopN, s.MinSourceWeight, s.MaxPositionWeight, s.MaxTurnoverPct, s.MinPrice, s.MinAvgDollarVolume, s.MaxSpreadBPS, s.MaxQuoteAgeSeconds, s.AllowedSessions, s.StockAllowlist, s.StockBlocklist, s.StoppedAt, r.accountID).Scan(&s.UpdatedAt)
+	err := r.pool.QueryRow(ctx, `UPDATE copy_subscriptions SET status=$2,method=$3,capital_budget=$4,cash_buffer_pct=$5,top_n=$6,min_source_weight=$7,max_position_weight=$8,max_turnover_pct=$9,min_price=$10,min_avg_dollar_volume=$11,max_spread_bps=$12,max_quote_age_seconds=$13,allowed_sessions=$14,stock_allowlist=$15,stock_blocklist=$16,stopped_at=$17,updated_at=NOW() WHERE id=$1 AND account_id=$18 AND updated_at=$19 RETURNING updated_at`, s.ID, s.Status, s.Method, s.CapitalBudget, s.CashBufferPct, s.TopN, s.MinSourceWeight, s.MaxPositionWeight, s.MaxTurnoverPct, s.MinPrice, s.MinAvgDollarVolume, s.MaxSpreadBPS, s.MaxQuoteAgeSeconds, s.AllowedSessions, s.StockAllowlist, s.StockBlocklist, s.StoppedAt, r.accountID, s.UpdatedAt).Scan(&s.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("postgres: copy subscription changed concurrently: %w", repository.ErrIdempotencyConflict)
+	}
+	return err
 }
 
 const copyIntentSelect = `SELECT id,account_id,environment,subscription_id,origin_type,origin_id,source_observation_id,pipeline_run_id,pipeline_run_trade_date,instrument_key,ticker,side,target_weight::double precision,target_value::double precision,attributed_current_value::double precision,requested_notional::double precision,executable_price::double precision,quote_gate_version,decision_quote_snapshot_id,decision_bid::text,decision_ask::text,decision_spread_bps::text,decision_available_at,decision_at,decision_market_status,decision_session_status,calculation_version,calculation,policy_status,policy_reasons,risk_status,risk_reasons,order_id,status,created_at,updated_at FROM copy_trade_intents`

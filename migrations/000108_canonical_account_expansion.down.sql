@@ -1,7 +1,7 @@
 LOCK TABLE pipeline_runs, pipeline_run_snapshots, agent_decisions, agent_events,
     trade_decisions, orders, positions, trades, portfolio_opportunities,
     allocation_decisions, replay_events, financial_fill_idempotency,
-    prediction_settlement_idempotency, option_settlement_idempotency, execution_intents, execution_orders,
+    prediction_settlement_idempotency, option_settlement_idempotency, option_status_idempotency, option_broker_sync_retries, execution_intents, execution_orders,
     copy_subscriptions, copy_trade_intents, copy_origin_rebalance_runs,
     copy_origin_rebalance_intents, copy_target_drift_runs, copy_target_drift_legs,
     strategies, projection_checkpoints, ledger_transactions, account_projection_outbox,
@@ -70,6 +70,8 @@ BEGIN
        OR EXISTS(SELECT 1 FROM financial_fill_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM prediction_settlement_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM option_settlement_idempotency)
+       OR EXISTS(SELECT 1 FROM option_status_idempotency)
+       OR EXISTS(SELECT 1 FROM option_broker_sync_retries)
        OR EXISTS(SELECT 1 FROM copy_subscriptions WHERE account_id IS NOT NULL OR environment IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_trade_intents WHERE account_id IS NOT NULL OR environment IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR execution_claim_id IS NOT NULL OR execution_claimed_at IS NOT NULL)
        OR EXISTS(SELECT 1 FROM copy_origin_rebalance_runs WHERE account_id IS NOT NULL OR environment IS NOT NULL)
@@ -102,6 +104,8 @@ DROP FUNCTION validate_account_projection_outbox_row();
 DROP INDEX idx_account_projection_outbox_claimable;
 DROP INDEX uq_account_projection_outbox_request;
 DROP TABLE option_settlement_idempotency;
+DROP TABLE option_status_idempotency;
+DROP TABLE option_broker_sync_retries;
 DROP TABLE account_projection_outbox;
 
 CREATE OR REPLACE FUNCTION validate_canonical_projection_checkpoint() RETURNS TRIGGER AS $$

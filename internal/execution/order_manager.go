@@ -548,8 +548,12 @@ func (m *OrderManager) processSignal(
 	side := m.signalToSide(signal.Signal)
 	orderType := m.entryTypeToOrderType(plan.EntryType)
 
+	effectIdentity := fmt.Sprintf("order-effect:v1:%s:%s:%s:%s:%s", scope.AccountID(), scope.Environment(), originType, originID, strings.ToUpper(strings.TrimSpace(plan.Ticker))+":"+string(side)+":"+string(orderType))
+	if hasRun {
+		effectIdentity += ":" + runID.String()
+	}
 	order := &domain.Order{
-		ID:                       uuid.New(),
+		ID:                       uuid.NewSHA1(uuid.NameSpaceURL, []byte(effectIdentity)),
 		AccountID:                scope.AccountID(),
 		Environment:              scope.Environment(),
 		OriginType:               string(originType),
@@ -591,6 +595,27 @@ func (m *OrderManager) processSignal(
 
 	if plan.StopLoss > 0 {
 		order.StopPrice = &plan.StopLoss
+	}
+	if hasRun {
+		run, _ := scope.PipelineRun()
+		existing, loadErr := m.orderRepo.GetByRun(ctx, run, repository.OrderFilter{Ticker: order.Ticker, Side: order.Side}, 2, 0)
+		if loadErr != nil {
+			return fmt.Errorf("order_manager: load durable effect: %w", loadErr)
+		}
+		if len(existing) > 0 {
+			if len(existing) != 1 || existing[0].ID != order.ID || existing[0].AccountID != order.AccountID || existing[0].Environment != order.Environment || existing[0].OriginType != order.OriginType || existing[0].OriginID != order.OriginID || existing[0].MarketType.Normalize() != order.MarketType.Normalize() || existing[0].Ticker != order.Ticker || existing[0].Side != order.Side || existing[0].OrderType != order.OrderType || !sameOptionalFloat(existing[0].LimitPrice, order.LimitPrice) || !sameOptionalFloat(existing[0].StopPrice, order.StopPrice) || !strings.EqualFold(strings.TrimSpace(existing[0].PredictionSide), strings.TrimSpace(order.PredictionSide)) {
+				return fmt.Errorf("order_manager: durable effect key conflicts with persisted order")
+			}
+			switch existing[0].Status {
+			case domain.OrderStatusFilled:
+				return nil
+			case domain.OrderStatusRejected, domain.OrderStatusCancelled:
+				return fmt.Errorf("order_manager: durable effect is terminal with status %s", existing[0].Status)
+			default:
+				_, resumeErr := m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
+				return resumeErr
+			}
+		}
 	}
 
 	// Durable orders must never exist before their pre-trade authorization.
@@ -770,6 +795,10 @@ func (m *OrderManager) processSignal(
 
 		return nil
 	}
+}
+
+func sameOptionalFloat(left, right *float64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 func executionAccountLocker(repo repository.OrderRepository) repository.ExecutionAccountLocker {
@@ -1175,6 +1204,13 @@ func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope Execut
 		return innerErr
 	})
 	return status, err
+}
+
+func (m *OrderManager) ReconcilePersistedOrderWithAccountLockHeld(ctx context.Context, scope ExecutionScope, order *domain.Order) (domain.OrderStatus, error) {
+	if order == nil {
+		return "", fmt.Errorf("order_manager: persisted order is required")
+	}
+	return m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
 }
 
 func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope ExecutionScope, orderID uuid.UUID) (domain.OrderStatus, error) {

@@ -80,11 +80,13 @@ type createOrderResponse struct {
 type CreateOrderResponse = createOrderResponse
 
 type getOrderResponse struct {
-	Order retailOrder `json:"order"`
+	Order  retailOrder   `json:"order"`
+	Orders []retailOrder `json:"orders"`
 }
 
 type retailOrder struct {
 	ID             string  `json:"id"`
+	ClientOrderID  string  `json:"clientOrderId"`
 	MarketSlug     string  `json:"marketSlug"`
 	State          string  `json:"state"`
 	Intent         string  `json:"intent"`
@@ -365,15 +367,26 @@ func (b *Broker) GetOrderStatusByClientOrderIDResult(ctx context.Context, client
 	if err := json.Unmarshal(body, &response); err != nil {
 		return "", execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode client order lookup: %w", err)
 	}
-	if strings.TrimSpace(response.Order.ID) == "" {
+	matches := response.Orders
+	if strings.TrimSpace(response.Order.ID) != "" {
+		matches = append(matches, response.Order)
+	}
+	if len(matches) == 0 {
 		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: client order lookup missing provider id")
 	}
-	status, err := mapOrderStatus(response.Order.State)
+	if len(matches) != 1 {
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: client order lookup returned %d matches", len(matches))
+	}
+	order := matches[0]
+	if strings.TrimSpace(order.ID) == "" || strings.TrimSpace(order.ClientOrderID) != clientOrderID || strings.TrimSpace(order.MarketSlug) == "" || strings.TrimSpace(order.Intent) == "" || order.Quantity <= 0 {
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: client order lookup returned conflicting identity")
+	}
+	status, err := mapOrderStatus(order.State)
 	if err != nil {
 		return "", execution.BrokerOrderStatus{}, err
 	}
-	result, err := richRetailOrderStatus(response.Order, status)
-	return strings.TrimSpace(response.Order.ID), result, err
+	result, err := richRetailOrderStatus(order, status)
+	return strings.TrimSpace(order.ID), result, err
 }
 
 func richRetailOrderStatus(order retailOrder, status domain.OrderStatus) (execution.BrokerOrderStatus, error) {

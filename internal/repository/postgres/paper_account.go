@@ -15,8 +15,16 @@ import (
 type PaperAccountRepo struct{ pool *DB }
 
 var _ repository.PaperAccountRepository = (*PaperAccountRepo)(nil)
+var _ repository.ExecutionAccountLocker = (*PaperAccountRepo)(nil)
 
 func NewPaperAccountRepo(db *DB) *PaperAccountRepo { return &PaperAccountRepo{pool: db} }
+
+func (r *PaperAccountRepo) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
+	if r == nil || r.pool == nil || r.pool.Pool == nil {
+		return fmt.Errorf("postgres: paper account repository is unavailable")
+	}
+	return (&OrderRepo{pool: r.pool.Pool, accountID: accountID}).WithExecutionAccountLock(ctx, accountID, fn)
+}
 
 func (r *PaperAccountRepo) ListPaperTrades(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Trade, error) {
 	rows, err := r.pool.Pool.Query(ctx, `SELECT t.id, t.account_id, t.environment, t.origin_type, t.origin_id, t.external_id, t.order_id, t.position_id, t.ticker, t.side,

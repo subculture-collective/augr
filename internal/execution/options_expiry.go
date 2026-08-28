@@ -28,6 +28,18 @@ type OptionSettlementState interface {
 	ApplyOptionSettlement(context.Context, uuid.UUID, float64) error
 }
 
+type OptionSettlementStateRebuilder interface {
+	RebuildOptionSettlementState(context.Context) error
+}
+
+type OptionSettlementSyncEvidence interface {
+	RecordOptionSettlementSyncFailure(context.Context, uuid.UUID, float64, error) error
+}
+
+type optionSettlementSyncFailureRepository interface {
+	RecordOptionSettlementSyncFailure(context.Context, repository.OptionPositionSettlementInput, error) error
+}
+
 // SettleExpiredOptionPositions cash-settles expired paper options. It does not
 // fabricate underlying-share assignment. Every candidate is validated before
 // persistence begins so missing prices or contract metadata fail the batch.
@@ -67,11 +79,12 @@ func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, pos
 	summary := OptionsExpirySummary{}
 	for _, settlement := range settlements {
 		originType, originID := settlement.scope.Origin()
-		if _, err := settlementRepo.SettleOptionPosition(ctx, repository.OptionPositionSettlementInput{
+		settlementInput := repository.OptionPositionSettlementInput{
 			IdempotencyKey: "option_expiry:v1:" + settlement.scope.AccountID().String() + ":" + settlement.positionID.String(), AccountID: settlement.scope.AccountID(), Environment: settlement.scope.Environment(), OriginType: string(originType), OriginID: originID,
 			PositionID: settlement.positionID, SettlementPrice: settlement.intrinsic,
 			SettledAt: now.UTC(), ExitReason: settlement.reason,
-		}); err != nil {
+		}
+		if _, err := settlementRepo.SettleOptionPosition(ctx, settlementInput); err != nil {
 			return summary, fmt.Errorf("options expiry: settle position %s: %w", settlement.positionID, err)
 		}
 		if len(states) > 0 && states[0] != nil {
@@ -79,7 +92,31 @@ func SettleExpiredOptionPositions(ctx context.Context, scope ExecutionScope, pos
 			err := states[0].ApplyOptionSettlement(cleanupCtx, settlement.positionID, settlement.intrinsic)
 			cancel()
 			if err != nil {
-				return summary, fmt.Errorf("options expiry: update paper broker position %s: %w", settlement.positionID, err)
+				recovery, canRebuild := states[0].(OptionSettlementStateRebuilder)
+				var rebuildErr error
+				if canRebuild {
+					rebuildCtx, rebuildCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					rebuildErr = recovery.RebuildOptionSettlementState(rebuildCtx)
+					rebuildCancel()
+				} else {
+					rebuildErr = errors.New("paper broker state rebuild is unavailable")
+				}
+				if rebuildErr != nil {
+					evidenceCtx, evidenceCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+					var evidenceErr error
+					if recorder, ok := settlementRepo.(optionSettlementSyncFailureRepository); ok {
+						evidenceErr = recorder.RecordOptionSettlementSyncFailure(evidenceCtx, settlementInput, errors.Join(err, rebuildErr))
+					} else if recorder, ok := states[0].(OptionSettlementSyncEvidence); ok {
+						evidenceErr = recorder.RecordOptionSettlementSyncFailure(evidenceCtx, settlement.positionID, settlement.intrinsic, errors.Join(err, rebuildErr))
+					} else {
+						evidenceErr = errors.New("durable option broker sync evidence repository is unavailable")
+					}
+					evidenceCancel()
+					if evidenceErr != nil {
+						return summary, fmt.Errorf("options expiry: broker sync and retry evidence failed for %s: %w", settlement.positionID, errors.Join(err, rebuildErr, evidenceErr))
+					}
+					return summary, fmt.Errorf("options expiry: broker sync queued for retry for %s: %w", settlement.positionID, errors.Join(err, rebuildErr))
+				}
 			}
 		}
 		if settlement.intrinsic > 0 {

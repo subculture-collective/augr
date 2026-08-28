@@ -103,6 +103,7 @@ func (c *HTTPClient) GetOrderByClientOrderID(ctx context.Context, clientOrderID 
 		return OrderResponse{}, errors.New("kalshi: client order id is required")
 	}
 	query := url.Values{"client_order_id": []string{clientOrderID}}
+	var matches []OrderResponse
 	for _, path := range []string{"/portfolio/orders", "/historical/orders"} {
 		body, err := c.client.Get(ctx, path, query, true)
 		if err != nil {
@@ -118,13 +119,29 @@ func (c *HTTPClient) GetOrderByClientOrderID(ctx context.Context, clientOrderID 
 		if err := json.Unmarshal(body, &response); err != nil {
 			return OrderResponse{}, fmt.Errorf("kalshi: decode client order lookup: %w", err)
 		}
-		raw := response.Order
-		if len(response.Orders) > 0 {
-			raw = response.Orders[0]
+		raws := response.Orders
+		if len(response.Order) != 0 && string(response.Order) != "null" {
+			raws = append(raws, response.Order)
 		}
-		if len(raw) != 0 && string(raw) != "null" {
-			return decodeOrderResponse(raw, "")
+		for _, raw := range raws {
+			if len(raw) == 0 || string(raw) == "null" {
+				continue
+			}
+			match, decodeErr := decodeOrderResponse(raw, "")
+			if decodeErr != nil {
+				return OrderResponse{}, decodeErr
+			}
+			if match.ClientOrderID != clientOrderID || strings.TrimSpace(match.OrderID) == "" {
+				return OrderResponse{}, errors.New("kalshi: client order lookup returned conflicting identity")
+			}
+			matches = append(matches, match)
 		}
+	}
+	if len(matches) > 1 {
+		return OrderResponse{}, fmt.Errorf("kalshi: client order lookup returned %d matches", len(matches))
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
 	}
 	return OrderResponse{}, execution.ErrBrokerOrderNotFound
 }
