@@ -120,12 +120,15 @@ func safeIntegrationDatabase(t *testing.T) (string, *pgxpool.Config) {
 			continue
 		}
 		config, err := pgxpool.ParseConfig(value)
-		if err != nil || strings.EqualFold(config.ConnConfig.Database, "tradingagent") {
-			continue
+		if err != nil {
+			t.Fatalf("invalid disposable integration DSN in %s: %v", key, err)
+		}
+		if strings.EqualFold(config.ConnConfig.Database, "tradingagent") {
+			t.Fatalf("refusing integration test against protected database tradingagent from %s", key)
 		}
 		return value, config
 	}
-	t.Skip("skipping integration test: no safe disposable DSN; TEST_DATABASE_URL/DB_URL/DATABASE_URL are unset, invalid, or target protected database tradingagent")
+	t.Skip("skipping integration test: TEST_DATABASE_URL, DB_URL, and DATABASE_URL are unset")
 	return "", nil
 }
 

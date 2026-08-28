@@ -73,13 +73,13 @@ ALTER TABLE orders
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
     ADD COLUMN origin_id TEXT,
     ADD COLUMN pipeline_run_trade_date DATE,
-    ADD COLUMN copy_origin_rebalance_run_id UUID REFERENCES copy_origin_rebalance_runs(id) ON DELETE RESTRICT;
+    ADD COLUMN copy_origin_rebalance_run_id UUID REFERENCES copy_origin_rebalance_runs(id) ON DELETE RESTRICT,
+    ADD COLUMN allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT;
 ALTER TABLE positions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT,
-    ADD COLUMN allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT;
+    ADD COLUMN origin_id TEXT;
 ALTER TABLE trades
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),

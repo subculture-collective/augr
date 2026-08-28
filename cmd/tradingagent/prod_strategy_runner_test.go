@@ -163,9 +163,11 @@ func (r *strategyDecisionCaptureRepo) Create(_ context.Context, decision *domain
 	r.decision = decision
 	return nil
 }
+
 func (*strategyDecisionCaptureRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
 	return nil, nil
 }
+
 func (*strategyDecisionCaptureRepo) CountByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter) (int, error) {
 	return 0, nil
 }
@@ -183,17 +185,105 @@ func (p *countingDecisionPersister) RecordRunStart(context.Context, *domain.Pipe
 	p.runStarts++
 	return nil
 }
+
 func (*countingDecisionPersister) FinalizeRun(context.Context, uuid.UUID, time.Time, repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
+
 func (*countingDecisionPersister) SupportsSnapshots() bool { return false }
 func (*countingDecisionPersister) PersistSnapshot(context.Context, *domain.PipelineRunSnapshot) error {
 	return nil
 }
+
 func (*countingDecisionPersister) PersistDecision(context.Context, domain.PipelineRunRef, agent.Node, *int, string, *agent.DecisionLLMResponse) error {
 	return nil
 }
+
 func (*countingDecisionPersister) PersistEvent(context.Context, *domain.AgentEvent) error { return nil }
+
+func TestStrategyVersionPersisterRejectsConflictingOwnershipBeforeWrites(t *testing.T) {
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	delegate := &ownershipCountingPersister{}
+	persister := &strategyVersionPersister{delegate: delegate, executionAccount: testExecutionAccountBinding, versionID: uuid.New()}
+	run := &domain.PipelineRun{ID: uuid.New(), TradeDate: tradeDate}
+	if err := persister.RecordRunStart(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot := &domain.PipelineRunSnapshot{
+		AccountID: uuid.New(), PipelineRunID: run.ID, PipelineRunTradeDate: tradeDate,
+		DataType: "market", Payload: json.RawMessage(`{}`),
+	}
+	if err := persister.PersistSnapshot(context.Background(), snapshot); err == nil || !strings.Contains(err.Error(), "conflicting account ownership") {
+		t.Fatalf("PersistSnapshot() error = %v, want account conflict", err)
+	}
+	runID := run.ID
+	eventDate := tradeDate
+	event := &domain.AgentEvent{PipelineRunID: &runID, PipelineRunTradeDate: &eventDate, Environment: domain.AccountEnvironmentLive}
+	if err := persister.PersistEvent(context.Background(), event); err == nil || !strings.Contains(err.Error(), "conflicting environment ownership") {
+		t.Fatalf("PersistEvent() error = %v, want environment conflict", err)
+	}
+	finalEvent := &domain.AgentEvent{OriginType: "operator"}
+	if _, err := persister.FinalizeRun(context.Background(), run.ID, tradeDate, repository.PipelineRunFinalization{Event: finalEvent}); err == nil || !strings.Contains(err.Error(), "conflicting origin type ownership") {
+		t.Fatalf("FinalizeRun() error = %v, want origin conflict", err)
+	}
+	if delegate.snapshots != 0 || delegate.events != 0 || delegate.finalizations != 0 {
+		t.Fatalf("conflicts reached delegate: snapshots=%d events=%d finalizations=%d", delegate.snapshots, delegate.events, delegate.finalizations)
+	}
+}
+
+func TestStrategyVersionPersisterFillsBlankOwnership(t *testing.T) {
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	delegate := &ownershipCountingPersister{}
+	persister := &strategyVersionPersister{delegate: delegate, executionAccount: testExecutionAccountBinding, versionID: uuid.New()}
+	run := &domain.PipelineRun{ID: uuid.New(), TradeDate: tradeDate}
+	if err := persister.RecordRunStart(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := &domain.PipelineRunSnapshot{PipelineRunID: run.ID, PipelineRunTradeDate: tradeDate, DataType: "market", Payload: json.RawMessage(`{}`)}
+	if err := persister.PersistSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	runID, eventDate := run.ID, tradeDate
+	event := &domain.AgentEvent{PipelineRunID: &runID, PipelineRunTradeDate: &eventDate}
+	if err := persister.PersistEvent(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	finalEvent := &domain.AgentEvent{}
+	if _, err := persister.FinalizeRun(context.Background(), run.ID, tradeDate, repository.PipelineRunFinalization{Event: finalEvent}); err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string]*domain.AgentEvent{"event": event, "final event": finalEvent} {
+		if got.AccountID != run.AccountID || got.Environment != run.Environment || got.OriginType != run.OriginType || got.OriginID != run.OriginID || got.PipelineRunID == nil || *got.PipelineRunID != run.ID || got.PipelineRunTradeDate == nil || !got.PipelineRunTradeDate.Equal(tradeDate) {
+			t.Fatalf("%s ownership = %+v, want run ownership", name, got)
+		}
+	}
+	if snapshot.AccountID != run.AccountID || snapshot.Environment != run.Environment || snapshot.OriginType != run.OriginType || snapshot.OriginID != run.OriginID {
+		t.Fatalf("snapshot ownership = %+v, want run ownership", snapshot)
+	}
+}
+
+type ownershipCountingPersister struct {
+	countingDecisionPersister
+	snapshots, events, finalizations int
+}
+
+func (p *ownershipCountingPersister) SupportsSnapshots() bool { return true }
+
+func (p *ownershipCountingPersister) PersistSnapshot(context.Context, *domain.PipelineRunSnapshot) error {
+	p.snapshots++
+	return nil
+}
+
+func (p *ownershipCountingPersister) PersistEvent(context.Context, *domain.AgentEvent) error {
+	p.events++
+	return nil
+}
+
+func (p *ownershipCountingPersister) FinalizeRun(context.Context, uuid.UUID, time.Time, repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	p.finalizations++
+	return repository.PipelineRunFinalizationReceipt{}, nil
+}
 
 func TestRunStrategy_KalshiUsesNativePathBeforeLegacyOHLCV(t *testing.T) {
 	t.Parallel()

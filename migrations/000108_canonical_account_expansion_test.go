@@ -59,6 +59,13 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 			t.Errorf("up migration contains forbidden compatibility change %q", forbidden)
 		}
 	}
+	if !strings.Contains(up, "alter table orders add column account_id") ||
+		!strings.Contains(up, "add column allocation_opportunity_id uuid references portfolio_opportunities(id) on delete restrict; alter table positions") {
+		t.Fatal("allocation_opportunity_id must be added to orders")
+	}
+	if strings.Contains(up, "alter table positions add column account_id uuid references accounts(id) on delete restrict, add column environment text check (environment in ('paper_scored','paper_stress','shadow','live')), add column origin_type text check (origin_type in ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')), add column origin_id text, add column allocation_opportunity_id") {
+		t.Fatal("allocation_opportunity_id must not be added to positions")
+	}
 	for _, fragment := range []string{
 		"in access exclusive mode",
 		"cannot roll back migration 108 while projection outbox rows exist",
@@ -611,7 +618,15 @@ func assertCanonicalExpansionOutboxContract(t *testing.T, ctx context.Context, p
 	}
 	asOf = asOf.UTC().Truncate(time.Microsecond)
 
-	insert := func(name, kind, status string, markAsOf any, generation uuid.UUID, markSource, markNamespace any, maxAge any, claimedAt, claimedBy, claimExpiresAt any, wantOK bool) {
+	insert := func(
+		name, kind, status string,
+		markAsOf any,
+		generation uuid.UUID,
+		markSource, markNamespace any,
+		maxAge any,
+		claimedAt, claimedBy, claimExpiresAt any,
+		wantOK bool,
+	) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
 			tx, err := pool.Begin(ctx)

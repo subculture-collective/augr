@@ -1029,7 +1029,9 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 		Metadata:             metadata,
 	}
 	if scope, scopeErr := persistenceScopeFromRun(run); scopeErr == nil {
-		applyEventPersistenceScope(event, scope)
+		if err := applyEventPersistenceScope(event, scope); err != nil {
+			return fmt.Errorf("%s native: scope start event: %w", source, err)
+		}
 	}
 	eventCtx, eventCancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	eventErr := r.eventRepo.Create(eventCtx, event)
@@ -1165,7 +1167,9 @@ func nativeTerminalEvent(
 		Metadata:             metadata,
 	}
 	if scope, scopeErr := persistenceScopeFromRun(run); scopeErr == nil {
-		applyEventPersistenceScope(event, scope)
+		if err := applyEventPersistenceScope(event, scope); err != nil {
+			return nil, fmt.Errorf("%s native: scope terminal event: %w", source, err)
+		}
 	}
 	return event, nil
 }
@@ -1649,7 +1653,9 @@ func (p *strategyVersionPersister) FinalizeRun(ctx context.Context, runID uuid.U
 		return repository.PipelineRunFinalizationReceipt{}, err
 	}
 	if finalization.Event != nil {
-		applyEventPersistenceScope(finalization.Event, scope)
+		if err := applyEventPersistenceScope(finalization.Event, scope); err != nil {
+			return repository.PipelineRunFinalizationReceipt{}, err
+		}
 	}
 	receipt, err := p.delegate.FinalizeRun(ctx, runID, tradeDate, finalization)
 	if err == nil {
@@ -1668,6 +1674,9 @@ func (p *strategyVersionPersister) PersistSnapshot(ctx context.Context, snapshot
 	if err != nil {
 		return err
 	}
+	if err := rejectPersistenceScopeConflict(snapshot.AccountID, snapshot.Environment, snapshot.OriginType, snapshot.OriginID, scope); err != nil {
+		return fmt.Errorf("strategy version snapshot: %w", err)
+	}
 	snapshot.AccountID = scope.AccountID
 	snapshot.Environment = scope.Environment
 	snapshot.OriginType = scope.OriginType
@@ -1676,6 +1685,7 @@ func (p *strategyVersionPersister) PersistSnapshot(ctx context.Context, snapshot
 	snapshot.PipelineRunTradeDate = scope.Run.TradeDate
 	return p.delegate.PersistSnapshot(ctx, snapshot)
 }
+
 func (p *strategyVersionPersister) PersistDecision(ctx context.Context, ref domain.PipelineRunRef, node agent.Node, roundNumber *int, output string, response *agent.DecisionLLMResponse) error {
 	scope, err := p.scope(ref)
 	if err != nil {
@@ -1687,6 +1697,7 @@ func (p *strategyVersionPersister) PersistDecision(ctx context.Context, ref doma
 	}
 	return delegate.PersistDecisionScoped(ctx, scope, node, roundNumber, output, response)
 }
+
 func (p *strategyVersionPersister) PersistEvent(ctx context.Context, event *domain.AgentEvent) error {
 	if event.PipelineRunID == nil || event.PipelineRunTradeDate == nil {
 		return errors.New("strategy version event requires complete pipeline run identity")
@@ -1695,7 +1706,9 @@ func (p *strategyVersionPersister) PersistEvent(ctx context.Context, event *doma
 	if err != nil {
 		return err
 	}
-	applyEventPersistenceScope(event, scope)
+	if err := applyEventPersistenceScope(event, scope); err != nil {
+		return err
+	}
 	return p.delegate.PersistEvent(ctx, event)
 }
 
@@ -1730,7 +1743,16 @@ func (p *strategyVersionPersister) scope(ref domain.PipelineRunRef) (agent.Persi
 	return scope, nil
 }
 
-func applyEventPersistenceScope(event *domain.AgentEvent, scope agent.PersistenceScope) {
+func applyEventPersistenceScope(event *domain.AgentEvent, scope agent.PersistenceScope) error {
+	if err := rejectPersistenceScopeConflict(event.AccountID, event.Environment, event.OriginType, event.OriginID, scope); err != nil {
+		return fmt.Errorf("strategy version event: %w", err)
+	}
+	if event.PipelineRunID != nil && *event.PipelineRunID != scope.Run.ID {
+		return errors.New("strategy version event has conflicting pipeline run ID")
+	}
+	if event.PipelineRunTradeDate != nil && !event.PipelineRunTradeDate.Equal(scope.Run.TradeDate) {
+		return errors.New("strategy version event has conflicting pipeline run trade date")
+	}
 	event.AccountID = scope.AccountID
 	event.Environment = scope.Environment
 	event.OriginType = scope.OriginType
@@ -1739,6 +1761,23 @@ func applyEventPersistenceScope(event *domain.AgentEvent, scope agent.Persistenc
 	tradeDate := scope.Run.TradeDate
 	event.PipelineRunID = &runID
 	event.PipelineRunTradeDate = &tradeDate
+	return nil
+}
+
+func rejectPersistenceScopeConflict(accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, scope agent.PersistenceScope) error {
+	if accountID != uuid.Nil && accountID != scope.AccountID {
+		return errors.New("conflicting account ownership")
+	}
+	if environment != "" && environment != scope.Environment {
+		return errors.New("conflicting environment ownership")
+	}
+	if originType != "" && originType != scope.OriginType {
+		return errors.New("conflicting origin type ownership")
+	}
+	if originID != "" && originID != scope.OriginID {
+		return errors.New("conflicting origin ID ownership")
+	}
+	return nil
 }
 
 func bindStrategyRunScope(run *domain.PipelineRun, executionAccount domain.ExecutionAccountBinding, versionID uuid.UUID) error {
