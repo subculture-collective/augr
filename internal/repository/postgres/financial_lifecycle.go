@@ -393,19 +393,13 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 	replayed := 0
 	for index, input := range inputs {
 		if input.StatusOnly {
-			var existingKey string
-			var orderID uuid.UUID
-			var accountID uuid.UUID
-			var environment domain.AccountEnvironment
-			var originType, originID, externalID string
-			var status domain.OrderStatus
-			var quantity float64
-			err := tx.QueryRow(ctx, `SELECT idempotency_key,order_id,account_id,environment,origin_type,origin_id,status,filled_quantity::double precision,COALESCE(external_id,'') FROM option_status_idempotency WHERE idempotency_key=$1 OR order_id=$2 FOR UPDATE`, input.IdempotencyKey, input.Order.ID).Scan(&existingKey, &orderID, &accountID, &environment, &originType, &originID, &status, &quantity, &externalID)
+			var existing optionStatusIdempotencyEvidence
+			err := tx.QueryRow(ctx, `SELECT idempotency_key,order_id,account_id,environment,origin_type,origin_id,status,filled_quantity::double precision,COALESCE(external_id,''),submitted_at FROM option_status_idempotency WHERE idempotency_key=$1 OR order_id=$2 FOR UPDATE`, input.IdempotencyKey, input.Order.ID).Scan(&existing.key, &existing.orderID, &existing.accountID, &existing.environment, &existing.originType, &existing.originID, &existing.status, &existing.quantity, &existing.externalID, &existing.submittedAt)
 			if err == nil {
-				if existingKey != input.IdempotencyKey || orderID != input.Order.ID || accountID != input.AccountID || environment != input.Environment || originType != input.OriginType || originID != input.OriginID || status != input.Order.Status || !numeric8Equal(quantity, input.FillQuantity) || externalID != strings.TrimSpace(input.Order.ExternalID) {
+				if !optionStatusIdempotencyMatches(existing, input) {
 					return nil, fmt.Errorf("postgres: option status idempotency mismatch for order %s", input.Order.ID)
 				}
-				results[index].OrderID = orderID
+				results[index].OrderID = existing.orderID
 				continue
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
@@ -414,7 +408,7 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 			if err := applyOptionStatusTx(ctx, tx, input); err != nil {
 				return nil, err
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO option_status_idempotency(idempotency_key,account_id,environment,origin_type,origin_id,order_id,status,filled_quantity,external_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.Order.ID, input.Order.Status, input.FillQuantity, nullString(input.Order.ExternalID)); err != nil {
+			if _, err := tx.Exec(ctx, `INSERT INTO option_status_idempotency(idempotency_key,account_id,environment,origin_type,origin_id,order_id,status,filled_quantity,external_id,submitted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, input.IdempotencyKey, input.AccountID, input.Environment, input.OriginType, input.OriginID, input.Order.ID, input.Order.Status, input.FillQuantity, nullString(input.Order.ExternalID), input.Order.SubmittedAt); err != nil {
 				return nil, fmt.Errorf("postgres: persist option status idempotency: %w", err)
 			}
 			results[index].OrderID = input.Order.ID
@@ -484,6 +478,22 @@ func (db *DB) ApplyOptionFills(ctx context.Context, inputs []repository.OptionFi
 		return nil, fmt.Errorf("postgres: commit option fills: %w", err)
 	}
 	return results, nil
+}
+
+type optionStatusIdempotencyEvidence struct {
+	key                              string
+	orderID, accountID               uuid.UUID
+	environment                      domain.AccountEnvironment
+	originType, originID, externalID string
+	status                           domain.OrderStatus
+	quantity                         float64
+	submittedAt                      *time.Time
+}
+
+func optionStatusIdempotencyMatches(existing optionStatusIdempotencyEvidence, input repository.OptionFillInput) bool {
+	return existing.key == input.IdempotencyKey && existing.orderID == input.Order.ID && existing.accountID == input.AccountID && existing.environment == input.Environment &&
+		existing.originType == input.OriginType && existing.originID == input.OriginID && existing.status == input.Order.Status && numeric8Equal(existing.quantity, input.FillQuantity) &&
+		existing.externalID == strings.TrimSpace(input.Order.ExternalID) && sameTimePointer(existing.submittedAt, input.Order.SubmittedAt)
 }
 
 func (db *DB) ResolveOptionFillCommit(ctx context.Context, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, bool, error) {

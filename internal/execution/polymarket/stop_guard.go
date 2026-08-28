@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -316,10 +317,22 @@ func validateRecoveredStopReservation(order *domain.Order, position domain.Posit
 	}
 	wantTicker := strings.TrimSpace(expected.Slug)
 	remaining := order.Quantity - order.FilledQuantity
-	if order.FilledQuantity < 0 || remaining <= 0 || remaining != position.Quantity || order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType != domain.MarketTypePolymarket || position.MarketType != domain.MarketTypePolymarket || order.OrderType != domain.OrderTypeMarket || strings.TrimSpace(order.Ticker) != wantTicker || !strings.EqualFold(strings.TrimSpace(order.PredictionSide), expected.OutcomeSide) || strings.TrimSpace(order.PolymarketIntent) != wantPolymarketIntent || order.Side != wantSide || *order.PositionIntent != wantIntent || position.Quantity <= 0 || position.ClosedAt != nil {
+	if order.FilledQuantity < 0 || !canonicalPolymarketQuantityPositive(remaining) || !canonicalPolymarketQuantityEqual(remaining, position.Quantity) || order.AccountID != position.AccountID || order.Environment != position.Environment || order.OriginType != position.OriginType || order.OriginID != position.OriginID || order.MarketType != domain.MarketTypePolymarket || position.MarketType != domain.MarketTypePolymarket || order.OrderType != domain.OrderTypeMarket || strings.TrimSpace(order.Ticker) != wantTicker || !strings.EqualFold(strings.TrimSpace(order.PredictionSide), expected.OutcomeSide) || strings.TrimSpace(order.PolymarketIntent) != wantPolymarketIntent || order.Side != wantSide || *order.PositionIntent != wantIntent || !canonicalPolymarketQuantityPositive(position.Quantity) || position.ClosedAt != nil {
 		return errors.New("polymarket: recovered stop reservation does not close the exact persisted position")
 	}
 	return nil
+}
+
+func canonicalPolymarketQuantityEqual(left, right float64) bool {
+	return isFinitePolymarketQuantity(left) && isFinitePolymarketQuantity(right) && math.Round(left*1e8) == math.Round(right*1e8)
+}
+
+func canonicalPolymarketQuantityPositive(quantity float64) bool {
+	return isFinitePolymarketQuantity(quantity) && math.Round(quantity*1e8) > 0
+}
+
+func isFinitePolymarketQuantity(quantity float64) bool {
+	return !math.IsNaN(quantity) && !math.IsInf(quantity, 0)
 }
 
 func (g *StopGuard) arm(positionID string) {

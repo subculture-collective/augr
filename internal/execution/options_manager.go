@@ -237,7 +237,11 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 		}
 		persistedQuantities := make(map[uuid.UUID]float64, len(group))
 		for _, order := range group {
-			persistedQuantities[order.ID] = order.FilledQuantity
+			durableFilled, err := m.durableOptionFillQuantity(ctx, order)
+			if err != nil {
+				return err
+			}
+			persistedQuantities[order.ID] = durableFilled
 			key := strings.ReplaceAll(strings.TrimSpace(order.Ticker), " ", "")
 			matches := legsByTicker[key]
 			if len(matches) != 1 {
@@ -267,6 +271,8 @@ func (m *OptionsOrderManager) reconcilePendingOptionOrdersLocked(ctx context.Con
 			if order.FilledQuantity <= persistedQuantities[order.ID] {
 				if terminalOrderStatus(order.Status) {
 					inputs = append(inputs, repository.OptionFillInput{IdempotencyKey: "option_status:v1:" + order.ID.String(), AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: order, FillQuantity: order.FilledQuantity, StatusOnly: true})
+				} else if err := m.orderRepo.Update(ctx, order); err != nil {
+					return fmt.Errorf("options_manager: persist recovered spread submission %s: %w", order.ID, err)
 				}
 				continue
 			}

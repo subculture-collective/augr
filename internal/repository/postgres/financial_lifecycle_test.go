@@ -27,6 +27,23 @@ func TestValidateOrderFillInputAcceptsCanonicalStrategyFreeCopyFill(t *testing.T
 	}
 }
 
+func TestOptionStatusIdempotencyIncludesSubmittedAt(t *testing.T) {
+	now := time.Date(2026, 8, 28, 12, 0, 0, 123456000, time.UTC)
+	accountID := uuid.New()
+	order := &domain.Order{ID: uuid.New(), SubmittedAt: &now}
+	input := repository.OptionFillInput{IdempotencyKey: "status-key", AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: "origin", Order: order, FillQuantity: 0, StatusOnly: true}
+	existing := optionStatusIdempotencyEvidence{key: input.IdempotencyKey, orderID: order.ID, accountID: accountID, environment: input.Environment, originType: input.OriginType, originID: input.OriginID, status: domain.OrderStatusCancelled, externalID: "external", submittedAt: &now}
+	order.Status, order.ExternalID = domain.OrderStatusCancelled, "external"
+	if !optionStatusIdempotencyMatches(existing, input) {
+		t.Fatal("matching status evidence rejected")
+	}
+	other := now.Add(time.Nanosecond)
+	existing.submittedAt = &other
+	if optionStatusIdempotencyMatches(existing, input) {
+		t.Fatal("submitted_at mismatch accepted")
+	}
+}
+
 func TestFinancialLifecycle_FirstDeliveryReplayRollbackAndPositions(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)

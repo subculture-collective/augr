@@ -488,6 +488,18 @@ func TestStopGuardBootstrapResumesReservedOrderIdentity(t *testing.T) {
 	}
 }
 
+func TestValidateRecoveredStopReservationComparesCanonicalFractionalRemainder(t *testing.T) {
+	positionID := uuid.New()
+	position := domain.Position{ID: positionID, AccountID: testStopGuardBinding.AccountID(), Environment: testStopGuardBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), MarketType: domain.MarketTypePolymarket, Ticker: "slug-a:YES", Side: domain.PositionSideLong, Quantity: 0.2}
+	intent := domain.PositionIntentSellToClose
+	order := &domain.Order{ID: uuid.New(), AccountID: position.AccountID, Environment: position.Environment, OriginType: position.OriginType, OriginID: position.OriginID, ClientOrderID: "fractional-stop", Ticker: "slug-a", MarketType: domain.MarketTypePolymarket, Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: 0.3, FilledQuantity: 0.1, Status: domain.OrderStatusPartial, PositionIntent: &intent, PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG"}
+	expected := scopedGuardPosition(Position{ID: positionID.String(), Slug: "slug-a", OutcomeSide: "YES"})
+	expected.OriginID = position.OriginID
+	if err := validateRecoveredStopReservation(order, position, expected); err != nil {
+		t.Fatalf("canonical fractional remainder rejected: %v", err)
+	}
+}
+
 func TestStopGuardReconcilesClaimedFilledExitBeforeTriggerCheck(t *testing.T) {
 	positionID := uuid.New()
 	stop := 0.40
