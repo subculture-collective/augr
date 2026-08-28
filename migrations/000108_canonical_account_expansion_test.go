@@ -49,6 +49,8 @@ func TestCanonicalAccountExpansionContract(t *testing.T) {
 		"add constraint copy_intent_execution_claim_pair check ((execution_claim_id is null) = (execution_claimed_at is null))",
 		"create unique index orders_copy_origin_effect_once on orders(account_id,environment,origin_id,copy_origin_rebalance_run_id,ticker,side) where origin_type='copy_subscription' and copy_origin_rebalance_run_id is not null",
 		"create unique index orders_allocation_effect_once on orders(account_id,allocation_opportunity_id) where allocation_opportunity_id is not null",
+		"alter table allocation_decisions add column account_id",
+		"add column pipeline_run_id uuid, add column pipeline_run_trade_date date",
 	} {
 		if !strings.Contains(up, fragment) {
 			t.Errorf("up migration missing %q", fragment)
@@ -723,7 +725,7 @@ func canonicalExpansionColumns() map[string][]string {
 		"positions":                         {"account_id", "environment", "origin_type", "origin_id"},
 		"trades":                            {"account_id", "environment", "origin_type", "origin_id"},
 		"portfolio_opportunities":           {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_trade_date", "allocation_claim_id", "allocation_claimed_at", "allocation_claim_expires_at"},
-		"allocation_decisions":              {"account_id", "environment", "origin_type", "origin_id"},
+		"allocation_decisions":              {"account_id", "environment", "origin_type", "origin_id", "pipeline_run_id", "pipeline_run_trade_date"},
 		"replay_events":                     {"account_id", "environment", "origin_type", "origin_id"},
 		"financial_fill_idempotency":        {"account_id", "environment", "origin_type", "origin_id"},
 		"prediction_settlement_idempotency": {"account_id", "environment", "origin_type", "origin_id"},

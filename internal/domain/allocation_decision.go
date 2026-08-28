@@ -33,20 +33,22 @@ func (a AllocationDecisionAction) String() string { return string(a) }
 
 // AllocationDecision records a single allocator outcome.
 type AllocationDecision struct {
-	ID               uuid.UUID                `json:"id"`
-	AccountID        uuid.UUID                `json:"account_id,omitzero"`
-	Environment      AccountEnvironment       `json:"environment,omitempty"`
-	OriginType       string                   `json:"origin_type,omitempty"`
-	OriginID         string                   `json:"origin_id,omitempty"`
-	OpportunityID    *uuid.UUID               `json:"opportunity_id,omitempty"`
-	StrategyID       *uuid.UUID               `json:"strategy_id,omitempty"`
-	Mode             AllocationDecisionMode   `json:"mode"`
-	Action           AllocationDecisionAction `json:"action"`
-	Score            float64                  `json:"score"`
-	NotionalUSD      float64                  `json:"notional_usd"`
-	Quantity         float64                  `json:"quantity"`
-	Reasons          []string                 `json:"reasons"`
-	CreatedOrderID   *uuid.UUID               `json:"created_order_id,omitempty"`
-	ExecutionClaimID uuid.UUID                `json:"-"`
-	CreatedAt        time.Time                `json:"created_at"`
+	ID                   uuid.UUID                `json:"id"`
+	AccountID            uuid.UUID                `json:"account_id,omitzero"`
+	Environment          AccountEnvironment       `json:"environment,omitempty"`
+	OriginType           string                   `json:"origin_type,omitempty"`
+	OriginID             string                   `json:"origin_id,omitempty"`
+	PipelineRunID        *uuid.UUID               `json:"pipeline_run_id,omitempty"`
+	PipelineRunTradeDate *time.Time               `json:"pipeline_run_trade_date,omitempty"`
+	OpportunityID        *uuid.UUID               `json:"opportunity_id,omitempty"`
+	StrategyID           *uuid.UUID               `json:"strategy_id,omitempty"`
+	Mode                 AllocationDecisionMode   `json:"mode"`
+	Action               AllocationDecisionAction `json:"action"`
+	Score                float64                  `json:"score"`
+	NotionalUSD          float64                  `json:"notional_usd"`
+	Quantity             float64                  `json:"quantity"`
+	Reasons              []string                 `json:"reasons"`
+	CreatedOrderID       *uuid.UUID               `json:"created_order_id,omitempty"`
+	ExecutionClaimID     uuid.UUID                `json:"-"`
+	CreatedAt            time.Time                `json:"created_at"`
 }

@@ -102,7 +102,9 @@ ALTER TABLE allocation_decisions
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
     ADD COLUMN origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
-    ADD COLUMN origin_id TEXT;
+    ADD COLUMN origin_id TEXT,
+    ADD COLUMN pipeline_run_id UUID,
+    ADD COLUMN pipeline_run_trade_date DATE;
 ALTER TABLE replay_events
     ADD COLUMN account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
     ADD COLUMN environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),

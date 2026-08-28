@@ -32,6 +32,9 @@ func NewOrderRepo(pool *pgxpool.Pool, accountID uuid.UUID) *OrderRepo {
 // Create inserts a new order and populates the generated ID and CreatedAt on
 // the provided struct.
 func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
+	if (order.AllocationOpportunityID == nil) != (order.AllocationClaimID == nil) {
+		return fmt.Errorf("postgres: create order: allocation opportunity and claim must be provided together")
+	}
 	if err := validateOptionalPipelineRunRef(order.PipelineRunID, order.PipelineRunTradeDate); err != nil {
 		return fmt.Errorf("postgres: create order: %w", err)
 	}
@@ -47,10 +50,14 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 
 	row := r.pool.QueryRow(ctx,
 		`WITH authorized AS (
-			SELECT 1 WHERE $34::uuid IS NULL OR EXISTS (
+			SELECT 1 WHERE ($33::uuid IS NULL AND $34::uuid IS NULL) OR EXISTS (
 				SELECT 1 FROM portfolio_opportunities
 				WHERE id=$33 AND account_id=$3 AND status='selected'
 				  AND allocation_claim_id=$34 AND allocation_claim_expires_at>NOW()
+				  AND environment=$4 AND origin_type=$5 AND origin_id=$6
+				  AND strategy_id=$1 AND pipeline_run_id=$2 AND pipeline_run_trade_date=$7
+				  AND $4::text IS NOT NULL AND $5::text IS NOT NULL AND $6::text IS NOT NULL
+				  AND $1::uuid IS NOT NULL AND $2::uuid IS NOT NULL AND $7::date IS NOT NULL
 			)
 		)
 		INSERT INTO orders (
@@ -101,7 +108,7 @@ func (r *OrderRepo) Create(ctx context.Context, order *domain.Order) error {
 
 	if err := row.Scan(&order.ID, &order.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) && order.AllocationOpportunityID != nil {
-			return fmt.Errorf("postgres: create order: allocation claim ownership lost")
+			return fmt.Errorf("postgres: create order: allocation lineage or claim ownership lost")
 		}
 		return fmt.Errorf("postgres: create order: %w", err)
 	}

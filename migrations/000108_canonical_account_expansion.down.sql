@@ -65,7 +65,7 @@ BEGIN
        OR EXISTS(SELECT 1 FROM positions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM trades WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL OR allocation_claim_id IS NOT NULL OR allocation_claimed_at IS NOT NULL OR allocation_claim_expires_at IS NOT NULL)
-       OR EXISTS(SELECT 1 FROM allocation_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
+       OR EXISTS(SELECT 1 FROM allocation_decisions WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL OR pipeline_run_id IS NOT NULL OR pipeline_run_trade_date IS NOT NULL)
        OR EXISTS(SELECT 1 FROM replay_events WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM financial_fill_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
        OR EXISTS(SELECT 1 FROM prediction_settlement_idempotency WHERE account_id IS NOT NULL OR environment IS NOT NULL OR origin_type IS NOT NULL OR origin_id IS NOT NULL)
@@ -293,7 +293,7 @@ ALTER TABLE copy_subscriptions DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE prediction_settlement_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE financial_fill_idempotency DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE replay_events DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
-ALTER TABLE allocation_decisions DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
+ALTER TABLE allocation_decisions DROP COLUMN pipeline_run_trade_date,DROP COLUMN pipeline_run_id,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunities_allocation_claim_tuple,DROP COLUMN allocation_claim_expires_at,DROP COLUMN allocation_claimed_at,DROP COLUMN allocation_claim_id,DROP COLUMN pipeline_run_trade_date,DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE trades DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;
 ALTER TABLE positions DROP COLUMN origin_id,DROP COLUMN origin_type,DROP COLUMN environment,DROP COLUMN account_id;

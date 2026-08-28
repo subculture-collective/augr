@@ -869,7 +869,7 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	}
 }
 
-func TestPortfolioAllocatorRestartPreservesPendingIntent(t *testing.T) {
+func TestPortfolioAllocatorRestartRejectsNonterminalIntentDeterministically(t *testing.T) {
 	now := time.Now().UTC()
 	runID, accountID, versionID, strategyID, opportunityID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	opportunity := domain.Opportunity{ID: opportunityID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &allocatorRunTradeDate, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
@@ -880,11 +880,26 @@ func TestPortfolioAllocatorRestartPreservesPendingIntent(t *testing.T) {
 	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
 		t.Fatal(err)
 	}
-	if opportunityRepo.items[0].Status != domain.OpportunityStatusSelected {
-		t.Fatalf("opportunity status = %s, want selected", opportunityRepo.items[0].Status)
+	if opportunityRepo.items[0].Status != domain.OpportunityStatusRejected {
+		t.Fatalf("opportunity status = %s, want rejected", opportunityRepo.items[0].Status)
 	}
-	if decisionRepo.created[0].Action != domain.AllocationDecisionActionPaperOrderIntent || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "submitted") {
-		t.Fatalf("pending decision not preserved: %+v", decisionRepo.created[0])
+	if decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "recovery_nonterminal_order:submitted") {
+		t.Fatalf("pending decision did not converge: %+v", decisionRepo.created[0])
+	}
+}
+
+func TestPortfolioAllocatorRestartRejectsMissingOrderDeterministically(t *testing.T) {
+	now := time.Now().UTC()
+	opportunityID, oldOwner := uuid.New(), uuid.New()
+	opportunity := domain.Opportunity{ID: opportunityID, Status: domain.OpportunityStatusSelected, ExpiresAt: now.Add(time.Hour)}
+	repo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opportunity}, claims: map[uuid.UUID]uuid.UUID{opportunityID: oldOwner}, claimExpires: map[uuid.UUID]time.Time{opportunityID: now.Add(-time.Minute)}}
+	decisionRepo := &portfolioAllocatorDecisionRepo{created: []*domain.AllocationDecision{{ID: uuid.New(), OpportunityID: &opportunityID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}}}
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: repo, AllocationDecisionRepo: decisionRepo})
+	if err := orch.recoverSelectedPaperOpportunities(context.Background(), uuid.New(), now); err != nil {
+		t.Fatal(err)
+	}
+	if repo.items[0].Status != domain.OpportunityStatusRejected || decisionRepo.created[0].Action != domain.AllocationDecisionActionExecutionRejected || !strings.Contains(strings.Join(decisionRepo.created[0].Reasons, ";"), "recovery_order_missing") {
+		t.Fatalf("missing order did not converge: opportunity=%+v decision=%+v", repo.items[0], decisionRepo.created[0])
 	}
 }
 

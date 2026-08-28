@@ -34,6 +34,14 @@ func TestBuildOrderListQuery_NoFilters(t *testing.T) {
 	assertNotContains(t, query, "WHERE")
 }
 
+func TestOrderRepoCreateRejectsPartialAllocationAuthorization(t *testing.T) {
+	repo := NewOrderRepo(nil, uuid.New())
+	order := &domain.Order{AllocationOpportunityID: func() *uuid.UUID { id := uuid.New(); return &id }()}
+	if err := repo.Create(context.Background(), order); err == nil || !strings.Contains(err.Error(), "provided together") {
+		t.Fatalf("Create() error = %v, want paired allocation fields", err)
+	}
+}
+
 func TestBuildOrderListQuery_AllFilters(t *testing.T) {
 	submittedAfter := time.Date(2026, 3, 20, 14, 0, 0, 0, time.UTC)
 	submittedBefore := time.Date(2026, 3, 21, 14, 0, 0, 0, time.UTC)
@@ -344,19 +352,21 @@ func TestOrderRepoIntegration_SlowStaleAllocatorCannotCreateSecondEffect(t *test
 	defer cleanup()
 
 	accountID, opportunityID, staleOwner, takeoverOwner := canonicalRepositoryTestAccountID, uuid.New(), uuid.New(), uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(id,account_id,status,allocation_claim_id,allocation_claimed_at,allocation_claim_expires_at) VALUES($1,$2,'selected',$3,NOW()-INTERVAL '2 minutes',NOW()-INTERVAL '1 minute')`, opportunityID, accountID, staleOwner); err != nil {
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	tradeDate := canonicalRepositoryTestTradeDate
+	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(id,account_id,environment,origin_type,origin_id,strategy_id,pipeline_run_id,pipeline_run_trade_date,status,allocation_claim_id,allocation_claimed_at,allocation_claim_expires_at) VALUES($1,$2,$3,'strategy_version',$4,$5,$6,$7,'selected',$8,NOW()-INTERVAL '2 minutes',NOW()-INTERVAL '1 minute')`, opportunityID, accountID, domain.AccountEnvironmentPaperScored, versionID.String(), strategyID, runID, tradeDate, staleOwner); err != nil {
 		t.Fatal(err)
 	}
 	staleMayResume := make(chan struct{})
 	staleDone := make(chan error, 1)
 	go func() {
 		<-staleMayResume
-		staleDone <- NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, staleOwner))
+		staleDone <- NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, staleOwner, strategyID, runID, tradeDate, versionID))
 	}()
 	if _, err := pool.Exec(ctx, `UPDATE portfolio_opportunities SET allocation_claim_id=$1,allocation_claimed_at=NOW(),allocation_claim_expires_at=NOW()+INTERVAL '1 minute' WHERE id=$2 AND allocation_claim_expires_at<=NOW()`, takeoverOwner, opportunityID); err != nil {
 		t.Fatal(err)
 	}
-	if err := NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, takeoverOwner)); err != nil {
+	if err := NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, takeoverOwner, strategyID, runID, tradeDate, versionID)); err != nil {
 		t.Fatalf("takeover Create() error = %v", err)
 	}
 	close(staleMayResume)
@@ -369,8 +379,29 @@ func TestOrderRepoIntegration_SlowStaleAllocatorCannotCreateSecondEffect(t *test
 	}
 }
 
-func allocationRaceOrder(opportunityID, claimID uuid.UUID) *domain.Order {
-	return &domain.Order{Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, AllocationOpportunityID: &opportunityID, AllocationClaimID: &claimID}
+func TestOrderRepoIntegration_AllocationAuthorizationRejectsLineageMismatch(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+	accountID, opportunityID, claimID := canonicalRepositoryTestAccountID, uuid.New(), uuid.New()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	tradeDate := canonicalRepositoryTestTradeDate
+	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(id,account_id,environment,origin_type,origin_id,strategy_id,pipeline_run_id,pipeline_run_trade_date,status,allocation_claim_id,allocation_claimed_at,allocation_claim_expires_at) VALUES($1,$2,$3,'strategy_version',$4,$5,$6,$7,'selected',$8,NOW(),NOW()+INTERVAL '1 minute')`, opportunityID, accountID, domain.AccountEnvironmentPaperScored, versionID.String(), strategyID, runID, tradeDate, claimID); err != nil {
+		t.Fatal(err)
+	}
+	order := allocationRaceOrder(opportunityID, claimID, strategyID, runID, tradeDate, versionID)
+	order.Environment = domain.AccountEnvironmentLive
+	if err := NewOrderRepo(pool, accountID).Create(ctx, order); err == nil || !strings.Contains(err.Error(), "allocation lineage") {
+		t.Fatalf("Create() error = %v, want lineage rejection", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM orders WHERE allocation_opportunity_id=$1`, opportunityID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unauthorized order count = %d, %v", count, err)
+	}
+}
+
+func allocationRaceOrder(opportunityID, claimID, strategyID, runID uuid.UUID, tradeDate time.Time, versionID uuid.UUID) *domain.Order {
+	return &domain.Order{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: &strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, AllocationOpportunityID: &opportunityID, AllocationClaimID: &claimID}
 }
 
 func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
@@ -449,6 +480,12 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 		`CREATE TABLE portfolio_opportunities (
 			id UUID PRIMARY KEY,
 			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
+			strategy_id UUID,
+			pipeline_run_id UUID,
+			pipeline_run_trade_date DATE,
 			status TEXT NOT NULL,
 			allocation_claim_id UUID,
 			allocation_claimed_at TIMESTAMPTZ,

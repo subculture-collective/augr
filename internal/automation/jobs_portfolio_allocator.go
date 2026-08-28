@@ -91,6 +91,8 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 			decision.Environment = opportunity.Environment
 			decision.OriginType = opportunity.OriginType
 			decision.OriginID = opportunity.OriginID
+			decision.PipelineRunID = opportunity.PipelineRunID
+			decision.PipelineRunTradeDate = opportunity.PipelineRunTradeDate
 		}
 
 		if mode == portfolio.AllocatorModePaper && decision.Action == domain.AllocationDecisionActionShadowSelected {
@@ -212,16 +214,18 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 		opportunityID := opportunity.ID
 		strategyID := opportunity.StrategyID
 		rejected = append(rejected, domain.AllocationDecision{
-			AccountID:     opportunity.AccountID,
-			Environment:   opportunity.Environment,
-			OriginType:    opportunity.OriginType,
-			OriginID:      opportunity.OriginID,
-			OpportunityID: &opportunityID,
-			StrategyID:    &strategyID,
-			Mode:          domain.AllocationDecisionMode(mode),
-			Action:        domain.AllocationDecisionActionShadowRejected,
-			Score:         -1,
-			Reasons:       []string{reason},
+			AccountID:            opportunity.AccountID,
+			Environment:          opportunity.Environment,
+			OriginType:           opportunity.OriginType,
+			OriginID:             opportunity.OriginID,
+			PipelineRunID:        opportunity.PipelineRunID,
+			PipelineRunTradeDate: opportunity.PipelineRunTradeDate,
+			OpportunityID:        &opportunityID,
+			StrategyID:           &strategyID,
+			Mode:                 domain.AllocationDecisionMode(mode),
+			Action:               domain.AllocationDecisionActionShadowRejected,
+			Score:                -1,
+			Reasons:              []string{reason},
 		})
 	}
 	return valid, rejected, nil
@@ -294,7 +298,7 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 	if err != nil && !errors.Is(err, repository.ErrNotFound) {
 		return fmt.Errorf("portfolio_allocator: load pending paper order: %w", err)
 	}
-	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovery_order_missing"
+	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovery_order_missing"
 	if order != nil {
 		if !orderMatchesOpportunity(*order, opportunity) {
 			order = nil
@@ -307,7 +311,7 @@ func (o *JobOrchestrator) reconcilePendingPaperDecision(ctx context.Context, opp
 			action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
 		} else {
 			decision.CreatedOrderID = &order.ID
-			reason = "recovered_pending_order:" + order.Status.String()
+			action, reason = domain.AllocationDecisionActionExecutionRejected, "recovery_nonterminal_order:"+order.Status.String()
 		}
 	}
 	decision.Action = action
@@ -345,13 +349,13 @@ func orderMatchesOpportunity(order domain.Order, opportunity domain.Opportunity)
 
 func recoveredAllocationDecision(opportunity domain.Opportunity, order domain.Order) domain.AllocationDecision {
 	opportunityID, strategyID, orderID := opportunity.ID, opportunity.StrategyID, order.ID
-	action, reason := domain.AllocationDecisionActionPaperOrderIntent, "recovered_pending_order:"+order.Status.String()
+	action, reason := domain.AllocationDecisionActionExecutionRejected, "recovery_nonterminal_order:"+order.Status.String()
 	if order.Status == domain.OrderStatusFilled {
 		action, reason = domain.AllocationDecisionActionExecuted, "recovered_filled_order"
 	} else if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
 		action, reason = domain.AllocationDecisionActionExecutionRejected, "recovered_rejected_order:"+order.Status.String()
 	}
-	return domain.AllocationDecision{AccountID: opportunity.AccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: action, Reasons: []string{reason}, CreatedOrderID: &orderID}
+	return domain.AllocationDecision{AccountID: opportunity.AccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: opportunity.PipelineRunID, PipelineRunTradeDate: opportunity.PipelineRunTradeDate, OpportunityID: &opportunityID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: action, Reasons: []string{reason}, CreatedOrderID: &orderID}
 }
 
 func (o *JobOrchestrator) updateOpportunityStatus(ctx context.Context, decision domain.AllocationDecision, claimID *uuid.UUID) error {

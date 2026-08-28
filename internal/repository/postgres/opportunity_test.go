@@ -63,6 +63,10 @@ func TestOpportunityRepoIntegration_CRUDAndUpsert(t *testing.T) {
 	evidence := json.RawMessage(`{"signals":["momentum"]}`)
 
 	opportunity := &domain.Opportunity{
+		AccountID:            canonicalRepositoryTestAccountID,
+		Environment:          domain.AccountEnvironmentPaperScored,
+		OriginType:           "strategy_version",
+		OriginID:             uuid.NewString(),
 		StrategyID:           strategyID,
 		PipelineRunID:        &runID,
 		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
@@ -198,9 +202,12 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 
 	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
+	runID, versionID := uuid.New(), uuid.New()
 	expiresAt := time.Date(2026, 6, 20, 15, 0, 0, 0, time.UTC)
 	score := 1.0
 	opportunity := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID:     strategyID,
 		MarketType:     domain.MarketTypeStock,
 		Ticker:         "AAPL",
@@ -237,6 +244,8 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 	}
 
 	queued := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID:     strategyID,
 		MarketType:     domain.MarketTypeStock,
 		Ticker:         "MSFT",
@@ -301,9 +310,12 @@ func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t 
 	defer cleanup()
 
 	strategyID := createTestStrategy(t, ctx, pool)
+	runID, versionID := uuid.New(), uuid.New()
 	ownerRepo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	foreignRepo := NewOpportunityRepo(pool, uuid.New())
 	owned := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID: strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL",
 		Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued,
 		Confidence: 0.4, ExpiresAt: time.Now().UTC().Add(time.Hour), DedupeKey: "account-fenced-dedupe",
@@ -313,6 +325,7 @@ func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t 
 	}
 
 	incoming := &domain.Opportunity{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID: strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL",
 		Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued,
 		Confidence: 0.9, ExpiresAt: time.Now().UTC().Add(2 * time.Hour), DedupeKey: owned.DedupeKey,
@@ -339,6 +352,32 @@ func TestOpportunityRepoIntegration_UpsertDedupeCannotClaimForeignOrLegacyRow(t 
 	}
 	if accountID != nil || confidence != 0.4 {
 		t.Fatalf("legacy row was claimed or changed: account_id=%v confidence=%v", accountID, confidence)
+	}
+}
+
+func TestOpportunityRepoIntegration_QueuedDedupeRejectsLineageRefreshAtomically(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	opportunity := &domain.Opportunity{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued, Confidence: .4, Evidence: json.RawMessage(`{"source":"original"}`), ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := repo.Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := *opportunity
+	conflicting.OriginID = uuid.NewString()
+	conflicting.Confidence = .9
+	conflicting.Evidence = json.RawMessage(`{"source":"foreign"}`)
+	if err := repo.UpsertQueuedByDedupeKey(ctx, &conflicting); err == nil {
+		t.Fatal("lineage-conflicting refresh succeeded")
+	}
+	stored, err := repo.Get(ctx, opportunity.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.OriginID != versionID.String() || stored.Confidence != .4 || !jsonBytesEqual(stored.Evidence, opportunity.Evidence) {
+		t.Fatalf("conflicting refresh partially changed row: %+v", stored)
 	}
 }
 
@@ -549,6 +588,12 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		`CREATE INDEX idx_portfolio_opportunities_market_type_ticker ON portfolio_opportunities (market_type, ticker)`,
 		`CREATE TABLE allocation_decisions (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
+			pipeline_run_id UUID,
+			pipeline_run_trade_date DATE,
 			opportunity_id UUID REFERENCES portfolio_opportunities (id),
 			strategy_id UUID REFERENCES strategies (id),
 			mode TEXT NOT NULL CHECK (mode IN ('shadow', 'paper')),

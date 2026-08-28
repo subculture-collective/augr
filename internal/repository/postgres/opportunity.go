@@ -163,6 +163,9 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	if err := validateOptionalPipelineRunRef(opportunity.PipelineRunID, opportunity.PipelineRunTradeDate); err != nil {
 		return fmt.Errorf("postgres: save opportunity: %w", err)
 	}
+	if upsert && (opportunity.PipelineRunID == nil || opportunity.Environment == "" || strings.TrimSpace(opportunity.OriginType) == "" || strings.TrimSpace(opportunity.OriginID) == "" || opportunity.StrategyID == uuid.Nil) {
+		return fmt.Errorf("postgres: save opportunity: complete dedupe scope is required")
+	}
 	if opportunity.AccountID != uuid.Nil && opportunity.AccountID != r.accountID {
 		return fmt.Errorf("postgres: save opportunity: account mismatch")
 	}
@@ -202,7 +205,13 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 			evidence = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.evidence ELSE portfolio_opportunities.evidence END,
 			expires_at = CASE WHEN portfolio_opportunities.status = 'queued' THEN EXCLUDED.expires_at ELSE portfolio_opportunities.expires_at END,
 			updated_at = CASE WHEN portfolio_opportunities.status = 'queued' THEN NOW() ELSE portfolio_opportunities.updated_at END
-			WHERE portfolio_opportunities.account_id = EXCLUDED.account_id`
+			WHERE portfolio_opportunities.account_id = EXCLUDED.account_id
+			  AND portfolio_opportunities.environment IS NOT DISTINCT FROM EXCLUDED.environment
+			  AND portfolio_opportunities.origin_type IS NOT DISTINCT FROM EXCLUDED.origin_type
+			  AND portfolio_opportunities.origin_id IS NOT DISTINCT FROM EXCLUDED.origin_id
+			  AND portfolio_opportunities.strategy_id = EXCLUDED.strategy_id
+			  AND portfolio_opportunities.pipeline_run_id = EXCLUDED.pipeline_run_id
+			  AND portfolio_opportunities.pipeline_run_trade_date = EXCLUDED.pipeline_run_trade_date`
 	}
 	query += ` RETURNING id, created_at, updated_at`
 

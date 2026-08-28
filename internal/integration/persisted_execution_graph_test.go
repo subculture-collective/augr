@@ -64,7 +64,7 @@ func TestPersistedExecutionGraphIntegration_SurvivesCancellationAndRestart(t *te
 	if claimed, err := opportunityRepo.ClaimQueuedForAllocation(ctx, opportunity.ID, claimID, startedAt, startedAt.Add(time.Minute)); err != nil || !claimed {
 		t.Fatalf("claim opportunity = %t, %v", claimed, err)
 	}
-	allocation := &domain.AllocationDecision{AccountID: accountID, Environment: run.Environment, OriginType: run.OriginType, OriginID: originID, OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, Score: 1, NotionalUSD: 100, Quantity: 10, Reasons: []string{"within budget"}}
+	allocation := &domain.AllocationDecision{AccountID: accountID, Environment: run.Environment, OriginType: run.OriginType, OriginID: originID, PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate, OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent, Score: 1, NotionalUSD: 100, Quantity: 10, Reasons: []string{"within budget"}}
 	allocationRepo := postgres.NewAllocationDecisionRepo(db.Pool, accountID)
 	if err := allocationRepo.Create(ctx, allocation); err != nil {
 		t.Fatal(err)

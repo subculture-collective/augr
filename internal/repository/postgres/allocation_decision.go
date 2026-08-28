@@ -27,19 +27,50 @@ func NewAllocationDecisionRepo(pool *pgxpool.Pool, accountID uuid.UUID) *Allocat
 
 // Create inserts a new allocation decision.
 func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.AllocationDecision) error {
+	if decision == nil || decision.OpportunityID == nil {
+		return fmt.Errorf("postgres: create allocation decision: opportunity is required")
+	}
+	if err := validateOptionalPipelineRunRef(decision.PipelineRunID, decision.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create allocation decision: %w", err)
+	}
+	if decision.PipelineRunID == nil || decision.Environment == "" || strings.TrimSpace(decision.OriginType) == "" || strings.TrimSpace(decision.OriginID) == "" || decision.StrategyID == nil || *decision.StrategyID == uuid.Nil {
+		return fmt.Errorf("postgres: create allocation decision: complete opportunity lineage is required")
+	}
 	if decision.AccountID != uuid.Nil && decision.AccountID != r.accountID {
 		return fmt.Errorf("postgres: create allocation decision: account mismatch")
 	}
 	decision.AccountID = r.accountID
 	row := r.pool.QueryRow(ctx,
-		`INSERT INTO allocation_decisions (
-			account_id, environment, origin_type, origin_id, opportunity_id, strategy_id, mode, action, score, notional_usd, quantity, reasons, created_order_id
+		`WITH authorized AS (
+			SELECT 1 FROM portfolio_opportunities o
+			WHERE o.id=$5 AND o.account_id=$1
+			  AND o.environment IS NOT DISTINCT FROM $2
+			  AND o.origin_type IS NOT DISTINCT FROM $3
+			  AND o.origin_id IS NOT DISTINCT FROM $4
+			  AND o.pipeline_run_id IS NOT DISTINCT FROM $6
+			  AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $7
+			  AND o.strategy_id IS NOT DISTINCT FROM $8
+		), inserted AS (
+			INSERT INTO allocation_decisions (
+				account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date,
+				opportunity_id, strategy_id, mode, action, score, notional_usd, quantity, reasons, created_order_id
+			)
+			SELECT $1,$2,$3,$4,$6,$7,$5,$8,$9,$10,$11,$12,$13,$14,$15 FROM authorized
+			ON CONFLICT (opportunity_id) WHERE opportunity_id IS NOT NULL DO NOTHING
+			RETURNING id, created_at
 		)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-		 ON CONFLICT (opportunity_id) WHERE opportunity_id IS NOT NULL DO UPDATE SET opportunity_id=EXCLUDED.opportunity_id
-		 RETURNING id, created_at`,
+		SELECT id,created_at FROM inserted
+		UNION ALL
+		SELECT d.id,d.created_at FROM allocation_decisions d, authorized
+		WHERE d.opportunity_id=$5 AND d.account_id=$1
+		  AND d.environment IS NOT DISTINCT FROM $2
+		  AND d.origin_type IS NOT DISTINCT FROM $3
+		  AND d.origin_id IS NOT DISTINCT FROM $4
+		  AND d.pipeline_run_id IS NOT DISTINCT FROM $6
+		  AND d.pipeline_run_trade_date IS NOT DISTINCT FROM $7
+		LIMIT 1`,
 		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.OpportunityID,
-		decision.StrategyID,
+		decision.PipelineRunID, decision.PipelineRunTradeDate, decision.StrategyID,
 		decision.Mode,
 		decision.Action,
 		decision.Score,
@@ -99,7 +130,7 @@ func (r *AllocationDecisionRepo) RecordPaperOrderResult(ctx context.Context, id 
 	return tag.RowsAffected() == 1, nil
 }
 
-const allocationDecisionSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, opportunity_id, strategy_id, mode, action,
+const allocationDecisionSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, opportunity_id, strategy_id, mode, action,
 	score::double precision, notional_usd::double precision, quantity::double precision,
 	reasons, created_order_id, created_at
 	FROM allocation_decisions`
@@ -109,6 +140,7 @@ func scanAllocationDecision(sc scanner) (*domain.AllocationDecision, error) {
 	if err := sc.Scan(
 		&decision.ID,
 		&decision.AccountID, &decision.Environment, &decision.OriginType, &decision.OriginID,
+		&decision.PipelineRunID, &decision.PipelineRunTradeDate,
 		&decision.OpportunityID,
 		&decision.StrategyID,
 		&decision.Mode,

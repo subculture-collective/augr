@@ -1007,6 +1007,22 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 	if r.eventRepo == nil {
 		return fmt.Errorf("%s native: agent event repository is required", source)
 	}
+	scope, err := persistenceScopeFromRun(run)
+	if err != nil {
+		return fmt.Errorf("%s native: validate run scope: %w", source, err)
+	}
+	event := &domain.AgentEvent{
+		PipelineRunID:        &run.ID,
+		PipelineRunTradeDate: &run.TradeDate,
+		StrategyID:           &run.StrategyID,
+		EventKind:            agent.AgentEventKindPipelineStarted.String(),
+		Title:                "Pipeline started",
+		Summary:              "Native deterministic pipeline admitted for evaluation.",
+		Tags:                 []string{"pipeline", "native", source},
+	}
+	if err := applyEventPersistenceScope(event, scope); err != nil {
+		return fmt.Errorf("%s native: scope start event: %w", source, err)
+	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	if err := r.runRepo.Create(persistCtx, run); err != nil {
 		cancel()
@@ -1018,21 +1034,7 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 	if err != nil {
 		return fmt.Errorf("%s native: marshal start event: %w", source, err)
 	}
-	event := &domain.AgentEvent{
-		PipelineRunID:        &run.ID,
-		PipelineRunTradeDate: &run.TradeDate,
-		StrategyID:           &run.StrategyID,
-		EventKind:            agent.AgentEventKindPipelineStarted.String(),
-		Title:                "Pipeline started",
-		Summary:              "Native deterministic pipeline admitted for evaluation.",
-		Tags:                 []string{"pipeline", "native", source},
-		Metadata:             metadata,
-	}
-	if scope, scopeErr := persistenceScopeFromRun(run); scopeErr == nil {
-		if err := applyEventPersistenceScope(event, scope); err != nil {
-			return fmt.Errorf("%s native: scope start event: %w", source, err)
-		}
-	}
+	event.Metadata = metadata
 	eventCtx, eventCancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	eventErr := r.eventRepo.Create(eventCtx, event)
 	eventCancel()
@@ -1135,6 +1137,10 @@ func nativeTerminalEvent(
 	status domain.PipelineStatus,
 	signal domain.PipelineSignal,
 ) (*domain.AgentEvent, error) {
+	scope, err := persistenceScopeFromRun(run)
+	if err != nil {
+		return nil, fmt.Errorf("%s native: validate terminal scope: %w", source, err)
+	}
 	eventKind := agent.AgentEventKindPipelineFailed.String()
 	title := "Pipeline failed"
 	tags := []string{"pipeline", "failed", "native", source}
@@ -1166,10 +1172,8 @@ func nativeTerminalEvent(
 		Tags:                 tags,
 		Metadata:             metadata,
 	}
-	if scope, scopeErr := persistenceScopeFromRun(run); scopeErr == nil {
-		if err := applyEventPersistenceScope(event, scope); err != nil {
-			return nil, fmt.Errorf("%s native: scope terminal event: %w", source, err)
-		}
+	if err := applyEventPersistenceScope(event, scope); err != nil {
+		return nil, fmt.Errorf("%s native: scope terminal event: %w", source, err)
 	}
 	return event, nil
 }

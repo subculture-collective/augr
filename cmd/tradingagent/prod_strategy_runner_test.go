@@ -901,7 +901,7 @@ func TestCompleteNativeRunPersistsTerminalEvent(t *testing.T) {
 	runRepo := &stubPipelineRunRepo{}
 	eventRepo := &recordingStrategyPreparationEventRepo{}
 	runner := &realStrategyRunner{runRepo: runRepo, eventRepo: eventRepo}
-	run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC()}
+	run := scopedNativeTestRun(domain.PipelineStatusRunning)
 
 	if err := runner.completeNativeRun(context.Background(), "kalshi", &run, domain.PipelineStatusFailed, domain.PipelineSignalHold, "secret provider detail"); err != nil {
 		t.Fatalf("completeNativeRun() error = %v", err)
@@ -929,7 +929,8 @@ func TestCompleteNativeRunTransactionFailureDoesNotReclassifyCompletion(t *testi
 		runRepo:   runRepo,
 		eventRepo: &recordingStrategyPreparationEventRepo{err: errors.New("event store unavailable")},
 	}
-	run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC()}
+	run := scopedNativeTestRun(domain.PipelineStatusRunning)
+	run.Status = ""
 
 	err := runner.completeNativeRun(context.Background(), "kalshi", &run, domain.PipelineStatusCompleted, domain.PipelineSignalHold, "")
 	if err == nil || !strings.Contains(err.Error(), "finalize run") {
@@ -958,7 +959,7 @@ func TestCompleteNativeRunCancellationDuringCompletedFinalizeWins(t *testing.T) 
 				return finalizeCtx.Err()
 			}
 			runner := &realStrategyRunner{runRepo: runRepo}
-			run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}
+			run := scopedNativeTestRun(domain.PipelineStatusRunning)
 
 			err := runner.completeNativeRun(ctx, "kalshi", &run, domain.PipelineStatusCompleted, domain.PipelineSignalBuy, "")
 			if !errors.Is(err, cause) || run.Status != domain.PipelineStatusCancelled || len(runRepo.updates) != 2 {
@@ -976,7 +977,7 @@ func TestStartNativeRunEventFailureMarksRunFailed(t *testing.T) {
 		runRepo:   runRepo,
 		eventRepo: &recordingStrategyPreparationEventRepo{err: errors.New("event store unavailable")},
 	}
-	run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}
+	run := scopedNativeTestRun(domain.PipelineStatusRunning)
 
 	err := runner.startNativeRun(context.Background(), "kalshi", &run)
 	if err == nil || !strings.Contains(err.Error(), "persist start event") {
@@ -1004,7 +1005,7 @@ func TestStartNativeRunEventFailureUsesTypedCancellation(t *testing.T) {
 				return errors.New("event store unavailable")
 			}}
 			runner := &realStrategyRunner{runRepo: runRepo, eventRepo: eventRepo}
-			run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}
+			run := scopedNativeTestRun(domain.PipelineStatusRunning)
 
 			err := runner.startNativeRun(ctx, "kalshi", &run)
 			if err == nil || !errors.Is(err, cause) || len(runRepo.updates) != 1 {
@@ -1057,10 +1058,12 @@ func TestStartNativeRunEventFailureLosesTerminalAuthority(t *testing.T) {
 	for _, status := range []domain.PipelineStatus{domain.PipelineStatusCompleted, domain.PipelineStatusFailed, domain.PipelineStatusCancelled} {
 		status := status
 		t.Run(string(status), func(t *testing.T) {
-			winner := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: status, Signal: domain.PipelineSignalHold}
+			winner := scopedNativeTestRun(status)
+			winner.Signal = domain.PipelineSignalHold
 			runRepo := &stubPipelineRunRepo{receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
 			runner := &realStrategyRunner{runRepo: runRepo, eventRepo: &recordingStrategyPreparationEventRepo{err: errors.New("event store unavailable")}}
-			run := domain.PipelineRun{ID: winner.ID, StrategyID: winner.StrategyID, TradeDate: winner.TradeDate, Status: domain.PipelineStatusRunning}
+			run := winner
+			run.Status = domain.PipelineStatusRunning
 
 			err := runner.startNativeRun(context.Background(), "kalshi", &run)
 			if !errors.Is(err, agent.ErrLostTerminalAuthority) {
@@ -1073,6 +1076,34 @@ func TestStartNativeRunEventFailureLosesTerminalAuthority(t *testing.T) {
 				t.Fatalf("finalizations = %d, want 1", len(runRepo.updates))
 			}
 		})
+	}
+}
+
+func scopedNativeTestRun(status domain.PipelineStatus) domain.PipelineRun {
+	return domain.PipelineRun{
+		ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC().Truncate(24 * time.Hour), Status: status,
+		AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(),
+		OriginType: "strategy_version", OriginID: uuid.NewString(),
+	}
+}
+
+func TestStartNativeRunRejectsScopeBeforeRunCreation(t *testing.T) {
+	runRepo := &stubPipelineRunRepo{}
+	runner := &realStrategyRunner{runRepo: runRepo, eventRepo: &recordingStrategyPreparationEventRepo{}}
+	run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC().Truncate(24 * time.Hour), Status: domain.PipelineStatusRunning}
+	if err := runner.startNativeRun(context.Background(), "kalshi", &run); err == nil || !strings.Contains(err.Error(), "validate run scope") {
+		t.Fatalf("startNativeRun() error = %v, want scope validation", err)
+	}
+	if runRepo.created != nil || len(runRepo.updates) != 0 {
+		t.Fatalf("invalid scope wrote run state: created=%+v updates=%+v", runRepo.created, runRepo.updates)
+	}
+}
+
+func TestNativeTerminalEventPropagatesScopeError(t *testing.T) {
+	run := domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC().Truncate(24 * time.Hour)}
+	event, err := nativeTerminalEvent("kalshi", &run, domain.PipelineStatusFailed, domain.PipelineSignalHold)
+	if err == nil || !strings.Contains(err.Error(), "validate terminal scope") || event != nil {
+		t.Fatalf("nativeTerminalEvent() = (%+v, %v), want propagated scope error", event, err)
 	}
 }
 

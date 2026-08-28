@@ -42,8 +42,11 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 
 	repo := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
+	runID, versionID := uuid.New(), uuid.New()
 	opportunityRepo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	opportunity := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID:        strategyID,
 		MarketType:        domain.MarketTypeStock,
 		Ticker:            "AAPL",
@@ -71,6 +74,8 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 		t.Fatalf("create order fixture: %v", err)
 	}
 	decision := &domain.AllocationDecision{
+		AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment,
+		OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		OpportunityID:  &opportunity.ID,
 		StrategyID:     &strategyID,
 		Mode:           domain.AllocationDecisionModeShadow,
@@ -105,5 +110,28 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected count 1, got %d", count)
+	}
+}
+
+func TestAllocationDecisionRepoIntegration_ConflictNeverReturnsForeignLineage(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	opportunity := &domain.Opportunity{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusSelected, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	decision := &domain.AllocationDecision{AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}
+	if err := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, decision); err != nil {
+		t.Fatal(err)
+	}
+	foreign := *decision
+	foreign.ID, foreign.CreatedAt, foreign.Environment = uuid.Nil, time.Time{}, domain.AccountEnvironmentLive
+	if err := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, &foreign); err == nil {
+		t.Fatal("foreign conflict returned existing allocation decision")
+	}
+	if foreign.ID != uuid.Nil {
+		t.Fatalf("foreign decision received ID %s", foreign.ID)
 	}
 }
