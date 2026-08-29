@@ -76,7 +76,7 @@ SELECT
         count(*) FILTER (WHERE idempotency_key='cash' AND ledger_account='asset:cash' AND unit_kind='currency' AND unit='USD' AND amount=100000)=1 AND
         count(*) FILTER (WHERE idempotency_key='contributed-capital' AND ledger_account='equity:contributed_capital' AND unit_kind='currency' AND unit='USD' AND amount=-100000)=1 AND
         count(DISTINCT transaction_id)=1 AND
-        min(transaction_id)=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID AND
+        bool_and(transaction_id=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID) AND
         sum(amount)=0
        FROM ledger_postings)
   ),

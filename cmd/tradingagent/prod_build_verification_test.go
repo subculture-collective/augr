@@ -596,6 +596,7 @@ func TestZeroHistoryAuditAcceptsOnlyTheSeededOpeningCapitalLedger(t *testing.T) 
 		`ledger_account='asset:cash'`,
 		`ledger_account='equity:contributed_capital'`,
 		`count(DISTINCT transaction_id)=1`,
+		`bool_and(transaction_id=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID)`,
 		`sum(amount)=0`,
 	} {
 		if !strings.Contains(script, want) {
