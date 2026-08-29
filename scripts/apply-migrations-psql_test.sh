@@ -58,6 +58,7 @@ if [[ $input == *"CREATE EXTENSION IF NOT EXISTS pgcrypto"* ]]; then
   exit 0
 fi
 if [[ $input == *"INSERT INTO schema_migrations(version,dirty) VALUES(0,false)"* ]]; then
+  [[ $input == *"ALTER TABLE schema_migrations OWNER TO augr_db_owner"* ]] || exit 1
   if [[ -f $state ]]; then
     IFS='|' read -r count _ _ <"$state"
     [[ $count == 0 ]] || exit 1

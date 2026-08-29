@@ -68,6 +68,7 @@ SQL
 BEGIN;
 SELECT pg_advisory_xact_lock(hashtextextended(current_database() || ':schema_migrations',0));
 CREATE TABLE IF NOT EXISTS schema_migrations(version BIGINT NOT NULL, dirty BOOLEAN NOT NULL);
+ALTER TABLE schema_migrations OWNER TO augr_db_owner;
 LOCK TABLE schema_migrations IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
   IF (SELECT count(*) FROM schema_migrations)<>0 THEN
