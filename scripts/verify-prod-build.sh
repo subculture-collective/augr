@@ -463,6 +463,7 @@ services:
   app:
     image: ${VERIFY_ROLLBACK_IMAGE}
     environment:
+      APP_ENV: production
       ENABLE_SCHEDULER: "true"
 EOF
     compose up -d --no-build --force-recreate app

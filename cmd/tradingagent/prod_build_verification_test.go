@@ -96,6 +96,7 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		`rollback image content mismatch`,
 		`rollback scheduler check returned HTTP`,
 		`Proving rollback image drains admitted work on SIGTERM`,
+		`APP_ENV: production`,
 		`ENABLE_SCHEDULER: "true"`,
 		`rollback pipeline admission returned HTTP`,
 		`rollback automation admission returned HTTP`,
