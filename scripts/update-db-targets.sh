@@ -130,7 +130,7 @@ def validate_url(label, raw, database):
         fail(f"{label} does not target POSTGRES_DB")
     return unquote(parsed.username)
 
-def validate_values(values, expected_database=None):
+def validate_values(values, expected_database=None, require_shared_general_user=True):
     try:
         database = values["POSTGRES_DB"].decode("utf-8")
     except UnicodeDecodeError:
@@ -142,9 +142,9 @@ def validate_values(values, expected_database=None):
     app_user = validate_url("APP_DATABASE_URL", values["APP_DATABASE_URL"], database)
     general_user = validate_url("DATABASE_URL", values["DATABASE_URL"], database)
     projection_user = validate_url("KALSHI_PROJECTION_DATABASE_URL", values["KALSHI_PROJECTION_DATABASE_URL"], database)
-    if app_user != general_user:
+    if require_shared_general_user and app_user != general_user:
         fail("APP_DATABASE_URL and DATABASE_URL must use the same general username")
-    if projection_user == general_user:
+    if projection_user in (app_user, general_user):
         fail("general and projection database usernames must differ")
 
 def read_regular_0600(path, label):
@@ -195,7 +195,7 @@ def validate_artifacts(rollback_path, metadata_path):
     for key in TARGET_KEYS:
         if metadata[f"{key}_sha256"] != digest(values[key]):
             fail(f"rollback {key} hash mismatch")
-    validate_values(values)
+    validate_values(values, require_shared_general_user=False)
     return rollback, values, non_target
 
 def write_exclusive(path, data):
@@ -243,7 +243,7 @@ env_data = read_regular_0600(env_path, "environment file")
 env_lines, env_values, env_indexes, env_non_target = parse_env(env_data)
 
 if mode == "prepare-rollback":
-    validate_values(env_values)
+    validate_values(env_values, require_shared_general_user=False)
     if os.path.lexists(rollback_path) or os.path.lexists(metadata_path):
         fail("rollback artifacts already exist")
     metadata = {"mode": "600", "rollback_sha256": digest(env_data), "non_target_sha256": digest(env_non_target)}
@@ -253,8 +253,9 @@ if mode == "prepare-rollback":
     write_exclusive(metadata_path, metadata_data)
     fsync_directory(os.path.dirname(env_path))
 elif mode == "validate":
-    _, _, rollback_non_target = validate_artifacts(rollback_path, metadata_path)
-    validate_values(env_values)
+    _, rollback_values, rollback_non_target = validate_artifacts(rollback_path, metadata_path)
+    targets_match_rollback = all(digest(env_values[key]) == digest(rollback_values[key]) for key in TARGET_KEYS)
+    validate_values(env_values, require_shared_general_user=not targets_match_rollback)
     if digest(env_non_target) != digest(rollback_non_target):
         fail("environment non-target digest changed")
 elif mode == "restore":
@@ -271,7 +272,7 @@ elif mode == "restore":
         fail("restored environment does not match rollback artifact")
 elif mode == "update":
     _, original_values, rollback_non_target = validate_artifacts(rollback_path, metadata_path)
-    validate_values(env_values)
+    validate_values(env_values, require_shared_general_user=False)
     if digest(env_non_target) != digest(rollback_non_target):
         fail("environment non-target digest changed")
     if any(digest(env_values[key]) != digest(original_values[key]) for key in TARGET_KEYS):

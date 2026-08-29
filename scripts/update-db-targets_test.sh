@@ -8,7 +8,7 @@ trap 'rm -rf "$test_root"' EXIT
 case_root="$test_root/repo"
 
 old_app_url='postgres://augr_app_runtime:old-app-secret@augr-postgres:5432/tradingagent?sslmode=disable'
-old_database_url='postgres://augr_app_runtime:old-general-secret@augr-postgres:5432/tradingagent?sslmode=disable'
+old_database_url='postgres://postgres:old-general-secret@augr-postgres:5432/tradingagent?sslmode=disable'
 old_projection_url='postgres://augr_projection_writer:old-projection-secret@augr-postgres:5432/tradingagent?sslmode=disable'
 new_db='tradingagent_canonical_20260827'
 new_app_url="postgres://augr_app_runtime:new-app-secret@augr-postgres:5432/$new_db?sslmode=disable"
