@@ -579,6 +579,34 @@ func TestNUCRollbackOverrideDisablesExecution(t *testing.T) {
 	}
 }
 
+func TestZeroHistoryAuditAcceptsOnlyTheSeededOpeningCapitalLedger(t *testing.T) {
+	repoRoot := filepath.Join(filepath.Dir(productionBuildVerificationScriptPath(t)), "..")
+	contents, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "verify-account-cutover.sh"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	script := string(contents)
+	for _, want := range []string{
+		`id='00000000-0000-4000-8000-000000000164'::UUID`,
+		`source='account_opening'`,
+		`idempotency_key='account-opening:00000000-0000-4000-8000-000000000064'`,
+		`id=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID`,
+		`metadata='{"normalizer":"capital_flow_v1","source":"account_opening"}'::JSONB`,
+		`ledger_account='asset:cash'`,
+		`ledger_account='equity:contributed_capital'`,
+		`count(DISTINCT transaction_id)=1`,
+		`sum(amount)=0`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("zero-history audit missing seeded opening-capital constraint %q", want)
+		}
+	}
+	if strings.Contains(script, `(SELECT count(*) FROM ledger_transactions)+(SELECT count(*) FROM ledger_postings)`) {
+		t.Fatal("zero-history audit treats the required seeded opening ledger as operational history")
+	}
+}
+
 func productionBuildVerificationScriptPath(t *testing.T) string {
 	t.Helper()
 

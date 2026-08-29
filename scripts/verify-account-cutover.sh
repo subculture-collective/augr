@@ -43,7 +43,7 @@ else
 fi
 
 if [[ $mode == --target-zero-history-audit ]]; then
-  psql_db "$TARGET_DB_NAME" -qAt <<'SQL' | grep -qx '109|f|t|t|1|1|0'
+  psql_db "$TARGET_DB_NAME" -qAt <<'SQL' | grep -qx '109|f|t|t|1|1|t|0'
 BEGIN READ ONLY;
 SET ROLE augr_db_owner;
 SELECT
@@ -53,6 +53,33 @@ SELECT
   has_function_privilege('augr_projection_writer','public.persist_canonical_projection_checkpoint(bytea,text,bytea)','EXECUTE'),
   (SELECT count(*) FROM accounts WHERE id='00000000-0000-4000-8000-000000000064' AND status='active' AND environment='paper_scored'),
   (SELECT count(*) FROM account_capital_policy_bindings WHERE account_id='00000000-0000-4000-8000-000000000064' AND environment='paper_scored'),
+  (
+    SELECT
+      (SELECT count(*)=1 AND count(*) FILTER (WHERE
+        id='00000000-0000-4000-8000-000000000164'::UUID AND
+        account_id='00000000-0000-4000-8000-000000000064'::UUID AND
+        flow_type='deposit' AND source='account_opening' AND
+        amount=100000 AND currency='USD' AND
+        idempotency_key='account-opening:00000000-0000-4000-8000-000000000064')=1
+       FROM capital_flows) AND
+      (SELECT count(*)=1 AND count(*) FILTER (WHERE
+        id=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID AND
+        account_id='00000000-0000-4000-8000-000000000064'::UUID AND
+        event_type='capital_flow.deposit' AND
+        idempotency_key='capital-flow:00000000-0000-4000-8000-000000000164' AND
+        origin_type='capital_flow' AND origin_id='00000000-0000-4000-8000-000000000164' AND
+        reference_type='capital_flow' AND reference_id='00000000-0000-4000-8000-000000000164' AND
+        metadata='{"normalizer":"capital_flow_v1","source":"account_opening"}'::JSONB AND
+        posting_count=2)=1
+       FROM ledger_transactions) AND
+      (SELECT count(*)=2 AND
+        count(*) FILTER (WHERE idempotency_key='cash' AND ledger_account='asset:cash' AND unit_kind='currency' AND unit='USD' AND amount=100000)=1 AND
+        count(*) FILTER (WHERE idempotency_key='contributed-capital' AND ledger_account='equity:contributed_capital' AND unit_kind='currency' AND unit='USD' AND amount=-100000)=1 AND
+        count(DISTINCT transaction_id)=1 AND
+        min(transaction_id)=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID AND
+        sum(amount)=0
+       FROM ledger_postings)
+  ),
   (SELECT count(*) FROM strategies)+
   (SELECT count(*) FROM pipeline_runs)+(SELECT count(*) FROM pipeline_run_snapshots)+
   (SELECT count(*) FROM agent_decisions)+(SELECT count(*) FROM agent_events)+
@@ -65,7 +92,6 @@ SELECT
   (SELECT count(*) FROM copy_subscriptions)+(SELECT count(*) FROM copy_trade_intents)+
   (SELECT count(*) FROM copy_origin_rebalance_runs)+(SELECT count(*) FROM copy_origin_rebalance_intents)+
   (SELECT count(*) FROM copy_target_drift_runs)+(SELECT count(*) FROM copy_target_drift_legs)+
-  (SELECT count(*) FROM ledger_transactions)+(SELECT count(*) FROM ledger_postings)+
   (SELECT count(*) FROM economic_source_events)+(SELECT count(*) FROM economic_event_normalizations)+
   (SELECT count(*) FROM account_projection_outbox)+(SELECT count(*) FROM projection_checkpoints);
 COMMIT;
