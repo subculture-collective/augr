@@ -250,6 +250,7 @@ func TestCanonicalCutoverAuditorsAreReadOnlyAndEvidenceBound(t *testing.T) {
 		`economic_event_normalizations`,
 		`ledger_transactions`,
 		`account_projection_outbox`,
+		`account_capital_policy_bindings`,
 		`projection_checkpoints`,
 		`octet_length(c.attestation_hmac)=32`,
 		`DROP DATABASE IF EXISTS`,
@@ -261,6 +262,9 @@ func TestCanonicalCutoverAuditorsAreReadOnlyAndEvidenceBound(t *testing.T) {
 	}
 	if strings.Contains(verifier, `--all`) {
 		t.Fatal("verify-account-cutover.sh permits an implicit all mode")
+	}
+	if strings.Contains(verifier, `paper_evaluation_profiles`) {
+		t.Fatal("verify-account-cutover.sh references the retired paper evaluation profile name")
 	}
 
 	for _, name := range []string{"capture-old-db-baseline.sh", "verify-old-db-after-drain.sh"} {

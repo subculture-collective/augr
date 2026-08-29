@@ -52,7 +52,7 @@ SELECT
   (SELECT pg_get_userbyid(datdba)='augr_db_owner' FROM pg_database WHERE datname=current_database()),
   has_function_privilege('augr_projection_writer','public.persist_canonical_projection_checkpoint(bytea,text,bytea)','EXECUTE'),
   (SELECT count(*) FROM accounts WHERE id='00000000-0000-4000-8000-000000000064' AND status='active' AND environment='paper_scored'),
-  (SELECT count(*) FROM paper_evaluation_profiles WHERE account_id='00000000-0000-4000-8000-000000000064' AND environment='paper_scored'),
+  (SELECT count(*) FROM account_capital_policy_bindings WHERE account_id='00000000-0000-4000-8000-000000000064' AND environment='paper_scored'),
   (SELECT count(*) FROM strategies)+
   (SELECT count(*) FROM pipeline_runs)+(SELECT count(*) FROM pipeline_run_snapshots)+
   (SELECT count(*) FROM agent_decisions)+(SELECT count(*) FROM agent_events)+
