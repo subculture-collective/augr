@@ -258,7 +258,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 
 	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy, executionVersionID)
 	if err != nil {
-		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, err); persistErr != nil {
+		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, executionVersionID, err); persistErr != nil {
 			return nil, recognizedRunControlError(ctx, errors.Join(err, persistErr))
 		}
 		return nil, recognizedRunControlError(ctx, err)
@@ -1536,7 +1536,7 @@ func normalizePolymarketStrategySide(side string) (string, error) {
 	}
 }
 
-func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Context, strategy domain.Strategy, preparationErr error) error {
+func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID, preparationErr error) error {
 	if r.eventRepo == nil {
 		return errors.New("record strategy preparation failure: agent event repository is required")
 	}
@@ -1551,12 +1551,16 @@ func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Contex
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	event := &domain.AgentEvent{
-		StrategyID: &strategy.ID,
-		EventKind:  "strategy.preparation_rejected",
-		Title:      "Strategy preparation rejected",
-		Summary:    "Required strategy inputs or runtime preparation did not pass preflight.",
-		Tags:       []string{"strategy", "preflight", "rejected"},
-		Metadata:   metadata,
+		AccountID:   r.executionAccount.AccountID(),
+		Environment: r.executionAccount.Environment(),
+		OriginType:  "strategy_version",
+		OriginID:    executionVersionID.String(),
+		StrategyID:  &strategy.ID,
+		EventKind:   "strategy.preparation_rejected",
+		Title:       "Strategy preparation rejected",
+		Summary:     "Required strategy inputs or runtime preparation did not pass preflight.",
+		Tags:        []string{"strategy", "preflight", "rejected"},
+		Metadata:    metadata,
 	}
 	if err := r.eventRepo.Create(persistCtx, event); err != nil {
 		return fmt.Errorf("record strategy preparation failure: persist event: %w", err)

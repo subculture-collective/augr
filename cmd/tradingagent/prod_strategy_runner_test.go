@@ -1525,9 +1525,10 @@ func TestRecordStrategyPreparationFailurePersistsBoundedReason(t *testing.T) {
 			t.Parallel()
 
 			repo := &recordingStrategyPreparationEventRepo{}
-			runner := &realStrategyRunner{eventRepo: repo}
+			runner := &realStrategyRunner{executionAccount: testExecutionAccountBinding, eventRepo: repo}
 			strategy := domain.Strategy{ID: uuid.New(), Ticker: "SAFE", MarketType: domain.MarketTypeStock}
-			if err := runner.recordStrategyPreparationFailure(context.Background(), strategy, tc.failure); err != nil {
+			versionID := uuid.New()
+			if err := runner.recordStrategyPreparationFailure(context.Background(), strategy, versionID, tc.failure); err != nil {
 				t.Fatalf("recordStrategyPreparationFailure() error = %v", err)
 			}
 			if len(repo.events) != 1 {
@@ -1536,6 +1537,9 @@ func TestRecordStrategyPreparationFailurePersistsBoundedReason(t *testing.T) {
 			event := repo.events[0]
 			if event.EventKind != "strategy.preparation_rejected" || event.StrategyID == nil || *event.StrategyID != strategy.ID {
 				t.Fatalf("event identity = %+v", event)
+			}
+			if event.AccountID != testExecutionAccountBinding.AccountID() || event.Environment != testExecutionAccountBinding.Environment() || event.OriginType != "strategy_version" || event.OriginID != versionID.String() {
+				t.Fatalf("event scope = %+v", event)
 			}
 			var metadata map[string]string
 			if err := json.Unmarshal(event.Metadata, &metadata); err != nil {
@@ -1558,8 +1562,8 @@ func TestRecordStrategyPreparationFailurePersistsBoundedReason(t *testing.T) {
 func TestRecordStrategyPreparationFailureSurfacesPersistenceFailure(t *testing.T) {
 	t.Parallel()
 
-	runner := &realStrategyRunner{eventRepo: &recordingStrategyPreparationEventRepo{err: fmt.Errorf("write unavailable")}}
-	err := runner.recordStrategyPreparationFailure(context.Background(), domain.Strategy{ID: uuid.New()}, fmt.Errorf("preparation failed"))
+	runner := &realStrategyRunner{executionAccount: testExecutionAccountBinding, eventRepo: &recordingStrategyPreparationEventRepo{err: fmt.Errorf("write unavailable")}}
+	err := runner.recordStrategyPreparationFailure(context.Background(), domain.Strategy{ID: uuid.New()}, uuid.New(), fmt.Errorf("preparation failed"))
 	if err == nil || !strings.Contains(err.Error(), "write unavailable") {
 		t.Fatalf("recordStrategyPreparationFailure() error = %v, want persistence failure", err)
 	}
@@ -1569,7 +1573,7 @@ func TestRunStrategyPersistsPreparationRejection(t *testing.T) {
 	t.Parallel()
 
 	repo := &recordingStrategyPreparationEventRepo{}
-	runner := &realStrategyRunner{eventRepo: repo}
+	runner := &realStrategyRunner{executionAccount: testExecutionAccountBinding, eventRepo: repo}
 	strategy := domain.Strategy{
 		ID:         uuid.New(),
 		Ticker:     "SAFE",
