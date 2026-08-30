@@ -26,8 +26,7 @@ psql_old() {
     psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$database" "$@"
 }
 
-raw_snapshot="$record_dir/baseline.raw"
-psql_old -qAt <<'SQL' >"$raw_snapshot"
+psql_old -qAt <<'SQL' | python3 scripts/parse-old-db-snapshot.py "$record_dir"
 BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SELECT '__AUGR_SECTION_schema_catalog.tsv__';
 SELECT version::text || E'\t' || dirty::text FROM schema_migrations;
@@ -48,8 +47,10 @@ WITH baseline_tables AS (
     AND c.relname NOT IN ('risk_state','automation_job_controls','pipeline_runs','automation_job_runs','agent_events','audit_log')
 )
 SELECT format(
-  'SELECT %L || E''\\t'' || count(*)::text || E''\\t'' || encode(digest(COALESCE(string_agg(to_jsonb(t)::text,E''\\n'' ORDER BY to_jsonb(t)::text),''''),''sha256''),''hex'') FROM %I.%I t',
-  schema_name || '.' || table_name,schema_name,table_name)
+  'SELECT %L; WITH row_hashes AS MATERIALIZED (SELECT digest(to_jsonb(t)::text,''sha256'') AS row_hash FROM %I.%I t), bucket_summaries AS (SELECT encode(substring(row_hash FROM 1 FOR 1),''hex'') AS bucket,count(*) AS row_count,encode(digest(string_agg(encode(row_hash,''hex''),'''' ORDER BY row_hash),''sha256''),''hex'') AS bucket_digest FROM row_hashes GROUP BY 1) SELECT E''B\t'' || bucket || E''\t'' || row_count::text || E''\t'' || bucket_digest FROM bucket_summaries ORDER BY bucket; SELECT %L;',
+  '__AUGR_TABLE_BEGIN__' || schema_name || '.' || table_name,
+  schema_name,table_name,
+  '__AUGR_TABLE_END__' || schema_name || '.' || table_name)
 FROM baseline_tables ORDER BY schema_name,table_name \gexec
 SELECT '__AUGR_SECTION_protected_snapshots.json__';
 SELECT jsonb_build_object(
@@ -73,28 +74,6 @@ SELECT encode(digest(COALESCE(string_agg(to_jsonb(t)::text,E'\n' ORDER BY to_jso
 FROM pipeline_runs t WHERE status<>'running';
 COMMIT;
 SQL
-
-python3 - "$raw_snapshot" "$record_dir" <<'PY'
-import pathlib, sys
-
-source = pathlib.Path(sys.argv[1])
-destination = pathlib.Path(sys.argv[2])
-current = None
-handles = []
-try:
-    for line in source.read_text(encoding="utf-8").splitlines(keepends=True):
-        stripped = line.rstrip("\r\n")
-        if stripped.startswith("__AUGR_SECTION_") and stripped.endswith("__"):
-            name = stripped.removeprefix("__AUGR_SECTION_").removesuffix("__")
-            current = (destination / name).open("w", encoding="utf-8")
-            handles.append(current)
-        elif current is not None:
-            current.write(line)
-finally:
-    for handle in handles:
-        handle.close()
-source.unlink()
-PY
 LC_ALL=C sort -o "$record_dir/table_fingerprints.tsv" "$record_dir/table_fingerprints.tsv"
 cut -f1 "$record_dir/table_fingerprints.tsv" >"$record_dir/table_list.txt"
 
