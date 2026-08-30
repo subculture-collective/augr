@@ -82,5 +82,7 @@ files=(schema_catalog.tsv table_fingerprints.tsv table_list.txt protected_snapsh
   cd "$record_dir"
   sha256sum "${files[@]}" >manifest.sha256
 )
-chmod 0600 "$record_dir"/*
+for file in "${files[@]}" manifest.sha256; do
+  chmod 0600 "$record_dir/$file"
+done
 printf 'old database baseline captured in %s\n' "$record_dir"

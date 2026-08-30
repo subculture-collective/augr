@@ -286,6 +286,14 @@ func TestCanonicalCutoverAuditorsAreReadOnlyAndEvidenceBound(t *testing.T) {
 		}
 	}
 
+	baselineCapture := read("capture-old-db-baseline.sh")
+	if strings.Contains(baselineCapture, `chmod 0600 "$record_dir"/*`) {
+		t.Fatal("capture-old-db-baseline.sh changes permissions on pre-existing evidence directories")
+	}
+	if !strings.Contains(baselineCapture, `for file in "${files[@]}" manifest.sha256; do`) {
+		t.Fatal("capture-old-db-baseline.sh does not limit permission changes to captured files")
+	}
+
 	postDrain := read("verify-old-db-after-drain.sh")
 	for _, want := range []string{
 		`pre-existing agent event was deleted or changed`,
