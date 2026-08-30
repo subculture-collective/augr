@@ -89,8 +89,8 @@ for old, new in zip(before["risk_state"], after["risk_state"]):
 
 old_controls = {row["job_name"]: row for row in before["automation_job_controls"]}
 new_controls = {row["job_name"]: row for row in after["automation_job_controls"]}
-if old_controls.keys() != new_controls.keys():
-    fail("automation control IDs changed")
+if not old_controls.keys() <= new_controls.keys():
+    fail("pre-existing automation control was deleted")
 for name, old in old_controls.items():
     new = new_controls[name]
     for key in old.keys() - {"enabled", "updated_by", "updated_at"}:
@@ -98,6 +98,10 @@ for name, old in old_controls.items():
             fail(f"automation control {name} changed outside approved fields")
     if new.get("enabled") is not False:
         fail(f"automation control {name} is still enabled")
+for name in new_controls.keys() - old_controls.keys():
+    new = new_controls[name]
+    if new.get("enabled") is not False or new.get("updated_by") != "canonical-cutover-operator" or not new.get("updated_at"):
+        fail(f"new automation control {name} is not an approved disabled materialization")
 
 pipeline = {(row["id"], row["trade_date"]): row for row in after["pipeline_runs"]}
 for old in before["nonrunning_pipeline_runs"]:
