@@ -93,9 +93,10 @@ func lockStrategyReuseKey(ctx context.Context, tx pgx.Tx, strategy domain.Strate
 }
 
 func strategyReuseKey(strategy domain.Strategy) string {
-	key := string(strategy.MarketType.Normalize()) + "\x00" + strategy.Ticker
+	marketType := string(strategy.MarketType.Normalize())
+	key := fmt.Sprintf("%d:%s|%d:%s", len(marketType), marketType, len(strategy.Ticker), strategy.Ticker)
 	if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
-		key += "\x00" + strategy.Name
+		key += fmt.Sprintf("|%d:%s", len(strategy.Name), strategy.Name)
 	}
 	return key
 }

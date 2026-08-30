@@ -56,6 +56,17 @@ func TestResolveExecutionVersionQueryReadsOneJoinedSnapshot(t *testing.T) {
 	}
 }
 
+func TestStrategyReuseKeyIsPostgresTextSafeAndUnambiguous(t *testing.T) {
+	first := strategyReuseKey(domain.Strategy{Name: "B", Ticker: "A|1", MarketType: domain.MarketTypeStock})
+	second := strategyReuseKey(domain.Strategy{Name: "1|B", Ticker: "A", MarketType: domain.MarketTypeStock})
+	if strings.ContainsRune(first, '\x00') || strings.ContainsRune(second, '\x00') {
+		t.Fatal("strategy reuse key contains a PostgreSQL text NUL")
+	}
+	if first == second {
+		t.Fatalf("strategy reuse keys collide: %q", first)
+	}
+}
+
 func TestBuildListQuery_AllFilters(t *testing.T) {
 	paper := false
 
