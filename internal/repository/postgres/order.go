@@ -140,7 +140,7 @@ func (r *OrderRepo) create(ctx context.Context, queryer orderRowQuerier, order *
 			prediction_side, polymarket_intent, allocation_opportunity_id, client_order_id,
 			spread_max_risk, spread_max_reward
 		)
-		 SELECT $40, $1, $2, $3, $4, $5, $6, $7, $8, $36, $37, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35, $38, $39 FROM authorized,copy_authorized
+		 SELECT $40, $1, $2, $3, $4, $5, $6, $7, $8, $36, $37, $9, $10, $11, $12::trade_side, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $35, $38, $39 FROM authorized,copy_authorized
 		 ON CONFLICT (id) DO NOTHING
 		 RETURNING id, created_at`,
 		order.StrategyID,

@@ -15,12 +15,12 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-func TestOrderRepoCreatePreservesDeterministicIDAndValidatesRetry(t *testing.T) {
+func TestOrderRepoCreatePreservesDeterministicIDAndCastsSideForEnumInsert(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
 	defer cleanup()
 	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
-	order := domain.Order{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
+	order := domain.Order{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "reconciliation", OriginID: "alpaca", Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
 	wantID := order.ID
 	if err := repo.Create(ctx, &order); err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestOrderRepoCreatePreservesDeterministicIDAndValidatesRetry(t *testing.T) 
 	if order.ID != wantID || order.CreatedAt.IsZero() {
 		t.Fatalf("created identity=%s at=%v, want %s", order.ID, order.CreatedAt, wantID)
 	}
-	retry := domain.Order{ID: wantID, AccountID: canonicalRepositoryTestAccountID, Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
+	retry := domain.Order{ID: wantID, AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "reconciliation", OriginID: "alpaca", Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
 	if err := repo.Create(ctx, &retry); err != nil {
 		t.Fatalf("idempotent retry: %v", err)
 	}
@@ -178,6 +178,10 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	limitPrice := 185.25
 
 	order := &domain.Order{
+		AccountID:            canonicalRepositoryTestAccountID,
+		Environment:          domain.AccountEnvironmentPaperScored,
+		OriginType:           "strategy_version",
+		OriginID:             uuid.NewString(),
 		StrategyID:           &strategyID,
 		PipelineRunID:        &runID,
 		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
@@ -241,8 +245,6 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	order.FilledAvgPrice = &filledAvgPrice
 	order.Status = domain.OrderStatusFilled
 	order.FilledAt = &filledAt
-	order.PredictionSide = "NO"
-	order.PolymarketIntent = "SELL"
 
 	if err := repo.Update(ctx, order); err != nil {
 		t.Fatalf("Update() error = %v", err)
@@ -267,8 +269,8 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	if updated.FilledAt == nil || !updated.FilledAt.Equal(filledAt) {
 		t.Fatalf("expected FilledAt %v, got %v", filledAt, updated.FilledAt)
 	}
-	if updated.PredictionSide != "NO" || updated.PolymarketIntent != "SELL" {
-		t.Fatalf("expected updated prediction metadata, got side=%q intent=%q", updated.PredictionSide, updated.PolymarketIntent)
+	if updated.PredictionSide != "YES" || updated.PolymarketIntent != "BUY" {
+		t.Fatalf("expected immutable prediction metadata, got side=%q intent=%q", updated.PredictionSide, updated.PolymarketIntent)
 	}
 
 	if err := repo.Delete(ctx, order.ID); err != nil {
@@ -569,8 +571,36 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			allocation_claimed_at TIMESTAMPTZ,
 			allocation_claim_expires_at TIMESTAMPTZ
 		)`,
+		`CREATE TABLE copy_subscriptions (
+			id UUID PRIMARY KEY,
+			account_id UUID NOT NULL,
+			environment TEXT NOT NULL,
+			status TEXT NOT NULL,
+			is_paper BOOLEAN NOT NULL
+		)`,
+		`CREATE TABLE copy_trade_intents (
+			id UUID PRIMARY KEY,
+			subscription_id UUID NOT NULL,
+			account_id UUID NOT NULL,
+			environment TEXT NOT NULL,
+			ticker TEXT NOT NULL,
+			side TEXT NOT NULL,
+			execution_claim_id UUID,
+			status TEXT NOT NULL,
+			order_id UUID
+		)`,
+		`CREATE TABLE copy_origin_rebalance_intents (
+			run_id UUID NOT NULL,
+			intent_id UUID NOT NULL,
+			account_id UUID NOT NULL,
+			environment TEXT NOT NULL,
+			origin_type TEXT NOT NULL,
+			origin_id TEXT NOT NULL
+		)`,
 		`CREATE TABLE positions (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
 			strategy_id UUID REFERENCES strategies (id),
 			ticker TEXT NOT NULL,
 			side position_side NOT NULL,
@@ -579,7 +609,8 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			unrealized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
 			realized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
 			opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			closed_at TIMESTAMPTZ
+			closed_at TIMESTAMPTZ,
+			close_reservation_order_id UUID
 		)`,
 		`CREATE TABLE orders (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -591,6 +622,8 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			origin_id TEXT,
 			pipeline_run_trade_date DATE,
 			copy_origin_rebalance_run_id UUID,
+			copy_intent_id UUID,
+			copy_execution_claim_id UUID,
 			allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id),
 			external_id TEXT,
 			ticker TEXT NOT NULL,
@@ -617,10 +650,15 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			market_type         market_type NOT NULL DEFAULT 'stock',
 			prediction_side     TEXT,
 			polymarket_intent   TEXT,
+			client_order_id     TEXT,
+			spread_max_risk     NUMERIC(20, 8),
+			spread_max_reward   NUMERIC(20, 8),
 			UNIQUE(account_id, allocation_opportunity_id)
 		)`,
 		`CREATE TABLE trades (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
 			external_id TEXT,
 			order_id UUID REFERENCES orders (id),
 			position_id UUID REFERENCES positions (id),
