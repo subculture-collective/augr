@@ -758,10 +758,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			deps.Automation.Stop()
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(os.Getenv("OVERHAUL_ACCOUNTS_READ_ENABLED")), "true") {
-		deps.EconomicAccounts = pgrepo.NewAccountRepo(db.Pool)
-		deps.EconomicLedger = pgrepo.NewLedgerRepo(db.Pool)
-	}
+	deps.EconomicAccounts = accountRepo
+	deps.EconomicLedger = pgrepo.NewLedgerRepo(db.Pool)
 	if cfg.Features.EnablePolymarketAutomation {
 		deps.PolymarketAccountRepo = polymarketAccountRepo
 		deps.PolymarketWatchedRepo = polymarketWatchedRepo

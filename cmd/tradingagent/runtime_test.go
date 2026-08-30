@@ -305,7 +305,7 @@ func TestNewAPIServerSchemaAheadFailsFast(t *testing.T) {
 }
 
 func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
-	t.Setenv("OVERHAUL_ACCOUNTS_READ_ENABLED", "true")
+	t.Setenv("OVERHAUL_ACCOUNTS_READ_ENABLED", "false")
 	origNewDB := runtimeNewDB
 	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
 	origNewPaperAccountRepo := runtimeNewPaperAccountRepo
