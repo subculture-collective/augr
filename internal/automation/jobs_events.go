@@ -104,6 +104,7 @@ func (o *JobOrchestrator) filingMonitor(ctx context.Context) error {
 		"tickers_checked":   0,
 		"filings_found":     0,
 		"rate_limited":      0,
+		"request_retries":   0,
 		"request_errors":    0,
 		"analysis_errors":   0,
 	}
@@ -170,6 +171,15 @@ func (o *JobOrchestrator) filingMonitor(ctx context.Context) error {
 
 		for _, formType := range []string{"8-K", "10-Q"} {
 			filings, err := o.deps.EventsProvider.GetFilings(ctx, ticker, formType, from, to)
+			if err != nil && isFilingProviderTransient(err) {
+				summary["request_retries"]++
+				o.logger.Warn("filing_monitor: transient provider failure; retrying once",
+					slog.String("ticker", ticker),
+					slog.String("form", formType),
+					slog.Any("error", err),
+				)
+				filings, err = o.deps.EventsProvider.GetFilings(ctx, ticker, formType, from, to)
+			}
 			if err != nil {
 				if isFilingProviderRateLimited(err) {
 					summary["rate_limited"] = 1
@@ -249,4 +259,16 @@ func isFilingProviderRateLimited(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "api limit") || strings.Contains(text, "rate limit") || strings.Contains(text, "status=429")
+}
+
+func isFilingProviderTransient(err error) bool {
+	var sc filingStatusCoder
+	if errors.As(err, &sc) {
+		return sc.StatusCode() >= http.StatusInternalServerError && sc.StatusCode() < 600
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "status=500") ||
+		strings.Contains(text, "status=502") ||
+		strings.Contains(text, "status=503") ||
+		strings.Contains(text, "status=504")
 }
