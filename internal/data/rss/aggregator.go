@@ -3,9 +3,11 @@ package rss
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -45,6 +47,7 @@ type FetchResult struct {
 	FeedsAttempted int
 	FeedsSucceeded int
 	FeedsFailed    int
+	FeedRetries    int
 	ItemsRejected  int
 }
 
@@ -89,6 +92,7 @@ func (a *Aggregator) FetchWithStats(ctx context.Context) FetchResult {
 		articles  []Article
 		succeeded int
 		failed    int
+		retries   int
 		wg        sync.WaitGroup
 	)
 
@@ -97,6 +101,16 @@ func (a *Aggregator) FetchWithStats(ctx context.Context) FetchResult {
 		go func(f Feed) {
 			defer wg.Done()
 			items, err := a.fetchFeed(ctx, f)
+			if err != nil && transientFeedError(ctx, err) {
+				mu.Lock()
+				retries++
+				mu.Unlock()
+				a.logger.Warn("rss: transient fetch failure; retrying once",
+					slog.String("feed", f.Name),
+					slog.Any("error", err),
+				)
+				items, err = a.fetchFeed(ctx, f)
+			}
 			if err != nil {
 				mu.Lock()
 				failed++
@@ -156,6 +170,7 @@ func (a *Aggregator) FetchWithStats(ctx context.Context) FetchResult {
 		FeedsAttempted: len(a.feeds),
 		FeedsSucceeded: succeeded,
 		FeedsFailed:    failed,
+		FeedRetries:    retries,
 		ItemsRejected:  rejected,
 	}
 }
@@ -197,7 +212,7 @@ func (a *Aggregator) fetchFeed(ctx context.Context, feed Feed) ([]Article, error
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		return nil, feedHTTPStatusError(resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024)) // 2 MB limit
@@ -206,6 +221,23 @@ func (a *Aggregator) fetchFeed(ctx context.Context, feed Feed) ([]Article, error
 	}
 
 	return parseRSS(feed.Name, body)
+}
+
+type feedHTTPStatusError int
+
+func (e feedHTTPStatusError) Error() string { return fmt.Sprintf("status %d", int(e)) }
+
+func transientFeedError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil {
+		return false
+	}
+	var status feedHTTPStatusError
+	if errors.As(err, &status) {
+		code := int(status)
+		return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && (networkError.Timeout() || networkError.Temporary())
 }
 
 // RSS XML structures.

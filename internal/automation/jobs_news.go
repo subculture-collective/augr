@@ -38,7 +38,7 @@ func (o *JobOrchestrator) registerNewsJobs() {
 
 // newsScan fetches RSS feeds, runs LLM triage, and persists tagged articles.
 func (o *JobOrchestrator) newsScan(ctx context.Context) error {
-	summary := map[string]int{"feeds_attempted": 0, "feeds_succeeded": 0, "feed_errors": 0, "items_rejected": 0, "fetched": 0, "saved": 0, "save_errors": 0, "triage_requested": 0, "classified": 0, "triage_missing": 0, "triage_write_errors": 0}
+	summary := map[string]int{"feeds_attempted": 0, "feeds_succeeded": 0, "feed_retries": 0, "feed_errors": 0, "items_rejected": 0, "fetched": 0, "saved": 0, "save_errors": 0, "triage_requested": 0, "classified": 0, "triage_missing": 0, "triage_write_errors": 0}
 	defer func() { o.SetLastSummary("news_scan", summary) }()
 	if o.deps.NewsFeedRepo == nil {
 		return fmt.Errorf("news_scan: news feed repo not configured")
@@ -56,6 +56,7 @@ func (o *JobOrchestrator) newsScan(ctx context.Context) error {
 	articles := fetch.Articles
 	summary["feeds_attempted"] = fetch.FeedsAttempted
 	summary["feeds_succeeded"] = fetch.FeedsSucceeded
+	summary["feed_retries"] = fetch.FeedRetries
 	summary["feed_errors"] = fetch.FeedsFailed
 	summary["items_rejected"] = fetch.ItemsRejected
 	summary["fetched"] = len(articles)
@@ -299,9 +300,14 @@ func (o *JobOrchestrator) socialScan(ctx context.Context) error {
 }
 
 func newsScanCompletionError(summary map[string]int) error {
-	errors := summary["feed_errors"] + summary["save_errors"] + summary["triage_missing"] + summary["triage_write_errors"]
-	if errors == 0 {
+	providerErrors := summary["feed_errors"]
+	workErrors := summary["save_errors"] + summary["triage_missing"] + summary["triage_write_errors"]
+	if providerErrors == 0 && workErrors == 0 {
 		return nil
+	}
+	if workErrors == 0 && summary["feeds_attempted"] > 0 && summary["feeds_succeeded"]*100 >= summary["feeds_attempted"]*80 {
+		return Degradedf("news_scan: partial provider coverage: feeds_succeeded=%d feeds_attempted=%d feed_retries=%d feed_errors=%d",
+			summary["feeds_succeeded"], summary["feeds_attempted"], summary["feed_retries"], providerErrors)
 	}
 	return fmt.Errorf("news_scan: incomplete run: feed_errors=%d save_errors=%d triage_missing=%d triage_write_errors=%d",
 		summary["feed_errors"], summary["save_errors"], summary["triage_missing"], summary["triage_write_errors"])
