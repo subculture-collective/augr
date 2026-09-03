@@ -18,7 +18,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 )
 
-const generatedDailyStockEvidenceSchemaV1 = "generated-daily-stock-proposal-evidence-v1"
+const generatedDailyStockEvidenceSchemaV2 = "generated-daily-stock-proposal-evidence-v2"
 
 type generatedDailyStockInstrumentSummary struct {
 	InstrumentID     string `json:"instrument_id"`
@@ -53,6 +53,7 @@ type generatedDailyStockEvidenceSummary struct {
 	QualityResultID  string                                 `json:"quality_result_id"`
 	QualitySHA256    string                                 `json:"quality_sha256"`
 	DecisionCutoff   string                                 `json:"decision_cutoff"`
+	ManifestCutoff   string                                 `json:"manifest_decision_cutoff"`
 	EvaluationStart  string                                 `json:"evaluation_start"`
 	EvaluationEnd    string                                 `json:"evaluation_end"`
 	BenchmarkID      string                                 `json:"benchmark_instrument_id"`
@@ -80,6 +81,11 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedProposalEvidence(
 	if !report.Stock.Ready {
 		return nil, fmt.Errorf("postgres: generated proposal stock evidence: %s", report.Stock.Reason)
 	}
+	folds, err := generativestrategy.PlanReviewedResearchFolds(report.EvaluationStart, report.EvaluationEnd)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: generated proposal fold plan: %w", err)
+	}
+	proposalCutoff := folds[0].TrainEnd
 	key := "daily_stock_" + strings.ReplaceAll(scopeID.String(), "-", "")
 	var exists bool
 	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generated_strategy_specs WHERE family_id=$1 AND spec_key=$2)`, familyID, key).Scan(&exists); err != nil {
@@ -95,7 +101,7 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedProposalEvidence(
 	groups := make(map[uuid.UUID]*generatedDailyStockGroup)
 	for _, payload := range payloads {
 		metadata := payload.Metadata()
-		if metadata.Timeframe != data.Timeframe1d.String() || metadata.EffectiveAt.Before(report.EvaluationStart) || metadata.EffectiveAt.After(report.EvaluationEnd) {
+		if metadata.Timeframe != data.Timeframe1d.String() || metadata.EffectiveAt.Before(report.EvaluationStart) || metadata.EffectiveAt.After(report.EvaluationEnd) || payload.ReplayAvailableAt().After(proposalCutoff) {
 			continue
 		}
 		if metadata.Revision != "original" || metadata.CorrectionOfSHA256 != "" || metadata.AvailableAt.After(report.DecisionCutoff) {
@@ -128,8 +134,8 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedProposalEvidence(
 			group.metadata = append(group.metadata, payload.Metadata())
 		}
 		first, latest := group.metadata[0], group.metadata[len(group.metadata)-1]
-		if first.EffectiveAt.After(report.EvaluationStart) || latest.EffectiveAt.Before(report.EvaluationEnd) {
-			return nil, fmt.Errorf("postgres: generated proposal instrument %s does not cover the scope interval", id)
+		if first.EffectiveAt.After(report.EvaluationStart) || group.payloads[len(group.payloads)-1].ReplayAvailableAt().Before(proposalCutoff.Add(-48*time.Hour)) {
+			return nil, fmt.Errorf("postgres: generated proposal instrument %s does not cover the calibration interval", id)
 		}
 		for index, metadata := range group.metadata {
 			if metadata.Provider != first.Provider || metadata.Feed != first.Feed || metadata.Timeframe != first.Timeframe || metadata.AdjustmentPolicy != first.AdjustmentPolicy ||
@@ -181,10 +187,10 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedProposalEvidence(
 		allowed = append(allowed, generativestrategy.AllowedDataField{DatasetKind: dataset.KindBars, Field: field, Type: "decimal"})
 	}
 	summary := generatedDailyStockEvidenceSummary{
-		Schema: generatedDailyStockEvidenceSchemaV1, TrustedSpecKey: key, AccountID: accountID.String(), ScopeID: scopeID.String(),
+		Schema: generatedDailyStockEvidenceSchemaV2, TrustedSpecKey: key, AccountID: accountID.String(), ScopeID: scopeID.String(),
 		ManifestID: report.ManifestID.String(), ManifestSHA256: report.ManifestSHA256, QualityResultID: report.QualityResultID.String(),
-		QualitySHA256: report.QualitySHA256, DecisionCutoff: formatProposalEvidenceTime(report.DecisionCutoff),
-		EvaluationStart: formatProposalEvidenceTime(report.EvaluationStart), EvaluationEnd: formatProposalEvidenceTime(report.EvaluationEnd),
+		QualitySHA256: report.QualitySHA256, DecisionCutoff: formatProposalEvidenceTime(proposalCutoff), ManifestCutoff: formatProposalEvidenceTime(report.DecisionCutoff),
+		EvaluationStart: formatProposalEvidenceTime(report.EvaluationStart), EvaluationEnd: formatProposalEvidenceTime(proposalCutoff),
 		BenchmarkID: benchmarkID.String(), AllowedBarFields: allowedNames, Instruments: summaries,
 	}
 	raw, err := json.Marshal(summary)

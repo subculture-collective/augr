@@ -24,8 +24,12 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	}
 	instrumentID := datasetManifestInstrumentID(t, fixture.manifest)
 	start := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
-	end := start.Add(24 * time.Hour)
+	end := start.Add(270 * 24 * time.Hour)
 	cutoff := end.Add(time.Hour)
+	folds, err := generativestrategy.PlanReviewedResearchFolds(start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
 	contract, err := instrument.NewVenueContract(instrument.VenueContractInput{
 		InstrumentID: instrumentID, Venue: "alpaca", ContractID: "SPY", Currency: "USD",
 		TickSize: decimal.RequireFromString("0.01"), LotSize: decimal.NewFromInt(1), Multiplier: decimal.NewFromInt(1),
@@ -39,7 +43,7 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	}
 	payloads := make([]*dataset.MarketPayload, 0, 2)
 	observations := make([]dataset.ObservationInput, 0, 2)
-	for index, at := range []time.Time{start, end} {
+	for index, at := range []time.Time{start, folds[0].TrainEnd, end} {
 		publishedAt := at
 		payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
 			Kind: dataset.MarketPayloadStockBar, InstrumentID: instrumentID, Provider: "alpaca", Feed: "sip", Symbol: "SPY",
