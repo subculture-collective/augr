@@ -203,6 +203,9 @@ type AccountingReconciliationRepository interface {
 // current manifest for an experiment.
 type DatasetRepository interface {
 	RegisterDatasetPolicy(context.Context, *dataset.PolicyArtifact) (*dataset.PolicyArtifact, error)
+	RecordMarketPayload(context.Context, *dataset.MarketPayload, time.Time) (*dataset.MarketPayload, error)
+	GetMarketPayload(context.Context, uuid.UUID) (*dataset.MarketPayload, error)
+	RecordBoundMarketDataset(context.Context, *dataset.BoundMarketDataset, time.Time) (*dataset.Manifest, error)
 	RecordDatasetManifest(context.Context, *dataset.Manifest, time.Time) (*dataset.Manifest, error)
 	GetDatasetManifest(context.Context, uuid.UUID) (*dataset.Manifest, error)
 	RecordDatasetQualityResult(context.Context, *dataset.QualityResult, time.Time) (*dataset.QualityResult, error)

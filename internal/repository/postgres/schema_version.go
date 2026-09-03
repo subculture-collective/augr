@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	MinimumSupportedSchemaVersion = 109
-	MaximumSupportedSchemaVersion = 109
+	MinimumSupportedSchemaVersion = 110
+	MaximumSupportedSchemaVersion = 110
 	RequiredSchemaVersion         = MaximumSupportedSchemaVersion
 )
 
