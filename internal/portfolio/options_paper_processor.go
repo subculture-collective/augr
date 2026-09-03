@@ -170,8 +170,10 @@ func DefinedRiskSpreadFromOpportunity(opportunity domain.Opportunity) (*domain.O
 	if opportunity.MaxLossPerUnit > widthValue {
 		return nil, errors.New("portfolio: option maximum loss exceeds vertical width")
 	}
-	return &domain.OptionSpread{StrategyType: strategyType, Underlying: strings.ToUpper(strings.TrimSpace(opportunity.Ticker)), Legs: legs,
-		MaxRisk: opportunity.MaxLossPerUnit, MaxReward: widthValue - opportunity.MaxLossPerUnit}, nil
+	return &domain.OptionSpread{
+		StrategyType: strategyType, Underlying: strings.ToUpper(strings.TrimSpace(opportunity.Ticker)), Legs: legs,
+		MaxRisk: opportunity.MaxLossPerUnit, MaxReward: widthValue - opportunity.MaxLossPerUnit,
+	}, nil
 }
 
 func verticalStrategyType(legs []domain.SpreadLeg) (domain.OptionStrategyType, error) {
@@ -180,9 +182,10 @@ func verticalStrategyType(legs []domain.SpreadLeg) (domain.OptionStrategyType, e
 	}
 	var long, short domain.SpreadLeg
 	for _, leg := range legs {
-		if leg.Side == domain.OrderSideBuy {
+		switch leg.Side {
+		case domain.OrderSideBuy:
 			long = leg
-		} else if leg.Side == domain.OrderSideSell {
+		case domain.OrderSideSell:
 			short = leg
 		}
 	}
@@ -205,5 +208,7 @@ func verticalStrategyType(legs []domain.SpreadLeg) (domain.OptionStrategyType, e
 	}
 }
 
-var _ PaperOptionsOrderProcessor = (*OptionsPaperOrderProcessor)(nil)
-var _ PaperOrderReconciler = (*OptionsPaperOrderProcessor)(nil)
+var (
+	_ PaperOptionsOrderProcessor = (*OptionsPaperOrderProcessor)(nil)
+	_ PaperOrderReconciler       = (*OptionsPaperOrderProcessor)(nil)
+)

@@ -146,9 +146,11 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 				return nil, fmt.Errorf("generated strategy scenario input %q is not canonical boolean", declaration.Name)
 			}
 			values[declaration.Name] = value
-			bindings = append(bindings, scenarioBindingCanonical{Name: declaration.Name, DatasetKind: declaration.DatasetKind, Field: declaration.Field,
+			bindings = append(bindings, scenarioBindingCanonical{
+				Name: declaration.Name, DatasetKind: declaration.DatasetKind, Field: declaration.Field,
 				PayloadID: payload.ID().String(), PayloadSHA256: payload.Digest(), PartitionContentSHA256: evidence.PartitionContentSHA256,
-				SourceKey: evidence.SourceKey, AvailableAt: scenarioFormatTime(payload.AvailableAt()), Value: value})
+				SourceKey: evidence.SourceKey, AvailableAt: scenarioFormatTime(payload.AvailableAt()), Value: value,
+			})
 		}
 		entry, exit, err := input.Spec.Evaluate(values)
 		if err != nil {
@@ -173,13 +175,17 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 		} else if exit && !entry && open[source.InstrumentID] {
 			action, open[source.InstrumentID] = ScenarioSell, false
 		}
-		frames[sequence] = scenarioFrameCanonical{Sequence: sequence, InstrumentID: source.InstrumentID.String(), VenueContractID: source.VenueContractID.String(),
+		frames[sequence] = scenarioFrameCanonical{
+			Sequence: sequence, InstrumentID: source.InstrumentID.String(), VenueContractID: source.VenueContractID.String(),
 			DecisionAt: scenarioFormatTime(source.DecisionAt), RouteAt: scenarioFormatTime(source.RouteAt), ExecutionInput: source.ExecutionInput,
-			Bindings: bindings, Entry: entry, Exit: exit, Action: action, ExecutionPrice: executionPrice.String()}
+			Bindings: bindings, Entry: entry, Exit: exit, Action: action, ExecutionPrice: executionPrice.String(),
+		}
 	}
-	canonical := scenarioCanonical{Schema: ScenarioSchemaV1, State: "derived", SpecID: input.Spec.ID().String(), SpecSHA256: input.Spec.Digest(),
+	canonical := scenarioCanonical{
+		Schema: ScenarioSchemaV1, State: "derived", SpecID: input.Spec.ID().String(), SpecSHA256: input.Spec.Digest(),
 		ManifestID: input.Manifest.ID().String(), ManifestSHA256: input.Manifest.Digest(), Mode: input.Mode,
-		EvaluationStart: scenarioFormatTime(input.EvaluationStart), EvaluationEnd: scenarioFormatTime(input.EvaluationEnd), Frames: frames}
+		EvaluationStart: scenarioFormatTime(input.EvaluationStart), EvaluationEnd: scenarioFormatTime(input.EvaluationEnd), Frames: frames,
+	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
 		return nil, err
@@ -238,42 +244,49 @@ func (scenario *Scenario) ID() uuid.UUID {
 	}
 	return scenario.id
 }
+
 func (scenario *Scenario) Digest() string {
 	if scenario == nil {
 		return ""
 	}
 	return scenario.digest
 }
+
 func (scenario *Scenario) CanonicalBytes() json.RawMessage {
 	if scenario == nil {
 		return nil
 	}
 	return append(json.RawMessage(nil), scenario.bytes...)
 }
+
 func (scenario *Scenario) SpecID() uuid.UUID {
 	if scenario == nil {
 		return uuid.Nil
 	}
 	return uuid.MustParse(scenario.canonical.SpecID)
 }
+
 func (scenario *Scenario) ManifestID() uuid.UUID {
 	if scenario == nil {
 		return uuid.Nil
 	}
 	return uuid.MustParse(scenario.canonical.ManifestID)
 }
+
 func (scenario *Scenario) Mode() strategycatalog.ExperimentMode {
 	if scenario == nil {
 		return ""
 	}
 	return scenario.canonical.Mode
 }
+
 func (scenario *Scenario) EvaluationStart() time.Time {
 	if scenario == nil {
 		return time.Time{}
 	}
 	return scenarioParseTime(scenario.canonical.EvaluationStart)
 }
+
 func (scenario *Scenario) EvaluationEnd() time.Time {
 	if scenario == nil {
 		return time.Time{}
@@ -284,9 +297,11 @@ func (scenario *Scenario) EvaluationEnd() time.Time {
 func scenarioTime(value time.Time) bool {
 	return !value.IsZero() && value.Location() == time.UTC && value.Equal(value.Truncate(time.Microsecond))
 }
+
 func scenarioFormatTime(value time.Time) string {
 	return value.UTC().Format("2006-01-02T15:04:05.000000Z")
 }
+
 func scenarioParseTime(value string) time.Time {
 	parsed, _ := time.Parse("2006-01-02T15:04:05.000000Z", value)
 	return parsed

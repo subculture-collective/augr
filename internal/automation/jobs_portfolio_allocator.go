@@ -744,21 +744,20 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 	state.OptionsBuyingPower = snapshot.OptionsBuyingPower
 	if o.deps.PortfolioRiskState == nil {
 		return state, warnings, fmt.Errorf("portfolio_allocator: %s mode requires canonical risk-state source", mode)
-	} else {
-		riskState, err := o.deps.PortfolioRiskState.LoadPortfolioRiskState(ctx, snapshot.ID, snapshot.ObservedAt)
-		if err != nil {
-			return state, warnings, fmt.Errorf("portfolio_allocator: load canonical risk state: %w", err)
-		}
-		state.DailyLossPct = riskState.DailyLossPct
-		state.DrawdownPct = riskState.DrawdownPct
-		state.NewOrdersToday = riskState.NewOrdersToday
-		state.CircuitBreakerOpen = riskState.CircuitBreakerOpen
-		state.ReconciliationID = riskState.ReconciliationID
-		state.UnderlyingRisk = riskState.UnderlyingRisk
-		for _, reservedRisk := range riskState.UnderlyingRisk {
-			grossExposure += reservedRisk
-			state.MarketExposure[domain.MarketTypeOptions] += reservedRisk
-		}
+	}
+	riskState, err := o.deps.PortfolioRiskState.LoadPortfolioRiskState(ctx, snapshot.ID, snapshot.ObservedAt)
+	if err != nil {
+		return state, warnings, fmt.Errorf("portfolio_allocator: load canonical risk state: %w", err)
+	}
+	state.DailyLossPct = riskState.DailyLossPct
+	state.DrawdownPct = riskState.DrawdownPct
+	state.NewOrdersToday = riskState.NewOrdersToday
+	state.CircuitBreakerOpen = riskState.CircuitBreakerOpen
+	state.ReconciliationID = riskState.ReconciliationID
+	state.UnderlyingRisk = riskState.UnderlyingRisk
+	for _, reservedRisk := range riskState.UnderlyingRisk {
+		grossExposure += reservedRisk
+		state.MarketExposure[domain.MarketTypeOptions] += reservedRisk
 	}
 	state.GrossExposure = grossExposure
 	if err := portfolio.BindRiskStateEvidence(&state, snapshot.ObservedAt); err != nil {

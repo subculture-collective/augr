@@ -12,7 +12,7 @@ type expressionValue struct {
 	boolean bool
 }
 
-func evaluateExpressions(entry, exit exprCanonical, types map[string]string, raw map[string]string) (bool, bool, error) {
+func evaluateExpressions(entry, exit exprCanonical, types, raw map[string]string) (bool, bool, error) {
 	if len(raw) != len(types) {
 		return false, false, fmt.Errorf("generated strategy evaluation requires every declared input exactly once")
 	}

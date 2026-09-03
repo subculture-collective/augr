@@ -21,15 +21,19 @@ type stockProviderStub struct {
 func (stub stockProviderStub) GetOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return stub.bars, nil
 }
+
 func (stockProviderStub) GetFundamentals(context.Context, string) (data.Fundamentals, error) {
 	return data.Fundamentals{}, nil
 }
+
 func (stockProviderStub) GetNews(context.Context, string, time.Time, time.Time) ([]data.NewsArticle, error) {
 	return nil, nil
 }
+
 func (stockProviderStub) GetSocialSentiment(context.Context, string, time.Time, time.Time) ([]data.SocialSentiment, error) {
 	return nil, nil
 }
+
 func (stub stockProviderStub) GetOHLCVWithReceipt(_ context.Context, _ string, _ data.Timeframe, _, _ time.Time, feed, adjustment string) ([]domain.OHLCV, data.HistoricalFetchReceipt, error) {
 	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: adjustment, Pages: 1, Entitled: true, PaginationComplete: true}
 	if stub.receipt != nil {
@@ -48,6 +52,7 @@ type optionsProviderStub struct {
 func (stub optionsProviderStub) GetOptionsChain(context.Context, string, time.Time, domain.OptionType) ([]domain.OptionSnapshot, error) {
 	return stub.snapshots, nil
 }
+
 func (stub optionsProviderStub) GetOptionsChainWithReceipt(_ context.Context, _ string, _ time.Time, _ domain.OptionType, feed string) ([]domain.OptionSnapshot, data.HistoricalFetchReceipt, error) {
 	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true}
 	if stub.receipt != nil {
@@ -55,6 +60,7 @@ func (stub optionsProviderStub) GetOptionsChainWithReceipt(_ context.Context, _ 
 	}
 	return stub.snapshots, receipt, nil
 }
+
 func (stub optionsProviderStub) GetOptionsTradesWithReceipt(_ context.Context, _ string, _, _ time.Time, feed string) ([]data.OptionTradeObservation, data.HistoricalFetchReceipt, error) {
 	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true}
 	if stub.receipt != nil {
@@ -62,9 +68,11 @@ func (stub optionsProviderStub) GetOptionsTradesWithReceipt(_ context.Context, _
 	}
 	return stub.trades, receipt, nil
 }
+
 func (stub optionsProviderStub) GetOptionsOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return stub.bars, nil
 }
+
 func (stub optionsProviderStub) GetOptionsOHLCVWithReceipt(_ context.Context, _ string, _ data.Timeframe, _, _ time.Time, feed, adjustment string) ([]domain.OHLCV, data.HistoricalFetchReceipt, error) {
 	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: adjustment, Pages: 1, Entitled: true, PaginationComplete: true}
 	if stub.receipt != nil {

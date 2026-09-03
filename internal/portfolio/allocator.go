@@ -645,7 +645,8 @@ func sizeOptionsOpportunity(opp domain.Opportunity, positionRisk, remainingTarge
 func smallestPositiveCap(values []struct {
 	name  string
 	value float64
-}) (float64, string) {
+},
+) (float64, string) {
 	best, binding := 0.0, ""
 	for _, candidate := range values {
 		if candidate.value <= 0 {
@@ -853,22 +854,6 @@ func isOpenTicker(open map[string]bool, ticker string) bool {
 		return true
 	}
 	return false
-}
-
-func minPositive(values ...float64) float64 {
-	minimum := math.Inf(1)
-	for _, v := range values {
-		if v <= 0 || math.IsNaN(v) {
-			return 0
-		}
-		if v < minimum {
-			minimum = v
-		}
-	}
-	if math.IsInf(minimum, 1) {
-		return 0
-	}
-	return minimum
 }
 
 func uniqueStrings(values []string) []string {

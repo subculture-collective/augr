@@ -300,11 +300,11 @@ func (r *AllocationDecisionRepo) loadRiskCaps(ctx context.Context, decision *dom
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var cap domain.AllocationRiskCap
-		if err := rows.Scan(&cap.Sequence, &cap.Name, &cap.AvailableAmount, &cap.UnitAmount, &cap.QuantityCap, &cap.Binding); err != nil {
+		var riskCap domain.AllocationRiskCap
+		if err := rows.Scan(&riskCap.Sequence, &riskCap.Name, &riskCap.AvailableAmount, &riskCap.UnitAmount, &riskCap.QuantityCap, &riskCap.Binding); err != nil {
 			return err
 		}
-		decision.RiskCaps = append(decision.RiskCaps, cap)
+		decision.RiskCaps = append(decision.RiskCaps, riskCap)
 	}
 	return rows.Err()
 }

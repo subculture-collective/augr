@@ -138,7 +138,7 @@ func decodeInput(path string, stdin io.Reader, target any) error {
 		if err != nil {
 			return fmt.Errorf("augr-dataset-compose: open input: %w", err)
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		reader = file
 	}
 	decoder := json.NewDecoder(reader)

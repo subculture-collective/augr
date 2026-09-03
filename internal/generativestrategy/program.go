@@ -94,18 +94,23 @@ func (program *Program) Plan(ctx context.Context, input experimentrun.ProgramInp
 				break
 			}
 		}
-		decision, marshalErr := canonicalGeneratedDecision(map[string]any{"schema": "typed-generative-experiment-decision-v1", "spec_id": program.spec.ID().String(), "scenario_id": program.scenario.ID().String(),
+		decision, marshalErr := canonicalGeneratedDecision(map[string]any{
+			"schema": "typed-generative-experiment-decision-v1", "spec_id": program.spec.ID().String(), "scenario_id": program.scenario.ID().String(),
 			"scenario_sha256": program.scenario.Digest(), "sequence": frame.Sequence, "entry": frame.Entry, "exit": frame.Exit, "action": frame.Action,
-			"execution_input": frame.ExecutionInput, "execution_price": frame.ExecutionPrice, "bindings": frame.Bindings})
+			"execution_input": frame.ExecutionInput, "execution_price": frame.ExecutionPrice, "bindings": frame.Bindings,
+		})
 		if marshalErr != nil {
 			return nil, marshalErr
 		}
-		step := experimentrun.StepInput{PartitionContentSHA256: execution.PartitionContentSHA256, ObservationSourceKey: execution.SourceKey,
-			ObservationContentSHA256: execution.PayloadSHA256, AvailableAt: scenarioParseTime(execution.AvailableAt), Decision: decision, Action: experimentrun.ActionNoop}
+		step := experimentrun.StepInput{
+			PartitionContentSHA256: execution.PartitionContentSHA256, ObservationSourceKey: execution.SourceKey,
+			ObservationContentSHA256: execution.PayloadSHA256, AvailableAt: scenarioParseTime(execution.AvailableAt), Decision: decision, Action: experimentrun.ActionNoop,
+		}
 		if frame.Action != ScenarioNoop {
 			price := decimal.RequireFromString(frame.ExecutionPrice)
 			quantity := openQuantity[frame.InstrumentID]
-			if frame.Action == ScenarioBuy {
+			switch frame.Action {
+			case ScenarioBuy:
 				notional := decimal.RequireFromString(program.spec.canonical.Sizing.Value)
 				maximum := decimal.RequireFromString(program.spec.canonical.Sizing.MaxPosition)
 				if program.spec.canonical.Sizing.Mode == "fixed_fraction" {
@@ -119,25 +124,32 @@ func (program *Program) Plan(ctx context.Context, input experimentrun.ProgramInp
 					return nil, fmt.Errorf("generated strategy frame %d has zero executable quantity", index)
 				}
 				openQuantity[frame.InstrumentID] = quantity
-			} else if !quantity.IsPositive() {
-				return nil, fmt.Errorf("generated strategy frame %d exits without an open quantity", index)
-			} else {
+			case ScenarioSell:
+				if !quantity.IsPositive() {
+					return nil, fmt.Errorf("generated strategy frame %d exits without an open quantity", index)
+				}
 				delete(openQuantity, frame.InstrumentID)
+			default:
+				return nil, fmt.Errorf("generated strategy frame %d has unsupported action %q", index, frame.Action)
 			}
 			side := string(frame.Action)
 			instrumentID, _ := uuid.Parse(frame.InstrumentID)
 			contractID, _ := uuid.Parse(frame.VenueContractID)
 			limit := price.String()
 			step.Action = experimentrun.ActionExecute
-			step.Intent = &experimentrun.IntentSpecInput{InstrumentID: instrumentID, VenueContractID: contractID, Side: side, OrderType: "limit", TimeInForce: "day", Quantity: quantity.String(), LimitPrice: &limit,
-				DecisionAt: scenarioParseTime(frame.DecisionAt), RouteAt: scenarioParseTime(frame.RouteAt)}
+			step.Intent = &experimentrun.IntentSpecInput{
+				InstrumentID: instrumentID, VenueContractID: contractID, Side: side, OrderType: "limit", TimeInForce: "day", Quantity: quantity.String(), LimitPrice: &limit,
+				DecisionAt: scenarioParseTime(frame.DecisionAt), RouteAt: scenarioParseTime(frame.RouteAt),
+			}
 		}
 		steps[index] = step
 	}
-	return experimentrun.NewPlan(experimentrun.PlanInput{ExperimentID: input.ExperimentID, ProgramID: program.identity.ID(), AccountID: input.AccountID,
+	return experimentrun.NewPlan(experimentrun.PlanInput{
+		ExperimentID: input.ExperimentID, ProgramID: program.identity.ID(), AccountID: input.AccountID,
 		CapitalStateID: input.CapitalStateID, CapitalStateSHA256: input.CapitalStateSHA256, CapitalProjectionCheckpointID: input.CapitalProjectionCheckpointID,
 		CapitalStateBytes: input.CapitalStateBytes, ManifestID: input.ManifestID, ManifestSHA256: input.ManifestSHA256,
-		EvaluationStart: program.scenario.EvaluationStart(), EvaluationEnd: program.scenario.EvaluationEnd(), Seed: input.Seed, Mode: input.Mode, Steps: steps})
+		EvaluationStart: program.scenario.EvaluationStart(), EvaluationEnd: program.scenario.EvaluationEnd(), Seed: input.Seed, Mode: input.Mode, Steps: steps,
+	})
 }
 
 func canonicalGeneratedDecision(value any) (json.RawMessage, error) {
@@ -164,8 +176,10 @@ func (program *Program) expectedEvidence() []experimentrun.ObservationEvidence {
 				continue
 			}
 			seen[key] = struct{}{}
-			result = append(result, experimentrun.ObservationEvidence{PartitionContentSHA256: binding.PartitionContentSHA256, SourceKey: binding.SourceKey,
-				ContentSHA256: binding.PayloadSHA256, AvailableAt: binding.AvailableAt})
+			result = append(result, experimentrun.ObservationEvidence{
+				PartitionContentSHA256: binding.PartitionContentSHA256, SourceKey: binding.SourceKey,
+				ContentSHA256: binding.PayloadSHA256, AvailableAt: binding.AvailableAt,
+			})
 		}
 	}
 	return result

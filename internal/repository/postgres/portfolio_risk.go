@@ -108,8 +108,10 @@ func (repo *PortfolioRiskRepo) CaptureAccountSnapshot(ctx context.Context) (port
 		return snapshot, fmt.Errorf("postgres: canonical portfolio account is not active paper_scored")
 	}
 	observedAt := databaseNow()
-	canonical := accountSnapshotCanonical{Schema: "portfolio-account-snapshot-v1", AccountID: repo.accountID.String(), Environment: environment, ExternalAccountID: externalID,
-		ObservedAt: observedAt.Format("2006-01-02T15:04:05.000000Z"), Equity: fmt.Sprintf("%.8f", balance.Equity), BuyingPower: fmt.Sprintf("%.8f", balance.BuyingPower), OptionsBuyingPower: fmt.Sprintf("%.8f", balance.OptionsBuyingPower), FallbackUsed: false}
+	canonical := accountSnapshotCanonical{
+		Schema: "portfolio-account-snapshot-v1", AccountID: repo.accountID.String(), Environment: environment, ExternalAccountID: externalID,
+		ObservedAt: observedAt.Format("2006-01-02T15:04:05.000000Z"), Equity: fmt.Sprintf("%.8f", balance.Equity), BuyingPower: fmt.Sprintf("%.8f", balance.BuyingPower), OptionsBuyingPower: fmt.Sprintf("%.8f", balance.OptionsBuyingPower), FallbackUsed: false,
+	}
 	raw, _ := json.Marshal(canonical)
 	digest := digestBytes(raw)
 	id := economicid.DeterministicUUID("portfolio-account-snapshot", canonical.Schema+"@sha256:"+digest)

@@ -22,10 +22,12 @@ type researchStoreFixture struct {
 func (store *researchStoreFixture) GetCompilation(context.Context, uuid.UUID) (*Spec, *strategycatalog.Version, *Receipt, error) {
 	return store.spec, store.version, store.receipt, nil
 }
+
 func (store *researchStoreFixture) RegisterScenario(_ context.Context, value *Scenario) (*Scenario, error) {
 	store.scenario = value
 	return value, nil
 }
+
 func (store *researchStoreFixture) DeclareResearchExperiment(_ context.Context, value *strategycatalog.Experiment) (*strategycatalog.Experiment, error) {
 	store.experiment = value
 	return value, nil
@@ -51,10 +53,12 @@ func researchFixture(t *testing.T) (*ResearchPreparer, ResearchRequest, *researc
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := ResearchRequest{SpecID: spec.ID(), ExpectedVersionID: version.ID(), Dataset: bound, QualityResultID: uuid.New(), AccountID: uuid.New(), CapitalBindingID: uuid.New(),
+	request := ResearchRequest{
+		SpecID: spec.ID(), ExpectedVersionID: version.ID(), Dataset: bound, QualityResultID: uuid.New(), AccountID: uuid.New(), CapitalBindingID: uuid.New(),
 		SimulationPolicyVersion: "simulation-policy-v1@sha256:" + strings.Repeat("d", 64), CapitalPolicyVersion: "capital-margin-policy-v1@sha256:" + strings.Repeat("e", 64),
 		Mode: scenarioInput.Mode, EvaluationStart: scenarioInput.EvaluationStart, EvaluationEnd: scenarioInput.EvaluationEnd, Seed: 42, ExecutionInput: "price",
-		VenueContractIDs: map[uuid.UUID]uuid.UUID{scenarioInput.Frames[0].InstrumentID: scenarioInput.Frames[0].VenueContractID}, MaximumFrames: 10}
+		VenueContractIDs: map[uuid.UUID]uuid.UUID{scenarioInput.Frames[0].InstrumentID: scenarioInput.Frames[0].VenueContractID}, MaximumFrames: 10,
+	}
 	return preparer, request, store
 }
 

@@ -23,8 +23,10 @@ type GenerativeStrategyRepo struct {
 	afterStage func(string) error
 }
 
-var _ generativestrategy.Store = (*GenerativeStrategyRepo)(nil)
-var _ generativestrategy.ResearchStore = (*GenerativeStrategyRepo)(nil)
+var (
+	_ generativestrategy.Store         = (*GenerativeStrategyRepo)(nil)
+	_ generativestrategy.ResearchStore = (*GenerativeStrategyRepo)(nil)
+)
 
 func NewGenerativeStrategyRepo(pool *pgxpool.Pool) *GenerativeStrategyRepo {
 	return &GenerativeStrategyRepo{pool: pool}

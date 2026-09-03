@@ -116,8 +116,10 @@ func NewActivation(input ActivationInput) (*Activation, error) {
 	}
 	hash := sha256.Sum256(raw)
 	digest := hex.EncodeToString(hash[:])
-	return &Activation{canonical: canonical, bytes: raw, digest: digest,
-		id: economicid.DeterministicUUID(activationDomain, ActivationSchemaV1+"@sha256:"+digest)}, nil
+	return &Activation{
+		canonical: canonical, bytes: raw, digest: digest,
+		id: economicid.DeterministicUUID(activationDomain, ActivationSchemaV1+"@sha256:"+digest),
+	}, nil
 }
 
 func ActivationFromCanonical(id uuid.UUID, digest string, raw []byte) (*Activation, error) {
@@ -190,12 +192,14 @@ func activationInputFromCanonical(value activationCanonical) (ActivationInput, e
 	if err != nil {
 		return ActivationInput{}, err
 	}
-	return ActivationInput{Action: value.Action, DeploymentID: deploymentID, DeploymentSHA256: value.DeploymentSHA256,
+	return ActivationInput{
+		Action: value.Action, DeploymentID: deploymentID, DeploymentSHA256: value.DeploymentSHA256,
 		DecisionID: decisionID, DecisionSHA256: value.DecisionSHA256, StrategyID: strategyID,
 		SourceVersionID: sourceVersionID, RuntimeVersionID: runtimeVersionID, RuntimeVersionSHA256: value.RuntimeVersionSHA256,
 		AccountID: accountID, ScopeID: scopeID, CapitalBindingID: bindingID, ScheduleCron: value.ScheduleCron,
 		Timezone: value.Timezone, RiskPolicyVersion: value.RiskPolicyVersion, PriorActivationID: priorID,
-		PriorActivationSHA: value.PriorActivationSHA}, nil
+		PriorActivationSHA: value.PriorActivationSHA,
+	}, nil
 }
 
 func (value *Activation) ID() uuid.UUID {
@@ -204,32 +208,38 @@ func (value *Activation) ID() uuid.UUID {
 	}
 	return value.id
 }
+
 func (value *Activation) Digest() string {
 	if value == nil {
 		return ""
 	}
 	return value.digest
 }
+
 func (value *Activation) CanonicalBytes() json.RawMessage {
 	if value == nil {
 		return nil
 	}
 	return append(json.RawMessage(nil), value.bytes...)
 }
+
 func (value *Activation) Action() string {
 	if value == nil {
 		return ""
 	}
 	return value.canonical.Action
 }
+
 func (value *Activation) DecisionID() uuid.UUID {
 	id, _ := uuid.Parse(value.canonical.DecisionID)
 	return id
 }
+
 func (value *Activation) StrategyID() uuid.UUID {
 	id, _ := uuid.Parse(value.canonical.StrategyID)
 	return id
 }
+
 func (value *Activation) RuntimeVersionID() uuid.UUID {
 	id, _ := uuid.Parse(value.canonical.RuntimeVersionID)
 	return id

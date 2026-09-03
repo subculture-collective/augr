@@ -28,11 +28,11 @@ func scenarioFixture(t *testing.T) (*Spec, ScenarioInput, map[uuid.UUID]*dataset
 	}
 	instrumentID := specInput.Universe.Instruments[0]
 	start := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
-	bar := func(at time.Time, close string) *dataset.MarketPayload {
+	bar := func(at time.Time, closePrice string) *dataset.MarketPayload {
 		payload, payloadErr := dataset.NewMarketPayload(dataset.MarketPayloadInput{
 			Kind: dataset.MarketPayloadStockBar, InstrumentID: instrumentID, Provider: "alpaca", Feed: "sip", Symbol: "AAPL", Timeframe: "1Min", AdjustmentPolicy: "all",
 			EffectiveAt: at.Add(-time.Minute), ObservedAt: at, AvailableAt: at, Revision: "original",
-			Bar: &dataset.BarPayload{Open: "100", High: "102", Low: "98", Close: close, Volume: "1000", TradeCount: "100", VWAP: "100"},
+			Bar: &dataset.BarPayload{Open: "100", High: "102", Low: "98", Close: closePrice, Volume: "1000", TradeCount: "100", VWAP: "100"},
 		})
 		if payloadErr != nil {
 			t.Fatal(payloadErr)

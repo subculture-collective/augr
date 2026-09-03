@@ -70,17 +70,21 @@ func (preparer *ResearchPreparer) Prepare(ctx context.Context, request ResearchR
 	if spec == nil || version == nil || receipt == nil || spec.ID() != request.SpecID || version.ID() != request.ExpectedVersionID || receipt.SpecID() != spec.ID() || receipt.VersionID() != version.ID() {
 		return nil, fmt.Errorf("generated strategy compilation does not match the requested identities")
 	}
-	scenario, err := BuildScenarioFromDataset(ScenarioBuildRequest{Spec: spec, Dataset: request.Dataset, Mode: request.Mode,
+	scenario, err := BuildScenarioFromDataset(ScenarioBuildRequest{
+		Spec: spec, Dataset: request.Dataset, Mode: request.Mode,
 		EvaluationStart: request.EvaluationStart, EvaluationEnd: request.EvaluationEnd, ExecutionInput: request.ExecutionInput,
-		VenueContractIDs: request.VenueContractIDs, MaximumFrames: request.MaximumFrames})
+		VenueContractIDs: request.VenueContractIDs, MaximumFrames: request.MaximumFrames,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("build generated strategy scenario: %w", err)
 	}
 	manifest := request.Dataset.Manifest()
-	experiment, err := strategycatalog.NewExperiment(strategycatalog.ExperimentInput{VersionID: version.ID(), AccountID: request.AccountID,
+	experiment, err := strategycatalog.NewExperiment(strategycatalog.ExperimentInput{
+		VersionID: version.ID(), AccountID: request.AccountID,
 		CapitalBindingID: request.CapitalBindingID, ManifestID: manifest.ID(), QualityResultID: request.QualityResultID,
 		SimulationPolicyVersion: request.SimulationPolicyVersion, CapitalPolicyVersion: request.CapitalPolicyVersion, Mode: request.Mode,
-		EvaluationStart: request.EvaluationStart, EvaluationEnd: request.EvaluationEnd, Seed: request.Seed, DatasetQuarantined: request.DatasetQuarantined})
+		EvaluationStart: request.EvaluationStart, EvaluationEnd: request.EvaluationEnd, Seed: request.Seed, DatasetQuarantined: request.DatasetQuarantined,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("declare generated strategy experiment: %w", err)
 	}
@@ -98,10 +102,12 @@ func (preparer *ResearchPreparer) Prepare(ctx context.Context, request ResearchR
 	if persistedExperiment == nil || persistedExperiment.ID() != experiment.ID() || persistedExperiment.Digest() != experiment.Digest() {
 		return nil, fmt.Errorf("recorded generated strategy experiment diverged")
 	}
-	identity, err := experimentrun.NewProgramIdentity(experimentrun.ProgramIdentityInput{VersionID: version.ID(), VersionSHA256: version.Digest(),
+	identity, err := experimentrun.NewProgramIdentity(experimentrun.ProgramIdentityInput{
+		VersionID: version.ID(), VersionSHA256: version.Digest(),
 		CompilerKind: version.CompilerKind(), CompilerVersion: version.CompilerVersion(), SourceCommit: version.SourceCommit(), SourceTreeSHA256: version.SourceTreeSHA256(),
 		DecisionContract: version.DecisionContract(), AdapterKind: ScenarioAdapterKindV1, AdapterVersion: ScenarioAdapterVersionV1,
-		AdapterSHA256: ScenarioAdapterSHA256(spec, persistedScenario), RunnerContract: experimentrun.RunnerContractV1})
+		AdapterSHA256: ScenarioAdapterSHA256(spec, persistedScenario), RunnerContract: experimentrun.RunnerContractV1,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("bind generated strategy experiment program: %w", err)
 	}

@@ -75,10 +75,12 @@ func finalizePortfolioRiskPolicy(value *PortfolioRiskPolicy) (*PortfolioRiskPoli
 }
 
 func nonFinitePolicy(value *PortfolioRiskPolicy) bool {
-	for _, number := range []float64{value.TargetGrossExposurePct, value.HardGrossExposurePct, value.CashReservePct,
+	for _, number := range []float64{
+		value.TargetGrossExposurePct, value.HardGrossExposurePct, value.CashReservePct,
 		value.MaxPositionRiskPct, value.MaxOptionsMarketRiskPct, value.MaxDailyLossPct, value.MaxDrawdownPct,
 		value.MaxOptionSpreadPct, value.MinOptionLiquidityUSD, value.MaxAbsoluteDelta, value.MaxAbsoluteGamma,
-		value.MaxAbsoluteTheta, value.MaxAbsoluteVega} {
+		value.MaxAbsoluteTheta, value.MaxAbsoluteVega,
+	} {
 		if math.IsNaN(number) || math.IsInf(number, 0) {
 			return true
 		}
@@ -92,24 +94,28 @@ func (value *PortfolioRiskPolicy) ID() uuid.UUID {
 	}
 	return value.id
 }
+
 func (value *PortfolioRiskPolicy) Digest() string {
 	if value == nil {
 		return ""
 	}
 	return value.digest
 }
+
 func (value *PortfolioRiskPolicy) CanonicalBytes() []byte {
 	if value == nil {
 		return nil
 	}
 	return append([]byte(nil), value.canonical...)
 }
+
 func (value *PortfolioRiskPolicy) Reference() string {
 	if value == nil {
 		return ""
 	}
 	return PortfolioRiskPolicySchemaV1 + "@sha256:" + value.digest
 }
+
 func (value *PortfolioRiskPolicy) MaxQuoteAge() time.Duration {
 	if value == nil {
 		return 0

@@ -181,6 +181,8 @@ func marketPayloadBar(at time.Time, value *dataset.BarPayload) (domain.OHLCV, er
 	return domain.OHLCV{Timestamp: at, Open: *values[0], High: *values[1], Low: *values[2], Close: *values[3], Volume: *values[4]}, nil
 }
 
-var _ data.ManifestBoundHistoricalLoader = (*ManifestBoundHistoricalLoader)(nil)
-var _ data.ManifestBoundOptionsReader = (*ManifestBoundHistoricalLoader)(nil)
-var _ data.ManifestBoundSymbolLoader = (*ManifestBoundHistoricalLoader)(nil)
+var (
+	_ data.ManifestBoundHistoricalLoader = (*ManifestBoundHistoricalLoader)(nil)
+	_ data.ManifestBoundOptionsReader    = (*ManifestBoundHistoricalLoader)(nil)
+	_ data.ManifestBoundSymbolLoader     = (*ManifestBoundHistoricalLoader)(nil)
+)

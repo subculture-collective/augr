@@ -79,8 +79,10 @@ func BuildScenarioFromDataset(request ScenarioBuildRequest) (*Scenario, error) {
 		if contractID == uuid.Nil {
 			return nil, fmt.Errorf("generated strategy instrument %s lacks an exact venue contract", candidate.payload.InstrumentID())
 		}
-		frame := DecisionFrameInput{InstrumentID: candidate.payload.InstrumentID(), VenueContractID: contractID, DecisionAt: candidate.available, RouteAt: candidate.available,
-			ExecutionInput: request.ExecutionInput, EvidenceByInput: map[string]ScenarioEvidenceInput{}}
+		frame := DecisionFrameInput{
+			InstrumentID: candidate.payload.InstrumentID(), VenueContractID: contractID, DecisionAt: candidate.available, RouteAt: candidate.available,
+			ExecutionInput: request.ExecutionInput, EvidenceByInput: map[string]ScenarioEvidenceInput{},
+		}
 		for _, declaration := range request.Spec.canonical.Inputs {
 			selected, selectErr := selectScenarioInput(available, candidate.payload.InstrumentID(), candidate.available, declaration)
 			if selectErr != nil {

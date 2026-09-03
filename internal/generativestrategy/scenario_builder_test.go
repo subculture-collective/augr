@@ -22,8 +22,10 @@ func TestBuildScenarioFromExactBoundDataset(t *testing.T) {
 		t.Fatal(err)
 	}
 	contractID := input.Frames[0].VenueContractID
-	scenario, err := BuildScenarioFromDataset(ScenarioBuildRequest{Spec: spec, Dataset: bound, Mode: input.Mode, EvaluationStart: input.EvaluationStart, EvaluationEnd: input.EvaluationEnd,
-		ExecutionInput: "price", VenueContractIDs: map[uuid.UUID]uuid.UUID{input.Frames[0].InstrumentID: contractID}, MaximumFrames: 10})
+	scenario, err := BuildScenarioFromDataset(ScenarioBuildRequest{
+		Spec: spec, Dataset: bound, Mode: input.Mode, EvaluationStart: input.EvaluationStart, EvaluationEnd: input.EvaluationEnd,
+		ExecutionInput: "price", VenueContractIDs: map[uuid.UUID]uuid.UUID{input.Frames[0].InstrumentID: contractID}, MaximumFrames: 10,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +65,11 @@ func TestSelectScenarioInputRejectsEquallyCurrentRevisions(t *testing.T) {
 		break
 	}
 	metadata := original.Metadata()
-	changed, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{Kind: dataset.MarketPayloadStockBar, InstrumentID: original.InstrumentID(), Provider: metadata.Provider, Feed: metadata.Feed,
+	changed, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
+		Kind: dataset.MarketPayloadStockBar, InstrumentID: original.InstrumentID(), Provider: metadata.Provider, Feed: metadata.Feed,
 		Symbol: metadata.Symbol, Timeframe: metadata.Timeframe, AdjustmentPolicy: metadata.AdjustmentPolicy, EffectiveAt: metadata.EffectiveAt, ObservedAt: metadata.ObservedAt,
-		AvailableAt: metadata.AvailableAt, Revision: "correction", CorrectionOfSHA256: original.Digest(), Bar: &dataset.BarPayload{Open: "100", High: "103", Low: "98", Close: "102", Volume: "1000", TradeCount: "100", VWAP: "100"}})
+		AvailableAt: metadata.AvailableAt, Revision: "correction", CorrectionOfSHA256: original.Digest(), Bar: &dataset.BarPayload{Open: "100", High: "103", Low: "98", Close: "102", Volume: "1000", TradeCount: "100", VWAP: "100"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
