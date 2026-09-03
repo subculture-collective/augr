@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -184,13 +185,25 @@ func bindDefinedRiskOptionIntent(opportunity *domain.Opportunity, spread *domain
 	if opportunity == nil || spread == nil || len(spread.Legs) != 2 || spread.MaxRisk <= 0 || quoteObservedAt == nil {
 		return errors.New("options opportunity requires an exact quoted defined-risk spread")
 	}
+	canonicalQuoteObservedAt := quoteObservedAt.UTC().Truncate(time.Microsecond)
+	_, offset := quoteObservedAt.Zone()
+	if offset != 0 || !quoteObservedAt.Equal(canonicalQuoteObservedAt) ||
+		!spread.QuoteObservedAt.Equal(canonicalQuoteObservedAt) {
+		return errors.New("option opportunity quote timestamp does not match the exact UTC spread observation")
+	}
+	if !strings.EqualFold(strings.TrimSpace(spread.Underlying), strings.TrimSpace(opportunity.Ticker)) {
+		return errors.New("option opportunity spread underlying does not match the opportunity")
+	}
 	opportunity.MaxLossPerUnit = spread.MaxRisk
 	opportunity.RequiredCapitalUnit = spread.MaxRisk
-	opportunity.QuoteObservedAt = quoteObservedAt
+	opportunity.QuoteObservedAt = &canonicalQuoteObservedAt
 	opportunity.OptionLegs = make([]domain.OpportunityOptionLeg, 0, 2)
 	for sequence, leg := range spread.Legs {
 		if leg.Contract.InstrumentID == uuid.Nil {
 			return errors.New("option opportunity contract lacks immutable instrument identity")
+		}
+		if !leg.QuoteObservedAt.Equal(canonicalQuoteObservedAt) {
+			return errors.New("option opportunity leg quote timestamp does not match the spread observation")
 		}
 		opportunity.OptionLegs = append(opportunity.OptionLegs, domain.OpportunityOptionLeg{
 			Sequence: sequence, ContractID: leg.Contract.InstrumentID, OCCSymbol: leg.Contract.OCCSymbol, Underlying: leg.Contract.Underlying,
@@ -207,6 +220,17 @@ func bindDefinedRiskOptionIntent(opportunity *domain.Opportunity, spread *domain
 		opportunity.Gamma += leg.Greeks.Gamma * units
 		opportunity.Theta += leg.Greeks.Theta * units
 		opportunity.Vega += leg.Greeks.Vega * units
+	}
+	if !validVertical(opportunity.OptionLegs) {
+		return errors.New("option opportunity is not an exact supported vertical")
+	}
+	reconstructedType, err := verticalStrategyType(spread.Legs)
+	if err != nil || reconstructedType != spread.StrategyType {
+		return errors.New("option opportunity strategy type does not reconstruct from its legs")
+	}
+	width := math.Abs(spread.Legs[0].Contract.Strike-spread.Legs[1].Contract.Strike) * spread.Legs[0].Contract.Multiplier
+	if width <= 0 || spread.MaxRisk > width || math.Abs(spread.MaxReward-(width-spread.MaxRisk)) > 1e-9 {
+		return errors.New("option opportunity risk and reward do not reconstruct from vertical width")
 	}
 	return nil
 }

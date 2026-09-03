@@ -307,13 +307,14 @@ func TestBuildOpportunityBindsDefinedRiskOptionPackage(t *testing.T) {
 	expiry := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
 	longID, shortID := uuid.New(), uuid.New()
 	spread := &domain.OptionSpread{
-		StrategyType: domain.StrategyBullCallSpread,
-		Underlying:   "AAPL",
-		MaxRisk:      250,
-		MaxReward:    250,
+		StrategyType:    domain.StrategyBullCallSpread,
+		Underlying:      "AAPL",
+		MaxRisk:         250,
+		MaxReward:       250,
+		QuoteObservedAt: observedAt,
 		Legs: []domain.SpreadLeg{
-			{Contract: domain.OptionContract{InstrumentID: longID, OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5.0, Greeks: domain.OptionGreeks{Delta: .55, Gamma: .03, Theta: -.05, Vega: .12}},
-			{Contract: domain.OptionContract{InstrumentID: shortID, OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, Greeks: domain.OptionGreeks{Delta: .4, Gamma: .02, Theta: -.03, Vega: .09}},
+			{Contract: domain.OptionContract{InstrumentID: longID, OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5.0, QuoteObservedAt: observedAt, Greeks: domain.OptionGreeks{Delta: .55, Gamma: .03, Theta: -.05, Vega: .12}},
+			{Contract: domain.OptionContract{InstrumentID: shortID, OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, QuoteObservedAt: observedAt, Greeks: domain.OptionGreeks{Delta: .4, Gamma: .02, Theta: -.03, Vega: .09}},
 		},
 	}
 
@@ -332,6 +333,52 @@ func TestBuildOpportunityBindsDefinedRiskOptionPackage(t *testing.T) {
 	}
 	if math.Abs(opportunity.Delta-15) > 1e-12 || math.Abs(opportunity.Gamma-1) > 1e-12 || math.Abs(opportunity.Theta+2) > 1e-12 || math.Abs(opportunity.Vega-3) > 1e-12 {
 		t.Fatalf("aggregate greeks = delta %v gamma %v theta %v vega %v", opportunity.Delta, opportunity.Gamma, opportunity.Theta, opportunity.Vega)
+	}
+}
+
+func TestBuildOpportunityRejectsOptionPackageThatDoesNotReconstruct(t *testing.T) {
+	t.Parallel()
+	baseObservedAt := time.Date(2026, 6, 19, 15, 0, 0, 0, time.UTC)
+	expiry := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	validSpread := func() *domain.OptionSpread {
+		return &domain.OptionSpread{
+			StrategyType: domain.StrategyBullCallSpread, Underlying: "AAPL", MaxRisk: 250, MaxReward: 250, QuoteObservedAt: baseObservedAt,
+			Legs: []domain.SpreadLeg{
+				{Contract: domain.OptionContract{InstrumentID: uuid.New(), OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5, QuoteObservedAt: baseObservedAt},
+				{Contract: domain.OptionContract{InstrumentID: uuid.New(), OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, QuoteObservedAt: baseObservedAt},
+			},
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*domain.OptionSpread, *time.Time)
+		want   string
+	}{
+		{name: "spread timestamp", mutate: func(s *domain.OptionSpread, _ *time.Time) { s.QuoteObservedAt = s.QuoteObservedAt.Add(time.Second) }, want: "quote timestamp"},
+		{name: "leg timestamp", mutate: func(s *domain.OptionSpread, _ *time.Time) {
+			s.Legs[1].QuoteObservedAt = s.Legs[1].QuoteObservedAt.Add(time.Second)
+		}, want: "leg quote timestamp"},
+		{name: "declared type", mutate: func(s *domain.OptionSpread, _ *time.Time) { s.StrategyType = domain.StrategyBearCallSpread }, want: "strategy type"},
+		{name: "economics", mutate: func(s *domain.OptionSpread, _ *time.Time) { s.MaxReward = 249 }, want: "risk and reward"},
+		{name: "underlying", mutate: func(s *domain.OptionSpread, _ *time.Time) { s.Underlying = "MSFT" }, want: "underlying"},
+		{name: "sub-microsecond timestamp", mutate: func(s *domain.OptionSpread, observedAt *time.Time) {
+			*observedAt = observedAt.Add(time.Nanosecond)
+			s.QuoteObservedAt = *observedAt
+			s.Legs[0].QuoteObservedAt, s.Legs[1].QuoteObservedAt = *observedAt, *observedAt
+		}, want: "exact UTC"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			strategy, run, scope := scopedOpportunitySource(domain.MarketTypeOptions, "AAPL")
+			spread, observedAt := validSpread(), baseObservedAt
+			test.mutate(spread, &observedAt)
+			opportunity, _, err := BuildOpportunity(OpportunityBuildInput{Scope: scope, Strategy: strategy, Run: run, Signal: domain.PipelineSignalBuy, OptionSpread: spread, QuoteObservedAt: &observedAt}, OpportunityBuilderConfig{})
+			if err == nil || opportunity != nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("BuildOpportunity() = %#v, %v; want %q rejection", opportunity, err, test.want)
+			}
+		})
 	}
 }
 
