@@ -45,6 +45,7 @@ type fetchedBars struct {
 	instrumentID uuid.UUID
 	underlyingID uuid.UUID
 	bars         []domain.OHLCV
+	receipt      data.HistoricalFetchReceipt
 }
 
 func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request dataset.MarketImportRequest) (dataset.MarketImportSourceResult, error) {
@@ -65,23 +66,31 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		if source.Stock == nil {
 			return dataset.MarketImportSourceResult{}, fmt.Errorf("stock provider is not configured")
 		}
+		verified, ok := source.Stock.(data.VerifiedStockHistoricalProvider)
+		if !ok {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("stock provider cannot prove entitlement and pagination")
+		}
 		for _, symbol := range request.Universe {
 			resolved, err := source.Instruments.ResolveAlias(ctx, request.Provider, instrument.AliasTicker, symbol, resolveAt)
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("resolve stock %s: %w", symbol, err)
 			}
-			bars, err := source.Stock.GetOHLCV(ctx, symbol, timeframe, request.From, request.To)
+			bars, receipt, err := verified.GetOHLCVWithReceipt(ctx, symbol, timeframe, request.From, request.To, request.Feed, request.AdjustmentPolicy)
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("fetch stock bars for %s: %w", symbol, err)
 			}
 			if len(bars) == 0 {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider returned no stock bars for %s", symbol)
 			}
-			fetched = append(fetched, fetchedBars{symbol: symbol, instrumentID: resolved.ID, bars: bars})
+			fetched = append(fetched, fetchedBars{symbol: symbol, instrumentID: resolved.ID, bars: bars, receipt: receipt})
 		}
 	case ModeOptionBars:
 		if source.Options == nil || len(source.OptionSymbols) == 0 {
 			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider and explicit OCC symbols are required")
+		}
+		verified, ok := source.Options.(data.VerifiedOptionsHistoricalProvider)
+		if !ok {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot prove entitlement and pagination")
 		}
 		optionSymbols := append([]string(nil), source.OptionSymbols...)
 		sort.Strings(optionSymbols)
@@ -107,7 +116,7 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			if resolved.UnderlyingID == nil || *resolved.UnderlyingID != underlying.ID {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("option %s canonical underlying binding does not reconstruct", symbol)
 			}
-			bars, err := source.Options.GetOptionsOHLCV(ctx, symbol, timeframe, request.From, request.To)
+			bars, receipt, err := verified.GetOptionsOHLCVWithReceipt(ctx, symbol, timeframe, request.From, request.To, request.Feed, request.AdjustmentPolicy)
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("fetch option bars for %s: %w", symbol, err)
 			}
@@ -115,7 +124,7 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider returned no option bars for %s", symbol)
 			}
 			fetched = append(fetched, fetchedBars{
-				symbol: symbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, bars: bars,
+				symbol: symbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, bars: bars, receipt: receipt,
 			})
 		}
 	default:
@@ -128,6 +137,12 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 	}
 	payloads := make([]*dataset.MarketPayload, 0)
 	for _, result := range fetched {
+		if !result.receipt.Entitled || !result.receipt.PaginationComplete || result.receipt.Pages <= 0 {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("provider receipt for %s is incomplete", result.symbol)
+		}
+		if result.receipt.Provider != request.Provider || result.receipt.Feed != request.Feed || result.receipt.AdjustmentPolicy != request.AdjustmentPolicy {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("provider receipt for %s does not match requested provenance", result.symbol)
+		}
 		for _, bar := range result.bars {
 			effectiveAt := bar.Timestamp.UTC().Truncate(time.Microsecond)
 			payloadKind := dataset.MarketPayloadStockBar

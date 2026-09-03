@@ -174,6 +174,51 @@ func TestGetOptionsOHLCV(t *testing.T) {
 	}
 }
 
+func TestGetOptionsOHLCVWithReceiptProvesFeedAndPagination(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("feed"); got != "opra" {
+			t.Errorf("feed = %q, want opra", got)
+		}
+		response := barsResponse{Bars: map[string][]optionBar{"AAPL241220C00150000": {{Timestamp: "2024-01-02T05:00:00Z", Open: 5, High: 6, Low: 4, Close: 5.5, Volume: 2}}}}
+		if requests == 1 {
+			response.NextPageToken = "page-2"
+		} else if got := r.URL.Query().Get("page_token"); got != "page-2" {
+			t.Errorf("page_token = %q, want page-2", got)
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	t.Cleanup(server.Close)
+	provider := NewOptionsDataProvider("key", "secret", nil)
+	provider.SetBaseURL(server.URL)
+	bars, receipt, err := provider.GetOptionsOHLCVWithReceipt(
+		context.Background(), "AAPL241220C00150000", data.Timeframe1d,
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 5, 0, 0, 0, 0, time.UTC), "opra", "raw",
+	)
+	if err != nil {
+		t.Fatalf("GetOptionsOHLCVWithReceipt() error = %v", err)
+	}
+	if len(bars) != 2 || receipt.Provider != "alpaca" || receipt.Feed != "opra" || receipt.AdjustmentPolicy != "raw" || receipt.Pages != 2 || !receipt.Entitled || !receipt.PaginationComplete {
+		t.Fatalf("bars/receipt = %d/%+v", len(bars), receipt)
+	}
+}
+
+func TestGetOptionsOHLCVWithReceiptRejectsUnexpectedSymbol(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(barsResponse{Bars: map[string][]optionBar{"FORGED": {{Timestamp: "2024-01-02T05:00:00Z"}}}})
+	}))
+	t.Cleanup(server.Close)
+	provider := NewOptionsDataProvider("key", "secret", nil)
+	provider.SetBaseURL(server.URL)
+	_, receipt, err := provider.GetOptionsOHLCVWithReceipt(context.Background(), "AAPL241220C00150000", data.Timeframe1d, time.Now(), time.Now(), "indicative", "raw")
+	if err == nil || receipt.Entitled || receipt.PaginationComplete {
+		t.Fatalf("error/receipt = %v/%+v, want fail-closed", err, receipt)
+	}
+}
+
 func TestGetOptionsOHLCVEmptySymbol(t *testing.T) {
 	t.Parallel()
 	provider := NewOptionsDataProvider("key", "secret", nil)

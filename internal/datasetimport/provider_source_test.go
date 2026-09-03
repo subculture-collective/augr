@@ -13,7 +13,10 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 )
 
-type stockProviderStub struct{ bars []domain.OHLCV }
+type stockProviderStub struct {
+	bars    []domain.OHLCV
+	receipt *data.HistoricalFetchReceipt
+}
 
 func (stub stockProviderStub) GetOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return stub.bars, nil
@@ -27,14 +30,31 @@ func (stockProviderStub) GetNews(context.Context, string, time.Time, time.Time) 
 func (stockProviderStub) GetSocialSentiment(context.Context, string, time.Time, time.Time) ([]data.SocialSentiment, error) {
 	return nil, nil
 }
+func (stub stockProviderStub) GetOHLCVWithReceipt(_ context.Context, _ string, _ data.Timeframe, _, _ time.Time, feed, adjustment string) ([]domain.OHLCV, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: adjustment, Pages: 1, Entitled: true, PaginationComplete: true}
+	if stub.receipt != nil {
+		receipt = *stub.receipt
+	}
+	return stub.bars, receipt, nil
+}
 
-type optionsProviderStub struct{ bars []domain.OHLCV }
+type optionsProviderStub struct {
+	bars    []domain.OHLCV
+	receipt *data.HistoricalFetchReceipt
+}
 
 func (optionsProviderStub) GetOptionsChain(context.Context, string, time.Time, domain.OptionType) ([]domain.OptionSnapshot, error) {
 	return nil, nil
 }
 func (stub optionsProviderStub) GetOptionsOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return stub.bars, nil
+}
+func (stub optionsProviderStub) GetOptionsOHLCVWithReceipt(_ context.Context, _ string, _ data.Timeframe, _, _ time.Time, feed, adjustment string) ([]domain.OHLCV, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: adjustment, Pages: 1, Entitled: true, PaginationComplete: true}
+	if stub.receipt != nil {
+		receipt = *stub.receipt
+	}
+	return stub.bars, receipt, nil
 }
 
 type resolverStub struct {
@@ -95,5 +115,29 @@ func TestProviderSourceRejectsEmptyEntitlementResultAndLateResponse(t *testing.T
 	source.Clock = func() time.Time { return request.DecisionCutoff.Add(time.Microsecond) }
 	if _, err := source.FetchMarketPayloads(context.Background(), request); err == nil {
 		t.Fatal("FetchMarketPayloads() accepted response after cutoff")
+	}
+}
+
+func TestProviderSourceRejectsUnverifiedOrMismatchedReceipt(t *testing.T) {
+	barAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
+	request := dataset.MarketImportRequest{
+		Provider: "alpaca", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
+		From: barAt, To: barAt, DecisionCutoff: barAt.Add(time.Hour), Universe: []string{"AAPL"},
+	}
+	resolver := resolverStub{stockID: uuid.New()}
+	bars := []domain.OHLCV{{Timestamp: barAt, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}
+	for name, receipt := range map[string]data.HistoricalFetchReceipt{
+		"not entitled":       {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "raw", Pages: 1, PaginationComplete: true},
+		"incomplete pages":   {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "raw", Pages: 1, Entitled: true},
+		"wrong feed":         {Provider: "alpaca", Feed: "opra", AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true},
+		"wrong adjustment":   {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "adjusted", Pages: 1, Entitled: true, PaginationComplete: true},
+		"missing page count": {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "raw", Entitled: true, PaginationComplete: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			source := &ProviderSource{Mode: ModeStockBars, Stock: stockProviderStub{bars: bars, receipt: &receipt}, Instruments: resolver, Clock: func() time.Time { return request.DecisionCutoff }}
+			if _, err := source.FetchMarketPayloads(context.Background(), request); err == nil {
+				t.Fatal("FetchMarketPayloads() accepted invalid provider receipt")
+			}
+		})
 	}
 }

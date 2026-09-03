@@ -75,24 +75,46 @@ func NewProvider(client *Client) *Provider {
 
 // GetOHLCV returns candlestick data from Polygon's aggregates endpoint.
 func (p *Provider) GetOHLCV(ctx context.Context, ticker string, timeframe data.Timeframe, from, to time.Time) ([]domain.OHLCV, error) {
+	bars, _, err := p.GetOHLCVWithReceipt(ctx, ticker, timeframe, from, to, "sip", "adjusted")
+	return bars, err
+}
+
+// GetOHLCVWithReceipt returns bars with exact feed, adjustment, entitlement,
+// and terminal-pagination evidence for immutable imports.
+func (p *Provider) GetOHLCVWithReceipt(ctx context.Context, ticker string, timeframe data.Timeframe, from, to time.Time, feed, adjustmentPolicy string) ([]domain.OHLCV, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "polygon", Feed: feed, AdjustmentPolicy: adjustmentPolicy}
 	if p == nil {
-		return nil, errors.New("polygon: provider is nil")
+		return nil, receipt, errors.New("polygon: provider is nil")
 	}
 	if p.client == nil {
-		return nil, errors.New("polygon: client is nil")
+		return nil, receipt, errors.New("polygon: client is nil")
 	}
 
 	ticker = strings.TrimSpace(ticker)
 	if ticker == "" {
-		return nil, errors.New("polygon: ticker is required")
+		return nil, receipt, errors.New("polygon: ticker is required")
 	}
 	if from.After(to) {
-		return nil, errors.New("polygon: from must be before or equal to to")
+		return nil, receipt, errors.New("polygon: from must be before or equal to to")
+	}
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed != "sip" {
+		return nil, receipt, fmt.Errorf("polygon: unsupported stock feed %q", feed)
+	}
+	receipt.Feed = feed
+	adjusted := ""
+	switch adjustmentPolicy {
+	case "raw":
+		adjusted = "false"
+	case "adjusted":
+		adjusted = "true"
+	default:
+		return nil, receipt, fmt.Errorf("polygon: unsupported adjustment policy %q", adjustmentPolicy)
 	}
 
 	mapping, err := mapTimeframe(timeframe)
 	if err != nil {
-		return nil, err
+		return nil, receipt, err
 	}
 
 	requestPath := fmt.Sprintf(
@@ -104,22 +126,24 @@ func (p *Provider) GetOHLCV(ctx context.Context, ticker string, timeframe data.T
 		to.UTC().UnixMilli(),
 	)
 	baseParams := url.Values{
-		"adjusted": []string{"true"},
+		"adjusted": []string{adjusted},
 		"sort":     []string{"asc"},
 		"limit":    []string{strconv.Itoa(polygonMaxPageSize)},
 	}
 	params := cloneQueryValues(baseParams)
 
 	bars := make([]domain.OHLCV, 0, 128)
+	seenNextURLs := make(map[string]struct{})
 	for {
 		body, err := p.client.Get(ctx, requestPath, params)
 		if err != nil {
-			return nil, err
+			return nil, receipt, err
 		}
+		receipt.Pages++
 
 		var response aggregateResponse
 		if err := json.Unmarshal(body, &response); err != nil {
-			return nil, fmt.Errorf("polygon: decode aggregates response: %w", err)
+			return nil, receipt, fmt.Errorf("polygon: decode aggregates response: %w", err)
 		}
 
 		for _, result := range response.Results {
@@ -134,16 +158,22 @@ func (p *Provider) GetOHLCV(ctx context.Context, ticker string, timeframe data.T
 		}
 
 		if strings.TrimSpace(response.NextURL) == "" {
+			receipt.Entitled = true
+			receipt.PaginationComplete = true
 			break
 		}
+		if _, duplicate := seenNextURLs[response.NextURL]; duplicate {
+			return nil, receipt, errors.New("polygon: repeated aggregates next_url")
+		}
+		seenNextURLs[response.NextURL] = struct{}{}
 
 		requestPath, params, err = nextPageRequest(response.NextURL, baseParams)
 		if err != nil {
-			return nil, err
+			return nil, receipt, err
 		}
 	}
 
-	return bars, nil
+	return bars, receipt, nil
 }
 
 // GetFundamentals is not supported by the Polygon provider yet.

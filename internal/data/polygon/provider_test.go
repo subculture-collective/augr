@@ -229,6 +229,26 @@ func TestProviderGetOHLCVEmptyResults(t *testing.T) {
 	}
 }
 
+func TestProviderGetOHLCVWithReceiptHonorsRawAdjustment(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("adjusted"); got != "false" {
+			t.Errorf("adjusted = %q, want false", got)
+		}
+		_, _ = w.Write([]byte(`{"results":[{"o":1,"h":2,"l":1,"c":2,"v":3,"t":1704067200000}]}`))
+	}))
+	t.Cleanup(server.Close)
+	provider := NewProvider(NewClient("key", nil))
+	provider.client.baseURL = server.URL
+	bars, receipt, err := provider.GetOHLCVWithReceipt(context.Background(), "AAPL", data.Timeframe1d, time.Unix(0, 0), time.Unix(1, 0), "sip", "raw")
+	if err != nil {
+		t.Fatalf("GetOHLCVWithReceipt() error = %v", err)
+	}
+	if len(bars) != 1 || receipt.Provider != "polygon" || receipt.Feed != "sip" || receipt.AdjustmentPolicy != "raw" || receipt.Pages != 1 || !receipt.Entitled || !receipt.PaginationComplete {
+		t.Fatalf("bars/receipt = %d/%+v", len(bars), receipt)
+	}
+}
+
 func TestProviderGetOHLCVReturnsErrorForNilClient(t *testing.T) {
 	t.Parallel()
 

@@ -229,22 +229,45 @@ func (p *OptionsDataProvider) GetOptionsOHLCV(
 	timeframe data.Timeframe,
 	from, to time.Time,
 ) ([]domain.OHLCV, error) {
+	bars, _, err := p.GetOptionsOHLCVWithReceipt(ctx, occSymbol, timeframe, from, to, "indicative", "raw")
+	return bars, err
+}
+
+// GetOptionsOHLCVWithReceipt returns historical bars together with the exact
+// feed and terminal-pagination evidence required by immutable imports.
+func (p *OptionsDataProvider) GetOptionsOHLCVWithReceipt(
+	ctx context.Context,
+	occSymbol string,
+	timeframe data.Timeframe,
+	from, to time.Time,
+	feed, adjustmentPolicy string,
+) ([]domain.OHLCV, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: adjustmentPolicy}
 	if p == nil {
-		return nil, fmt.Errorf("alpaca/options: provider is nil")
+		return nil, receipt, fmt.Errorf("alpaca/options: provider is nil")
 	}
 
 	occSymbol = strings.TrimSpace(occSymbol)
 	if occSymbol == "" {
-		return nil, fmt.Errorf("alpaca/options: OCC symbol is required")
+		return nil, receipt, fmt.Errorf("alpaca/options: OCC symbol is required")
+	}
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed != "indicative" && feed != "opra" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported feed %q", feed)
+	}
+	receipt.Feed = feed
+	if adjustmentPolicy != "raw" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported adjustment policy %q", adjustmentPolicy)
 	}
 
 	alpacaTF, err := mapTimeframe(timeframe)
 	if err != nil {
-		return nil, err
+		return nil, receipt, err
 	}
 
 	var allBars []domain.OHLCV
 	var pageToken string
+	seenPageTokens := make(map[string]struct{})
 
 	for {
 		params := url.Values{}
@@ -253,27 +276,29 @@ func (p *OptionsDataProvider) GetOptionsOHLCV(
 		params.Set("start", from.UTC().Format(time.RFC3339))
 		params.Set("end", to.UTC().Format(time.RFC3339))
 		params.Set("limit", "1000")
+		params.Set("feed", feed)
 		if pageToken != "" {
 			params.Set("page_token", pageToken)
 		}
 
 		body, err := p.doGet(ctx, "/v1beta1/options/bars", params)
 		if err != nil {
-			return nil, fmt.Errorf("alpaca/options: ohlcv request failed: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: ohlcv request failed: %w", err)
 		}
+		receipt.Pages++
 
 		var resp barsResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("alpaca/options: unmarshal ohlcv response: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: unmarshal ohlcv response: %w", err)
 		}
 
 		bars, ok := resp.Bars[occSymbol]
 		if !ok {
-			// Try without O: prefix or with it.
-			for _, b := range resp.Bars {
-				bars = b
-				break
-			}
+			prefixed := "O:" + strings.TrimPrefix(occSymbol, "O:")
+			bars, ok = resp.Bars[prefixed]
+		}
+		if !ok && len(resp.Bars) != 0 {
+			return nil, receipt, fmt.Errorf("alpaca/options: response omitted requested symbol %s", occSymbol)
 		}
 
 		for _, bar := range bars {
@@ -296,12 +321,18 @@ func (p *OptionsDataProvider) GetOptionsOHLCV(
 		}
 
 		if resp.NextPageToken == "" {
+			receipt.Entitled = true
+			receipt.PaginationComplete = true
 			break
 		}
+		if _, duplicate := seenPageTokens[resp.NextPageToken]; duplicate {
+			return nil, receipt, fmt.Errorf("alpaca/options: repeated page token")
+		}
+		seenPageTokens[resp.NextPageToken] = struct{}{}
 		pageToken = resp.NextPageToken
 	}
 
-	return allBars, nil
+	return allBars, receipt, nil
 }
 
 // ------------------------------------------------------------------
