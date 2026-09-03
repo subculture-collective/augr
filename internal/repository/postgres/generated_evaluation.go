@@ -85,11 +85,21 @@ func (source *GeneratedEvaluationSource) ListEligibleGeneratedEvaluations(ctx co
 	}
 	runRepo := NewExperimentRunRepo(source.pool)
 	generatedRepo := NewGenerativeStrategyRepo(source.pool)
+	datasetRepo := NewDatasetRepo(source.pool)
 	items := make([]generativestrategy.EligibleEvaluation, 0, len(candidates))
 	for _, candidate := range candidates {
 		prepared, err := generatedRepo.restorePreparedResearch(ctx, candidate.experimentID, candidate.scenarioID)
 		if err != nil {
 			return nil, err
+		}
+		for _, frame := range prepared.Scenario.ExecutionEvidence() {
+			payload, loadErr := datasetRepo.GetMarketPayload(ctx, frame.PayloadID)
+			if loadErr != nil {
+				return nil, fmt.Errorf("postgres: load generated evaluation timeframe evidence: %w", loadErr)
+			}
+			if payload.Timeframe() != "1Day" {
+				return nil, fmt.Errorf("postgres: generated promotion evaluation requires reviewed 1Day payloads, got %q", payload.Timeframe())
+			}
 		}
 		result, err := runRepo.GetResult(ctx, candidate.resultID)
 		if err != nil {

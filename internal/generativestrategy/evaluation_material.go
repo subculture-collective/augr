@@ -131,7 +131,7 @@ func (state *evaluationReplayState) applyStep(sequence int, frame ScenarioExecut
 	aggregate := input.Lifecycles[intentID]
 	if aggregate == nil || aggregate.Order == nil || aggregate.Intent.ID != intentID || aggregate.Order.ID != orderID ||
 		aggregate.Intent.AccountID != input.Result.AccountID() || aggregate.Intent.InstrumentID != frame.InstrumentID || aggregate.Order.VenueContractID != frame.VenueContractID ||
-		len(aggregate.Fills) != len(outcome.FillIDs) {
+		aggregate.State != lifecycle.StateFilled || len(aggregate.Fills) != len(outcome.FillIDs) {
 		return fmt.Errorf("generated evaluation step %d lifecycle does not reconstruct", sequence)
 	}
 	contract := input.Graph.VenueContracts[frame.VenueContractID]
@@ -145,6 +145,9 @@ func (state *evaluationReplayState) applyStep(sequence int, frame ScenarioExecut
 	quantity, notional, weightedPrice := decimal.Zero, decimal.Zero, decimal.Zero
 	fillIDs := make([]uuid.UUID, len(aggregate.Fills))
 	for index, fill := range aggregate.Fills {
+		if err := fill.Validate(); err != nil {
+			return fmt.Errorf("generated evaluation step %d fill %d is invalid: %w", sequence, index, err)
+		}
 		if fill.ID != outcome.FillIDs[index] || fill.InstrumentID != frame.InstrumentID || fill.VenueContractID != frame.VenueContractID || fill.Side != aggregate.Order.Side {
 			return fmt.Errorf("generated evaluation step %d fill %d differs", sequence, index)
 		}
