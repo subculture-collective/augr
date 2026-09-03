@@ -7,12 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
+	"github.com/PatrickFanella/get-rich-quick/internal/economicid"
+	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
@@ -24,12 +27,102 @@ type GenerativeStrategyRepo struct {
 }
 
 var (
-	_ generativestrategy.Store         = (*GenerativeStrategyRepo)(nil)
-	_ generativestrategy.ResearchStore = (*GenerativeStrategyRepo)(nil)
+	_ generativestrategy.Store                  = (*GenerativeStrategyRepo)(nil)
+	_ generativestrategy.ResearchStore          = (*GenerativeStrategyRepo)(nil)
+	_ generativestrategy.EligibleResearchSource = (*GenerativeStrategyRepo)(nil)
 )
 
 func NewGenerativeStrategyRepo(pool *pgxpool.Pool) *GenerativeStrategyRepo {
 	return &GenerativeStrategyRepo{pool: pool}
+}
+
+func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearch(
+	ctx context.Context,
+	accountID, scopeID uuid.UUID,
+	limit int,
+	now time.Time,
+) ([]generativestrategy.EligibleResearch, error) {
+	if r == nil || r.pool == nil || accountID == uuid.Nil || scopeID == uuid.Nil || limit <= 0 ||
+		limit > generativestrategy.MaximumResearchBatchSize || now.IsZero() || now.Location() != time.UTC || !now.Equal(now.Truncate(time.Microsecond)) {
+		return nil, fmt.Errorf("postgres: exact generated research account, scope, limit, and time are required")
+	}
+	rows, err := r.pool.Query(ctx, `
+		SELECT experiment.id,scenario.id
+		FROM paper_evaluation_scopes scope
+		JOIN dataset_manifests manifest ON manifest.sha256=scope.manifest_sha256
+		JOIN dataset_quality_results quality ON quality.manifest_id=manifest.id AND quality.sha256=scope.quality_sha256 AND NOT quality.quarantined
+		JOIN simulation_policy_artifacts simulation ON simulation.sha256=scope.simulation_policy_sha256
+		JOIN account_capital_policy_bindings binding ON binding.id=scope.capital_binding_id AND binding.account_id=scope.account_id
+		JOIN capital_margin_policy_artifacts capital ON capital.id=binding.policy_artifact_id AND capital.sha256=scope.capital_policy_sha256
+		JOIN research_experiments experiment ON experiment.account_id=scope.account_id AND experiment.capital_binding_id=binding.id
+			AND experiment.manifest_id=manifest.id AND experiment.quality_result_id=quality.id
+			AND experiment.simulation_policy_version=simulation.policy_version AND experiment.capital_policy_version=capital.policy_version
+			AND experiment.evaluation_start=scope.evaluation_start AND experiment.evaluation_end=scope.evaluation_end AND NOT experiment.dataset_quarantined
+		JOIN generated_strategy_compilation_receipts receipt ON receipt.version_id=experiment.version_id
+		JOIN generated_strategy_scenarios scenario ON scenario.spec_id=receipt.spec_id AND scenario.manifest_id=manifest.id
+			AND scenario.mode=experiment.mode AND scenario.evaluation_start=experiment.evaluation_start AND scenario.evaluation_end=experiment.evaluation_end
+		WHERE scope.id=$1 AND scope.account_id=$2
+			AND NOT EXISTS(SELECT 1 FROM experiment_run_results result WHERE result.experiment_id=experiment.id)
+		ORDER BY experiment.created_at,experiment.id
+		LIMIT $3`, scopeID, accountID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list exact generated research: %w", err)
+	}
+	defer rows.Close()
+	items := make([]generativestrategy.EligibleResearch, 0, limit)
+	for rows.Next() {
+		var experimentID, scenarioID uuid.UUID
+		if err := rows.Scan(&experimentID, &scenarioID); err != nil {
+			return nil, fmt.Errorf("postgres: scan exact generated research: %w", err)
+		}
+		prepared, err := r.restorePreparedResearch(ctx, experimentID, scenarioID)
+		if err != nil {
+			return nil, err
+		}
+		attemptID := economicid.DeterministicUUID("generated-research-attempt", experimentID.String(), now.Format("2006-01-02T15:04:05.000000Z"))
+		items = append(items, generativestrategy.EligibleResearch{
+			ScopeID: scopeID, Prepared: prepared, AttemptID: attemptID, StartedAt: now, FinishedAt: now,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list exact generated research: %w", err)
+	}
+	return items, nil
+}
+
+func (r *GenerativeStrategyRepo) restorePreparedResearch(ctx context.Context, experimentID, scenarioID uuid.UUID) (*generativestrategy.PreparedResearch, error) {
+	scenario, err := r.GetScenario(ctx, scenarioID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: restore generated research scenario: %w", err)
+	}
+	spec, version, receipt, err := r.GetCompilation(ctx, scenario.SpecID())
+	if err != nil {
+		return nil, fmt.Errorf("postgres: restore generated research compilation: %w", err)
+	}
+	experiment, err := NewStrategyCatalogRepo(r.pool).GetResearchExperiment(ctx, experimentID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: restore generated research experiment: %w", err)
+	}
+	identity, err := experimentrun.NewProgramIdentity(experimentrun.ProgramIdentityInput{
+		VersionID: version.ID(), VersionSHA256: version.Digest(), CompilerKind: version.CompilerKind(), CompilerVersion: version.CompilerVersion(),
+		SourceCommit: version.SourceCommit(), SourceTreeSHA256: version.SourceTreeSHA256(), DecisionContract: version.DecisionContract(),
+		AdapterKind: generativestrategy.ScenarioAdapterKindV1, AdapterVersion: generativestrategy.ScenarioAdapterVersionV1,
+		AdapterSHA256: generativestrategy.ScenarioAdapterSHA256(spec, scenario), RunnerContract: experimentrun.RunnerContractV1,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: bind generated research program: %w", err)
+	}
+	program, err := generativestrategy.NewProgram(identity, spec, version, scenario)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: restore generated research program: %w", err)
+	}
+	if experiment.VersionID() != version.ID() || experiment.ManifestID() != scenario.ManifestID() ||
+		experiment.Mode() != scenario.Mode() || !experiment.EvaluationStart().Equal(scenario.EvaluationStart()) || !experiment.EvaluationEnd().Equal(scenario.EvaluationEnd()) {
+		return nil, fmt.Errorf("postgres: generated research experiment and scenario do not reconstruct")
+	}
+	return &generativestrategy.PreparedResearch{
+		Spec: spec, Version: version, Receipt: receipt, Scenario: scenario, Experiment: experiment, Program: program,
+	}, nil
 }
 
 func (r *GenerativeStrategyRepo) DeclareResearchExperiment(ctx context.Context, value *strategycatalog.Experiment) (*strategycatalog.Experiment, error) {
