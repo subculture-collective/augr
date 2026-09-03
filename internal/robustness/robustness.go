@@ -75,6 +75,31 @@ type Policy struct {
 	id        uuid.UUID
 }
 
+// ReviewedPolicyV1Input returns the fixed walk-forward, bootstrap, multiple-
+// testing, concentration, and perturbation gates for promotion-quality
+// generated research.
+func ReviewedPolicyV1Input() PolicyInput {
+	return PolicyInput{
+		Version:                    "robustness-policy-v1@reviewed",
+		FoldCount:                  2,
+		PurgeSeconds:               86400,
+		EmbargoSeconds:             86400,
+		BootstrapAlgorithm:         "xorshift64star-iid-percentile-v1",
+		BootstrapSeed:              305,
+		BootstrapIterations:        1000,
+		ConfidenceLevel:            "0.95",
+		FamilyWiseAlpha:            "0.05",
+		MaxLargestPositiveShare:    "0.4",
+		MaxTopDecilePositiveShare:  "0.4",
+		MaxPerturbationDegradation: "0.005",
+		RequiredPerturbations:      []string{"cost_up"},
+		DecimalScale:               12,
+	}
+}
+
+// ReviewedPolicyV1 constructs a fresh immutable reviewed policy artifact.
+func ReviewedPolicyV1() (*Policy, error) { return NewPolicy(ReviewedPolicyV1Input()) }
+
 func NewPolicy(input PolicyInput) (*Policy, error) {
 	perturbations := append([]string(nil), input.RequiredPerturbations...)
 	sort.Strings(perturbations)

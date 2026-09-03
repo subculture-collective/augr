@@ -62,6 +62,26 @@ type Policy struct {
 	id        uuid.UUID
 }
 
+// ReviewedPolicyV1Input returns the fixed portfolio-evaluation semantics used
+// by promotion-quality generated research. Keeping these values package-owned
+// prevents callers from quietly changing return, cash, lot, or recovery
+// conventions while retaining a plausible policy label.
+func ReviewedPolicyV1Input() PolicyInput {
+	return PolicyInput{
+		Version:            "evaluation-policy-v1@reviewed",
+		Frequency:          "daily",
+		PeriodsPerYear:     252,
+		ReturnKind:         "simple",
+		CashConvention:     "explicit_per_period",
+		LotMethod:          "fifo",
+		RecoveryDefinition: "first_equity_at_or_above_prior_peak",
+		DecimalScale:       12,
+	}
+}
+
+// ReviewedPolicyV1 constructs a fresh immutable reviewed policy artifact.
+func ReviewedPolicyV1() (*Policy, error) { return NewPolicy(ReviewedPolicyV1Input()) }
+
 func NewPolicy(input PolicyInput) (*Policy, error) {
 	if !canonicalText(input.Version, 128) || !oneOf(input.Frequency, "minute", "daily", "weekly", "monthly") || input.PeriodsPerYear <= 0 || input.PeriodsPerYear > 1000000 ||
 		input.ReturnKind != "simple" || input.CashConvention != "explicit_per_period" || input.LotMethod != "fifo" ||
