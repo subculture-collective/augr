@@ -40,7 +40,7 @@ func (repo *PromotionRepo) EvaluateEligiblePromotions(ctx context.Context, accou
 	if repo == nil || repo.pool == nil || accountID == uuid.Nil || scopeID == uuid.Nil || readiness.AccountID() != accountID || readiness.ScopeID() != scopeID || !readiness.Ready() {
 		return summary, fmt.Errorf("postgres: promotion evaluation requires ready exact account scope")
 	}
-	policy, err := promotion.NewPolicy(promotion.PolicyInput{Version: "promotion-policy-v1@reviewed", RequiredGates: []string{"multiple_testing_adjustment", "overall_robustness"}, FailureAction: promotion.ActionHold})
+	policy, err := promotion.ReviewedPolicyV1()
 	if err != nil {
 		return summary, err
 	}
