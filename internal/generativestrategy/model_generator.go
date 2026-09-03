@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	llmparse "github.com/PatrickFanella/get-rich-quick/internal/llm/parse"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
@@ -19,15 +20,24 @@ import (
 const typedProposalSystemPrompt = `Return one constrained stock strategy proposal as a JSON object. Use only the supplied immutable-data fields. Decimal values must be canonical JSON strings. The object must contain: spec_key, inputs, entry, exit, sizing, maximum_holding_seconds, costs, capacity, example_tests, and retirement. Expressions use op/ref/value/args and only ref, decimal, boolean, add, sub, mul, div, lt, lte, gt, gte, eq, and, or, not. Every input must use missing_policy "abstain". Do not include account, deployment, schedule, promotion, order, credential, network, or live-trading fields.`
 
 type ModelProposalRequest struct {
-	Family           *strategycatalog.Family
-	Universe         Universe
-	SpecKey          string
-	ProviderName     string
-	Provider         llm.Provider
-	Model            string
-	ImmutableSummary string
-	SourceCommit     string
-	SourceTreeSHA256 string
+	Family            *strategycatalog.Family
+	Universe          Universe
+	SpecKey           string
+	AllowedDataFields []AllowedDataField
+	ProviderName      string
+	Provider          llm.Provider
+	Model             string
+	ImmutableSummary  string
+	SourceCommit      string
+	SourceTreeSHA256  string
+}
+
+// AllowedDataField is an immutable-scope capability supplied by trusted
+// runtime code. Model output may name only these exact kind/field/type tuples.
+type AllowedDataField struct {
+	DatasetKind dataset.Kind
+	Field       string
+	Type        string
 }
 
 type modelProposalEnvelope struct {
@@ -50,8 +60,19 @@ type ModelProposalGenerator struct{}
 // are supplied by trusted runtime inputs before the normal Spec validator runs.
 func (ModelProposalGenerator) Generate(ctx context.Context, request ModelProposalRequest) (ProposalRequest, error) {
 	if request.Family == nil || request.Provider == nil || !tokenPattern.MatchString(request.SpecKey) || !tokenPattern.MatchString(request.ProviderName) || strings.TrimSpace(request.Model) == "" ||
-		strings.TrimSpace(request.ImmutableSummary) == "" {
+		strings.TrimSpace(request.ImmutableSummary) == "" || len(request.AllowedDataFields) == 0 {
 		return ProposalRequest{}, fmt.Errorf("typed model proposal requires family, provider, model, and immutable summary")
+	}
+	allowed := make(map[string]struct{}, len(request.AllowedDataFields))
+	for _, field := range request.AllowedDataFields {
+		key := string(field.DatasetKind) + "\x00" + field.Field + "\x00" + field.Type
+		if !validDatasetKind(field.DatasetKind) || !tokenPattern.MatchString(field.Field) || field.Type != "decimal" && field.Type != "boolean" {
+			return ProposalRequest{}, fmt.Errorf("typed model proposal allowed data field is invalid")
+		}
+		if _, duplicate := allowed[key]; duplicate {
+			return ProposalRequest{}, fmt.Errorf("typed model proposal allowed data field is duplicated")
+		}
+		allowed[key] = struct{}{}
 	}
 	userPrompt := strings.TrimSpace(request.ImmutableSummary)
 	response, err := request.Provider.Complete(ctx, llm.CompletionRequest{
@@ -80,6 +101,12 @@ func (ModelProposalGenerator) Generate(ctx context.Context, request ModelProposa
 	}
 	if draft.SpecKey != request.SpecKey {
 		return ProposalRequest{}, fmt.Errorf("typed strategy proposal changed trusted spec key")
+	}
+	for _, field := range draft.Inputs {
+		key := string(field.DatasetKind) + "\x00" + field.Field + "\x00" + field.Type
+		if _, ok := allowed[key]; !ok {
+			return ProposalRequest{}, fmt.Errorf("typed strategy proposal requested unavailable immutable data field")
+		}
 	}
 	promptDigest := sha256.Sum256([]byte(typedProposalSystemPrompt + "\x00" + userPrompt))
 	model := strings.TrimSpace(response.Model)
