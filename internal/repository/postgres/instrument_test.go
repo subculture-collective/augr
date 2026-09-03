@@ -220,6 +220,10 @@ func TestInstrumentRepoRegistersNonOverlappingVenueContract(t *testing.T) {
 	if persisted.ContractID != "CONTRACT-1" || !persisted.TickSize.Equal(first.TickSize) {
 		t.Fatalf("persisted venue contract = %+v", persisted)
 	}
+	loaded, err := repo.GetVenueContractByID(ctx, persisted.ID)
+	if err != nil || loaded.ID != persisted.ID || loaded.InstrumentID != persisted.InstrumentID || loaded.ContractID != persisted.ContractID {
+		t.Fatalf("GetVenueContractByID() = %+v/%v", loaded, err)
+	}
 
 	retry, err := instrument.NewVenueContract(input)
 	if err != nil {
