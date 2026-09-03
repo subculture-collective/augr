@@ -16,28 +16,29 @@ import (
 const PortfolioRiskPolicySchemaV1 = "portfolio-risk-policy-v1"
 
 type PortfolioRiskPolicy struct {
-	Schema                  string  `json:"schema"`
-	Version                 string  `json:"version"`
-	TargetGrossExposurePct  float64 `json:"target_gross_exposure_pct"`
-	HardGrossExposurePct    float64 `json:"hard_gross_exposure_pct"`
-	CashReservePct          float64 `json:"cash_reserve_pct"`
-	MaxNewSelectionsPerRun  int     `json:"max_new_selections_per_run"`
-	MaxNewSelectionsPerDay  int     `json:"max_new_selections_per_day"`
-	MaxPositionRiskPct      float64 `json:"max_position_risk_pct"`
-	MaxOptionsMarketRiskPct float64 `json:"max_options_market_risk_pct"`
-	MaxDailyLossPct         float64 `json:"max_daily_loss_pct"`
-	MaxDrawdownPct          float64 `json:"max_drawdown_pct"`
-	MaxOpenPositions        int     `json:"max_open_positions"`
-	MaxQuoteAgeSeconds      int     `json:"max_quote_age_seconds"`
-	MaxOptionSpreadPct      float64 `json:"max_option_spread_pct"`
-	MinOptionLiquidityUSD   float64 `json:"min_option_liquidity_usd"`
-	MaxAbsoluteDelta        float64 `json:"max_absolute_delta"`
-	MaxAbsoluteGamma        float64 `json:"max_absolute_gamma"`
-	MaxAbsoluteTheta        float64 `json:"max_absolute_theta"`
-	MaxAbsoluteVega         float64 `json:"max_absolute_vega"`
-	canonical               []byte
-	digest                  string
-	id                      uuid.UUID
+	Schema                      string  `json:"schema"`
+	Version                     string  `json:"version"`
+	TargetGrossExposurePct      float64 `json:"target_gross_exposure_pct"`
+	HardGrossExposurePct        float64 `json:"hard_gross_exposure_pct"`
+	CashReservePct              float64 `json:"cash_reserve_pct"`
+	MaxNewSelectionsPerRun      int     `json:"max_new_selections_per_run"`
+	MaxNewSelectionsPerDay      int     `json:"max_new_selections_per_day"`
+	MaxPositionRiskPct          float64 `json:"max_position_risk_pct"`
+	MaxOptionsMarketRiskPct     float64 `json:"max_options_market_risk_pct"`
+	MaxDailyLossPct             float64 `json:"max_daily_loss_pct"`
+	MaxDrawdownPct              float64 `json:"max_drawdown_pct"`
+	MaxOpenPositions            int     `json:"max_open_positions"`
+	MaxReconciliationAgeSeconds int     `json:"max_reconciliation_age_seconds"`
+	MaxQuoteAgeSeconds          int     `json:"max_quote_age_seconds"`
+	MaxOptionSpreadPct          float64 `json:"max_option_spread_pct"`
+	MinOptionLiquidityUSD       float64 `json:"min_option_liquidity_usd"`
+	MaxAbsoluteDelta            float64 `json:"max_absolute_delta"`
+	MaxAbsoluteGamma            float64 `json:"max_absolute_gamma"`
+	MaxAbsoluteTheta            float64 `json:"max_absolute_theta"`
+	MaxAbsoluteVega             float64 `json:"max_absolute_vega"`
+	canonical                   []byte
+	digest                      string
+	id                          uuid.UUID
 }
 
 func ReviewedPortfolioRiskPolicyV1() (*PortfolioRiskPolicy, error) {
@@ -45,7 +46,7 @@ func ReviewedPortfolioRiskPolicyV1() (*PortfolioRiskPolicy, error) {
 		Schema: PortfolioRiskPolicySchemaV1, Version: "reviewed-v1", TargetGrossExposurePct: .35,
 		HardGrossExposurePct: .50, CashReservePct: .20, MaxNewSelectionsPerRun: 2, MaxNewSelectionsPerDay: 5,
 		MaxPositionRiskPct: .02, MaxOptionsMarketRiskPct: .10, MaxDailyLossPct: .03, MaxDrawdownPct: .15,
-		MaxOpenPositions: 20, MaxQuoteAgeSeconds: 300, MaxOptionSpreadPct: .15, MinOptionLiquidityUSD: 1000,
+		MaxOpenPositions: 20, MaxReconciliationAgeSeconds: 900, MaxQuoteAgeSeconds: 300, MaxOptionSpreadPct: .15, MinOptionLiquidityUSD: 1000,
 		MaxAbsoluteDelta: 500, MaxAbsoluteGamma: 100, MaxAbsoluteTheta: 500, MaxAbsoluteVega: 1000,
 	}
 	return finalizePortfolioRiskPolicy(value)
@@ -55,7 +56,7 @@ func finalizePortfolioRiskPolicy(value *PortfolioRiskPolicy) (*PortfolioRiskPoli
 	if value == nil || value.Schema != PortfolioRiskPolicySchemaV1 || value.Version == "" ||
 		value.TargetGrossExposurePct <= 0 || value.HardGrossExposurePct < value.TargetGrossExposurePct || value.HardGrossExposurePct > 1 ||
 		value.CashReservePct < 0 || value.CashReservePct >= 1 || value.MaxNewSelectionsPerRun <= 0 || value.MaxNewSelectionsPerDay < value.MaxNewSelectionsPerRun ||
-		value.MaxPositionRiskPct <= 0 || value.MaxOptionsMarketRiskPct <= 0 || value.MaxOpenPositions <= 0 || value.MaxQuoteAgeSeconds <= 0 ||
+		value.MaxPositionRiskPct <= 0 || value.MaxOptionsMarketRiskPct <= 0 || value.MaxOpenPositions <= 0 || value.MaxReconciliationAgeSeconds <= 0 || value.MaxQuoteAgeSeconds <= 0 ||
 		value.MaxOptionSpreadPct <= 0 || value.MinOptionLiquidityUSD <= 0 || nonFinitePolicy(value) {
 		return nil, fmt.Errorf("portfolio risk policy is invalid")
 	}
@@ -114,4 +115,11 @@ func (value *PortfolioRiskPolicy) MaxQuoteAge() time.Duration {
 		return 0
 	}
 	return time.Duration(value.MaxQuoteAgeSeconds) * time.Second
+}
+
+func (value *PortfolioRiskPolicy) MaxReconciliationAge() time.Duration {
+	if value == nil {
+		return 0
+	}
+	return time.Duration(value.MaxReconciliationAgeSeconds) * time.Second
 }

@@ -1211,9 +1211,12 @@ func TestPortfolioAllocatorPaperModeRequiresCompleteFinancialState(t *testing.T)
 func TestBuildPortfolioAllocatorStateUsesReservedOptionRiskAndCanonicalLimits(t *testing.T) {
 	t.Parallel()
 	delta, gamma, theta, vega := .6, .03, -.04, .12
+	shortDelta, shortGamma, shortTheta, shortVega := .4, .02, -.03, .09
+	legGroupID := uuid.New()
 	positionRepo := newRecordingPositionRepo(
 		&domain.Position{Ticker: "AAPL", MarketType: domain.MarketTypeStock, AssetClass: domain.AssetClassEquity, Quantity: 10, AvgEntry: 100},
-		&domain.Position{Ticker: "AAPL261218C00150000", UnderlyingTicker: "AAPL", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 5, ContractMultiplier: 100, Delta: &delta, Gamma: &gamma, Theta: &theta, Vega: &vega},
+		&domain.Position{Ticker: "AAPL261218C00150000", UnderlyingTicker: "AAPL", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 5, ContractMultiplier: 100, LegGroupID: &legGroupID, Delta: &delta, Gamma: &gamma, Theta: &theta, Vega: &vega},
+		&domain.Position{Ticker: "AAPL261218C00155000", UnderlyingTicker: "AAPL", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.PositionSideShort, Quantity: 2, AvgEntry: 3, ContractMultiplier: 100, LegGroupID: &legGroupID, Delta: &shortDelta, Gamma: &shortGamma, Theta: &shortTheta, Vega: &shortVega},
 	)
 	orch := NewJobOrchestrator(OrchestratorDeps{
 		PositionRepo: positionRepo, PortfolioAccountSnapshot: allocatorSnapshotSource(),
@@ -1232,7 +1235,7 @@ func TestBuildPortfolioAllocatorStateUsesReservedOptionRiskAndCanonicalLimits(t 
 	if state.DailyLossPct != .01 || state.DrawdownPct != .02 || state.NewOrdersToday != 3 || !state.CircuitBreakerOpen || state.OpenPositionCount != 2 {
 		t.Fatalf("risk controls = %+v", state)
 	}
-	if state.Delta != 120 || state.Gamma != 6 || state.Theta != -8 || state.Vega != 24 {
+	if state.Delta != 40 || state.Gamma != 2 || state.Theta != -2 || state.Vega != 6 {
 		t.Fatalf("greek state = %+v", state)
 	}
 }

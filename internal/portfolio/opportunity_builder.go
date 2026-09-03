@@ -198,10 +198,15 @@ func bindDefinedRiskOptionIntent(opportunity *domain.Opportunity, spread *domain
 			Side: leg.Side, PositionIntent: string(leg.PositionIntent), Bid: leg.Bid, Ask: leg.Ask,
 			Multiplier: int(leg.Contract.Multiplier),
 		})
-		opportunity.Delta += leg.Greeks.Delta * float64(leg.Ratio)
-		opportunity.Gamma += leg.Greeks.Gamma * float64(leg.Ratio)
-		opportunity.Theta += leg.Greeks.Theta * float64(leg.Ratio)
-		opportunity.Vega += leg.Greeks.Vega * float64(leg.Ratio)
+		sign := 1.0
+		if leg.Side == domain.OrderSideSell {
+			sign = -1
+		}
+		units := sign * float64(leg.Ratio) * float64(leg.Contract.Multiplier)
+		opportunity.Delta += leg.Greeks.Delta * units
+		opportunity.Gamma += leg.Greeks.Gamma * units
+		opportunity.Theta += leg.Greeks.Theta * units
+		opportunity.Vega += leg.Greeks.Vega * units
 	}
 	return nil
 }

@@ -229,7 +229,7 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 		case run.ExecutionVersionID != opportunity.ExecutionVersionID || run.EvaluationScopeID != opportunity.EvaluationScopeID ||
 			run.ManifestID != opportunity.ManifestID || run.QualityResultID != opportunity.QualityResultID ||
 			run.DeploymentID != opportunity.DeploymentID || run.PromotionDecisionID != opportunity.PromotionDecisionID ||
-			run.RiskPolicyVersion != opportunity.RiskPolicyVersion:
+			run.CapitalBindingID != opportunity.CapitalBindingID || run.RiskPolicyVersion != opportunity.RiskPolicyVersion:
 			reason = "source_promotion_lineage_mismatch"
 		case run.StrategyID != opportunity.StrategyID:
 			reason = "source_strategy_mismatch"
@@ -686,9 +686,15 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 	}
 
 	var grossExposure float64
+	countedOptionGroups := make(map[uuid.UUID]struct{})
 	for _, position := range positions {
-		state.OpenPositionCount++
 		if position.AssetClass == domain.AssetClassOption {
+			if position.LegGroupID == nil || *position.LegGroupID == uuid.Nil {
+				state.OpenPositionCount++
+			} else if _, counted := countedOptionGroups[*position.LegGroupID]; !counted {
+				countedOptionGroups[*position.LegGroupID] = struct{}{}
+				state.OpenPositionCount++
+			}
 			multiplier := position.ContractMultiplier
 			if multiplier <= 0 {
 				multiplier = 100
@@ -711,6 +717,7 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 			}
 			continue
 		}
+		state.OpenPositionCount++
 		exposure := portfolioPositionExposure(position)
 		grossExposure += exposure
 		state.MarketExposure[position.MarketType] += exposure

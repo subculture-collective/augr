@@ -149,15 +149,20 @@ func (repo *PortfolioRiskRepo) LoadPortfolioRiskState(ctx context.Context, accou
 	}
 	var reconciliationID uuid.UUID
 	var reconciliationClean bool
-	err = repo.pool.QueryRow(ctx, `SELECT run.id,run.clean FROM venue_reconciliation_runs run
+	var reconciliationAt time.Time
+	err = repo.pool.QueryRow(ctx, `SELECT run.id,run.clean,run.created_at FROM venue_reconciliation_runs run
 		JOIN venue_local_snapshots snapshot ON snapshot.id=run.local_snapshot_id
 		WHERE snapshot.account_id=$1 AND snapshot.provider='alpaca'
-		ORDER BY run.created_at DESC,run.id DESC LIMIT 1`, repo.accountID).Scan(&reconciliationID, &reconciliationClean)
+		ORDER BY run.created_at DESC,run.id DESC LIMIT 1`, repo.accountID).Scan(&reconciliationID, &reconciliationClean, &reconciliationAt)
 	if err != nil {
 		return state, fmt.Errorf("postgres: load latest Alpaca reconciliation: %w", err)
 	}
 	if reconciliationID == uuid.Nil || !reconciliationClean {
 		return state, fmt.Errorf("postgres: latest Alpaca reconciliation is not clean")
+	}
+	policy, policyErr := portfolio.ReviewedPortfolioRiskPolicyV1()
+	if policyErr != nil || reconciliationAt.After(asOf) || asOf.Sub(reconciliationAt) > policy.MaxReconciliationAge() {
+		return state, fmt.Errorf("postgres: latest Alpaca reconciliation is stale")
 	}
 	state.ReconciliationID = reconciliationID.String()
 	rows, err := repo.pool.Query(ctx, `SELECT upper(opportunity.ticker),sum(decision.reserved_risk_usd)::double precision

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReviewedPortfolioRiskPolicyIsStableAndPreservesEnvelope(t *testing.T) {
@@ -19,7 +20,7 @@ func TestReviewedPortfolioRiskPolicyIsStableAndPreservesEnvelope(t *testing.T) {
 		t.Fatal("reviewed portfolio risk policy is not deterministic")
 	}
 	if first.TargetGrossExposurePct != .35 || first.HardGrossExposurePct != .50 || first.CashReservePct != .20 ||
-		first.MaxNewSelectionsPerRun != 2 || first.MaxNewSelectionsPerDay != 5 || !strings.HasPrefix(first.Reference(), PortfolioRiskPolicySchemaV1+"@sha256:") {
+		first.MaxNewSelectionsPerRun != 2 || first.MaxNewSelectionsPerDay != 5 || first.MaxReconciliationAge() != 15*time.Minute || !strings.HasPrefix(first.Reference(), PortfolioRiskPolicySchemaV1+"@sha256:") {
 		t.Fatalf("reviewed policy = %+v reference=%s", first, first.Reference())
 	}
 }

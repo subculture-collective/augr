@@ -330,7 +330,7 @@ func TestBuildOpportunityBindsDefinedRiskOptionPackage(t *testing.T) {
 	if len(opportunity.OptionLegs) != 2 || opportunity.OptionLegs[0].ContractID != longID || opportunity.OptionLegs[1].ContractID != shortID || opportunity.OptionLegs[0].Sequence != 0 || opportunity.OptionLegs[1].Sequence != 1 {
 		t.Fatalf("option legs = %+v", opportunity.OptionLegs)
 	}
-	if math.Abs(opportunity.Delta-.95) > 1e-12 || math.Abs(opportunity.Gamma-.05) > 1e-12 || math.Abs(opportunity.Theta+.08) > 1e-12 || math.Abs(opportunity.Vega-.21) > 1e-12 {
+	if math.Abs(opportunity.Delta-15) > 1e-12 || math.Abs(opportunity.Gamma-1) > 1e-12 || math.Abs(opportunity.Theta+2) > 1e-12 || math.Abs(opportunity.Vega-3) > 1e-12 {
 		t.Fatalf("aggregate greeks = delta %v gamma %v theta %v vega %v", opportunity.Delta, opportunity.Gamma, opportunity.Theta, opportunity.Vega)
 	}
 }
