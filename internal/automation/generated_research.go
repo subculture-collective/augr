@@ -36,5 +36,5 @@ func (o *JobOrchestrator) registerGeneratedResearchJob() {
 			return fmt.Errorf("generated_research: %w", err)
 		}
 		return nil
-	}, "overnight_generate")
+	}, "generated_proposal")
 }

@@ -1254,7 +1254,35 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				}
 				var generatedResearch *generativestrategy.BatchService
 				var generatedEvaluation *generativestrategy.EvaluationBatchService
+				var generatedProposal *generativestrategy.ProposalBatchService
 				if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
+					generatedRepo := pgrepo.NewGenerativeStrategyRepo(db.Pool)
+					if deps.LLMProvider != nil && len(sourceCommit) == 40 && len(sourceTreeSHA256) == 64 {
+						family, constructErr := generativestrategy.ReviewedDailyStockFamily()
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct reviewed generated strategy family: %w", constructErr)
+						}
+						model := strings.TrimSpace(cfg.LLM.DeepThinkModel)
+						if model == "" {
+							model = strings.TrimSpace(cfg.LLM.QuickThinkModel)
+						}
+						modelSource, constructErr := generativestrategy.NewModelProposalSource(
+							generatedRepo, family, cfg.LLM.DefaultProvider, deps.LLMProvider, model, sourceCommit, sourceTreeSHA256,
+						)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated proposal source: %w", constructErr)
+						}
+						proposalService, constructErr := generativestrategy.NewProposalService(generatedRepo)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated proposal service: %w", constructErr)
+						}
+						generatedProposal, constructErr = generativestrategy.NewProposalBatchService(modelSource, proposalService)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated proposal batch: %w", constructErr)
+						}
+					} else {
+						logger.Warn("generated proposals unavailable: exact compiler provenance or LLM provider is not configured")
+					}
 					if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
 						capitalState, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
 						if constructErr != nil {
@@ -1272,7 +1300,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						if constructErr != nil {
 							return nil, nil, nil, fmt.Errorf("construct generated research executor: %w", constructErr)
 						}
-						generatedResearch, constructErr = generativestrategy.NewBatchService(pgrepo.NewGenerativeStrategyRepo(db.Pool), executor)
+						generatedResearch, constructErr = generativestrategy.NewBatchService(generatedRepo, executor)
 						if constructErr != nil {
 							return nil, nil, nil, fmt.Errorf("construct generated research batch: %w", constructErr)
 						}
@@ -1374,6 +1402,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						OvernightBacktestRuns:        overnightBacktestRunRepo,
 						GeneratedResearch:            generatedResearch,
 						GeneratedEvaluation:          generatedEvaluation,
+						GeneratedProposal:            generatedProposal,
 						PromotionEvaluation:          pgrepo.NewPromotionRepo(db.Pool),
 						PromotionAccountSource:       accountRepo,
 						PromotionProjectionSource:    projectionReader,

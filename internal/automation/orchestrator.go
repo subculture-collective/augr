@@ -252,6 +252,9 @@ type OrchestratorDeps struct {
 	GeneratedResearch      interface {
 		RunEligible(context.Context, uuid.UUID, uuid.UUID, int, time.Time) (generativestrategy.BatchSummary, error)
 	}
+	GeneratedProposal interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.ProposalBatchSummary, error)
+	}
 	GeneratedEvaluation interface {
 		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.EvaluationBatchSummary, error)
 	}
@@ -600,6 +603,7 @@ func (o *JobOrchestrator) RegisterAll() {
 	o.registerKalshiReconciliationJob()
 	o.registerReportJobs()
 	o.registerPortfolioAllocatorJobs()
+	o.registerGeneratedProposalJob()
 	o.registerGeneratedResearchJob()
 	o.registerGeneratedEvaluationJob()
 	o.registerPromotionEvaluationJob()

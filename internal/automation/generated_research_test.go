@@ -36,6 +36,9 @@ func TestGeneratedResearchRegistersAndRunsOnlyWithExactCapability(t *testing.T) 
 	if job == nil {
 		t.Fatal("generated research job was not registered")
 	}
+	if len(job.DependsOn) != 1 || job.DependsOn[0] != "generated_proposal" {
+		t.Fatalf("generated research dependencies = %v", job.DependsOn)
+	}
 	now := time.Date(2026, 9, 3, 12, 0, 0, 123456789, time.UTC)
 	orchestrator.now = func() time.Time { return now }
 	if err := job.Fn(context.Background()); err != nil {
