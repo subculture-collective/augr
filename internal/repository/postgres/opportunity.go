@@ -280,7 +280,7 @@ func hasScopedOpportunityLineage(value *domain.Opportunity) bool {
 func (r *OpportunityRepo) saveScoped(ctx context.Context, opportunity *domain.Opportunity) error {
 	if opportunity == nil || opportunity.AccountID != uuid.Nil && opportunity.AccountID != r.accountID || opportunity.ExecutionVersionID == uuid.Nil ||
 		opportunity.EvaluationScopeID == uuid.Nil || opportunity.ManifestID == uuid.Nil || opportunity.QualityResultID == uuid.Nil ||
-		opportunity.DeploymentID == uuid.Nil || opportunity.PromotionDecisionID == uuid.Nil || opportunity.RiskPolicyVersion == "" ||
+		opportunity.DeploymentID == uuid.Nil || opportunity.PromotionDecisionID == uuid.Nil || opportunity.CapitalBindingID == uuid.Nil || opportunity.RiskPolicyVersion == "" ||
 		opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
 		return fmt.Errorf("postgres: save scoped opportunity: complete promotion lineage is required")
 	}
@@ -305,10 +305,10 @@ func (r *OpportunityRepo) saveScoped(ctx context.Context, opportunity *domain.Op
 		JOIN strategy_deployments deployment ON deployment.id=$5 AND deployment.account_id=$1 AND deployment.capital_binding_id=scope.capital_binding_id
 		JOIN promotion_retirement_decisions decision ON decision.id=$6 AND decision.deployment_id=deployment.id AND decision.outcome='approved' AND decision.next_state='shadow'
 		JOIN strategy_promotion_activations activation ON activation.deployment_id=deployment.id AND activation.strategy_id=$7 AND activation.runtime_version_id=$8 AND activation.action='activate'
-		WHERE risk.schema_name||'@sha256:'||risk.sha256=$9
+		WHERE risk.schema_name||'@sha256:'||risk.sha256=$9 AND scope.capital_binding_id=$10
 		AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions child WHERE child.prior_decision_id=decision.id)`,
 		r.accountID, opportunity.EvaluationScopeID, opportunity.ManifestID, opportunity.QualityResultID, opportunity.DeploymentID,
-		opportunity.PromotionDecisionID, opportunity.StrategyID, opportunity.ExecutionVersionID, opportunity.RiskPolicyVersion).Scan(&riskPolicyID)
+		opportunity.PromotionDecisionID, opportunity.StrategyID, opportunity.ExecutionVersionID, opportunity.RiskPolicyVersion, opportunity.CapitalBindingID).Scan(&riskPolicyID)
 	if err != nil {
 		return fmt.Errorf("postgres: save scoped opportunity: promotion graph does not reconstruct: %w", err)
 	}
@@ -316,16 +316,16 @@ func (r *OpportunityRepo) saveScoped(ctx context.Context, opportunity *domain.Op
 	row := tx.QueryRow(ctx, `INSERT INTO portfolio_opportunities(account_id,environment,origin_type,origin_id,strategy_id,pipeline_run_id,pipeline_run_trade_date,
 		market_type,ticker,side,prediction_side,signal,status,score,confidence,edge_pct,expected_return_pct,max_loss_pct,entry_price,liquidity_usd,market_cap_usd,
 		spread_pct,proposed_notional,selected_notional,reason,reject_reason,evidence,expires_at,dedupe_key,execution_version_id,evaluation_scope_id,manifest_id,
-		quality_result_id,deployment_id,promotion_decision_id,risk_policy_id,risk_policy_version,deployment_budget_usd,expected_loss_usd,max_loss_per_unit,
+		quality_result_id,deployment_id,promotion_decision_id,capital_binding_id,risk_policy_id,risk_policy_version,deployment_budget_usd,expected_loss_usd,max_loss_per_unit,
 		required_capital_per_unit,quote_observed_at,delta,gamma,theta,vega,intent_sha256,intent_bytes)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48,$49)
 		ON CONFLICT(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key) DO NOTHING
 		RETURNING id,created_at,updated_at`, r.accountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, opportunity.StrategyID, opportunity.PipelineRunID,
 		opportunity.PipelineRunTradeDate, opportunity.MarketType, opportunity.Ticker, opportunity.Side, opportunity.PredictionSide, opportunity.Signal, opportunity.Status,
 		opportunity.Score, opportunity.Confidence, opportunity.EdgePct, opportunity.ExpectedReturnPct, opportunity.MaxLossPct, opportunity.EntryPrice, opportunity.LiquidityUSD,
 		opportunity.MarketCapUSD, opportunity.SpreadPct, opportunity.ProposedNotional, opportunity.SelectedNotional, opportunity.Reason, opportunity.RejectReason, evidence,
 		opportunity.ExpiresAt, opportunity.DedupeKey, opportunity.ExecutionVersionID, opportunity.EvaluationScopeID, opportunity.ManifestID, opportunity.QualityResultID,
-		opportunity.DeploymentID, opportunity.PromotionDecisionID, riskPolicyID, opportunity.RiskPolicyVersion, opportunity.DeploymentBudgetUSD, opportunity.ExpectedLossUSD,
+		opportunity.DeploymentID, opportunity.PromotionDecisionID, opportunity.CapitalBindingID, riskPolicyID, opportunity.RiskPolicyVersion, opportunity.DeploymentBudgetUSD, opportunity.ExpectedLossUSD,
 		opportunity.MaxLossPerUnit, opportunity.RequiredCapitalUnit, opportunity.QuoteObservedAt, opportunity.Delta, opportunity.Gamma, opportunity.Theta, opportunity.Vega,
 		intent.Digest(), intent.CanonicalBytes())
 	if err = row.Scan(&opportunity.ID, &opportunity.CreatedAt, &opportunity.UpdatedAt); errors.Is(err, pgx.ErrNoRows) {
@@ -361,7 +361,7 @@ const opportunitySelectSQL = `SELECT id, account_id, environment, origin_type, o
 	expected_return_pct::double precision, max_loss_pct::double precision, entry_price::double precision, liquidity_usd::double precision,
 	market_cap_usd::double precision, spread_pct::double precision, proposed_notional::double precision, selected_notional::double precision,
 	reason, reject_reason, evidence, expires_at, created_at, updated_at, dedupe_key,
-	execution_version_id, evaluation_scope_id, manifest_id, quality_result_id, deployment_id, promotion_decision_id,
+	execution_version_id, evaluation_scope_id, manifest_id, quality_result_id, deployment_id, promotion_decision_id, capital_binding_id,
 	risk_policy_version, deployment_budget_usd::double precision, expected_loss_usd::double precision,
 	max_loss_per_unit::double precision, required_capital_per_unit::double precision, quote_observed_at,
 	delta::double precision, gamma::double precision, theta::double precision, vega::double precision
@@ -409,6 +409,7 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 		qualityResultID      *uuid.UUID
 		deploymentID         *uuid.UUID
 		promotionDecisionID  *uuid.UUID
+		capitalBindingID     *uuid.UUID
 		riskPolicyVersion    *string
 		deploymentBudgetUSD  *float64
 		expectedLossUSD      *float64
@@ -459,6 +460,7 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 		&qualityResultID,
 		&deploymentID,
 		&promotionDecisionID,
+		&capitalBindingID,
 		&riskPolicyVersion,
 		&deploymentBudgetUSD,
 		&expectedLossUSD,
@@ -506,6 +508,9 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 	}
 	if promotionDecisionID != nil {
 		opportunity.PromotionDecisionID = *promotionDecisionID
+	}
+	if capitalBindingID != nil {
+		opportunity.CapitalBindingID = *capitalBindingID
 	}
 	if riskPolicyVersion != nil {
 		opportunity.RiskPolicyVersion = *riskPolicyVersion

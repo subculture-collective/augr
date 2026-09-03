@@ -78,6 +78,9 @@ func TestBuildOpportunityBuyStock(t *testing.T) {
 	if opportunity.PredictionSide != "YES" {
 		t.Fatalf("prediction side = %q, want YES", opportunity.PredictionSide)
 	}
+	if opportunity.CapitalBindingID != run.CapitalBindingID {
+		t.Fatalf("capital binding = %s, want %s", opportunity.CapitalBindingID, run.CapitalBindingID)
+	}
 	if opportunity.MarketType != domain.MarketTypeStock {
 		t.Fatalf("market type = %q, want stock", opportunity.MarketType)
 	}

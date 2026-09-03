@@ -594,6 +594,7 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			quality_result_id UUID,
 			deployment_id UUID,
 			promotion_decision_id UUID,
+			capital_binding_id UUID,
 			risk_policy_id UUID,
 			risk_policy_version TEXT,
 			deployment_budget_usd NUMERIC,

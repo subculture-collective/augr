@@ -156,6 +156,7 @@ ALTER TABLE portfolio_opportunities
   ADD COLUMN quality_result_id UUID REFERENCES dataset_quality_results(id) ON DELETE RESTRICT,
   ADD COLUMN deployment_id UUID REFERENCES strategy_deployments(id) ON DELETE RESTRICT,
   ADD COLUMN promotion_decision_id UUID REFERENCES promotion_retirement_decisions(id) ON DELETE RESTRICT,
+  ADD COLUMN capital_binding_id UUID REFERENCES account_capital_policy_bindings(id) ON DELETE RESTRICT,
   ADD COLUMN risk_policy_id UUID REFERENCES portfolio_risk_policy_artifacts(id) ON DELETE RESTRICT,
   ADD COLUMN risk_policy_version TEXT,
   ADD COLUMN deployment_budget_usd NUMERIC(20,8),
@@ -168,10 +169,46 @@ ALTER TABLE portfolio_opportunities
   ADD COLUMN intent_bytes BYTEA,
   ADD CONSTRAINT portfolio_opportunity_promotion_lineage CHECK(
     (execution_version_id IS NULL AND evaluation_scope_id IS NULL AND manifest_id IS NULL AND quality_result_id IS NULL AND
-     deployment_id IS NULL AND promotion_decision_id IS NULL AND risk_policy_id IS NULL AND risk_policy_version IS NULL AND intent_sha256 IS NULL AND intent_bytes IS NULL) OR
+     deployment_id IS NULL AND promotion_decision_id IS NULL AND capital_binding_id IS NULL AND risk_policy_id IS NULL AND risk_policy_version IS NULL AND intent_sha256 IS NULL AND intent_bytes IS NULL) OR
     (execution_version_id IS NOT NULL AND evaluation_scope_id IS NOT NULL AND manifest_id IS NOT NULL AND quality_result_id IS NOT NULL AND
-     deployment_id IS NOT NULL AND promotion_decision_id IS NOT NULL AND risk_policy_id IS NOT NULL AND risk_policy_version IS NOT NULL AND intent_sha256 IS NOT NULL AND intent_bytes IS NOT NULL)),
+     deployment_id IS NOT NULL AND promotion_decision_id IS NOT NULL AND capital_binding_id IS NOT NULL AND risk_policy_id IS NOT NULL AND risk_policy_version IS NOT NULL AND intent_sha256 IS NOT NULL AND intent_bytes IS NOT NULL)),
   ADD CONSTRAINT portfolio_opportunity_intent_hash CHECK(intent_sha256 IS NULL OR intent_sha256=encode(digest(intent_bytes,'sha256'),'hex'));
+
+CREATE FUNCTION validate_portfolio_opportunity_promotion_lineage() RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.execution_version_id IS NULL THEN RETURN NEW; END IF;
+  PERFORM 1
+  FROM pipeline_runs run
+  JOIN paper_evaluation_scopes scope ON scope.id=NEW.evaluation_scope_id
+    AND scope.account_id=NEW.account_id AND scope.capital_binding_id=NEW.capital_binding_id
+  JOIN dataset_manifests manifest ON manifest.id=NEW.manifest_id AND manifest.sha256=scope.manifest_sha256
+  JOIN dataset_quality_results quality ON quality.id=NEW.quality_result_id
+    AND quality.manifest_id=manifest.id AND quality.sha256=scope.quality_sha256 AND NOT quality.quarantined
+  JOIN strategy_deployments deployment ON deployment.id=NEW.deployment_id
+    AND deployment.version_id=NEW.execution_version_id AND deployment.account_id=NEW.account_id
+    AND deployment.capital_binding_id=NEW.capital_binding_id
+  JOIN promotion_retirement_decisions decision ON decision.id=NEW.promotion_decision_id
+    AND decision.deployment_id=deployment.id AND decision.outcome='approved' AND decision.next_state='shadow'
+  JOIN strategy_promotion_activations activation ON activation.deployment_id=deployment.id
+    AND activation.strategy_id=NEW.strategy_id AND activation.runtime_version_id=NEW.execution_version_id
+    AND activation.action='activate'
+  JOIN portfolio_risk_policy_artifacts risk ON risk.id=NEW.risk_policy_id
+    AND risk.schema_name||'@sha256:'||risk.sha256=NEW.risk_policy_version
+  WHERE run.id=NEW.pipeline_run_id AND run.trade_date=NEW.pipeline_run_trade_date
+    AND run.account_id=NEW.account_id AND run.environment=NEW.environment
+    AND run.origin_type=NEW.origin_type AND run.origin_id=NEW.origin_id
+    AND run.strategy_id=NEW.strategy_id AND run.execution_version_id=NEW.execution_version_id
+    AND run.evaluation_scope_id=NEW.evaluation_scope_id AND run.manifest_id=NEW.manifest_id
+    AND run.quality_result_id=NEW.quality_result_id AND run.deployment_id=NEW.deployment_id
+    AND run.promotion_decision_id=NEW.promotion_decision_id AND run.capital_binding_id=NEW.capital_binding_id
+    AND run.risk_policy_version=NEW.risk_policy_version
+    AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions child WHERE child.prior_decision_id=decision.id)
+    AND NOT EXISTS(SELECT 1 FROM strategy_promotion_activations child WHERE child.prior_activation_id=activation.id);
+  IF NOT FOUND THEN RAISE EXCEPTION 'portfolio opportunity promotion graph does not reconstruct'; END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_portfolio_opportunity_promotion_lineage BEFORE INSERT ON portfolio_opportunities
+  FOR EACH ROW EXECUTE FUNCTION validate_portfolio_opportunity_promotion_lineage();
 
 CREATE TABLE portfolio_opportunity_option_legs (
   opportunity_id UUID NOT NULL REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT,
@@ -229,7 +266,7 @@ BEGIN
   IF OLD.intent_sha256 IS NOT NULL AND (NEW.intent_sha256<>OLD.intent_sha256 OR NEW.intent_bytes<>OLD.intent_bytes OR
     NEW.execution_version_id<>OLD.execution_version_id OR NEW.evaluation_scope_id<>OLD.evaluation_scope_id OR
     NEW.manifest_id<>OLD.manifest_id OR NEW.quality_result_id<>OLD.quality_result_id OR NEW.deployment_id<>OLD.deployment_id OR
-    NEW.promotion_decision_id<>OLD.promotion_decision_id OR NEW.risk_policy_id<>OLD.risk_policy_id) THEN
+    NEW.promotion_decision_id<>OLD.promotion_decision_id OR NEW.capital_binding_id<>OLD.capital_binding_id OR NEW.risk_policy_id<>OLD.risk_policy_id) THEN
     RAISE EXCEPTION 'portfolio opportunity execution intent is immutable';
   END IF;
   RETURN NEW;

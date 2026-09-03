@@ -37,6 +37,7 @@ type Opportunity struct {
 	QualityResultID      uuid.UUID              `json:"quality_result_id,omitempty"`
 	DeploymentID         uuid.UUID              `json:"deployment_id,omitempty"`
 	PromotionDecisionID  uuid.UUID              `json:"promotion_decision_id,omitempty"`
+	CapitalBindingID     uuid.UUID              `json:"capital_binding_id,omitempty"`
 	RiskPolicyVersion    string                 `json:"risk_policy_version,omitempty"`
 	DeploymentBudgetUSD  float64                `json:"deployment_budget_usd"`
 	MarketType           MarketType             `json:"market_type"`

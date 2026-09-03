@@ -164,6 +164,7 @@ func bindPromotedOpportunityLineage(opportunity *domain.Opportunity, strategy do
 	opportunity.QualityResultID = lifecycle.QualityResultID
 	opportunity.DeploymentID = lifecycle.DeploymentID
 	opportunity.PromotionDecisionID = lifecycle.PromotionDecisionID
+	opportunity.CapitalBindingID = lifecycle.CapitalBindingID
 	opportunity.RiskPolicyVersion = lifecycle.RiskPolicyVersion
 	opportunity.DeploymentBudgetUSD = lifecycle.DeploymentBudgetUSD
 	return nil
