@@ -50,6 +50,8 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	predictionexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/prediction"
+	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
+	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/integration/redditlimit"
 	kalshidiscovery "github.com/PatrickFanella/get-rich-quick/internal/kalshidiscovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
@@ -376,19 +378,12 @@ func (t *runtimeTeardown) Stop() {
 
 func newRuntimeKalshiProjectionRepo(ctx context.Context, cfg config.KalshiConfig, generalDatabaseURL string, logger *slog.Logger) (repository.ProjectionRepository, func()) {
 	databaseURL := strings.TrimSpace(cfg.ProjectionDatabaseURL)
-	keyID := strings.TrimSpace(cfg.ProjectionKeyID)
-	secretB64 := strings.TrimSpace(cfg.ProjectionSecretB64)
-	if databaseURL == "" || keyID == "" || secretB64 == "" {
+	attestor, configured := runtimeProjectionAttestor(cfg)
+	if databaseURL == "" || !configured {
 		return nil, func() {}
 	}
 	if databaseURL == strings.TrimSpace(generalDatabaseURL) {
 		logger.Warn("automation: Kalshi projection database URL matches general DATABASE_URL; marking disabled")
-		return nil, func() {}
-	}
-
-	secret, err := base64.StdEncoding.DecodeString(secretB64)
-	if err != nil || len(secret) != 32 {
-		logger.Warn("automation: invalid Kalshi projection attestation secret; marking disabled")
 		return nil, func() {}
 	}
 
@@ -397,7 +392,20 @@ func newRuntimeKalshiProjectionRepo(ctx context.Context, cfg config.KalshiConfig
 		logger.Warn("automation: failed to connect to Kalshi projection-writer database; marking disabled", slog.Any("error", err))
 		return nil, func() {}
 	}
-	return pgrepo.NewProjectionRepo(db.Pool, pgrepo.ProjectionCheckpointAttestor{KeyID: keyID, Secret: secret}), db.Close
+	return pgrepo.NewProjectionRepo(db.Pool, attestor), db.Close
+}
+
+func runtimeProjectionAttestor(cfg config.KalshiConfig) (pgrepo.ProjectionCheckpointAttestor, bool) {
+	keyID := strings.TrimSpace(cfg.ProjectionKeyID)
+	secretB64 := strings.TrimSpace(cfg.ProjectionSecretB64)
+	if keyID == "" || secretB64 == "" {
+		return pgrepo.ProjectionCheckpointAttestor{}, false
+	}
+	secret, err := base64.StdEncoding.DecodeString(secretB64)
+	if err != nil || len(secret) != 32 {
+		return pgrepo.ProjectionCheckpointAttestor{}, false
+	}
+	return pgrepo.ProjectionCheckpointAttestor{KeyID: keyID, Secret: secret}, true
 }
 
 func runtimeOpenAIProvider(cfg llm.OpenAIProviderConfig) (llm.Provider, error) {
@@ -1243,6 +1251,33 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				if alpacaAdapter != nil {
 					portfolioRiskRepo = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID, alpacaAdapter)
 				}
+				var generatedResearch *generativestrategy.BatchService
+				if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
+					if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
+						capitalState, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated research capital source: %w", constructErr)
+						}
+						loader, constructErr := pgrepo.NewGeneratedExperimentEvidenceLoader(db.Pool, capitalState)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated research evidence loader: %w", constructErr)
+						}
+						runner, constructErr := experimentrun.NewRunner(loader, pgrepo.NewExperimentRunRepo(db.Pool))
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated research runner: %w", constructErr)
+						}
+						executor, constructErr := generativestrategy.NewExecutor(runner)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated research executor: %w", constructErr)
+						}
+						generatedResearch, constructErr = generativestrategy.NewBatchService(pgrepo.NewGenerativeStrategyRepo(db.Pool), executor)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated research batch: %w", constructErr)
+						}
+					} else {
+						logger.Warn("generated research unavailable: projection attestation is not configured")
+					}
+				}
 				var orch *automation.JobOrchestrator
 				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 					optionSettlementState := &durableOptionSettlementState{
@@ -1323,6 +1358,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						BacktestRunRepo:              backtestRunRepo,
 						DiscoveryRunRepo:             discoveryRunRepo,
 						OvernightBacktestRuns:        overnightBacktestRunRepo,
+						GeneratedResearch:            generatedResearch,
 						PromotionEvaluation:          pgrepo.NewPromotionRepo(db.Pool),
 						PromotionAccountSource:       accountRepo,
 						PromotionProjectionSource:    projectionReader,

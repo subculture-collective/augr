@@ -1212,6 +1212,24 @@ func TestNewRuntimeKalshiProjectionRepoRejectsGeneralDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestRuntimeProjectionAttestorRequiresCompleteDecodedSecret(t *testing.T) {
+	valid := config.KalshiConfig{ProjectionKeyID: " canonical-key ", ProjectionSecretB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+	attestor, configured := runtimeProjectionAttestor(valid)
+	if !configured || attestor.KeyID != "canonical-key" || len(attestor.Secret) != 32 {
+		t.Fatalf("runtimeProjectionAttestor(valid) = %+v/%v", attestor, configured)
+	}
+	for _, invalid := range []config.KalshiConfig{
+		{},
+		{ProjectionKeyID: "key"},
+		{ProjectionSecretB64: valid.ProjectionSecretB64},
+		{ProjectionKeyID: "key", ProjectionSecretB64: "invalid"},
+	} {
+		if got, ok := runtimeProjectionAttestor(invalid); ok || got.KeyID != "" || len(got.Secret) != 0 {
+			t.Fatalf("runtimeProjectionAttestor(invalid) = %+v/%v", got, ok)
+		}
+	}
+}
+
 func TestNewRuntimeKalshiClientsShareGovernorAndSeparateLabels(t *testing.T) {
 	t.Parallel()
 
