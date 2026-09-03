@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,9 +83,11 @@ type optionSnapshot struct {
 }
 
 type optionTrade struct {
-	Price float64 `json:"p"`
-	Size  float64 `json:"s"`
-	Time  string  `json:"t"`
+	ID       int64   `json:"i"`
+	Price    float64 `json:"p"`
+	Size     float64 `json:"s"`
+	Time     string  `json:"t"`
+	Exchange string  `json:"x"`
 }
 
 type optionQuote struct {
@@ -264,6 +267,11 @@ type barsResponse struct {
 	NextPageToken string                 `json:"next_page_token"`
 }
 
+type tradesResponse struct {
+	Trades        map[string][]optionTrade `json:"trades"`
+	NextPageToken string                   `json:"next_page_token"`
+}
+
 type optionBar struct {
 	Timestamp string  `json:"t"`
 	Open      float64 `json:"o"`
@@ -386,6 +394,82 @@ func (p *OptionsDataProvider) GetOptionsOHLCVWithReceipt(
 	}
 
 	return allBars, receipt, nil
+}
+
+// GetOptionsTradesWithReceipt returns exact historical trades for one OCC
+// symbol and is complete only after a terminal provider page.
+func (p *OptionsDataProvider) GetOptionsTradesWithReceipt(ctx context.Context, occSymbol string, from, to time.Time, feed string) ([]data.OptionTradeObservation, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw"}
+	if p == nil {
+		return nil, receipt, fmt.Errorf("alpaca/options: provider is nil")
+	}
+	occSymbol = domain.AlpacaSymbol(strings.TrimSpace(occSymbol))
+	if _, err := domain.ParseOCC(occSymbol); err != nil {
+		return nil, receipt, fmt.Errorf("alpaca/options: invalid OCC symbol: %w", err)
+	}
+	if from.After(to) {
+		return nil, receipt, fmt.Errorf("alpaca/options: trade range is invalid")
+	}
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed != "indicative" && feed != "opra" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported feed %q", feed)
+	}
+	receipt.Feed = feed
+	var values []data.OptionTradeObservation
+	var pageToken string
+	seenPageTokens := make(map[string]struct{})
+	seenTrades := make(map[string]struct{})
+	for {
+		params := url.Values{}
+		params.Set("symbols", occSymbol)
+		params.Set("start", from.UTC().Format(time.RFC3339Nano))
+		params.Set("end", to.UTC().Format(time.RFC3339Nano))
+		params.Set("feed", feed)
+		params.Set("limit", "1000")
+		if pageToken != "" {
+			params.Set("page_token", pageToken)
+		}
+		body, err := p.doGet(ctx, "/v1beta1/options/trades", params)
+		if err != nil {
+			return nil, receipt, fmt.Errorf("alpaca/options: trades request failed: %w", err)
+		}
+		receipt.Pages++
+		var response tradesResponse
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, receipt, fmt.Errorf("alpaca/options: unmarshal trades response: %w", err)
+		}
+		trades, ok := response.Trades[occSymbol]
+		if !ok {
+			trades, ok = response.Trades["O:"+occSymbol]
+		}
+		if !ok && len(response.Trades) != 0 {
+			return nil, receipt, fmt.Errorf("alpaca/options: trades response omitted requested symbol %s", occSymbol)
+		}
+		for _, trade := range trades {
+			at, err := parseAlpacaTime(trade.Time)
+			if err != nil || trade.ID <= 0 || trade.Price <= 0 || trade.Size <= 0 {
+				return nil, receipt, fmt.Errorf("alpaca/options: invalid trade for %s", occSymbol)
+			}
+			key := strconv.FormatInt(trade.ID, 10)
+			if _, duplicate := seenTrades[key]; duplicate {
+				return nil, receipt, fmt.Errorf("alpaca/options: duplicate trade for %s", occSymbol)
+			}
+			seenTrades[key] = struct{}{}
+			values = append(values, data.OptionTradeObservation{ProviderID: key, Price: trade.Price, Size: trade.Size, Timestamp: at, Exchange: trade.Exchange})
+		}
+		if response.NextPageToken == "" {
+			receipt.Entitled = true
+			receipt.PaginationComplete = true
+			break
+		}
+		if _, duplicate := seenPageTokens[response.NextPageToken]; duplicate {
+			return nil, receipt, fmt.Errorf("alpaca/options: repeated page token")
+		}
+		seenPageTokens[response.NextPageToken] = struct{}{}
+		pageToken = response.NextPageToken
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].Timestamp.Before(values[j].Timestamp) })
+	return values, receipt, nil
 }
 
 // ------------------------------------------------------------------

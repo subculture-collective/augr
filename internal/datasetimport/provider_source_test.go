@@ -41,6 +41,7 @@ func (stub stockProviderStub) GetOHLCVWithReceipt(_ context.Context, _ string, _
 type optionsProviderStub struct {
 	bars      []domain.OHLCV
 	snapshots []domain.OptionSnapshot
+	trades    []data.OptionTradeObservation
 	receipt   *data.HistoricalFetchReceipt
 }
 
@@ -53,6 +54,13 @@ func (stub optionsProviderStub) GetOptionsChainWithReceipt(_ context.Context, _ 
 		receipt = *stub.receipt
 	}
 	return stub.snapshots, receipt, nil
+}
+func (stub optionsProviderStub) GetOptionsTradesWithReceipt(_ context.Context, _ string, _, _ time.Time, feed string) ([]data.OptionTradeObservation, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true}
+	if stub.receipt != nil {
+		receipt = *stub.receipt
+	}
+	return stub.trades, receipt, nil
 }
 func (stub optionsProviderStub) GetOptionsOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return stub.bars, nil
@@ -176,5 +184,25 @@ func TestProviderSourceCapturesPointInTimeOptionContractAndSnapshot(t *testing.T
 		result.Payloads[1].Kind() != dataset.MarketPayloadOptionQuote || result.Payloads[2].Kind() != dataset.MarketPayloadOptionTrade ||
 		result.Payloads[3].Kind() != dataset.MarketPayloadOptionSnapshot {
 		t.Fatalf("payloads = %#v, want contract, quote, trade, and snapshot", result.Payloads)
+	}
+}
+
+func TestProviderSourceCapturesHistoricalOptionTrades(t *testing.T) {
+	at := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
+	resolver := resolverStub{stockID: uuid.New(), optionID: uuid.New()}
+	source := &ProviderSource{
+		Mode:        ModeOptionTrades,
+		Options:     optionsProviderStub{trades: []data.OptionTradeObservation{{ProviderID: "42", Price: 5.1, Size: 2, Timestamp: at, Exchange: "C"}}},
+		Instruments: resolver, OptionSymbols: []string{"AAPL260116C00150000"}, Clock: func() time.Time { return at.Add(time.Minute) },
+	}
+	result, err := source.FetchMarketPayloads(context.Background(), dataset.MarketImportRequest{
+		Provider: "alpaca", Feed: "opra", Timeframe: "trade", AdjustmentPolicy: "raw",
+		From: at, To: at.Add(time.Second), DecisionCutoff: at.Add(time.Minute), Universe: []string{"AAPL"},
+	})
+	if err != nil {
+		t.Fatalf("FetchMarketPayloads() error = %v", err)
+	}
+	if len(result.Payloads) != 1 || result.Payloads[0].Kind() != dataset.MarketPayloadOptionTrade {
+		t.Fatalf("payloads = %#v, want one option trade", result.Payloads)
 	}
 }

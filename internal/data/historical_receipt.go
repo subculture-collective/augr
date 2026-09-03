@@ -35,3 +35,17 @@ type VerifiedOptionsHistoricalProvider interface {
 type VerifiedOptionsSnapshotProvider interface {
 	GetOptionsChainWithReceipt(context.Context, string, time.Time, domain.OptionType, string) ([]domain.OptionSnapshot, HistoricalFetchReceipt, error)
 }
+
+type OptionTradeObservation struct {
+	ProviderID string
+	Price      float64
+	Size       float64
+	Timestamp  time.Time
+	Exchange   string
+}
+
+// VerifiedOptionsTradeProvider returns historical trades with explicit
+// entitlement and pagination provenance.
+type VerifiedOptionsTradeProvider interface {
+	GetOptionsTradesWithReceipt(context.Context, string, time.Time, time.Time, string) ([]OptionTradeObservation, HistoricalFetchReceipt, error)
+}

@@ -24,6 +24,7 @@ type Mode string
 const (
 	ModeStockBars           Mode = "stock_bars"
 	ModeOptionBars          Mode = "option_bars"
+	ModeOptionTrades        Mode = "option_trades"
 	ModeOptionChainSnapshot Mode = "option_chain_snapshot"
 )
 
@@ -56,6 +57,15 @@ type fetchedSnapshot struct {
 	receipt      data.HistoricalFetchReceipt
 }
 
+type fetchedTrades struct {
+	symbol       string
+	underlying   string
+	instrumentID uuid.UUID
+	underlyingID uuid.UUID
+	trades       []data.OptionTradeObservation
+	receipt      data.HistoricalFetchReceipt
+}
+
 func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request dataset.MarketImportRequest) (dataset.MarketImportSourceResult, error) {
 	if source == nil || source.Instruments == nil || source.Clock == nil {
 		return dataset.MarketImportSourceResult{}, fmt.Errorf("provider market import source is incomplete")
@@ -66,6 +76,7 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 	}
 	var fetched []fetchedBars
 	var snapshots []fetchedSnapshot
+	var tradeSets []fetchedTrades
 	switch source.Mode {
 	case ModeStockBars:
 		timeframe, err := parseTimeframe(request.Timeframe)
@@ -139,6 +150,33 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			fetched = append(fetched, fetchedBars{
 				symbol: symbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, bars: bars, receipt: receipt,
 			})
+		}
+	case ModeOptionTrades:
+		if request.Timeframe != "trade" || request.AdjustmentPolicy != "raw" || source.Options == nil || len(source.OptionSymbols) == 0 {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("option trades require timeframe trade, raw adjustment policy, provider, and explicit OCC symbols")
+		}
+		verified, ok := source.Options.(data.VerifiedOptionsTradeProvider)
+		if !ok {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot prove trade entitlement and pagination")
+		}
+		optionSymbols := append([]string(nil), source.OptionSymbols...)
+		sort.Strings(optionSymbols)
+		for index, symbol := range optionSymbols {
+			if index > 0 && symbol == optionSymbols[index-1] {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("OCC symbol %s is duplicated", symbol)
+			}
+			contract, resolved, underlying, err := source.resolveOption(ctx, request, symbol, resolveAt)
+			if err != nil {
+				return dataset.MarketImportSourceResult{}, err
+			}
+			trades, receipt, err := verified.GetOptionsTradesWithReceipt(ctx, symbol, request.From, request.To, request.Feed)
+			if err != nil {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("fetch option trades for %s: %w", symbol, err)
+			}
+			if len(trades) == 0 {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider returned no option trades for %s", symbol)
+			}
+			tradeSets = append(tradeSets, fetchedTrades{symbol: contract.OCCSymbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, trades: trades, receipt: receipt})
 		}
 	case ModeOptionChainSnapshot:
 		if request.Timeframe != "snapshot" || request.AdjustmentPolicy != "raw" {
@@ -283,9 +321,57 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		}
 		payloads = append(payloads, snapshotPayload)
 	}
+	for _, result := range tradeSets {
+		if err := validateReceipt(result.symbol, result.receipt, request); err != nil {
+			return dataset.MarketImportSourceResult{}, err
+		}
+		for _, trade := range result.trades {
+			effectiveAt := trade.Timestamp.UTC().Truncate(time.Microsecond)
+			providerTradeID, idErr := strconv.ParseInt(trade.ProviderID, 10, 64)
+			if idErr != nil || providerTradeID <= 0 {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("option trade %s lacks canonical provider identity", result.symbol)
+			}
+			if effectiveAt.Before(request.From) || effectiveAt.After(request.To) {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("option trade %s escapes requested interval", result.symbol)
+			}
+			payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
+				Kind: dataset.MarketPayloadOptionTrade, InstrumentID: result.instrumentID, UnderlyingInstrumentID: result.underlyingID,
+				Provider: request.Provider, Feed: request.Feed, Symbol: result.symbol, UnderlyingSymbol: result.underlying,
+				Timeframe: request.Timeframe, AdjustmentPolicy: request.AdjustmentPolicy, EffectiveAt: effectiveAt,
+				ObservedAt: observedAt, AvailableAt: observedAt, Revision: "trade_" + trade.ProviderID,
+				Trade: &dataset.TradePayload{Price: canonicalFloat(trade.Price), Size: canonicalFloat(trade.Size), Exchange: trade.Exchange},
+			})
+			if err != nil {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option trade %s at %s: %w", result.symbol, effectiveAt, err)
+			}
+			payloads = append(payloads, payload)
+		}
+	}
 	return dataset.MarketImportSourceResult{
 		Origin: dataset.MarketImportOriginProviderAPI, Entitled: true, PaginationComplete: true, Payloads: payloads,
 	}, nil
+}
+
+func (source *ProviderSource) resolveOption(ctx context.Context, request dataset.MarketImportRequest, symbol string, resolveAt time.Time) (*domain.OptionContract, *instrument.Instrument, *instrument.Instrument, error) {
+	contract, err := domain.ParseOCC(symbol)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse OCC symbol %s: %w", symbol, err)
+	}
+	if !contains(request.Universe, contract.Underlying) {
+		return nil, nil, nil, fmt.Errorf("option %s escapes requested underlying universe", symbol)
+	}
+	resolved, err := source.Instruments.ResolveAlias(ctx, request.Provider, instrument.AliasOCC, symbol, resolveAt)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve option %s: %w", symbol, err)
+	}
+	underlying, err := source.Instruments.ResolveAlias(ctx, request.Provider, instrument.AliasTicker, contract.Underlying, resolveAt)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("resolve option underlying %s: %w", contract.Underlying, err)
+	}
+	if resolved.UnderlyingID == nil || *resolved.UnderlyingID != underlying.ID {
+		return nil, nil, nil, fmt.Errorf("option %s canonical underlying binding does not reconstruct", symbol)
+	}
+	return contract, resolved, underlying, nil
 }
 
 func validateReceipt(symbol string, receipt data.HistoricalFetchReceipt, request dataset.MarketImportRequest) error {

@@ -259,6 +259,38 @@ func TestGetOptionsOHLCVEmptySymbol(t *testing.T) {
 	}
 }
 
+func TestGetOptionsTradesWithReceipt(t *testing.T) {
+	t.Parallel()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.URL.Path != "/v1beta1/options/trades" || r.URL.Query().Get("feed") != "opra" || r.URL.Query().Get("symbols") != "AAPL241220C00150000" {
+			t.Errorf("unexpected request %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		response := tradesResponse{Trades: map[string][]optionTrade{"AAPL241220C00150000": {{ID: 41, Price: 5.1, Size: 2, Time: "2024-01-02T15:30:00.123456789Z", Exchange: "C"}}}}
+		if requestCount == 1 {
+			response.NextPageToken = "page-2"
+		} else {
+			response.Trades["AAPL241220C00150000"][0].ID = 42
+			response.Trades["AAPL241220C00150000"][0].Time = "2024-01-02T15:30:01Z"
+		}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	t.Cleanup(server.Close)
+	provider := NewOptionsDataProvider("key", "secret", nil)
+	provider.SetBaseURL(server.URL)
+	trades, receipt, err := provider.GetOptionsTradesWithReceipt(context.Background(), "AAPL241220C00150000", time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 3, 0, 0, 0, 0, time.UTC), "opra")
+	if err != nil {
+		t.Fatalf("GetOptionsTradesWithReceipt() error = %v", err)
+	}
+	if len(trades) != 2 {
+		t.Fatalf("trades = %d, want 2", len(trades))
+	}
+	if receipt.Pages != 2 || !receipt.Entitled || !receipt.PaginationComplete || trades[0].Exchange != "C" {
+		t.Fatalf("receipt/trade = %+v/%+v", receipt, trades[0])
+	}
+}
+
 func TestMapTimeframe(t *testing.T) {
 	t.Parallel()
 
