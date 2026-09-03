@@ -27,6 +27,9 @@ DROP TRIGGER trg_portfolio_opportunity_preserve_intent ON portfolio_opportunitie
 DROP FUNCTION preserve_portfolio_opportunity_intent();
 DROP TRIGGER IF EXISTS trg_portfolio_opportunity_promotion_lineage ON portfolio_opportunities;
 DROP FUNCTION IF EXISTS validate_portfolio_opportunity_promotion_lineage();
+DROP TRIGGER IF EXISTS trg_portfolio_option_package_parent ON portfolio_opportunities;
+DROP TRIGGER IF EXISTS trg_portfolio_option_package_leg ON portfolio_opportunity_option_legs;
+DROP FUNCTION IF EXISTS validate_portfolio_option_package();
 DROP TRIGGER IF EXISTS trg_allocation_decision_preserve_risk ON allocation_decisions;
 DROP FUNCTION IF EXISTS preserve_allocation_risk_evidence();
 DROP TABLE allocation_risk_caps;

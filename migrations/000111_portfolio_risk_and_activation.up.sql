@@ -224,6 +224,68 @@ CREATE TABLE portfolio_opportunity_option_legs (
   PRIMARY KEY(opportunity_id,sequence), UNIQUE(opportunity_id,contract_id), UNIQUE(opportunity_id,occ_symbol)
 );
 
+CREATE FUNCTION validate_portfolio_option_package() RETURNS TRIGGER AS $$
+DECLARE target UUID;
+BEGIN
+  target:=COALESCE((to_jsonb(NEW)->>'opportunity_id')::UUID,(to_jsonb(NEW)->>'id')::UUID);
+  PERFORM 1 FROM portfolio_opportunities opportunity
+  WHERE opportunity.id=target AND (opportunity.intent_sha256 IS NULL OR opportunity.market_type<>'options' OR (
+    opportunity.max_loss_per_unit>0 AND opportunity.required_capital_per_unit>0 AND opportunity.quote_observed_at IS NOT NULL
+    AND opportunity.ticker=upper(opportunity.ticker)
+    AND (SELECT count(*)=2 AND min(sequence)=0 AND max(sequence)=1
+      AND count(*) FILTER(WHERE side='buy' AND position_intent='buy_to_open')=1
+      AND count(*) FILTER(WHERE side='sell' AND position_intent='sell_to_open')=1
+      AND count(DISTINCT underlying)=1 AND min(underlying)=opportunity.ticker
+      AND count(DISTINCT expiry)=1 AND count(DISTINCT option_type)=1 AND count(DISTINCT strike)=2
+      FROM portfolio_opportunity_option_legs WHERE opportunity_id=opportunity.id)
+    AND NOT EXISTS(
+      SELECT 1 FROM portfolio_opportunity_option_legs leg WHERE leg.opportunity_id=opportunity.id AND NOT EXISTS(
+        SELECT 1 FROM dataset_manifest_payload_bindings binding
+        JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_contract'
+          AND payload.instrument_id=leg.contract_id AND payload.symbol=leg.occ_symbol AND payload.underlying_symbol=leg.underlying
+          AND payload.canonical_json#>>'{contract,option_type}'=leg.option_type
+          AND (payload.canonical_json#>>'{contract,strike}')::numeric=leg.strike
+          AND payload.canonical_json#>>'{contract,expiry}'=to_char(leg.expiry AT TIME ZONE 'UTC','YYYY-MM-DD')
+          AND (payload.canonical_json#>>'{contract,multiplier}')::numeric=leg.multiplier))
+    AND NOT EXISTS(
+      SELECT 1 FROM portfolio_opportunity_option_legs leg WHERE leg.opportunity_id=opportunity.id AND NOT EXISTS(
+        SELECT 1 FROM dataset_manifest_payload_bindings binding
+        JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot'
+          AND payload.instrument_id=leg.contract_id AND payload.symbol=leg.occ_symbol
+          AND payload.observed_at=opportunity.quote_observed_at
+          AND (payload.canonical_json#>>'{snapshot,quote,bid_price}')::numeric=leg.bid
+          AND (payload.canonical_json#>>'{snapshot,quote,ask_price}')::numeric=leg.ask))
+    AND opportunity.delta=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,delta}')::numeric)
+      FROM portfolio_opportunity_option_legs leg
+      JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding
+        JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot'
+          AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at
+          AND (payload.canonical_json#>>'{snapshot,quote,bid_price}')::numeric=leg.bid
+          AND (payload.canonical_json#>>'{snapshot,quote,ask_price}')::numeric=leg.ask LIMIT 1) payload ON true
+      WHERE leg.opportunity_id=opportunity.id)
+    AND opportunity.gamma=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,gamma}')::numeric)
+      FROM portfolio_opportunity_option_legs leg JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot' AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
+    AND opportunity.theta=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,theta}')::numeric)
+      FROM portfolio_opportunity_option_legs leg JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot' AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
+    AND opportunity.vega=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,vega}')::numeric)
+      FROM portfolio_opportunity_option_legs leg JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot' AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
+  ));
+  IF NOT FOUND THEN RAISE EXCEPTION 'portfolio option package does not reconstruct immutable manifest evidence'; END IF;
+  RETURN NULL;
+END; $$ LANGUAGE plpgsql;
+CREATE CONSTRAINT TRIGGER trg_portfolio_option_package_parent
+  AFTER INSERT ON portfolio_opportunities DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION validate_portfolio_option_package();
+CREATE CONSTRAINT TRIGGER trg_portfolio_option_package_leg
+  AFTER INSERT ON portfolio_opportunity_option_legs DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION validate_portfolio_option_package();
+
 ALTER TABLE allocation_decisions
   ADD COLUMN risk_policy_id UUID REFERENCES portfolio_risk_policy_artifacts(id) ON DELETE RESTRICT,
   ADD COLUMN risk_policy_version TEXT,
