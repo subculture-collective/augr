@@ -268,9 +268,11 @@ sys.exit(0 if body.get("status") == "ok" and body.get("db") == "ok" and body.get
 echo "=== Building production image for ${PROJECT_NAME} ==="
 VERIFY_BUILD_VERSION="$(git -C "$ROOT_DIR" describe --tags --always --dirty)"
 VERIFY_BUILD_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+VERIFY_BUILD_TREE_SHA256="$(git -C "$ROOT_DIR" ls-tree -r --full-tree HEAD | sha256sum | awk '{print $1}')"
 VERIFY_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 BUILD_VERSION="$VERIFY_BUILD_VERSION" \
 BUILD_COMMIT="$VERIFY_BUILD_COMMIT" \
+BUILD_TREE_SHA256="$VERIFY_BUILD_TREE_SHA256" \
 BUILD_TIME="$VERIFY_BUILD_TIME" \
 compose build app
 
@@ -281,6 +283,7 @@ if [ -z "$BUILT_APP_IMAGE_ID" ]; then
 fi
 BUILT_APP_REVISION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$BUILT_APP_IMAGE_ID")
 BUILT_APP_VERSION=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$BUILT_APP_IMAGE_ID")
+BUILT_APP_TREE_SHA256=$(docker image inspect --format '{{ index .Config.Labels "tv.subcult.augr.source-tree-sha256" }}' "$BUILT_APP_IMAGE_ID")
 BUILT_APP_CREATED=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.created" }}' "$BUILT_APP_IMAGE_ID")
 if [ "$BUILT_APP_REVISION" != "$VERIFY_BUILD_COMMIT" ]; then
     echo "built app revision label mismatch: got ${BUILT_APP_REVISION}, expected ${VERIFY_BUILD_COMMIT}" >&2
@@ -288,6 +291,10 @@ if [ "$BUILT_APP_REVISION" != "$VERIFY_BUILD_COMMIT" ]; then
 fi
 if [ "$BUILT_APP_VERSION" != "$VERIFY_BUILD_VERSION" ]; then
     echo "built app version label mismatch: got ${BUILT_APP_VERSION}, expected ${VERIFY_BUILD_VERSION}" >&2
+    exit 1
+fi
+if [ "$BUILT_APP_TREE_SHA256" != "$VERIFY_BUILD_TREE_SHA256" ]; then
+    echo "built app source-tree label mismatch: got ${BUILT_APP_TREE_SHA256}, expected ${VERIFY_BUILD_TREE_SHA256}" >&2
     exit 1
 fi
 if [ "$BUILT_APP_CREATED" != "$VERIFY_BUILD_TIME" ]; then

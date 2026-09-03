@@ -13,6 +13,8 @@ FROM golang:${GO_VERSION}-alpine AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG BUILD_VERSION=development
+ARG BUILD_COMMIT=unknown
+ARG BUILD_TREE_SHA256=unknown
 WORKDIR /src
 
 RUN apk add --no-cache ca-certificates
@@ -22,7 +24,7 @@ RUN go mod download
 
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${BUILD_VERSION}" -o /out/tradingagent ./cmd/tradingagent
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${BUILD_VERSION} -X main.sourceCommit=${BUILD_COMMIT} -X main.sourceTreeSHA256=${BUILD_TREE_SHA256}" -o /out/tradingagent ./cmd/tradingagent
 
 FROM alpine:${ALPINE_VERSION} AS production
 RUN addgroup -S app && \
@@ -38,12 +40,15 @@ RUN chmod 444 ./ca-certificates.crt
 ENV APP_ENV=production
 ARG BUILD_VERSION=development
 ARG BUILD_COMMIT=unknown
+ARG BUILD_TREE_SHA256=unknown
 ARG BUILD_TIME=unknown
 LABEL org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${BUILD_COMMIT}" \
+      tv.subcult.augr.source-tree-sha256="${BUILD_TREE_SHA256}" \
       org.opencontainers.image.created="${BUILD_TIME}"
 ENV APP_VERSION=${BUILD_VERSION}
 ENV APP_BUILD_COMMIT=${BUILD_COMMIT}
+ENV APP_BUILD_TREE_SHA256=${BUILD_TREE_SHA256}
 ENV APP_BUILD_TIME=${BUILD_TIME}
 ENV SSL_CERT_FILE=/app/ca-certificates.crt
 
