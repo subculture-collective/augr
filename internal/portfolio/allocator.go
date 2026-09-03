@@ -616,7 +616,10 @@ func sizeOptionsOpportunity(opp domain.Opportunity, positionRisk, remainingTarge
 		if perUnit == 0 || maximum <= 0 {
 			return
 		}
-		remaining := maximum - math.Abs(current)
+		remaining := maximum - current
+		if perUnit < 0 {
+			remaining = maximum + current
+		}
 		caps = append(caps, unitCap{name, remaining, math.Abs(perUnit), math.Floor(remaining / math.Abs(perUnit))})
 	}
 	greekCap("delta", state.Delta, opp.Delta, cfg.MaxAbsoluteDelta)
@@ -752,7 +755,7 @@ func toAllocationDecision(item scoredOpportunity) domain.AllocationDecision {
 		NotionalUSD:        item.notional,
 		Quantity:           0,
 		RiskPolicyVersion:  item.opp.RiskPolicyVersion,
-		ProposedQuantity:   item.quantity,
+		ProposedQuantity:   proposedQuantity(item.opp),
 		MaxLossPerUnit:     item.opp.MaxLossPerUnit,
 		ReservedRiskUSD:    item.quantity * item.opp.MaxLossPerUnit,
 		ReservedCapitalUSD: item.notional,
@@ -776,6 +779,20 @@ func toAllocationDecision(item scoredOpportunity) domain.AllocationDecision {
 		decision.StrategyID = &strategyID
 	}
 	return decision
+}
+
+func proposedQuantity(opportunity domain.Opportunity) float64 {
+	if opportunity.ProposedNotional <= 0 {
+		return 0
+	}
+	unit := opportunity.EntryPrice
+	if opportunity.MarketType == domain.MarketTypeOptions {
+		unit = opportunity.RequiredCapitalUnit
+	}
+	if unit <= 0 {
+		return 0
+	}
+	return math.Floor(opportunity.ProposedNotional / unit)
 }
 
 func clamp01(v float64) float64 {

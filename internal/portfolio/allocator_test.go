@@ -268,6 +268,7 @@ func TestAllocatorSizesDefinedRiskVerticalInWholeContracts(t *testing.T) {
 	quoteAt := now.Add(-time.Minute)
 	opp := strongOptionOpportunity(now, quoteAt)
 	opp.DeploymentBudgetUSD = 1250
+	opp.ProposedNotional = 2200
 	result := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{
 		Equity: 100000, BuyingPower: 100000, OptionsBuyingPower: 100000, AccountSnapshotID: uuid.New(), MarketExposure: map[domain.MarketType]float64{},
 	}, cfg)
@@ -275,8 +276,31 @@ func TestAllocatorSizesDefinedRiskVerticalInWholeContracts(t *testing.T) {
 		t.Fatalf("result = %+v", result)
 	}
 	decision := result.Decisions[0]
-	if decision.Quantity != 2 || decision.ReservedRiskUSD != 1000 || decision.ReservedCapitalUSD != 900 || decision.BindingConstraint != "deployment_budget" || decision.ExecutionRoute != "alpaca_mleg" {
+	if decision.ProposedQuantity != 4 || decision.Quantity != 2 || decision.ReservedRiskUSD != 1000 || decision.ReservedCapitalUSD != 900 || decision.BindingConstraint != "deployment_budget" || decision.ExecutionRoute != "alpaca_mleg" {
 		t.Fatalf("defined-risk decision = %+v", decision)
+	}
+}
+
+func TestAllocatorGreekCapsAllowRiskReducingOptionPackages(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	cfg := DefaultAllocatorConfig()
+	cfg.Now = func() time.Time { return now }
+	for name, values := range map[string]struct{ current, perUnit float64 }{
+		"reduce negative delta": {-490, 20},
+		"reduce positive delta": {490, -20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opp := strongOptionOpportunity(now, now)
+			opp.Delta = values.perUnit
+			result := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{
+				Equity: 100000, BuyingPower: 100000, OptionsBuyingPower: 100000, AccountSnapshotID: uuid.New(),
+				MarketExposure: map[domain.MarketType]float64{}, Delta: values.current,
+			}, cfg)
+			if result.Decisions[0].Action != domain.AllocationDecisionActionShadowSelected || containsReason(result.Decisions[0].Reasons, reasonGreekLimit) {
+				t.Fatalf("risk-reducing package rejected: %+v", result.Decisions[0])
+			}
+		})
 	}
 }
 
