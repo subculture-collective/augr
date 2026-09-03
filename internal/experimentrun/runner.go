@@ -345,13 +345,20 @@ func validatePlan(graph *EvidenceGraph, program *ProgramIdentity, plan *Plan, ma
 
 func preflightCapital(graph *EvidenceGraph, plan *Plan, steps []StepInput, materials map[string]ObservationMaterial) ([]*capital.Assessment, error) {
 	assessments := make([]*capital.Assessment, len(steps))
+	plannedPositions := make(map[uuid.UUID]decimal.Decimal)
 	for sequence, step := range steps {
 		if step.Action != ActionExecute {
 			continue
 		}
-		quantity := decimal.RequireFromString(step.Intent.Quantity)
+		signedQuantity := decimal.RequireFromString(step.Intent.Quantity)
 		if step.Intent.Side == "sell" {
-			quantity = quantity.Neg()
+			signedQuantity = signedQuantity.Neg()
+		}
+		currentQuantity := plannedPositions[step.Intent.InstrumentID]
+		increasingQuantity, direction := exposureIncreasingQuantity(currentQuantity, signedQuantity)
+		plannedPositions[step.Intent.InstrumentID] = currentQuantity.Add(signedQuantity)
+		if increasingQuantity.IsZero() {
+			continue
 		}
 		material := materials[observationKey(step)]
 		price, err := preflightPrice(step.Intent, material.Snapshot)
@@ -360,11 +367,7 @@ func preflightCapital(graph *EvidenceGraph, plan *Plan, steps []StepInput, mater
 		}
 		inst := graph.Instruments[step.Intent.InstrumentID]
 		contract := graph.VenueContracts[step.Intent.VenueContractID]
-		direction := capital.ExposureIncreaseLong
-		if quantity.IsNegative() {
-			direction = capital.ExposureIncreaseShort
-		}
-		proposedNotional, err := capitalAssessmentNotional(step, *inst, *contract, price, graph.CapitalPolicy.Scale())
+		proposedNotional, err := capitalAssessmentNotional(step, *inst, *contract, price, increasingQuantity, graph.CapitalPolicy.Scale())
 		if err != nil {
 			return nil, fmt.Errorf("experiment step %d capital notional: %w", sequence, err)
 		}
@@ -385,8 +388,26 @@ func preflightCapital(graph *EvidenceGraph, plan *Plan, steps []StepInput, mater
 	return assessments, nil
 }
 
-func capitalAssessmentNotional(step StepInput, inst instrument.Instrument, contract instrument.VenueContract, price decimal.Decimal, scale int32) (decimal.Decimal, error) {
-	executionNotional := decimal.RequireFromString(step.Intent.Quantity).Mul(price).Mul(contract.Multiplier).RoundCeil(scale)
+func exposureIncreasingQuantity(current, change decimal.Decimal) (decimal.Decimal, capital.ExposureDirection) {
+	next := current.Add(change)
+	switch {
+	case change.IsPositive() && next.IsPositive():
+		if current.IsPositive() {
+			return next.Sub(current), capital.ExposureIncreaseLong
+		}
+		return next, capital.ExposureIncreaseLong
+	case change.IsNegative() && next.IsNegative():
+		if current.IsNegative() {
+			return next.Sub(current).Abs(), capital.ExposureIncreaseShort
+		}
+		return next.Abs(), capital.ExposureIncreaseShort
+	default:
+		return decimal.Zero, capital.ExposureIncreaseLong
+	}
+}
+
+func capitalAssessmentNotional(step StepInput, inst instrument.Instrument, contract instrument.VenueContract, price, increasingQuantity decimal.Decimal, scale int32) (decimal.Decimal, error) {
+	executionNotional := increasingQuantity.Mul(price).Mul(contract.Multiplier).RoundCeil(scale)
 	if inst.AssetClass != instrument.AssetClassOption {
 		return executionNotional, nil
 	}

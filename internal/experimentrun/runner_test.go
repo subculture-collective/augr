@@ -120,6 +120,35 @@ func TestRunnerRetriesAfterAtomicCompletionFailure(t *testing.T) {
 	}
 }
 
+func TestExposureIncreasingQuantityDistinguishesClosesAndCrossings(t *testing.T) {
+	tests := []struct {
+		name      string
+		current   string
+		change    string
+		quantity  string
+		direction capital.ExposureDirection
+	}{
+		{name: "open long", current: "0", change: "10", quantity: "10", direction: capital.ExposureIncreaseLong},
+		{name: "add long", current: "10", change: "2", quantity: "2", direction: capital.ExposureIncreaseLong},
+		{name: "close long", current: "10", change: "-10", quantity: "0", direction: capital.ExposureIncreaseLong},
+		{name: "reduce long", current: "10", change: "-2", quantity: "0", direction: capital.ExposureIncreaseLong},
+		{name: "cross into short", current: "10", change: "-12", quantity: "2", direction: capital.ExposureIncreaseShort},
+		{name: "open short", current: "0", change: "-10", quantity: "10", direction: capital.ExposureIncreaseShort},
+		{name: "add short", current: "-10", change: "-2", quantity: "2", direction: capital.ExposureIncreaseShort},
+		{name: "close short", current: "-10", change: "10", quantity: "0", direction: capital.ExposureIncreaseLong},
+		{name: "reduce short", current: "-10", change: "2", quantity: "0", direction: capital.ExposureIncreaseLong},
+		{name: "cross into long", current: "-10", change: "12", quantity: "2", direction: capital.ExposureIncreaseLong},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			quantity, direction := exposureIncreasingQuantity(decimal.RequireFromString(testCase.current), decimal.RequireFromString(testCase.change))
+			if quantity.String() != testCase.quantity || direction != testCase.direction {
+				t.Fatalf("exposureIncreasingQuantity() = %s/%s, want %s/%s", quantity, direction, testCase.quantity, testCase.direction)
+			}
+		})
+	}
+}
+
 type runnerFixture struct {
 	start, end time.Time
 	graph      *EvidenceGraph
