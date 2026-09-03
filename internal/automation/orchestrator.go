@@ -220,7 +220,9 @@ type OrchestratorDeps struct {
 	}
 	PortfolioAllocatorMode    portfolio.AllocatorMode
 	PortfolioPaperProcessor   portfolio.PaperOrderProcessor
+	PortfolioOptionsProcessor portfolio.PaperOptionsOrderProcessor
 	PortfolioAccountBalance   PortfolioAccountBalanceSource
+	PortfolioAccountSnapshot  PortfolioAccountSnapshotSource
 	KalshiWatchedRepo         repository.KalshiWatchedMarketsRepository
 	KalshiMarketSnapshotsRepo repository.KalshiMarketSnapshotsRepository
 	KalshiDiscoveryRuns       repository.KalshiDiscoveryRunRepository // optional; nil = skip progress recording
@@ -239,8 +241,13 @@ type OrchestratorDeps struct {
 	BacktestRunRepo        repository.BacktestRunRepository    // optional; needed by report jobs
 	DiscoveryRunRepo       discovery.RunRepository             // required by stock discovery jobs
 	OvernightBacktestRuns  repository.OvernightBacktestRunRepository
-	JobTimeout             time.Duration
-	Logger                 *slog.Logger
+	PromotionActivation    interface {
+		ProjectEligibleActivations(context.Context, uuid.UUID, uuid.UUID, bool) (pgrepo.PromotionActivationBatch, error)
+	}
+	AutomaticShadowPromotion bool
+	DiscoveryScopeID         uuid.UUID
+	JobTimeout               time.Duration
+	Logger                   *slog.Logger
 }
 
 // RegisteredJob tracks a single automated job and its runtime state.
@@ -571,6 +578,26 @@ func (o *JobOrchestrator) RegisterAll() {
 	o.registerKalshiReconciliationJob()
 	o.registerReportJobs()
 	o.registerPortfolioAllocatorJobs()
+	o.registerPromotionActivationJob()
+}
+
+func (o *JobOrchestrator) registerPromotionActivationJob() {
+	if !o.deps.AutomaticShadowPromotion {
+		return
+	}
+	if o.deps.PromotionActivation == nil || o.deps.CanonicalAccountID == uuid.Nil || o.deps.DiscoveryScopeID == uuid.Nil {
+		o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: "promotion_activation", Reason: "automatic promotion requires canonical account, configured scope, and projector"})
+		return
+	}
+	o.Register("promotion_activation", "Project approved promotion heads into paper shadow schedules", scheduler.ScheduleSpec{
+		Type: scheduler.ScheduleTypeCron, Cron: "*/5 * * * *",
+	}, func(ctx context.Context) error {
+		summary, err := o.deps.PromotionActivation.ProjectEligibleActivations(ctx, o.deps.CanonicalAccountID, o.deps.DiscoveryScopeID, true)
+		o.SetLastSummary("promotion_activation", map[string]int{
+			"eligible": summary.Eligible, "activated": summary.Activated, "suspended": summary.Suspended, "noop": summary.Noop,
+		})
+		return err
+	})
 }
 
 // Start starts the cron engine with all registered jobs.

@@ -25,6 +25,7 @@ type Client struct {
 	apiKey     string
 	apiSecret  string
 	baseURL    string
+	paper      bool
 	httpClient *http.Client
 	logger     *slog.Logger
 }
@@ -53,6 +54,7 @@ func NewClient(apiKey, apiSecret string, isPaper bool, logger *slog.Logger) *Cli
 		apiKey:    strings.TrimSpace(apiKey),
 		apiSecret: strings.TrimSpace(apiSecret),
 		baseURL:   baseURL,
+		paper:     isPaper,
 		httpClient: &http.Client{
 			Timeout: defaultTimeout,
 		},
@@ -121,6 +123,11 @@ func (c *Client) SetTimeout(timeout time.Duration) {
 	}
 
 	c.httpClient.Timeout = timeout
+}
+
+// IsPaper reports whether this client is locked to Alpaca's paper endpoint.
+func (c *Client) IsPaper() bool {
+	return c != nil && c.paper
 }
 
 // Get issues a GET request and returns the raw response body.

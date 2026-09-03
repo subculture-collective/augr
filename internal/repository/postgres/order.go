@@ -524,7 +524,7 @@ func (r *OrderRepo) GetByAllocationOpportunity(ctx context.Context, opportunity 
 	if opportunity.ID == uuid.Nil || opportunity.AccountID != r.accountID || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil || opportunity.StrategyID == uuid.Nil {
 		return nil, fmt.Errorf("postgres: get allocation order: complete account-bound lineage is required")
 	}
-	order, err := scanOrder(r.pool.QueryRow(ctx, orderSelectSQL+` WHERE allocation_opportunity_id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND pipeline_run_id=$6 AND pipeline_run_trade_date=$7 AND strategy_id=$8`, opportunity.ID, r.accountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, opportunity.PipelineRunID, opportunity.PipelineRunTradeDate, opportunity.StrategyID))
+	order, err := scanOrder(r.pool.QueryRow(ctx, orderSelectSQL+` WHERE allocation_opportunity_id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND pipeline_run_id=$6 AND pipeline_run_trade_date=$7 AND strategy_id=$8 ORDER BY leg_group_id NULLS FIRST,ticker,id LIMIT 1`, opportunity.ID, r.accountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, opportunity.PipelineRunID, opportunity.PipelineRunTradeDate, opportunity.StrategyID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: get allocation order: %w", ErrNotFound)
 	}
@@ -532,6 +532,26 @@ func (r *OrderRepo) GetByAllocationOpportunity(ctx context.Context, opportunity 
 		return nil, fmt.Errorf("postgres: get allocation order: %w", err)
 	}
 	return order, nil
+}
+
+func (r *OrderRepo) ListByAllocationOpportunity(ctx context.Context, opportunity domain.Opportunity) ([]domain.Order, error) {
+	if opportunity.ID == uuid.Nil || opportunity.AccountID != r.accountID || opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil || opportunity.StrategyID == uuid.Nil {
+		return nil, fmt.Errorf("postgres: list allocation package orders: complete account-bound lineage is required")
+	}
+	rows, err := r.pool.Query(ctx, orderSelectSQL+` WHERE allocation_opportunity_id=$1 AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND pipeline_run_id=$6 AND pipeline_run_trade_date=$7 AND strategy_id=$8 ORDER BY leg_group_id NULLS FIRST,ticker,id`, opportunity.ID, r.accountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, opportunity.PipelineRunID, opportunity.PipelineRunTradeDate, opportunity.StrategyID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list allocation package orders: %w", err)
+	}
+	defer rows.Close()
+	orders := make([]domain.Order, 0, 2)
+	for rows.Next() {
+		order, scanErr := scanOrder(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("postgres: list allocation package orders: %w", scanErr)
+		}
+		orders = append(orders, *order)
+	}
+	return orders, rows.Err()
 }
 
 // List returns orders matching the provided filter with pagination.

@@ -28,6 +28,16 @@ func (s portfolioAllocatorBalanceStub) GetAccountBalance(context.Context) (execu
 	return s.balance, s.err
 }
 
+type portfolioAllocatorSnapshotStub struct{ snapshot portfolio.AccountSnapshot }
+
+func (s portfolioAllocatorSnapshotStub) CaptureAccountSnapshot(context.Context) (portfolio.AccountSnapshot, error) {
+	return s.snapshot, nil
+}
+
+func allocatorSnapshotSource() PortfolioAccountSnapshotSource {
+	return portfolioAllocatorSnapshotStub{snapshot: portfolio.AccountSnapshot{ID: uuid.New(), Equity: 100000, BuyingPower: 100000, OptionsBuyingPower: 100000}}
+}
+
 func paperAllocatorStateDeps() (repository.PositionRepository, PortfolioAccountBalanceSource) {
 	return newRecordingPositionRepo(), portfolioAllocatorBalanceStub{balance: execution.Balance{Currency: "USD", Cash: 100000, BuyingPower: 100000, Equity: 100000}}
 }
@@ -628,9 +638,10 @@ func TestPortfolioAllocatorJobPersistsShadowDecisions(t *testing.T) {
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	runRepo := persistedRunsForOpportunities(opportunityRepo.items)
 	orch := NewJobOrchestrator(OrchestratorDeps{
-		OpportunityRepo:        opportunityRepo,
-		AllocationDecisionRepo: decisionRepo,
-		RunRepo:                runRepo,
+		OpportunityRepo:          opportunityRepo,
+		AllocationDecisionRepo:   decisionRepo,
+		RunRepo:                  runRepo,
+		PortfolioAccountSnapshot: allocatorSnapshotSource(),
 	})
 	orch.registerPortfolioAllocatorJobs()
 	job, ok := orch.jobs["portfolio_allocator"]
@@ -666,7 +677,7 @@ func TestPortfolioAllocatorJobSecondShadowRunDoesNotRepeatSelectedOpportunity(t 
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), StrategyID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.01, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: 0.001, ProposedNotional: 2_000, Reason: "strong shadow opportunity", ExpiresAt: now.Add(24 * time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "aapl-shadow-1"}}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	runRepo := persistedRunsForOpportunities(opportunityRepo.items)
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo})
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo, PortfolioAccountSnapshot: allocatorSnapshotSource()})
 	orch.registerPortfolioAllocatorJobs()
 	job := orch.jobs["portfolio_allocator"]
 	if job == nil {
@@ -695,7 +706,7 @@ func TestPortfolioAllocatorJobUpdatesShadowStatuses(t *testing.T) {
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), StrategyID: uuid.New(), Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.01, LiquidityUSD: 5_000_000, MarketCapUSD: 10_000_000_000, SpreadPct: 0.001, ProposedNotional: 2_000, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "selected"}, {ID: uuid.New(), StrategyID: uuid.New(), Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "MSFT", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 0.1, EdgePct: 0.001, ExpectedReturnPct: 0.1, MaxLossPct: 0.01, LiquidityUSD: 1, MarketCapUSD: 1, SpreadPct: 0.2, ProposedNotional: 1, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "rejected"}}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	runRepo := persistedRunsForOpportunities(opportunityRepo.items)
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo})
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo, PortfolioAccountSnapshot: allocatorSnapshotSource()})
 	orch.registerPortfolioAllocatorJobs()
 	if err := orch.jobs["portfolio_allocator"].Fn(context.Background()); err != nil {
 		t.Fatalf("job run error = %v", err)
@@ -715,7 +726,7 @@ func TestPortfolioAllocatorJobExpiresDueBeforeAllocation(t *testing.T) {
 	opp := domain.Opportunity{ID: uuid.New(), StrategyID: uuid.New(), Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.01, LiquidityUSD: 1, MarketCapUSD: 1, SpreadPct: 0.001, ProposedNotional: 1, ExpiresAt: now.Add(-time.Minute), CreatedAt: now.Add(-time.Hour), DedupeKey: "expired-queued"}
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{opp}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo})
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, PortfolioAccountSnapshot: allocatorSnapshotSource()})
 	orch.registerPortfolioAllocatorJobs()
 	if err := orch.jobs["portfolio_allocator"].Fn(context.Background()); err != nil {
 		t.Fatalf("job run error = %v", err)
@@ -742,7 +753,7 @@ func TestPortfolioAllocatorJobLoadsCompleteSnapshot(t *testing.T) {
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: items}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	runRepo := persistedRunsForOpportunities(opportunityRepo.items)
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo})
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo, PortfolioAccountSnapshot: allocatorSnapshotSource()})
 	orch.registerPortfolioAllocatorJobs()
 	if err := orch.jobs["portfolio_allocator"].Fn(context.Background()); err != nil {
 		t.Fatalf("job run error = %v", err)
@@ -759,7 +770,7 @@ func TestPortfolioAllocatorJobReportsLifecycleCounts(t *testing.T) {
 	opportunityRepo := &portfolioAllocatorOpportunityRepo{items: []domain.Opportunity{{ID: uuid.New(), StrategyID: uuid.New(), Status: domain.OpportunityStatusQueued, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Confidence: 1, EdgePct: 0.05, ExpectedReturnPct: 0.1, MaxLossPct: 0.01, LiquidityUSD: 1, MarketCapUSD: 1, SpreadPct: 0.001, ProposedNotional: 1, ExpiresAt: now.Add(time.Hour), CreatedAt: now.Add(-time.Hour), DedupeKey: "queued"}}}
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	runRepo := persistedRunsForOpportunities(opportunityRepo.items)
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo})
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, RunRepo: runRepo, PortfolioAccountSnapshot: allocatorSnapshotSource()})
 	orch.registerPortfolioAllocatorJobs()
 	if err := orch.jobs["portfolio_allocator"].Fn(context.Background()); err != nil {
 		t.Fatalf("job run error = %v", err)
@@ -826,13 +837,14 @@ func TestPortfolioAllocatorJobPaperModeExecutesPaperIntent(t *testing.T) {
 			binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
 			return binding
 		}(),
-		OpportunityRepo:         opportunityRepo,
-		AllocationDecisionRepo:  decisionRepo,
-		StrategyRepo:            strategyRepo,
-		PortfolioAllocatorMode:  portfolio.AllocatorModePaper,
-		PortfolioPaperProcessor: processor,
-		PositionRepo:            positionRepo,
-		PortfolioAccountBalance: accountBalance,
+		OpportunityRepo:          opportunityRepo,
+		AllocationDecisionRepo:   decisionRepo,
+		StrategyRepo:             strategyRepo,
+		PortfolioAllocatorMode:   portfolio.AllocatorModePaper,
+		PortfolioPaperProcessor:  processor,
+		PositionRepo:             positionRepo,
+		PortfolioAccountBalance:  accountBalance,
+		PortfolioAccountSnapshot: allocatorSnapshotSource(),
 		RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{
 			runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: opportunityRepo.items[0].StrategyID, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
 		}},
@@ -891,7 +903,7 @@ func TestPortfolioAllocatorJobRestartRetriesCompletedEffectFromDurableClaim(t *t
 	processor := &restartPaperProcessor{orders: orders, errAfterEffect: true}
 	positionRepo, balance := paperAllocatorStateDeps()
 	binding, _ := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
-	deps := OrchestratorDeps{ExecutionAccount: binding, OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}}, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, OrderRepo: orders, PortfolioAccountBalance: balance, RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}}
+	deps := OrchestratorDeps{ExecutionAccount: binding, OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, ExecutionStrategyVersionID: &versionID}}, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, OrderRepo: orders, PortfolioAccountBalance: balance, PortfolioAccountSnapshot: allocatorSnapshotSource(), RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}}
 
 	first := NewJobOrchestrator(deps)
 	first.registerPortfolioAllocatorJobs()
@@ -1047,11 +1059,12 @@ func TestPortfolioAllocatorJobPaperModeRejectsWithoutStrategyRepo(t *testing.T) 
 	decisionRepo := &portfolioAllocatorDecisionRepo{}
 	positionRepo, accountBalance := paperAllocatorStateDeps()
 	orch := NewJobOrchestrator(OrchestratorDeps{
-		OpportunityRepo:         opportunityRepo,
-		AllocationDecisionRepo:  decisionRepo,
-		PortfolioAllocatorMode:  portfolio.AllocatorModePaper,
-		PositionRepo:            positionRepo,
-		PortfolioAccountBalance: accountBalance,
+		OpportunityRepo:          opportunityRepo,
+		AllocationDecisionRepo:   decisionRepo,
+		PortfolioAllocatorMode:   portfolio.AllocatorModePaper,
+		PositionRepo:             positionRepo,
+		PortfolioAccountBalance:  accountBalance,
+		PortfolioAccountSnapshot: allocatorSnapshotSource(),
 		RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{
 			runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: opportunityRepo.items[0].StrategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy},
 		}},
@@ -1087,7 +1100,7 @@ func TestPortfolioAllocatorJobPaperModeStopsWhenPreclaimFails(t *testing.T) {
 	strategyRepo := &portfolioAllocatorStrategyRepo{strategy: &domain.Strategy{ID: opportunityRepo.items[0].StrategyID, Name: "paper-aapl", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}}
 	processor := &portfolioPaperProcessorStub{}
 	positionRepo, accountBalance := paperAllocatorStateDeps()
-	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: strategyRepo, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, PortfolioAccountBalance: accountBalance, RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: opportunityRepo.items[0].StrategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}})
+	orch := NewJobOrchestrator(OrchestratorDeps{OpportunityRepo: opportunityRepo, AllocationDecisionRepo: decisionRepo, StrategyRepo: strategyRepo, PortfolioAllocatorMode: portfolio.AllocatorModePaper, PortfolioPaperProcessor: processor, PositionRepo: positionRepo, PortfolioAccountBalance: accountBalance, PortfolioAccountSnapshot: allocatorSnapshotSource(), RunRepo: &portfolioAllocatorRunRepo{runs: map[uuid.UUID]domain.PipelineRun{runID: {ID: runID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: opportunityRepo.items[0].StrategyID, TradeDate: allocatorRunTradeDate, Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}}}})
 	orch.registerPortfolioAllocatorJobs()
 	err := orch.jobs["portfolio_allocator"].Fn(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "preclaim opportunity selected") {

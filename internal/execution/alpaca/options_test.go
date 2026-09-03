@@ -42,3 +42,32 @@ func TestSubmitSpreadOrderSendsStableParentClientIdentity(t *testing.T) {
 		t.Fatalf("spread ids = %v", ids)
 	}
 }
+
+func TestPreflightPaperOptionsVerifiesIdentityLevelAndBuyingPower(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v2/account" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"account_number":"paper-123","status":"ACTIVE","trading_blocked":false,"options_trading_level":3,"options_approved_level":3,"currency":"USD","cash":"10000","buying_power":"20000","options_buying_power":"5000","equity":"10000"}`))
+	}))
+	defer server.Close()
+	client := NewClient("test-key", "test-secret", true, discardLogger())
+	client.SetBaseURL(server.URL)
+	broker := NewOptionsBroker(client).WithExpectedPaperAccount("paper-123")
+	if err := broker.PreflightPaperOptions(context.Background(), 4500); err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.PreflightPaperOptions(context.Background(), 5500); err == nil {
+		t.Fatal("insufficient options buying power accepted")
+	}
+	if err := NewOptionsBroker(client).WithExpectedPaperAccount("wrong").PreflightPaperOptions(context.Background(), 1); err == nil {
+		t.Fatal("wrong paper account accepted")
+	}
+	liveClient := NewClient("test-key", "test-secret", false, discardLogger())
+	liveClient.SetBaseURL(server.URL)
+	if err := NewOptionsBroker(liveClient).WithExpectedPaperAccount("paper-123").PreflightPaperOptions(context.Background(), 1); err == nil {
+		t.Fatal("live endpoint accepted for allocator paper execution")
+	}
+}

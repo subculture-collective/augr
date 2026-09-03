@@ -973,6 +973,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				return nil, nil, nil, err
 			}
 		}
+		var alpacaAdapter *automation.AlpacaClientAdapter
+		var alpacaOptionsBroker *alpacaexecution.OptionsBroker
 		if strings.TrimSpace(cfg.Brokers.Alpaca.APIKey) != "" && strings.TrimSpace(cfg.Brokers.Alpaca.APISecret) != "" {
 			alpacaClient := alpacaexecution.NewClient(
 				cfg.Brokers.Alpaca.APIKey,
@@ -980,9 +982,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				cfg.Brokers.Alpaca.PaperMode,
 				logger,
 			)
-			var alpacaAdapter *automation.AlpacaClientAdapter
 			if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 				alpacaAdapter = automation.NewAlpacaClientAdapter(alpacaClient)
+				if cfg.Brokers.Alpaca.PaperMode {
+					alpacaOptionsBroker = alpacaexecution.NewOptionsBroker(alpacaClient).WithExpectedPaperAccount(account.ExternalAccountID)
+				}
 				alpacaReconciler = automation.NewAlpacaReconciler(automation.AlpacaReconcilerDeps{
 					ExecutionAccount: executionAccount,
 					Broker:           alpacaAdapter, PLAggregate: pgrepo.NewAlpacaPLAggregateRepo(db.Pool), StrategyRepo: strategyRepo,
@@ -1067,6 +1071,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		}
 		strategyRunner.runGroup = runGroup
 		portfolioAllocatorMode := portfolioAllocatorModeFromEnv()
+		if portfolioAllocatorMode == portfolio.AllocatorModePaper && (runtimeDeps.executionAccount.Environment() != domain.AccountEnvironmentPaperScored || cfg.Features.EnableLiveTrading) {
+			return nil, nil, nil, fmt.Errorf("portfolio allocator paper mode requires paper_scored account with live trading disabled")
+		}
 		strategyRunner.opportunityRepo = opportunityRepo
 		strategyRunner.optionsProvider = deps.OptionsProvider
 		var optionCloseRepos []repository.AtomicOptionCloseRepository
@@ -1220,6 +1227,17 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					Logger:           logger,
 					PaperBroker:      strategyRunner.localPaperBroker,
 				})
+				var portfolioOptionsProcessor portfolio.PaperOptionsOrderProcessor
+				if alpacaOptionsBroker != nil {
+					portfolioOptionsProcessor = portfolio.NewOptionsPaperOrderProcessor(portfolio.OptionsPaperOrderProcessorDeps{
+						Broker: alpacaOptionsBroker, OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo,
+						RiskEngine: riskEngine, EconomicWriter: strategyRunner.economicWriter, OpportunityRepo: opportunityRepo, Logger: logger,
+					})
+				}
+				portfolioRiskRepo := pgrepo.NewPortfolioRiskRepo(db.Pool, accountID)
+				if alpacaAdapter != nil {
+					portfolioRiskRepo = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID, alpacaAdapter)
+				}
 				var orch *automation.JobOrchestrator
 				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 					optionSettlementState := &durableOptionSettlementState{
@@ -1266,7 +1284,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						AllocationDecisionRepo:       allocationDecisionRepo,
 						PortfolioAllocatorMode:       portfolioAllocatorMode,
 						PortfolioPaperProcessor:      portfolioPaperProcessor,
-						PortfolioAccountBalance:      strategyRunner.localPaperBroker,
+						PortfolioOptionsProcessor:    portfolioOptionsProcessor,
+						PortfolioAccountBalance:      alpacaAdapter,
+						PortfolioAccountSnapshot:     portfolioRiskRepo,
 						JobRunRepo:                   jobRunRepo,
 						JobControlRepo:               jobControlRepo,
 						OptionsScanRepo:              optionsScanRepo,
@@ -1297,6 +1317,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						BacktestRunRepo:              backtestRunRepo,
 						DiscoveryRunRepo:             discoveryRunRepo,
 						OvernightBacktestRuns:        overnightBacktestRunRepo,
+						PromotionActivation:          pgrepo.NewPromotionRepo(db.Pool),
+						AutomaticShadowPromotion:     cfg.AutomaticShadowPromotion,
+						DiscoveryScopeID:             discoveryScopeID,
 						JobTimeout:                   cfg.Features.SchedulerJobTimeout,
 						StrategyTrigger:              sched,
 						Logger:                       logger,

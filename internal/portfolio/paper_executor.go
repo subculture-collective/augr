@@ -25,6 +25,12 @@ type PaperOrderReconciler interface {
 	ReconcilePaperOrder(context.Context, domain.Opportunity, *domain.Order, uuid.UUID) (PaperOrderResult, error)
 }
 
+// PaperOptionsOrderProcessor executes only normalized, atomic, defined-risk
+// option packages. It is deliberately separate from stock TradingPlan flow.
+type PaperOptionsOrderProcessor interface {
+	ProcessPaperOptionsOrder(context.Context, execution.ExecutionScope, domain.Opportunity, domain.AllocationDecision) (PaperOrderResult, error)
+}
+
 type PaperOrderRequest struct {
 	Signal        execution.FinalSignal
 	Plan          execution.TradingPlan

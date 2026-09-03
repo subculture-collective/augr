@@ -626,6 +626,10 @@ type AllocationOrderRepository interface {
 	GetByAllocationOpportunity(ctx context.Context, opportunity domain.Opportunity) (*domain.Order, error)
 }
 
+type AllocationPackageOrderRepository interface {
+	ListByAllocationOpportunity(ctx context.Context, opportunity domain.Opportunity) ([]domain.Order, error)
+}
+
 // PositionRepository provides CRUD operations for positions.
 type PositionRepository interface {
 	Create(ctx context.Context, position *domain.Position) error

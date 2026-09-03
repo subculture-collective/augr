@@ -70,6 +70,64 @@ func (r allocationOrderRepo) WithExecutionAccountLock(ctx context.Context, accou
 	return locker.WithExecutionAccountLock(ctx, accountID, fn)
 }
 
+func (r allocationOrderRepo) CreateOptionOrders(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, orders []*domain.Order) error {
+	repo, ok := r.OrderRepository.(repository.AtomicOptionOrderRepository)
+	if !ok {
+		return errors.New("portfolio: atomic option order repository is required")
+	}
+	for _, order := range orders {
+		if err := r.DecorateOrder(order); err != nil {
+			return err
+		}
+	}
+	return repo.CreateOptionOrders(ctx, accountID, environment, originType, originID, orders)
+}
+
+func (r allocationOrderRepo) CreateOptionCloseOrdersAndReserve(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, positionIDs []uuid.UUID, orders []*domain.Order) error {
+	repo, ok := r.OrderRepository.(repository.AtomicOptionCloseRepository)
+	if !ok {
+		return errors.New("portfolio: atomic option close repository is required")
+	}
+	for _, order := range orders {
+		if err := r.DecorateOrder(order); err != nil {
+			return err
+		}
+	}
+	return repo.CreateOptionCloseOrdersAndReserve(ctx, accountID, environment, originType, originID, positionIDs, orders)
+}
+
+func (r allocationOrderRepo) ReleaseOptionClosePositions(ctx context.Context, accountID uuid.UUID, positionIDs, orderIDs []uuid.UUID) error {
+	repo, ok := r.OrderRepository.(repository.AtomicOptionCloseRepository)
+	if !ok {
+		return errors.New("portfolio: atomic option close repository is required")
+	}
+	return repo.ReleaseOptionClosePositions(ctx, accountID, positionIDs, orderIDs)
+}
+
+func (r allocationOrderRepo) ReconcileOptionCloseReservations(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) error {
+	repo, ok := r.OrderRepository.(repository.AtomicOptionCloseRepository)
+	if !ok {
+		return errors.New("portfolio: atomic option close repository is required")
+	}
+	return repo.ReconcileOptionCloseReservations(ctx, accountID, environment)
+}
+
+func (r allocationOrderRepo) RejectOptionOrdersAndRelease(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, orderIDs []uuid.UUID) error {
+	repo, ok := r.OrderRepository.(repository.OptionDefinitiveRejectionRepository)
+	if !ok {
+		return errors.New("portfolio: option rejection repository is required")
+	}
+	return repo.RejectOptionOrdersAndRelease(ctx, accountID, environment, orderIDs)
+}
+
+func (r allocationOrderRepo) GetOptionClosePositionByOrder(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, orderID uuid.UUID) (*domain.Position, error) {
+	repo, ok := r.OrderRepository.(repository.OptionCloseReservationLookup)
+	if !ok {
+		return nil, errors.New("portfolio: option close reservation lookup is required")
+	}
+	return repo.GetOptionClosePositionByOrder(ctx, accountID, environment, orderID)
+}
+
 var _ repository.ExecutionAccountLocker = allocationOrderRepo{}
 
 func NewPaperOrderManagerProcessor(deps PaperOrderManagerProcessorDeps) *PaperOrderManagerProcessor {

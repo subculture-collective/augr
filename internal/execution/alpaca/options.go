@@ -17,12 +17,65 @@ import (
 
 // OptionsBroker extends the standard Alpaca broker with options support.
 type OptionsBroker struct {
-	client *Client
+	client                    *Client
+	expectedExternalAccountID string
 }
 
 // NewOptionsBroker constructs an Alpaca options broker adapter.
 func NewOptionsBroker(client *Client) *OptionsBroker {
 	return &OptionsBroker{client: client}
+}
+
+// WithExpectedPaperAccount binds every allocator preflight to one external
+// Alpaca paper account. An empty ID remains fail-closed.
+func (b *OptionsBroker) WithExpectedPaperAccount(externalAccountID string) *OptionsBroker {
+	if b != nil {
+		b.expectedExternalAccountID = strings.TrimSpace(externalAccountID)
+	}
+	return b
+}
+
+func (b *OptionsBroker) GetAccountBalance(ctx context.Context) (execution.Balance, error) {
+	if b == nil {
+		return execution.Balance{}, errors.New("alpaca: options broker is required")
+	}
+	return NewBroker(b.client).GetAccountBalance(ctx)
+}
+
+// PreflightPaperOptions verifies the actual broker account and buying power at
+// the order boundary. Multi-leg opening orders require level 3 eligibility.
+func (b *OptionsBroker) PreflightPaperOptions(ctx context.Context, requiredCapital float64) error {
+	if b == nil || b.client == nil || !b.client.IsPaper() {
+		return errors.New("alpaca: options allocator requires the paper endpoint")
+	}
+	if b.expectedExternalAccountID == "" {
+		return errors.New("alpaca: expected paper account id is required")
+	}
+	body, err := b.client.Get(ctx, "/v2/account", nil)
+	if err != nil {
+		return fmt.Errorf("alpaca: paper options account preflight: %w", err)
+	}
+	var account accountResponse
+	if err := json.Unmarshal(body, &account); err != nil {
+		return fmt.Errorf("alpaca: decode paper options account preflight: %w", err)
+	}
+	if strings.TrimSpace(account.AccountNumber) != b.expectedExternalAccountID {
+		return errors.New("alpaca: paper options account identity mismatch")
+	}
+	if !strings.EqualFold(strings.TrimSpace(account.Status), "ACTIVE") || account.TradingBlocked {
+		return errors.New("alpaca: paper options account is not active for trading")
+	}
+	if account.OptionsTradingLevel < 3 || account.OptionsApprovedLevel < 3 {
+		return errors.New("alpaca: paper options account lacks multi-leg level 3 eligibility")
+	}
+	optionsBuyingPower, err := parseRequiredFloat("options_buying_power", account.OptionsBuyingPower)
+	if err != nil {
+		return err
+	}
+	if requiredCapital <= 0 || optionsBuyingPower < requiredCapital {
+		return errors.New("alpaca: insufficient verified options buying power")
+	}
+	return nil
 }
 
 // optionOrderRequest is the Alpaca single-leg options order payload.

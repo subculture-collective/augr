@@ -31,6 +31,10 @@ type PortfolioAccountBalanceSource interface {
 	GetAccountBalance(context.Context) (execution.Balance, error)
 }
 
+type PortfolioAccountSnapshotSource interface {
+	CaptureAccountSnapshot(context.Context) (portfolio.AccountSnapshot, error)
+}
+
 func (o *JobOrchestrator) registerPortfolioAllocatorJobs() {
 	if o.deps.OpportunityRepo == nil || o.deps.AllocationDecisionRepo == nil {
 		o.logger.Info("portfolio_allocator: skipped — repositories not configured")
@@ -93,7 +97,9 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 			decision.OriginID = opportunity.OriginID
 			decision.PipelineRunID = opportunity.PipelineRunID
 			decision.PipelineRunTradeDate = opportunity.PipelineRunTradeDate
+			decision.RiskPolicyVersion = opportunity.RiskPolicyVersion
 		}
+		decision.AccountSnapshotID = state.AccountSnapshotID
 
 		if mode == portfolio.AllocatorModePaper && decision.Action == domain.AllocationDecisionActionShadowSelected {
 			claimed, err := o.preclaimPaperOpportunity(ctx, decision, claimID, asOf)
@@ -374,7 +380,11 @@ func (o *JobOrchestrator) reconcileNonterminalPaperOrder(ctx context.Context, op
 	if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
 		return nil
 	}
-	reconciler, ok := o.deps.PortfolioPaperProcessor.(portfolio.PaperOrderReconciler)
+	processor := any(o.deps.PortfolioPaperProcessor)
+	if opportunity.MarketType == domain.MarketTypeOptions {
+		processor = o.deps.PortfolioOptionsProcessor
+	}
+	reconciler, ok := processor.(portfolio.PaperOrderReconciler)
 	if !ok {
 		return fmt.Errorf("portfolio_allocator: paper order reconciler is required for fill-safe recovery")
 	}
@@ -573,6 +583,29 @@ func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, dec
 	if err != nil {
 		return paperAllocatorRejected(decision, "execution_scope_mismatch"), nil
 	}
+	if opportunity.MarketType == domain.MarketTypeOptions {
+		if o.deps.PortfolioOptionsProcessor == nil {
+			return paperAllocatorRejected(decision, "missing_options_paper_processor"), nil
+		}
+		result, optionErr := o.deps.PortfolioOptionsProcessor.ProcessPaperOptionsOrder(ctx, scope, opportunity, decision)
+		if optionErr != nil {
+			decision.Action = domain.AllocationDecisionActionPaperOrderIntent
+			decision.CreatedOrderID = result.OrderID
+			decision.Reasons = append(decision.Reasons, result.Reason)
+			return decision, optionErr
+		}
+		if result.Skipped || result.OrderID == nil || result.Status == domain.OrderStatusRejected || result.Status == domain.OrderStatusCancelled {
+			return paperAllocatorRejected(decision, result.Reason), nil
+		}
+		decision.CreatedOrderID = result.OrderID
+		if result.Status == domain.OrderStatusFilled {
+			decision.Action = domain.AllocationDecisionActionExecuted
+		}
+		if result.Reason != "" {
+			decision.Reasons = append(decision.Reasons, result.Reason)
+		}
+		return decision, nil
+	}
 	executor := portfolio.NewPaperExecutor(portfolio.PaperExecutorDeps{Processor: o.deps.PortfolioPaperProcessor, ExecutionAccount: o.deps.ExecutionAccount})
 	result, err := executor.ExecutePaperDecisionScoped(ctx, scope, opportunity, decision, *strategy)
 	if err != nil {
@@ -653,33 +686,22 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 		}
 	}
 
-	if mode == portfolio.AllocatorModePaper {
-		if o.deps.PortfolioAccountBalance == nil {
-			return state, warnings, fmt.Errorf("portfolio_allocator: paper mode requires account balance source")
-		}
-		balance, err := o.deps.PortfolioAccountBalance.GetAccountBalance(ctx)
-		if err != nil {
-			return state, warnings, fmt.Errorf("portfolio_allocator: load paper account balance: %w", err)
-		}
-		if balance.Equity <= 0 || balance.BuyingPower < 0 {
-			return state, warnings, fmt.Errorf("portfolio_allocator: invalid paper account balance: equity=%g buying_power=%g", balance.Equity, balance.BuyingPower)
-		}
-		state.Equity = balance.Equity
-		state.BuyingPower = balance.BuyingPower
-	} else {
-		state.Equity = 100000
-		state.BuyingPower = maxFloat(100000-grossExposure, 0)
-		warnings = append(warnings, "paper_account_balance_fallback")
+	if o.deps.PortfolioAccountSnapshot == nil {
+		return state, warnings, fmt.Errorf("portfolio_allocator: %s mode requires canonical account snapshot source", mode)
 	}
+	snapshot, err := o.deps.PortfolioAccountSnapshot.CaptureAccountSnapshot(ctx)
+	if err != nil {
+		return state, warnings, fmt.Errorf("portfolio_allocator: capture canonical account balance: %w", err)
+	}
+	if snapshot.ID == uuid.Nil || snapshot.FallbackUsed || snapshot.Equity <= 0 || snapshot.BuyingPower < 0 || snapshot.OptionsBuyingPower < 0 {
+		return state, warnings, fmt.Errorf("portfolio_allocator: invalid canonical account snapshot")
+	}
+	state.AccountSnapshotID = snapshot.ID
+	state.Equity = snapshot.Equity
+	state.BuyingPower = snapshot.BuyingPower
+	state.OptionsBuyingPower = snapshot.OptionsBuyingPower
 	state.GrossExposure = grossExposure
 	return state, warnings, nil
-}
-
-func maxFloat(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func portfolioPositionExposure(position domain.Position) float64 {
