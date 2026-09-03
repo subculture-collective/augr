@@ -55,7 +55,7 @@ func (processor *OptionsPaperOrderProcessor) ProcessPaperOptionsOrder(ctx contex
 		return PaperOrderResult{Skipped: true, Reason: "missing_paper_options_preflight"}, nil
 	}
 	if err := preflight.PreflightPaperOptions(ctx, decision.ReservedCapitalUSD); err != nil {
-		return PaperOrderResult{Skipped: true, Reason: "paper_options_preflight_rejected"}, err
+		return PaperOrderResult{Skipped: true, Reason: "paper_options_preflight_rejected"}, nil
 	}
 	spread, err := DefinedRiskSpreadFromOpportunity(opportunity)
 	if err != nil {
@@ -81,8 +81,19 @@ func (processor *OptionsPaperOrderProcessor) ProcessPaperOptionsOrder(ctx contex
 		}
 		return PaperOrderResult{Skipped: true, Reason: "option_package_order_not_created"}, nil
 	}
+	return classifyOptionsPackageResult(order, err)
+}
+
+func classifyOptionsPackageResult(order *domain.Order, submitErr error) (PaperOrderResult, error) {
+	if order == nil {
+		return PaperOrderResult{}, submitErr
+	}
 	result := PaperOrderResult{OrderID: &order.ID, Status: order.Status}
-	return result, err
+	if order.Status == domain.OrderStatusRejected || order.Status == domain.OrderStatusCancelled {
+		result.Reason = "option_package_" + order.Status.String()
+		return result, nil
+	}
+	return result, submitErr
 }
 
 func (processor *OptionsPaperOrderProcessor) ReconcilePaperOrder(ctx context.Context, opportunity domain.Opportunity, _ *domain.Order, claimID uuid.UUID) (PaperOrderResult, error) {

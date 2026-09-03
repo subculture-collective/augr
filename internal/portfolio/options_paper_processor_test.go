@@ -1,10 +1,12 @@
 package portfolio
 
 import (
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/google/uuid"
 )
 
 func TestDefinedRiskSpreadFromOpportunitySupportsOnlyFourVerticals(t *testing.T) {
@@ -49,5 +51,22 @@ func TestDefinedRiskSpreadFromOpportunityRejectsNakedOrChangedPackage(t *testing
 	opportunity.OptionLegs[1].Expiry = opportunity.OptionLegs[1].Expiry.AddDate(0, 1, 0)
 	if _, err := DefinedRiskSpreadFromOpportunity(opportunity); err == nil {
 		t.Fatal("mixed-expiry option package accepted")
+	}
+}
+
+func TestOptionsPackageResultDistinguishesDefinitiveAndAmbiguousFailures(t *testing.T) {
+	t.Parallel()
+	submitErr := errors.New("provider result uncertain")
+	for _, status := range []domain.OrderStatus{domain.OrderStatusRejected, domain.OrderStatusCancelled} {
+		order := &domain.Order{ID: uuid.New(), Status: status}
+		result, err := classifyOptionsPackageResult(order, submitErr)
+		if err != nil || result.OrderID == nil || *result.OrderID != order.ID || result.Reason != "option_package_"+status.String() {
+			t.Fatalf("definitive status %s result=%+v err=%v", status, result, err)
+		}
+	}
+	order := &domain.Order{ID: uuid.New(), Status: domain.OrderStatusPending}
+	result, err := classifyOptionsPackageResult(order, submitErr)
+	if !errors.Is(err, submitErr) || result.OrderID == nil || *result.OrderID != order.ID {
+		t.Fatalf("ambiguous result=%+v err=%v", result, err)
 	}
 }
