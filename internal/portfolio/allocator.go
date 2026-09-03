@@ -34,16 +34,38 @@ type AllocatorConfig struct {
 	MinEdgePctByMarket     map[domain.MarketType]float64
 	MinLiquidityUSD        map[domain.MarketType]float64
 	MaxSpreadPct           map[domain.MarketType]float64
+	RiskPolicyVersion      string
+	MaxPositionRiskPct     float64
+	MaxDailyLossPct        float64
+	MaxDrawdownPct         float64
+	MaxOpenPositions       int
+	MaxQuoteAge            time.Duration
+	MaxAbsoluteDelta       float64
+	MaxAbsoluteGamma       float64
+	MaxAbsoluteTheta       float64
+	MaxAbsoluteVega        float64
 	Now                    func() time.Time
 }
 
 type PortfolioState struct {
-	Equity         float64
-	BuyingPower    float64
-	GrossExposure  float64
-	MarketExposure map[domain.MarketType]float64
-	OpenTickers    map[string]bool
-	NewOrdersToday int
+	Equity                 float64
+	BuyingPower            float64
+	OptionsBuyingPower     float64
+	GrossExposure          float64
+	MarketExposure         map[domain.MarketType]float64
+	OpenTickers            map[string]bool
+	NewOrdersToday         int
+	AccountSnapshotID      uuid.UUID
+	AccountBalanceFallback bool
+	DailyLossPct           float64
+	DrawdownPct            float64
+	OpenPositionCount      int
+	CircuitBreakerOpen     bool
+	UnderlyingRisk         map[string]float64
+	Delta                  float64
+	Gamma                  float64
+	Theta                  float64
+	Vega                   float64
 }
 
 type AllocationSummary struct {
@@ -62,35 +84,55 @@ type AllocationResult struct {
 }
 
 type scoredOpportunity struct {
-	opp      domain.Opportunity
-	score    float64
-	reasons  []string
-	notional float64
-	action   domain.AllocationDecisionAction
+	opp            domain.Opportunity
+	score          float64
+	reasons        []string
+	notional       float64
+	quantity       float64
+	binding        string
+	caps           []domain.AllocationRiskCap
+	exposureBefore float64
+	exposureAfter  float64
+	action         domain.AllocationDecisionAction
 }
 
 const (
-	reasonNotQueued               = "not_queued"
-	reasonExpired                 = "expired"
-	reasonOptionsDisabled         = "options_disabled"
-	reasonBelowMinScore           = "below_min_score"
-	reasonBelowMinEdge            = "below_min_edge"
-	reasonBelowMinLiquidity       = "below_min_liquidity"
-	reasonAboveMaxSpread          = "above_max_spread"
-	reasonDuplicateTicker         = "duplicate_ticker"
-	reasonNearMarketCap           = "near_market_cap"
-	reasonCashReservePressure     = "cash_reserve_pressure"
-	reasonTargetExposureExceeded  = "target_gross_exposure_exceeded"
-	reasonHardExposureExceeded    = "hard_gross_exposure_exceeded"
-	reasonMarketExposureExceeded  = "market_exposure_exceeded"
-	reasonCashReserveInsufficient = "cash_reserve_insufficient"
-	reasonMaxOrdersPerRun         = "max_orders_per_run"
-	reasonMaxOrdersPerDay         = "max_orders_per_day"
-	reasonSizingZero              = "sizing_zero"
-	reasonBudgetClamped           = "budget_clamped"
+	reasonNotQueued                = "not_queued"
+	reasonExpired                  = "expired"
+	reasonUndefinedOptionRisk      = "undefined_option_maximum_loss"
+	reasonUnsupportedOptionPackage = "unsupported_option_package"
+	reasonStaleOptionQuote         = "stale_option_quote"
+	reasonRiskPolicyMismatch       = "risk_policy_mismatch"
+	reasonAccountBalanceFallback   = "account_balance_fallback"
+	reasonCircuitBreakerOpen       = "circuit_breaker_open"
+	reasonDailyLossLimit           = "daily_loss_limit"
+	reasonDrawdownLimit            = "drawdown_limit"
+	reasonOpenPositionLimit        = "open_position_limit"
+	reasonGreekLimit               = "greek_limit"
+	reasonMissingAccountSnapshot   = "missing_account_snapshot"
+	reasonInsufficientBuyingPower  = "insufficient_buying_power"
+	reasonBelowMinScore            = "below_min_score"
+	reasonBelowMinEdge             = "below_min_edge"
+	reasonBelowMinLiquidity        = "below_min_liquidity"
+	reasonAboveMaxSpread           = "above_max_spread"
+	reasonDuplicateTicker          = "duplicate_ticker"
+	reasonNearMarketCap            = "near_market_cap"
+	reasonCashReservePressure      = "cash_reserve_pressure"
+	reasonTargetExposureExceeded   = "target_gross_exposure_exceeded"
+	reasonHardExposureExceeded     = "hard_gross_exposure_exceeded"
+	reasonMarketExposureExceeded   = "market_exposure_exceeded"
+	reasonCashReserveInsufficient  = "cash_reserve_insufficient"
+	reasonMaxOrdersPerRun          = "max_orders_per_run"
+	reasonMaxOrdersPerDay          = "max_orders_per_day"
+	reasonSizingZero               = "sizing_zero"
+	reasonBudgetClamped            = "budget_clamped"
 )
 
 func DefaultAllocatorConfig() AllocatorConfig {
+	policy, err := ReviewedPortfolioRiskPolicyV1()
+	if err != nil {
+		panic(err)
+	}
 	return AllocatorConfig{
 		Mode:                   AllocatorModeShadow,
 		PaperOnly:              true,
@@ -104,43 +146,48 @@ func DefaultAllocatorConfig() AllocatorConfig {
 			domain.MarketTypeCrypto:     0.01,
 			domain.MarketTypeKalshi:     0.01,
 			domain.MarketTypePolymarket: 0.01,
-			domain.MarketTypeOptions:    0,
+			domain.MarketTypeOptions:    policy.MaxPositionRiskPct,
 		},
 		MaxPerMarketPct: map[domain.MarketType]float64{
 			domain.MarketTypeStock:      0.50,
 			domain.MarketTypeCrypto:     0.05,
 			domain.MarketTypeKalshi:     0.10,
 			domain.MarketTypePolymarket: 0.05,
-			domain.MarketTypeOptions:    0,
+			domain.MarketTypeOptions:    policy.MaxOptionsMarketRiskPct,
 		},
 		MinScoreByMarket: map[domain.MarketType]float64{
 			domain.MarketTypeStock:      65,
 			domain.MarketTypeCrypto:     70,
 			domain.MarketTypeKalshi:     70,
 			domain.MarketTypePolymarket: 75,
-			domain.MarketTypeOptions:    100,
+			domain.MarketTypeOptions:    65,
 		},
 		MinEdgePctByMarket: map[domain.MarketType]float64{
 			domain.MarketTypeStock:      0.015,
 			domain.MarketTypeCrypto:     0.03,
 			domain.MarketTypeKalshi:     0.04,
 			domain.MarketTypePolymarket: 0.05,
-			domain.MarketTypeOptions:    1,
+			domain.MarketTypeOptions:    0.015,
 		},
 		MinLiquidityUSD: map[domain.MarketType]float64{
 			domain.MarketTypeStock:      500000,
 			domain.MarketTypeCrypto:     100000,
 			domain.MarketTypeKalshi:     1000,
 			domain.MarketTypePolymarket: 2500,
-			domain.MarketTypeOptions:    math.Inf(1),
+			domain.MarketTypeOptions:    policy.MinOptionLiquidityUSD,
 		},
 		MaxSpreadPct: map[domain.MarketType]float64{
 			domain.MarketTypeStock:      0.01,
 			domain.MarketTypeCrypto:     0.02,
 			domain.MarketTypeKalshi:     0.08,
 			domain.MarketTypePolymarket: 0.08,
-			domain.MarketTypeOptions:    0,
+			domain.MarketTypeOptions:    policy.MaxOptionSpreadPct,
 		},
+		RiskPolicyVersion: policy.Reference(), MaxPositionRiskPct: policy.MaxPositionRiskPct,
+		MaxDailyLossPct: policy.MaxDailyLossPct, MaxDrawdownPct: policy.MaxDrawdownPct,
+		MaxOpenPositions: policy.MaxOpenPositions, MaxQuoteAge: policy.MaxQuoteAge(),
+		MaxAbsoluteDelta: policy.MaxAbsoluteDelta, MaxAbsoluteGamma: policy.MaxAbsoluteGamma,
+		MaxAbsoluteTheta: policy.MaxAbsoluteTheta, MaxAbsoluteVega: policy.MaxAbsoluteVega,
 		Now: time.Now,
 	}
 }
@@ -177,9 +224,7 @@ func AllocateShadow(opportunities []domain.Opportunity, state PortfolioState, cf
 
 		result.Summary.Eligible++
 		score, reasons := scoreOpportunity(opp, state, cfg, now)
-		if opp.MarketType == domain.MarketTypeOptions {
-			reasons = append(reasons, reasonOptionsDisabled)
-		}
+		reasons = append(reasons, portfolioRiskRejectionReasons(opp, state, cfg, now)...)
 		minScore := lookup(cfg.MinScoreByMarket, opp.MarketType)
 		minEdge := lookup(cfg.MinEdgePctByMarket, opp.MarketType)
 		minLiquidity := lookup(cfg.MinLiquidityUSD, opp.MarketType)
@@ -231,12 +276,36 @@ func AllocateShadow(opportunities []domain.Opportunity, state PortfolioState, cf
 			reasons = append(reasons, reasonMaxOrdersPerDay)
 		}
 		if len(reasons) == 0 {
-			notional, sizingReasons := sizeOpportunity(item.opp, item.score, state, cfg)
+			item.exposureBefore = state.GrossExposure
+			notional, quantity, binding, caps, sizingReasons := sizeOpportunity(item.opp, item.score, state, cfg)
 			reasons = append(reasons, sizingReasons...)
 			if notional > 0 {
 				item.notional = notional
+				item.quantity = quantity
+				item.binding = binding
+				item.caps = caps
 				item.action = domain.AllocationDecisionActionShadowSelected
 				item.reasons = append([]string{fmt.Sprintf("score=%.1f", item.score), fmt.Sprintf("multiplier=%.2f", scoreMultiplier(item.score))}, reasons...)
+				riskConsumed := notional
+				if item.opp.MarketType == domain.MarketTypeOptions {
+					riskConsumed = quantity * item.opp.MaxLossPerUnit
+					state.OptionsBuyingPower = math.Max(0, state.OptionsBuyingPower-notional)
+					if state.UnderlyingRisk == nil {
+						state.UnderlyingRisk = make(map[string]float64)
+					}
+					state.UnderlyingRisk[strings.ToUpper(item.opp.Ticker)] += riskConsumed
+					state.Delta += quantity * item.opp.Delta
+					state.Gamma += quantity * item.opp.Gamma
+					state.Theta += quantity * item.opp.Theta
+					state.Vega += quantity * item.opp.Vega
+				}
+				state.GrossExposure += riskConsumed
+				if state.MarketExposure == nil {
+					state.MarketExposure = make(map[domain.MarketType]float64)
+				}
+				state.MarketExposure[item.opp.MarketType] += riskConsumed
+				state.BuyingPower = math.Max(0, state.BuyingPower-notional)
+				item.exposureAfter = state.GrossExposure
 				selectedCount++
 				selectedNotional += notional
 				result.Summary.Selected++
@@ -286,6 +355,36 @@ func applyAllocatorDefaults(cfg AllocatorConfig) AllocatorConfig {
 	}
 	if cfg.Now == nil {
 		cfg.Now = defaults.Now
+	}
+	if cfg.RiskPolicyVersion == "" {
+		cfg.RiskPolicyVersion = defaults.RiskPolicyVersion
+	}
+	if cfg.MaxPositionRiskPct == 0 {
+		cfg.MaxPositionRiskPct = defaults.MaxPositionRiskPct
+	}
+	if cfg.MaxDailyLossPct == 0 {
+		cfg.MaxDailyLossPct = defaults.MaxDailyLossPct
+	}
+	if cfg.MaxDrawdownPct == 0 {
+		cfg.MaxDrawdownPct = defaults.MaxDrawdownPct
+	}
+	if cfg.MaxOpenPositions == 0 {
+		cfg.MaxOpenPositions = defaults.MaxOpenPositions
+	}
+	if cfg.MaxQuoteAge == 0 {
+		cfg.MaxQuoteAge = defaults.MaxQuoteAge
+	}
+	if cfg.MaxAbsoluteDelta == 0 {
+		cfg.MaxAbsoluteDelta = defaults.MaxAbsoluteDelta
+	}
+	if cfg.MaxAbsoluteGamma == 0 {
+		cfg.MaxAbsoluteGamma = defaults.MaxAbsoluteGamma
+	}
+	if cfg.MaxAbsoluteTheta == 0 {
+		cfg.MaxAbsoluteTheta = defaults.MaxAbsoluteTheta
+	}
+	if cfg.MaxAbsoluteVega == 0 {
+		cfg.MaxAbsoluteVega = defaults.MaxAbsoluteVega
 	}
 	if cfg.TargetGrossExposurePct == 0 {
 		cfg.TargetGrossExposurePct = defaults.TargetGrossExposurePct
@@ -417,11 +516,11 @@ func scoreOpportunity(opp domain.Opportunity, state PortfolioState, cfg Allocato
 	return score, uniqueStrings(reasons)
 }
 
-func sizeOpportunity(opp domain.Opportunity, score float64, state PortfolioState, cfg AllocatorConfig) (float64, []string) {
+func sizeOpportunity(opp domain.Opportunity, score float64, state PortfolioState, cfg AllocatorConfig) (float64, float64, string, []domain.AllocationRiskCap, []string) {
 	market := opp.MarketType
 	multiplier := scoreMultiplier(score)
 	if multiplier <= 0 {
-		return 0, []string{reasonBelowMinScore}
+		return 0, 0, reasonBelowMinScore, nil, []string{reasonBelowMinScore}
 	}
 	perPosition := lookup(cfg.MaxPerPositionPct, market)
 	base := state.Equity * perPosition * multiplier
@@ -433,19 +532,19 @@ func sizeOpportunity(opp domain.Opportunity, score float64, state PortfolioState
 
 	remainingTarget := state.Equity*cfg.TargetGrossExposurePct - state.GrossExposure
 	if remainingTarget <= 0 {
-		return 0, []string{reasonTargetExposureExceeded}
+		return 0, 0, reasonTargetExposureExceeded, nil, []string{reasonTargetExposureExceeded}
 	}
 	remainingHard := state.Equity*cfg.HardGrossExposurePct - state.GrossExposure
 	if remainingHard <= 0 {
-		return 0, []string{reasonHardExposureExceeded}
+		return 0, 0, reasonHardExposureExceeded, nil, []string{reasonHardExposureExceeded}
 	}
 	remainingMarket := state.Equity*lookup(cfg.MaxPerMarketPct, market) - lookupMarketExposure(state.MarketExposure, market)
 	if remainingMarket <= 0 {
-		return 0, []string{reasonMarketExposureExceeded}
+		return 0, 0, reasonMarketExposureExceeded, nil, []string{reasonMarketExposureExceeded}
 	}
 	remainingBuyingPower := state.BuyingPower - state.Equity*cfg.CashReservePct
 	if remainingBuyingPower <= 0 {
-		return 0, []string{reasonCashReserveInsufficient}
+		return 0, 0, reasonCashReserveInsufficient, nil, []string{reasonCashReserveInsufficient}
 	}
 	if opp.MarketCapUSD > 0 {
 		marketCapCap := opp.MarketCapUSD * 0.02
@@ -453,15 +552,178 @@ func sizeOpportunity(opp domain.Opportunity, score float64, state PortfolioState
 			base = math.Min(base, marketCapCap)
 		}
 	}
+	if opp.MarketType == domain.MarketTypeOptions {
+		return sizeOptionsOpportunity(opp, base, remainingTarget, remainingHard, remainingMarket, remainingBuyingPower, state, cfg)
+	}
 
-	final := minPositive(base, remainingTarget, remainingHard, remainingMarket, remainingBuyingPower)
+	capValues := []struct {
+		name  string
+		value float64
+	}{{"position_risk", base}, {"target_exposure", remainingTarget}, {"hard_exposure", remainingHard}, {"market_exposure", remainingMarket}, {"buying_power", remainingBuyingPower}}
+	if opp.DeploymentBudgetUSD > 0 {
+		capValues = append(capValues, struct {
+			name  string
+			value float64
+		}{"deployment_budget", opp.DeploymentBudgetUSD})
+	}
+	final, binding := smallestPositiveCap(capValues)
+	caps := make([]domain.AllocationRiskCap, 0, len(capValues))
+	for sequence, capValue := range capValues {
+		caps = append(caps, domain.AllocationRiskCap{Sequence: sequence, Name: capValue.name, AvailableAmount: capValue.value, UnitAmount: 1, QuantityCap: capValue.value, Binding: capValue.name == binding})
+	}
 	if final <= 0 {
-		return 0, []string{reasonSizingZero}
+		return 0, 0, reasonSizingZero, caps, []string{reasonSizingZero}
+	}
+	quantity := 0.0
+	if opp.EntryPrice > 0 {
+		quantity = math.Floor(final / opp.EntryPrice)
+		if quantity < 1 {
+			return 0, 0, binding, caps, []string{reasonSizingZero, binding}
+		}
+		final = quantity * opp.EntryPrice
 	}
 	if final < base {
 		reasons = append(reasons, reasonBudgetClamped)
 	}
-	return final, uniqueStrings(reasons)
+	return final, quantity, binding, caps, uniqueStrings(reasons)
+}
+
+func sizeOptionsOpportunity(opp domain.Opportunity, positionRisk, remainingTarget, remainingHard, remainingMarket, remainingBuyingPower float64, state PortfolioState, cfg AllocatorConfig) (float64, float64, string, []domain.AllocationRiskCap, []string) {
+	type unitCap struct {
+		name      string
+		available float64
+		unit      float64
+		units     float64
+	}
+	caps := []unitCap{
+		{"position_risk", positionRisk, opp.MaxLossPerUnit, math.Floor(positionRisk / opp.MaxLossPerUnit)},
+		{"target_exposure", remainingTarget, opp.MaxLossPerUnit, math.Floor(remainingTarget / opp.MaxLossPerUnit)},
+		{"hard_exposure", remainingHard, opp.MaxLossPerUnit, math.Floor(remainingHard / opp.MaxLossPerUnit)},
+		{"market_exposure", remainingMarket, opp.MaxLossPerUnit, math.Floor(remainingMarket / opp.MaxLossPerUnit)},
+		{"buying_power", math.Min(remainingBuyingPower, state.OptionsBuyingPower), opp.RequiredCapitalUnit, math.Floor(math.Min(remainingBuyingPower, state.OptionsBuyingPower) / opp.RequiredCapitalUnit)},
+	}
+	if opp.DeploymentBudgetUSD > 0 {
+		caps = append(caps, unitCap{"deployment_budget", opp.DeploymentBudgetUSD, opp.RequiredCapitalUnit, math.Floor(opp.DeploymentBudgetUSD / opp.RequiredCapitalUnit)})
+	}
+	if state.UnderlyingRisk != nil {
+		remaining := state.Equity*cfg.MaxPositionRiskPct - state.UnderlyingRisk[strings.ToUpper(opp.Ticker)]
+		caps = append(caps, unitCap{"same_underlying", remaining, opp.MaxLossPerUnit, math.Floor(remaining / opp.MaxLossPerUnit)})
+	}
+	greekCap := func(name string, current, perUnit, maximum float64) {
+		if perUnit == 0 || maximum <= 0 {
+			return
+		}
+		remaining := maximum - math.Abs(current)
+		caps = append(caps, unitCap{name, remaining, math.Abs(perUnit), math.Floor(remaining / math.Abs(perUnit))})
+	}
+	greekCap("delta", state.Delta, opp.Delta, cfg.MaxAbsoluteDelta)
+	greekCap("gamma", state.Gamma, opp.Gamma, cfg.MaxAbsoluteGamma)
+	greekCap("theta", state.Theta, opp.Theta, cfg.MaxAbsoluteTheta)
+	greekCap("vega", state.Vega, opp.Vega, cfg.MaxAbsoluteVega)
+	quantity, binding := math.Inf(1), ""
+	for _, cap := range caps {
+		if cap.units < quantity {
+			quantity, binding = cap.units, cap.name
+		}
+	}
+	recorded := make([]domain.AllocationRiskCap, 0, len(caps))
+	for sequence, cap := range caps {
+		recorded = append(recorded, domain.AllocationRiskCap{Sequence: sequence, Name: cap.name, AvailableAmount: cap.available, UnitAmount: cap.unit, QuantityCap: cap.units, Binding: cap.name == binding})
+	}
+	if math.IsInf(quantity, 1) || quantity < 1 {
+		return 0, 0, binding, recorded, []string{reasonSizingZero, binding}
+	}
+	return quantity * opp.RequiredCapitalUnit, quantity, binding, recorded, nil
+}
+
+func smallestPositiveCap(values []struct {
+	name  string
+	value float64
+}) (float64, string) {
+	best, binding := 0.0, ""
+	for _, candidate := range values {
+		if candidate.value <= 0 {
+			continue
+		}
+		if best == 0 || candidate.value < best {
+			best, binding = candidate.value, candidate.name
+		}
+	}
+	return best, binding
+}
+
+func portfolioRiskRejectionReasons(opp domain.Opportunity, state PortfolioState, cfg AllocatorConfig, now time.Time) []string {
+	reasons := make([]string, 0)
+	if state.AccountBalanceFallback {
+		reasons = append(reasons, reasonAccountBalanceFallback)
+	}
+	if state.CircuitBreakerOpen {
+		reasons = append(reasons, reasonCircuitBreakerOpen)
+	}
+	if cfg.MaxDailyLossPct > 0 && state.DailyLossPct >= cfg.MaxDailyLossPct {
+		reasons = append(reasons, reasonDailyLossLimit)
+	}
+	if cfg.MaxDrawdownPct > 0 && state.DrawdownPct >= cfg.MaxDrawdownPct {
+		reasons = append(reasons, reasonDrawdownLimit)
+	}
+	if cfg.MaxOpenPositions > 0 && state.OpenPositionCount >= cfg.MaxOpenPositions {
+		reasons = append(reasons, reasonOpenPositionLimit)
+	}
+	if opp.RiskPolicyVersion != "" && opp.RiskPolicyVersion != cfg.RiskPolicyVersion {
+		reasons = append(reasons, reasonRiskPolicyMismatch)
+	}
+	if opp.MarketType != domain.MarketTypeOptions {
+		return reasons
+	}
+	if opp.RiskPolicyVersion != cfg.RiskPolicyVersion {
+		reasons = append(reasons, reasonRiskPolicyMismatch)
+	}
+	if state.AccountSnapshotID == uuid.Nil {
+		reasons = append(reasons, reasonMissingAccountSnapshot)
+	}
+	if state.BuyingPower <= 0 {
+		reasons = append(reasons, reasonInsufficientBuyingPower)
+	}
+	if opp.MaxLossPerUnit <= 0 || opp.RequiredCapitalUnit <= 0 {
+		reasons = append(reasons, reasonUndefinedOptionRisk)
+	}
+	if !validVertical(opp.OptionLegs) {
+		reasons = append(reasons, reasonUnsupportedOptionPackage)
+	}
+	if opp.QuoteObservedAt == nil || now.Sub(opp.QuoteObservedAt.UTC()) > cfg.MaxQuoteAge || opp.QuoteObservedAt.After(now) {
+		reasons = append(reasons, reasonStaleOptionQuote)
+	}
+	if math.Abs(state.Delta+opp.Delta) > cfg.MaxAbsoluteDelta || math.Abs(state.Gamma+opp.Gamma) > cfg.MaxAbsoluteGamma ||
+		math.Abs(state.Theta+opp.Theta) > cfg.MaxAbsoluteTheta || math.Abs(state.Vega+opp.Vega) > cfg.MaxAbsoluteVega {
+		reasons = append(reasons, reasonGreekLimit)
+	}
+	return reasons
+}
+
+func validVertical(legs []domain.OpportunityOptionLeg) bool {
+	if len(legs) != 2 || legs[0].Sequence != 0 || legs[1].Sequence != 1 {
+		return false
+	}
+	a, b := legs[0], legs[1]
+	if a.ContractID == uuid.Nil || b.ContractID == uuid.Nil || a.ContractID == b.ContractID || a.OCCSymbol == "" || b.OCCSymbol == "" ||
+		a.Underlying == "" || a.Underlying != b.Underlying || !a.Expiry.Equal(b.Expiry) || a.OptionType != b.OptionType ||
+		(a.OptionType != "call" && a.OptionType != "put") || a.Strike == b.Strike || a.Ratio != 1 || b.Ratio != 1 ||
+		a.Multiplier != 100 || b.Multiplier != 100 || a.Side == b.Side {
+		return false
+	}
+	longs, shorts := 0, 0
+	for _, leg := range legs {
+		if leg.PositionIntent == "buy_to_open" && leg.Side == domain.OrderSideBuy {
+			longs++
+		}
+		if leg.PositionIntent == "sell_to_open" && leg.Side == domain.OrderSideSell {
+			shorts++
+		}
+		if leg.Bid <= 0 || leg.Ask < leg.Bid {
+			return false
+		}
+	}
+	return longs == 1 && shorts == 1
 }
 
 func scoreMultiplier(score float64) float64 {
@@ -481,13 +743,29 @@ func toAllocationDecision(item scoredOpportunity) domain.AllocationDecision {
 	opportunityID := item.opp.ID
 	strategyID := item.opp.StrategyID
 	decision := domain.AllocationDecision{
-		Mode:        domain.AllocationDecisionModeShadow,
-		Action:      item.action,
-		Score:       clampScore(item.score),
-		NotionalUSD: item.notional,
-		Quantity:    0,
-		Reasons:     append([]string(nil), item.reasons...),
+		Mode:               domain.AllocationDecisionModeShadow,
+		Action:             item.action,
+		Score:              clampScore(item.score),
+		NotionalUSD:        item.notional,
+		Quantity:           0,
+		RiskPolicyVersion:  item.opp.RiskPolicyVersion,
+		ProposedQuantity:   item.quantity,
+		MaxLossPerUnit:     item.opp.MaxLossPerUnit,
+		ReservedRiskUSD:    item.quantity * item.opp.MaxLossPerUnit,
+		ReservedCapitalUSD: item.notional,
+		ExposureBeforeUSD:  item.exposureBefore,
+		ExposureAfterUSD:   item.exposureAfter,
+		BindingConstraint:  item.binding,
+		ExecutionRoute: func() string {
+			if item.opp.MarketType == domain.MarketTypeOptions {
+				return "alpaca_mleg"
+			}
+			return "stock_order_manager"
+		}(),
+		RiskCaps: append([]domain.AllocationRiskCap(nil), item.caps...),
+		Reasons:  append([]string(nil), item.reasons...),
 	}
+	decision.Quantity = item.quantity
 	if opportunityID != uuid.Nil {
 		decision.OpportunityID = &opportunityID
 	}

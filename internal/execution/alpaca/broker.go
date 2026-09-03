@@ -62,10 +62,16 @@ type positionResponse struct {
 }
 
 type accountResponse struct {
-	Currency    string `json:"currency"`
-	Cash        string `json:"cash"`
-	BuyingPower string `json:"buying_power"`
-	Equity      string `json:"equity"`
+	AccountNumber        string `json:"account_number"`
+	Status               string `json:"status"`
+	TradingBlocked       bool   `json:"trading_blocked"`
+	OptionsTradingLevel  int    `json:"options_trading_level"`
+	OptionsApprovedLevel int    `json:"options_approved_level"`
+	Currency             string `json:"currency"`
+	Cash                 string `json:"cash"`
+	BuyingPower          string `json:"buying_power"`
+	OptionsBuyingPower   string `json:"options_buying_power"`
+	Equity               string `json:"equity"`
 }
 
 // NewBroker constructs an Alpaca broker adapter.
@@ -273,11 +279,19 @@ func (b *Broker) GetAccountBalance(ctx context.Context) (execution.Balance, erro
 		return execution.Balance{}, err
 	}
 
+	optionsBuyingPower := 0.0
+	if strings.TrimSpace(response.OptionsBuyingPower) != "" {
+		optionsBuyingPower, err = parseRequiredFloat("options_buying_power", response.OptionsBuyingPower)
+		if err != nil {
+			return execution.Balance{}, err
+		}
+	}
 	return execution.Balance{
-		Currency:    currency,
-		Cash:        cash,
-		BuyingPower: buyingPower,
-		Equity:      equity,
+		Currency:           currency,
+		Cash:               cash,
+		BuyingPower:        buyingPower,
+		OptionsBuyingPower: optionsBuyingPower,
+		Equity:             equity,
 	}, nil
 }
 
