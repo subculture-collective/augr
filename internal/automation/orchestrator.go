@@ -79,6 +79,11 @@ type DiscoveryReadiness struct {
 	BindingCount          int       `json:"binding_count"`
 	StockPayloadCount     int       `json:"stock_payload_count"`
 	OptionsPayloadCount   int       `json:"options_payload_count"`
+	OptionBarCount        int       `json:"option_bar_count"`
+	OptionContractCount   int       `json:"option_contract_count"`
+	OptionQuoteCount      int       `json:"option_quote_count"`
+	OptionTradeCount      int       `json:"option_trade_count"`
+	OptionSnapshotCount   int       `json:"option_snapshot_count"`
 	StockEffectiveStart   time.Time `json:"stock_effective_start,omitempty"`
 	StockEffectiveEnd     time.Time `json:"stock_effective_end,omitempty"`
 	OptionsEffectiveStart time.Time `json:"options_effective_start,omitempty"`

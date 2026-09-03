@@ -88,6 +88,11 @@ type DatasetCapabilityReadiness struct {
 	Ready          bool      `json:"ready"`
 	Reason         string    `json:"reason,omitempty"`
 	PayloadCount   int       `json:"payload_count"`
+	BarCount       int       `json:"bar_count,omitempty"`
+	ContractCount  int       `json:"contract_count,omitempty"`
+	QuoteCount     int       `json:"quote_count,omitempty"`
+	TradeCount     int       `json:"trade_count,omitempty"`
+	SnapshotCount  int       `json:"snapshot_count,omitempty"`
 	EffectiveStart time.Time `json:"effective_start,omitempty"`
 	EffectiveEnd   time.Time `json:"effective_end,omitempty"`
 }
@@ -124,7 +129,7 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 	var quarantined bool
 	var evaluationStart, evaluationEnd time.Time
 	var stockStart, stockEnd, optionStart, optionEnd *time.Time
-	var optionBarCount, optionContractCount, optionQuoteCount, optionSnapshotCount int
+	var optionBarCount, optionContractCount, optionQuoteCount, optionTradeCount, optionSnapshotCount int
 	err := r.pool.QueryRow(ctx, `SELECT s.account_id,b.environment,m.id,m.sha256,q.id,q.sha256,m.decision_cutoff,q.quarantined,
 		s.evaluation_start,s.evaluation_end,m.observation_count,
 		(SELECT count(*) FROM dataset_manifest_payload_bindings binding WHERE binding.manifest_id=m.id),
@@ -136,6 +141,7 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 		(SELECT max(payload.effective_at) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_bar'),
 		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_contract'),
 		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_quote'),
+		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_trade'),
 		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_snapshot')
 		FROM paper_evaluation_scopes s
 		JOIN accounts a ON a.id=s.account_id
@@ -148,7 +154,7 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 		&report.AccountID, &environment, &report.ManifestID, &report.ManifestSHA256, &report.QualityResultID,
 		&report.QualitySHA256, &report.DecisionCutoff, &quarantined, &evaluationStart, &evaluationEnd,
 		&report.ObservationCount, &report.BindingCount, &report.Stock.PayloadCount, &stockStart, &stockEnd,
-		&optionBarCount, &optionStart, &optionEnd, &optionContractCount, &optionQuoteCount, &optionSnapshotCount)
+		&optionBarCount, &optionStart, &optionEnd, &optionContractCount, &optionQuoteCount, &optionTradeCount, &optionSnapshotCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		reason := "configured evaluation scope evidence graph is missing or inconsistent"
 		report.Reason = reason
@@ -163,7 +169,13 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 		report.Stock.EffectiveStart = stockStart.UTC()
 		report.Stock.EffectiveEnd = stockEnd.UTC()
 	}
-	report.Options.PayloadCount = optionBarCount + optionContractCount + optionQuoteCount + optionSnapshotCount
+	report.Stock.BarCount = report.Stock.PayloadCount
+	report.Options.BarCount = optionBarCount
+	report.Options.ContractCount = optionContractCount
+	report.Options.QuoteCount = optionQuoteCount
+	report.Options.TradeCount = optionTradeCount
+	report.Options.SnapshotCount = optionSnapshotCount
+	report.Options.PayloadCount = optionBarCount + optionContractCount + optionQuoteCount + optionTradeCount + optionSnapshotCount
 	if optionStart != nil {
 		report.Options.EffectiveStart = optionStart.UTC()
 		report.Options.EffectiveEnd = optionEnd.UTC()
@@ -192,17 +204,9 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 	} else {
 		report.Stock.Ready = true
 	}
-	optionsMinimumStart := evaluationEnd.AddDate(0, -9, 0)
-	switch {
-	case optionBarCount == 0 || optionStart == nil || optionStart.After(evaluationStart) || optionEnd.Before(evaluationEnd):
-		report.Options.Reason = "immutable option bars do not cover the complete evaluation interval"
-	case evaluationStart.After(optionsMinimumStart):
-		report.Options.Reason = "options evidence lacks a complete six-month calibration plus three-month out-of-sample interval"
-	case optionContractCount == 0:
-		report.Options.Reason = "immutable option contract metadata is missing"
-	case optionQuoteCount == 0 && optionSnapshotCount == 0:
-		report.Options.Reason = "immutable executable option quote or chain evidence is missing"
-	default:
+	report.Options.Reason = optionsCapabilityBlockReason(evaluationStart, evaluationEnd, optionStart, optionEnd,
+		optionBarCount, optionContractCount, optionQuoteCount, optionTradeCount, optionSnapshotCount)
+	if report.Options.Reason == "" {
 		report.Options.Ready = true
 	}
 	report.Ready = report.Stock.Ready || report.Options.Ready
@@ -214,6 +218,25 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 		report.Reason = report.Options.Reason
 	}
 	return report, nil
+}
+
+func optionsCapabilityBlockReason(evaluationStart, evaluationEnd time.Time, optionStart, optionEnd *time.Time, bars, contracts, quotes, trades, snapshots int) string {
+	switch {
+	case bars == 0 || optionStart == nil || optionEnd == nil || optionStart.After(evaluationStart) || optionEnd.Before(evaluationEnd):
+		return "immutable option bars do not cover the complete evaluation interval"
+	case evaluationStart.After(evaluationEnd.AddDate(0, -9, 0)):
+		return "options evidence lacks a complete six-month calibration plus three-month out-of-sample interval"
+	case contracts == 0:
+		return "immutable option contract metadata is missing"
+	case quotes == 0:
+		return "immutable executable option quote evidence is missing"
+	case trades == 0:
+		return "immutable option trade evidence is missing"
+	case snapshots == 0:
+		return "immutable option chain snapshot evidence is missing"
+	default:
+		return ""
+	}
 }
 
 // ScopedExecutionBinding retains per-scope validation for backtest callers.

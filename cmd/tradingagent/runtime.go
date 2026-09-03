@@ -515,6 +515,11 @@ func evaluateRuntimeDiscoveryReadiness(ctx context.Context, reportRepo *pgrepo.R
 		readiness.BindingCount = report.BindingCount
 		readiness.StockPayloadCount = report.Stock.PayloadCount
 		readiness.OptionsPayloadCount = report.Options.PayloadCount
+		readiness.OptionBarCount = report.Options.BarCount
+		readiness.OptionContractCount = report.Options.ContractCount
+		readiness.OptionQuoteCount = report.Options.QuoteCount
+		readiness.OptionTradeCount = report.Options.TradeCount
+		readiness.OptionSnapshotCount = report.Options.SnapshotCount
 		readiness.StockEffectiveStart = report.Stock.EffectiveStart
 		readiness.StockEffectiveEnd = report.Stock.EffectiveEnd
 		readiness.OptionsEffectiveStart = report.Options.EffectiveStart

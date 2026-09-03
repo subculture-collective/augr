@@ -113,6 +113,32 @@ func TestConfiguredScopeEnablesStockAndKeepsOptionsFailClosed(t *testing.T) {
 	}
 }
 
+func TestOptionsCapabilityRequiresEveryTypedEvidenceKind(t *testing.T) {
+	end := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	start := end.AddDate(0, -9, 0)
+	optionStart, optionEnd := start, end
+	tests := []struct {
+		name                                       string
+		bars, contracts, quotes, trades, snapshots int
+		want                                       string
+	}{
+		{"bars", 0, 1, 1, 1, 1, "immutable option bars do not cover the complete evaluation interval"},
+		{"contracts", 1, 0, 1, 1, 1, "immutable option contract metadata is missing"},
+		{"quotes", 1, 1, 0, 1, 1, "immutable executable option quote evidence is missing"},
+		{"trades", 1, 1, 1, 0, 1, "immutable option trade evidence is missing"},
+		{"snapshots", 1, 1, 1, 1, 0, "immutable option chain snapshot evidence is missing"},
+		{"ready", 1, 1, 1, 1, 1, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := optionsCapabilityBlockReason(start, end, &optionStart, &optionEnd, test.bars, test.contracts, test.quotes, test.trades, test.snapshots)
+			if got != test.want {
+				t.Fatalf("optionsCapabilityBlockReason() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestDiscoveryDeploymentReadinessRejectsValidScopeWithoutLoaderBinding(t *testing.T) {
 	scope, err := NewPaperEvaluationScope(PaperEvaluationScope{
 		AccountID: uuid.New(), CapitalBindingID: uuid.New(), ManifestSHA256: strings.Repeat("1", 64),
