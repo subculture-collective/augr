@@ -31,19 +31,19 @@ var (
 )
 
 type InputField struct {
-	Name             string
-	Type             string
-	DatasetKind      dataset.Kind
-	Field            string
-	FreshnessSeconds int64
-	MissingPolicy    string
+	Name             string       `json:"name"`
+	Type             string       `json:"type"`
+	DatasetKind      dataset.Kind `json:"dataset_kind"`
+	Field            string       `json:"field"`
+	FreshnessSeconds int64        `json:"freshness_seconds"`
+	MissingPolicy    string       `json:"missing_policy"`
 }
 
 type Expr struct {
-	Op    string
-	Ref   string
-	Value string
-	Args  []Expr
+	Op    string `json:"op"`
+	Ref   string `json:"ref"`
+	Value string `json:"value"`
+	Args  []Expr `json:"args"`
 }
 
 type Universe struct {
@@ -53,33 +53,33 @@ type Universe struct {
 }
 
 type Sizing struct {
-	Mode        string
-	Value       string
-	MaxPosition string
+	Mode        string `json:"mode"`
+	Value       string `json:"value"`
+	MaxPosition string `json:"max_position"`
 }
 
 type Costs struct {
-	SpreadBPS   string
-	FeeBPS      string
-	SlippageBPS string
+	SpreadBPS   string `json:"spread_bps"`
+	FeeBPS      string `json:"fee_bps"`
+	SlippageBPS string `json:"slippage_bps"`
 }
 
 type Capacity struct {
-	MaximumDailyTurnover string
-	MaximumParticipation string
+	MaximumDailyTurnover string `json:"maximum_daily_turnover"`
+	MaximumParticipation string `json:"maximum_participation"`
 }
 
 type ExampleTest struct {
-	Key           string
-	Values        map[string]string
-	ExpectedEntry bool
-	ExpectedExit  bool
+	Key           string            `json:"key"`
+	Values        map[string]string `json:"values"`
+	ExpectedEntry bool              `json:"expected_entry"`
+	ExpectedExit  bool              `json:"expected_exit"`
 }
 
 type Retirement struct {
-	MaximumDrawdown     string
-	MinimumSamples      int64
-	MaximumFailedChecks int64
+	MaximumDrawdown     string `json:"maximum_drawdown"`
+	MinimumSamples      int64  `json:"minimum_samples"`
+	MaximumFailedChecks int64  `json:"maximum_failed_checks"`
 }
 
 type Authoring struct {
