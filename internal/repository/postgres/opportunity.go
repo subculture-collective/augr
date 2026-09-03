@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -49,6 +50,9 @@ func (r *OpportunityRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Opport
 			return nil, fmt.Errorf("postgres: get opportunity %s: %w", id, ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: get opportunity: %w", err)
+	}
+	if err := r.loadOptionLegs(ctx, opportunity); err != nil {
+		return nil, fmt.Errorf("postgres: get opportunity legs: %w", err)
 	}
 	return opportunity, nil
 }
@@ -173,6 +177,9 @@ func (r *OpportunityRepo) UpdateStatus(ctx context.Context, id uuid.UUID, status
 }
 
 func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportunity, upsert bool) error {
+	if hasScopedOpportunityLineage(opportunity) {
+		return r.saveScoped(ctx, opportunity)
+	}
 	if err := validateOptionalPipelineRunRef(opportunity.PipelineRunID, opportunity.PipelineRunTradeDate); err != nil {
 		return fmt.Errorf("postgres: save opportunity: %w", err)
 	}
@@ -266,11 +273,98 @@ func (r *OpportunityRepo) save(ctx context.Context, opportunity *domain.Opportun
 	return nil
 }
 
+func hasScopedOpportunityLineage(value *domain.Opportunity) bool {
+	return value != nil && (value.EvaluationScopeID != uuid.Nil || value.DeploymentID != uuid.Nil || value.PromotionDecisionID != uuid.Nil)
+}
+
+func (r *OpportunityRepo) saveScoped(ctx context.Context, opportunity *domain.Opportunity) error {
+	if opportunity == nil || opportunity.AccountID != uuid.Nil && opportunity.AccountID != r.accountID || opportunity.ExecutionVersionID == uuid.Nil ||
+		opportunity.EvaluationScopeID == uuid.Nil || opportunity.ManifestID == uuid.Nil || opportunity.QualityResultID == uuid.Nil ||
+		opportunity.DeploymentID == uuid.Nil || opportunity.PromotionDecisionID == uuid.Nil || opportunity.RiskPolicyVersion == "" ||
+		opportunity.PipelineRunID == nil || opportunity.PipelineRunTradeDate == nil {
+		return fmt.Errorf("postgres: save scoped opportunity: complete promotion lineage is required")
+	}
+	intent, err := portfolio.NewExecutionIntent(*opportunity)
+	if err != nil {
+		return fmt.Errorf("postgres: save scoped opportunity: %w", err)
+	}
+	evidence, err := marshalOpportunityJSON(opportunity.Evidence)
+	if err != nil {
+		return err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var riskPolicyID uuid.UUID
+	err = tx.QueryRow(ctx, `SELECT risk.id FROM portfolio_risk_policy_artifacts risk
+		JOIN paper_evaluation_scopes scope ON scope.id=$2 AND scope.account_id=$1
+		JOIN dataset_manifests manifest ON manifest.id=$3 AND manifest.sha256=scope.manifest_sha256
+		JOIN dataset_quality_results quality ON quality.id=$4 AND quality.manifest_id=manifest.id AND quality.sha256=scope.quality_sha256 AND NOT quality.quarantined
+		JOIN strategy_deployments deployment ON deployment.id=$5 AND deployment.account_id=$1 AND deployment.capital_binding_id=scope.capital_binding_id
+		JOIN promotion_retirement_decisions decision ON decision.id=$6 AND decision.deployment_id=deployment.id AND decision.outcome='approved' AND decision.next_state='shadow'
+		JOIN strategy_promotion_activations activation ON activation.deployment_id=deployment.id AND activation.strategy_id=$7 AND activation.runtime_version_id=$8 AND activation.action='activate'
+		WHERE risk.schema_name||'@sha256:'||risk.sha256=$9
+		AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions child WHERE child.prior_decision_id=decision.id)`,
+		r.accountID, opportunity.EvaluationScopeID, opportunity.ManifestID, opportunity.QualityResultID, opportunity.DeploymentID,
+		opportunity.PromotionDecisionID, opportunity.StrategyID, opportunity.ExecutionVersionID, opportunity.RiskPolicyVersion).Scan(&riskPolicyID)
+	if err != nil {
+		return fmt.Errorf("postgres: save scoped opportunity: promotion graph does not reconstruct: %w", err)
+	}
+	opportunity.AccountID = r.accountID
+	row := tx.QueryRow(ctx, `INSERT INTO portfolio_opportunities(account_id,environment,origin_type,origin_id,strategy_id,pipeline_run_id,pipeline_run_trade_date,
+		market_type,ticker,side,prediction_side,signal,status,score,confidence,edge_pct,expected_return_pct,max_loss_pct,entry_price,liquidity_usd,market_cap_usd,
+		spread_pct,proposed_notional,selected_notional,reason,reject_reason,evidence,expires_at,dedupe_key,execution_version_id,evaluation_scope_id,manifest_id,
+		quality_result_id,deployment_id,promotion_decision_id,risk_policy_id,risk_policy_version,deployment_budget_usd,expected_loss_usd,max_loss_per_unit,
+		required_capital_per_unit,quote_observed_at,delta,gamma,theta,vega,intent_sha256,intent_bytes)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,$44,$45,$46,$47,$48)
+		ON CONFLICT(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key) DO NOTHING
+		RETURNING id,created_at,updated_at`, r.accountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, opportunity.StrategyID, opportunity.PipelineRunID,
+		opportunity.PipelineRunTradeDate, opportunity.MarketType, opportunity.Ticker, opportunity.Side, opportunity.PredictionSide, opportunity.Signal, opportunity.Status,
+		opportunity.Score, opportunity.Confidence, opportunity.EdgePct, opportunity.ExpectedReturnPct, opportunity.MaxLossPct, opportunity.EntryPrice, opportunity.LiquidityUSD,
+		opportunity.MarketCapUSD, opportunity.SpreadPct, opportunity.ProposedNotional, opportunity.SelectedNotional, opportunity.Reason, opportunity.RejectReason, evidence,
+		opportunity.ExpiresAt, opportunity.DedupeKey, opportunity.ExecutionVersionID, opportunity.EvaluationScopeID, opportunity.ManifestID, opportunity.QualityResultID,
+		opportunity.DeploymentID, opportunity.PromotionDecisionID, riskPolicyID, opportunity.RiskPolicyVersion, opportunity.DeploymentBudgetUSD, opportunity.ExpectedLossUSD,
+		opportunity.MaxLossPerUnit, opportunity.RequiredCapitalUnit, opportunity.QuoteObservedAt, opportunity.Delta, opportunity.Gamma, opportunity.Theta, opportunity.Vega,
+		intent.Digest(), intent.CanonicalBytes())
+	if err = row.Scan(&opportunity.ID, &opportunity.CreatedAt, &opportunity.UpdatedAt); errors.Is(err, pgx.ErrNoRows) {
+		var id uuid.UUID
+		var digest string
+		if loadErr := tx.QueryRow(ctx, `SELECT id,intent_sha256 FROM portfolio_opportunities WHERE account_id=$1 AND environment=$2 AND origin_type=$3 AND origin_id=$4 AND pipeline_run_id=$5 AND pipeline_run_trade_date=$6 AND strategy_id=$7 AND dedupe_key=$8`, r.accountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, opportunity.PipelineRunID, opportunity.PipelineRunTradeDate, opportunity.StrategyID, opportunity.DedupeKey).Scan(&id, &digest); loadErr != nil || digest != intent.Digest() {
+			return fmt.Errorf("postgres: save scoped opportunity changed on retry: %w", repository.ErrIdempotencyConflict)
+		}
+		opportunity.ID = id
+	} else if err != nil {
+		return err
+	}
+	for _, leg := range opportunity.OptionLegs {
+		result, insertErr := tx.Exec(ctx, `INSERT INTO portfolio_opportunity_option_legs(opportunity_id,sequence,contract_id,occ_symbol,underlying,expiry,option_type,strike,ratio,side,position_intent,bid,ask,multiplier) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(opportunity_id,sequence) DO NOTHING`, opportunity.ID, leg.Sequence, leg.ContractID, leg.OCCSymbol, leg.Underlying, leg.Expiry, leg.OptionType, leg.Strike, leg.Ratio, leg.Side, leg.PositionIntent, leg.Bid, leg.Ask, leg.Multiplier)
+		if insertErr != nil {
+			return insertErr
+		}
+		if result.RowsAffected() == 0 {
+			var contract uuid.UUID
+			if scanErr := tx.QueryRow(ctx, `SELECT contract_id FROM portfolio_opportunity_option_legs WHERE opportunity_id=$1 AND sequence=$2`, opportunity.ID, leg.Sequence).Scan(&contract); scanErr != nil || contract != leg.ContractID {
+				return fmt.Errorf("postgres: scoped option leg changed on retry: %w", repository.ErrIdempotencyConflict)
+			}
+		}
+	}
+	if opportunity.MarketType == domain.MarketTypeOptions && len(opportunity.OptionLegs) != 2 {
+		return fmt.Errorf("postgres: scoped options opportunity requires two normalized legs")
+	}
+	return tx.Commit(ctx)
+}
+
 const opportunitySelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, strategy_id, pipeline_run_id, pipeline_run_trade_date, market_type, ticker, side, prediction_side, signal,
 	status, score::double precision, confidence::double precision, edge_pct::double precision,
 	expected_return_pct::double precision, max_loss_pct::double precision, entry_price::double precision, liquidity_usd::double precision,
 	market_cap_usd::double precision, spread_pct::double precision, proposed_notional::double precision, selected_notional::double precision,
-	reason, reject_reason, evidence, expires_at, created_at, updated_at, dedupe_key
+	reason, reject_reason, evidence, expires_at, created_at, updated_at, dedupe_key,
+	execution_version_id, evaluation_scope_id, manifest_id, quality_result_id, deployment_id, promotion_decision_id,
+	risk_policy_version, deployment_budget_usd::double precision, expected_loss_usd::double precision,
+	max_loss_per_unit::double precision, required_capital_per_unit::double precision, quote_observed_at,
+	delta::double precision, gamma::double precision, theta::double precision, vega::double precision
 	FROM portfolio_opportunities`
 
 func (r *OpportunityRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.Opportunity, error) {
@@ -285,6 +379,9 @@ func (r *OpportunityRepo) list(ctx context.Context, query string, args []any, op
 		opportunity, err := scanOpportunity(rows)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: %s scan: %w", op, err)
+		}
+		if err := r.loadOptionLegs(ctx, opportunity); err != nil {
+			return nil, fmt.Errorf("postgres: %s option legs: %w", op, err)
 		}
 		opportunities = append(opportunities, *opportunity)
 	}
@@ -306,6 +403,22 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 		pipelineRunTradeDate *time.Time
 		score                *float64
 		evidence             []byte
+		executionVersionID   *uuid.UUID
+		evaluationScopeID    *uuid.UUID
+		manifestID           *uuid.UUID
+		qualityResultID      *uuid.UUID
+		deploymentID         *uuid.UUID
+		promotionDecisionID  *uuid.UUID
+		riskPolicyVersion    *string
+		deploymentBudgetUSD  *float64
+		expectedLossUSD      *float64
+		maxLossPerUnit       *float64
+		requiredCapitalUnit  *float64
+		quoteObservedAt      *time.Time
+		delta                *float64
+		gamma                *float64
+		theta                *float64
+		vega                 *float64
 	)
 	if err := sc.Scan(
 		&opportunity.ID,
@@ -340,6 +453,22 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 		&opportunity.CreatedAt,
 		&opportunity.UpdatedAt,
 		&opportunity.DedupeKey,
+		&executionVersionID,
+		&evaluationScopeID,
+		&manifestID,
+		&qualityResultID,
+		&deploymentID,
+		&promotionDecisionID,
+		&riskPolicyVersion,
+		&deploymentBudgetUSD,
+		&expectedLossUSD,
+		&maxLossPerUnit,
+		&requiredCapitalUnit,
+		&quoteObservedAt,
+		&delta,
+		&gamma,
+		&theta,
+		&vega,
 	); err != nil {
 		return nil, err
 	}
@@ -360,7 +489,66 @@ func scanOpportunity(sc scanner) (*domain.Opportunity, error) {
 	opportunity.PipelineRunTradeDate = pipelineRunTradeDate
 	opportunity.Score = score
 	opportunity.Evidence = json.RawMessage(evidence)
+	if executionVersionID != nil {
+		opportunity.ExecutionVersionID = *executionVersionID
+	}
+	if evaluationScopeID != nil {
+		opportunity.EvaluationScopeID = *evaluationScopeID
+	}
+	if manifestID != nil {
+		opportunity.ManifestID = *manifestID
+	}
+	if qualityResultID != nil {
+		opportunity.QualityResultID = *qualityResultID
+	}
+	if deploymentID != nil {
+		opportunity.DeploymentID = *deploymentID
+	}
+	if promotionDecisionID != nil {
+		opportunity.PromotionDecisionID = *promotionDecisionID
+	}
+	if riskPolicyVersion != nil {
+		opportunity.RiskPolicyVersion = *riskPolicyVersion
+	}
+	opportunity.DeploymentBudgetUSD = float64Value(deploymentBudgetUSD)
+	opportunity.ExpectedLossUSD = float64Value(expectedLossUSD)
+	opportunity.MaxLossPerUnit = float64Value(maxLossPerUnit)
+	opportunity.RequiredCapitalUnit = float64Value(requiredCapitalUnit)
+	opportunity.QuoteObservedAt = quoteObservedAt
+	opportunity.Delta = float64Value(delta)
+	opportunity.Gamma = float64Value(gamma)
+	opportunity.Theta = float64Value(theta)
+	opportunity.Vega = float64Value(vega)
 	return &opportunity, nil
+}
+
+func (r *OpportunityRepo) loadOptionLegs(ctx context.Context, opportunity *domain.Opportunity) error {
+	if opportunity == nil || opportunity.MarketType != domain.MarketTypeOptions || opportunity.EvaluationScopeID == uuid.Nil {
+		return nil
+	}
+	rows, err := r.pool.Query(ctx, `SELECT sequence,contract_id,occ_symbol,underlying,expiry,option_type,strike::double precision,
+		ratio,side,position_intent,bid::double precision,ask::double precision,multiplier
+		FROM portfolio_opportunity_option_legs WHERE opportunity_id=$1 ORDER BY sequence`, opportunity.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var leg domain.OpportunityOptionLeg
+		if err := rows.Scan(&leg.Sequence, &leg.ContractID, &leg.OCCSymbol, &leg.Underlying, &leg.Expiry, &leg.OptionType,
+			&leg.Strike, &leg.Ratio, &leg.Side, &leg.PositionIntent, &leg.Bid, &leg.Ask, &leg.Multiplier); err != nil {
+			return err
+		}
+		opportunity.OptionLegs = append(opportunity.OptionLegs, leg)
+	}
+	return rows.Err()
+}
+
+func float64Value(value *float64) float64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func buildOpportunityCountQuery(accountID uuid.UUID, filter repository.OpportunityFilter) (string, []any) {
