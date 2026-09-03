@@ -54,6 +54,104 @@ CREATE TABLE portfolio_account_snapshots (
   CHECK(id=economic_deterministic_uuid('portfolio-account-snapshot','portfolio-account-snapshot-v1@sha256:'||sha256))
 );
 
+CREATE TABLE generated_strategy_scenarios (
+  id UUID PRIMARY KEY,
+  schema_name TEXT NOT NULL CHECK(schema_name='typed-generative-strategy-scenario-v1'),
+  state TEXT NOT NULL CHECK(state='derived'),
+  spec_id UUID NOT NULL REFERENCES generated_strategy_specs(id) ON DELETE RESTRICT,
+  spec_sha256 TEXT NOT NULL CHECK(spec_sha256 ~ '^[0-9a-f]{64}$'),
+  manifest_id UUID NOT NULL REFERENCES dataset_manifests(id) ON DELETE RESTRICT,
+  manifest_sha256 TEXT NOT NULL CHECK(manifest_sha256 ~ '^[0-9a-f]{64}$'),
+  mode TEXT NOT NULL CHECK(mode IN ('paper_scored','paper_stress')),
+  evaluation_start TIMESTAMPTZ NOT NULL CHECK(evaluation_start=date_trunc('microseconds',evaluation_start)),
+  evaluation_end TIMESTAMPTZ NOT NULL CHECK(evaluation_end=date_trunc('microseconds',evaluation_end) AND evaluation_start<evaluation_end),
+  frame_count INTEGER NOT NULL CHECK(frame_count>0 AND frame_count<=100000),
+  sha256 TEXT NOT NULL UNIQUE CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+  canonical_bytes BYTEA NOT NULL,
+  canonical_json JSONB NOT NULL CHECK(jsonb_typeof(canonical_json)='object'),
+  created_at TIMESTAMPTZ NOT NULL CHECK(created_at=date_trunc('microseconds',created_at)),
+  CHECK(sha256=encode(digest(canonical_bytes,'sha256'),'hex')),
+  CHECK(canonical_json=convert_from(canonical_bytes,'UTF8')::JSONB),
+  CHECK(id=economic_deterministic_uuid('typed-generative-strategy-scenario',schema_name||'@sha256:'||sha256))
+);
+
+CREATE TABLE generated_strategy_scenario_frames (
+  scenario_id UUID NOT NULL REFERENCES generated_strategy_scenarios(id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK(sequence>=0),
+  instrument_id UUID NOT NULL REFERENCES instruments(id) ON DELETE RESTRICT,
+  venue_contract_id UUID NOT NULL REFERENCES venue_contracts(id) ON DELETE RESTRICT,
+  decision_at TIMESTAMPTZ NOT NULL CHECK(decision_at=date_trunc('microseconds',decision_at)),
+  route_at TIMESTAMPTZ NOT NULL CHECK(route_at=date_trunc('microseconds',route_at) AND route_at>=decision_at),
+  action TEXT NOT NULL CHECK(action IN ('noop','buy','sell')),
+  input_count INTEGER NOT NULL CHECK(input_count>0),
+  canonical_frame JSONB NOT NULL CHECK(jsonb_typeof(canonical_frame)='object'),
+  PRIMARY KEY(scenario_id,sequence)
+);
+
+CREATE TABLE generated_strategy_scenario_bindings (
+  scenario_id UUID NOT NULL,
+  frame_sequence INTEGER NOT NULL,
+  input_sequence INTEGER NOT NULL CHECK(input_sequence>=0),
+  input_name TEXT NOT NULL CHECK(input_name<>''),
+  dataset_kind TEXT NOT NULL CHECK(dataset_kind<>''),
+  field_name TEXT NOT NULL CHECK(field_name<>''),
+  payload_id UUID NOT NULL REFERENCES dataset_market_payloads(id) ON DELETE RESTRICT,
+  payload_sha256 TEXT NOT NULL CHECK(payload_sha256 ~ '^[0-9a-f]{64}$'),
+  partition_content_sha256 TEXT NOT NULL CHECK(partition_content_sha256 ~ '^[0-9a-f]{64}$'),
+  source_key TEXT NOT NULL CHECK(source_key<>''),
+  available_at TIMESTAMPTZ NOT NULL CHECK(available_at=date_trunc('microseconds',available_at)),
+  canonical_value TEXT NOT NULL,
+  canonical_binding JSONB NOT NULL CHECK(jsonb_typeof(canonical_binding)='object'),
+  PRIMARY KEY(scenario_id,frame_sequence,input_sequence),
+  UNIQUE(scenario_id,frame_sequence,input_name),
+  FOREIGN KEY(scenario_id,frame_sequence) REFERENCES generated_strategy_scenario_frames(scenario_id,sequence) ON DELETE RESTRICT
+);
+
+CREATE FUNCTION validate_generated_strategy_scenario_graph() RETURNS TRIGGER AS $$
+DECLARE target UUID; scenario generated_strategy_scenarios%ROWTYPE;
+BEGIN
+  target:=COALESCE((to_jsonb(NEW)->>'scenario_id')::UUID,(to_jsonb(NEW)->>'id')::UUID);
+  SELECT * INTO scenario FROM generated_strategy_scenarios WHERE id=target;
+  IF NOT FOUND THEN RAISE EXCEPTION 'generated strategy scenario parent is missing'; END IF;
+  IF scenario.spec_sha256<>(SELECT sha256 FROM generated_strategy_specs WHERE id=scenario.spec_id)
+    OR scenario.manifest_sha256<>(SELECT sha256 FROM dataset_manifests WHERE id=scenario.manifest_id)
+    OR scenario.frame_count<>(SELECT count(*) FROM generated_strategy_scenario_frames WHERE scenario_id=target)
+    OR scenario.canonical_json->'frames'<>COALESCE((SELECT jsonb_agg(frame.canonical_frame ORDER BY frame.sequence) FROM generated_strategy_scenario_frames frame WHERE frame.scenario_id=target),'[]'::JSONB)
+    OR EXISTS(SELECT 1 FROM generated_strategy_scenario_frames frame WHERE frame.scenario_id=target AND
+      (frame.sequence<>((frame.canonical_frame->>'sequence')::INTEGER)
+       OR frame.instrument_id<>((frame.canonical_frame->>'instrument_id')::UUID)
+       OR frame.venue_contract_id<>((frame.canonical_frame->>'venue_contract_id')::UUID)
+       OR frame.action<>(frame.canonical_frame->>'action')
+       OR frame.input_count<>(SELECT count(*) FROM generated_strategy_scenario_bindings binding WHERE binding.scenario_id=target AND binding.frame_sequence=frame.sequence)
+       OR frame.canonical_frame->'bindings'<>COALESCE((SELECT jsonb_agg(binding.canonical_binding ORDER BY binding.input_sequence) FROM generated_strategy_scenario_bindings binding WHERE binding.scenario_id=target AND binding.frame_sequence=frame.sequence),'[]'::JSONB)))
+    OR EXISTS(SELECT 1 FROM generated_strategy_scenario_bindings binding
+      LEFT JOIN dataset_market_payloads payload ON payload.id=binding.payload_id AND payload.sha256=binding.payload_sha256
+      WHERE binding.scenario_id=target AND (payload.id IS NULL
+        OR binding.input_name<>binding.canonical_binding->>'name'
+        OR binding.dataset_kind<>binding.canonical_binding->>'dataset_kind'
+        OR binding.field_name<>binding.canonical_binding->>'field'
+        OR binding.payload_id<>((binding.canonical_binding->>'payload_id')::UUID)
+        OR binding.payload_sha256<>binding.canonical_binding->>'payload_sha256'
+        OR binding.partition_content_sha256<>binding.canonical_binding->>'partition_content_sha256'
+        OR binding.source_key<>binding.canonical_binding->>'source_key'
+        OR binding.canonical_value<>binding.canonical_binding->>'value'
+        OR binding.available_at<>payload.available_at
+        OR NOT EXISTS(SELECT 1 FROM dataset_manifest_partitions partition
+          JOIN dataset_manifest_observations observation ON observation.manifest_id=partition.manifest_id AND observation.partition_sequence=partition.sequence
+          WHERE partition.manifest_id=scenario.manifest_id AND partition.content_sha256=binding.partition_content_sha256
+            AND observation.source_key=binding.source_key AND observation.content_sha256=binding.payload_sha256 AND observation.available_at=binding.available_at))) THEN
+    RAISE EXCEPTION 'generated strategy scenario graph does not reconstruct';
+  END IF;
+  RETURN NULL;
+END; $$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER trg_generated_strategy_scenario_parent
+  AFTER INSERT ON generated_strategy_scenarios DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_generated_strategy_scenario_graph();
+CREATE CONSTRAINT TRIGGER trg_generated_strategy_scenario_frame
+  AFTER INSERT ON generated_strategy_scenario_frames DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_generated_strategy_scenario_graph();
+CREATE CONSTRAINT TRIGGER trg_generated_strategy_scenario_binding
+  AFTER INSERT ON generated_strategy_scenario_bindings DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION validate_generated_strategy_scenario_graph();
+
 CREATE FUNCTION validate_portfolio_risk_binding() RETURNS TRIGGER AS $$
 BEGIN
   PERFORM 1
@@ -319,7 +417,7 @@ CREATE TABLE allocation_risk_caps (
 
 CREATE FUNCTION reject_portfolio_evidence_mutation() RETURNS TRIGGER AS $$
 BEGIN RAISE EXCEPTION 'portfolio evidence is append-only'; END; $$ LANGUAGE plpgsql;
-DO $$ DECLARE name TEXT; BEGIN FOREACH name IN ARRAY ARRAY['portfolio_risk_policy_artifacts','account_portfolio_risk_policy_bindings','portfolio_account_snapshots','portfolio_opportunity_option_legs','allocation_risk_caps'] LOOP
+DO $$ DECLARE name TEXT; BEGIN FOREACH name IN ARRAY ARRAY['portfolio_risk_policy_artifacts','account_portfolio_risk_policy_bindings','portfolio_account_snapshots','generated_strategy_scenarios','generated_strategy_scenario_frames','generated_strategy_scenario_bindings','portfolio_opportunity_option_legs','allocation_risk_caps'] LOOP
   EXECUTE format('CREATE TRIGGER trg_%s_immutable BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION reject_portfolio_evidence_mutation()',name,name);
 END LOOP; END $$;
 

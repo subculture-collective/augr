@@ -40,12 +40,23 @@ func scenarioFixture(t *testing.T) (*Spec, ScenarioInput, map[uuid.UUID]*dataset
 		return payload
 	}
 	first, second := bar(start.Add(time.Minute), "101"), bar(start.Add(2*time.Minute), "99")
+	manifest, err := dataset.NewManifest(dataset.ManifestInput{DecisionCutoff: start.Add(time.Hour), Partitions: []dataset.PartitionInput{{
+		Kind: dataset.KindBars, Provider: "alpaca", Source: "historical-bars", Namespace: "alpaca/sip", RequestSHA256: strings.Repeat("a", 64), MediaType: "application/json",
+		SymbologyVersion: "alpaca-v1", AdjustmentPolicy: "all", Timezone: "UTC", Calendar: "XNYS", Revision: "original", License: "licensed", RetentionPolicy: "immutable",
+		Observations: []dataset.ObservationInput{
+			{SourceKey: "aapl-first", InstrumentID: instrumentID, EffectiveAt: first.EffectiveAt(), ObservedAt: first.Metadata().ObservedAt, AvailableAt: first.AvailableAt(), Revision: "original", ContentSHA256: first.Digest()},
+			{SourceKey: "aapl-second", InstrumentID: instrumentID, EffectiveAt: second.EffectiveAt(), ObservedAt: second.Metadata().ObservedAt, AvailableAt: second.AvailableAt(), Revision: "original", ContentSHA256: second.Digest()},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	contractID := uuid.New()
 	evidence := func(payload *dataset.MarketPayload, source string) map[string]ScenarioEvidenceInput {
-		bound := ScenarioEvidenceInput{Payload: payload, PartitionContentSHA256: strings.Repeat("d", 64), SourceKey: source}
+		bound := ScenarioEvidenceInput{Payload: payload, PartitionContentSHA256: manifest.Partitions()[0].ContentSHA256, SourceKey: source}
 		return map[string]ScenarioEvidenceInput{"price": bound, "average": bound}
 	}
-	input := ScenarioInput{Spec: spec, Mode: strategycatalog.ExperimentPaperScored, EvaluationStart: start, EvaluationEnd: start.Add(time.Hour), Frames: []DecisionFrameInput{
+	input := ScenarioInput{Spec: spec, Manifest: manifest, Mode: strategycatalog.ExperimentPaperScored, EvaluationStart: start, EvaluationEnd: start.Add(time.Hour), Frames: []DecisionFrameInput{
 		{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: first.AvailableAt(), RouteAt: first.AvailableAt(), ExecutionInput: "price", EvidenceByInput: evidence(first, "aapl-first")},
 		{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: second.AvailableAt(), RouteAt: second.AvailableAt(), ExecutionInput: "price", EvidenceByInput: evidence(second, "aapl-second")},
 	}}
@@ -63,7 +74,7 @@ func TestScenarioDerivesActionsOnlyFromImmutablePayloads(t *testing.T) {
 		scenario.canonical.Frames[0].ExecutionPrice != "101" || scenario.canonical.Frames[1].ExecutionPrice != "99" {
 		t.Fatalf("scenario frames = %+v", scenario.canonical.Frames)
 	}
-	restored, err := ScenarioFromCanonical(scenario.ID(), scenario.Digest(), scenario.CanonicalBytes(), spec, payloads)
+	restored, err := ScenarioFromCanonical(scenario.ID(), scenario.Digest(), scenario.CanonicalBytes(), spec, input.Manifest, payloads)
 	if err != nil || restored.ID() != scenario.ID() || !bytes.Equal(restored.CanonicalBytes(), scenario.CanonicalBytes()) {
 		t.Fatalf("restored = %v, %v", restored, err)
 	}
@@ -89,7 +100,7 @@ func TestScenarioRejectsStaleCrossInstrumentAndTamperedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	tampered := bytes.Replace(scenario.CanonicalBytes(), []byte(`"value":"101"`), []byte(`"value":"102"`), 1)
-	if _, err = ScenarioFromCanonical(scenario.ID(), scenario.Digest(), tampered, spec, payloads); err == nil {
+	if _, err = ScenarioFromCanonical(scenario.ID(), scenario.Digest(), tampered, spec, validInput.Manifest, payloads); err == nil {
 		t.Fatal("tampered scenario restored")
 	}
 }

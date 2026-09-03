@@ -43,6 +43,7 @@ type ScenarioEvidenceInput struct {
 
 type ScenarioInput struct {
 	Spec            *Spec
+	Manifest        *dataset.Manifest
 	Mode            strategycatalog.ExperimentMode
 	EvaluationStart time.Time
 	EvaluationEnd   time.Time
@@ -80,6 +81,8 @@ type scenarioCanonical struct {
 	State           string                         `json:"state"`
 	SpecID          string                         `json:"spec_id"`
 	SpecSHA256      string                         `json:"spec_sha256"`
+	ManifestID      string                         `json:"manifest_id"`
+	ManifestSHA256  string                         `json:"manifest_sha256"`
 	Mode            strategycatalog.ExperimentMode `json:"mode"`
 	EvaluationStart string                         `json:"evaluation_start"`
 	EvaluationEnd   string                         `json:"evaluation_end"`
@@ -94,7 +97,7 @@ type Scenario struct {
 }
 
 func NewScenario(input ScenarioInput) (*Scenario, error) {
-	if input.Spec == nil || (input.Mode != strategycatalog.ExperimentPaperScored && input.Mode != strategycatalog.ExperimentPaperStress) ||
+	if input.Spec == nil || input.Manifest == nil || (input.Mode != strategycatalog.ExperimentPaperScored && input.Mode != strategycatalog.ExperimentPaperStress) ||
 		!scenarioTime(input.EvaluationStart) || !scenarioTime(input.EvaluationEnd) || !input.EvaluationStart.Before(input.EvaluationEnd) ||
 		len(input.Frames) == 0 || len(input.Frames) > 100000 {
 		return nil, fmt.Errorf("generated strategy scenario identity is invalid")
@@ -127,7 +130,8 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 			payload := evidence.Payload
 			if payload == nil || payload.InstrumentID() != source.InstrumentID || payload.AvailableAt().After(source.DecisionAt) ||
 				source.DecisionAt.Sub(payload.AvailableAt()) > time.Duration(declaration.FreshnessSeconds)*time.Second ||
-				!digestPattern.MatchString(evidence.PartitionContentSHA256) || evidence.SourceKey == "" || evidence.SourceKey != strings.TrimSpace(evidence.SourceKey) || len(evidence.SourceKey) > 512 {
+				!digestPattern.MatchString(evidence.PartitionContentSHA256) || evidence.SourceKey == "" || evidence.SourceKey != strings.TrimSpace(evidence.SourceKey) || len(evidence.SourceKey) > 512 ||
+				!scenarioManifestContains(input.Manifest, declaration.DatasetKind, evidence) {
 				return nil, fmt.Errorf("generated strategy scenario input %q is missing, stale, future, or cross-instrument", declaration.Name)
 			}
 			value, err := payload.Field(declaration.DatasetKind, declaration.Field)
@@ -173,7 +177,8 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 			DecisionAt: scenarioFormatTime(source.DecisionAt), RouteAt: scenarioFormatTime(source.RouteAt), ExecutionInput: source.ExecutionInput,
 			Bindings: bindings, Entry: entry, Exit: exit, Action: action, ExecutionPrice: executionPrice.String()}
 	}
-	canonical := scenarioCanonical{Schema: ScenarioSchemaV1, State: "derived", SpecID: input.Spec.ID().String(), SpecSHA256: input.Spec.Digest(), Mode: input.Mode,
+	canonical := scenarioCanonical{Schema: ScenarioSchemaV1, State: "derived", SpecID: input.Spec.ID().String(), SpecSHA256: input.Spec.Digest(),
+		ManifestID: input.Manifest.ID().String(), ManifestSHA256: input.Manifest.Digest(), Mode: input.Mode,
 		EvaluationStart: scenarioFormatTime(input.EvaluationStart), EvaluationEnd: scenarioFormatTime(input.EvaluationEnd), Frames: frames}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
@@ -183,8 +188,8 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 	return &Scenario{canonical: canonical, bytes: encoded, digest: digest, id: economicid.DeterministicUUID("typed-generative-strategy-scenario", ScenarioSchemaV1+"@sha256:"+digest)}, nil
 }
 
-func ScenarioFromCanonical(id uuid.UUID, digest string, raw []byte, spec *Spec, payloads map[uuid.UUID]*dataset.MarketPayload) (*Scenario, error) {
-	if id == uuid.Nil || spec == nil || !digestPattern.MatchString(digest) || hash(raw) != digest {
+func ScenarioFromCanonical(id uuid.UUID, digest string, raw []byte, spec *Spec, manifest *dataset.Manifest, payloads map[uuid.UUID]*dataset.MarketPayload) (*Scenario, error) {
+	if id == uuid.Nil || spec == nil || manifest == nil || !digestPattern.MatchString(digest) || hash(raw) != digest {
 		return nil, fmt.Errorf("generated strategy scenario envelope is invalid")
 	}
 	var canonical scenarioCanonical
@@ -197,7 +202,7 @@ func ScenarioFromCanonical(id uuid.UUID, digest string, raw []byte, spec *Spec, 
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return nil, fmt.Errorf("generated strategy scenario has extra JSON")
 	}
-	input := ScenarioInput{Spec: spec, Mode: canonical.Mode, EvaluationStart: scenarioParseTime(canonical.EvaluationStart), EvaluationEnd: scenarioParseTime(canonical.EvaluationEnd)}
+	input := ScenarioInput{Spec: spec, Manifest: manifest, Mode: canonical.Mode, EvaluationStart: scenarioParseTime(canonical.EvaluationStart), EvaluationEnd: scenarioParseTime(canonical.EvaluationEnd)}
 	for sequence, frame := range canonical.Frames {
 		if frame.Sequence != sequence {
 			return nil, fmt.Errorf("generated strategy scenario frame sequence is invalid")
@@ -220,6 +225,7 @@ func ScenarioFromCanonical(id uuid.UUID, digest string, raw []byte, spec *Spec, 
 	}
 	rebuilt, err := NewScenario(input)
 	if err != nil || canonical.Schema != ScenarioSchemaV1 || canonical.State != "derived" || canonical.SpecID != spec.ID().String() || canonical.SpecSHA256 != spec.Digest() ||
+		canonical.ManifestID != manifest.ID().String() || canonical.ManifestSHA256 != manifest.Digest() ||
 		rebuilt == nil || rebuilt.ID() != id || rebuilt.Digest() != digest || !bytes.Equal(rebuilt.bytes, raw) {
 		return nil, fmt.Errorf("generated strategy scenario does not reconstruct")
 	}
@@ -250,6 +256,12 @@ func (scenario *Scenario) SpecID() uuid.UUID {
 	}
 	return uuid.MustParse(scenario.canonical.SpecID)
 }
+func (scenario *Scenario) ManifestID() uuid.UUID {
+	if scenario == nil {
+		return uuid.Nil
+	}
+	return uuid.MustParse(scenario.canonical.ManifestID)
+}
 func (scenario *Scenario) Mode() strategycatalog.ExperimentMode {
 	if scenario == nil {
 		return ""
@@ -278,4 +290,21 @@ func scenarioFormatTime(value time.Time) string {
 func scenarioParseTime(value string) time.Time {
 	parsed, _ := time.Parse("2006-01-02T15:04:05.000000Z", value)
 	return parsed
+}
+
+func scenarioManifestContains(manifest *dataset.Manifest, kind dataset.Kind, evidence ScenarioEvidenceInput) bool {
+	if manifest == nil || evidence.Payload == nil {
+		return false
+	}
+	for _, partition := range manifest.Partitions() {
+		if partition.Kind != kind || partition.ContentSHA256 != evidence.PartitionContentSHA256 {
+			continue
+		}
+		for _, observation := range partition.Observations {
+			if observation.SourceKey == evidence.SourceKey && observation.ContentSHA256 == evidence.Payload.Digest() && observation.AvailableAt == scenarioFormatTime(evidence.Payload.AvailableAt()) {
+				return true
+			}
+		}
+	}
+	return false
 }

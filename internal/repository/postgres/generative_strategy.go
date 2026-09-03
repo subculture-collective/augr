@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
@@ -58,6 +59,41 @@ type generatedReceiptEnvelope struct {
 	ConfigSchema     string `json:"config_schema"`
 	DecisionContract string `json:"decision_contract"`
 	ConfigSHA256     string `json:"config_sha256"`
+}
+
+type generatedScenarioEnvelope struct {
+	Schema          string                           `json:"schema"`
+	State           string                           `json:"state"`
+	SpecID          string                           `json:"spec_id"`
+	SpecSHA256      string                           `json:"spec_sha256"`
+	ManifestID      string                           `json:"manifest_id"`
+	ManifestSHA256  string                           `json:"manifest_sha256"`
+	Mode            string                           `json:"mode"`
+	EvaluationStart string                           `json:"evaluation_start"`
+	EvaluationEnd   string                           `json:"evaluation_end"`
+	Frames          []generatedScenarioFrameEnvelope `json:"frames"`
+}
+
+type generatedScenarioFrameEnvelope struct {
+	Sequence        int                                `json:"sequence"`
+	InstrumentID    string                             `json:"instrument_id"`
+	VenueContractID string                             `json:"venue_contract_id"`
+	DecisionAt      string                             `json:"decision_at"`
+	RouteAt         string                             `json:"route_at"`
+	Action          string                             `json:"action"`
+	Bindings        []generatedScenarioBindingEnvelope `json:"bindings"`
+}
+
+type generatedScenarioBindingEnvelope struct {
+	Name                   string `json:"name"`
+	DatasetKind            string `json:"dataset_kind"`
+	Field                  string `json:"field"`
+	PayloadID              string `json:"payload_id"`
+	PayloadSHA256          string `json:"payload_sha256"`
+	PartitionContentSHA256 string `json:"partition_content_sha256"`
+	SourceKey              string `json:"source_key"`
+	AvailableAt            string `json:"available_at"`
+	Value                  string `json:"value"`
 }
 
 type generatedNormalizedRow struct {
@@ -229,6 +265,118 @@ func (r *GenerativeStrategyRepo) GetCompilation(ctx context.Context, specID uuid
 		return nil, nil, nil, err
 	}
 	return spec, version, receipt, nil
+}
+
+func (r *GenerativeStrategyRepo) RegisterScenario(ctx context.Context, scenario *generativestrategy.Scenario) (*generativestrategy.Scenario, error) {
+	if r == nil || r.pool == nil || scenario == nil || scenario.SpecID() == uuid.Nil {
+		return nil, fmt.Errorf("postgres: generated strategy scenario is required")
+	}
+	var envelope generatedScenarioEnvelope
+	if err := json.Unmarshal(scenario.CanonicalBytes(), &envelope); err != nil {
+		return nil, err
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var specSHA string
+	if err = tx.QueryRow(ctx, `SELECT sha256 FROM generated_strategy_specs WHERE id=$1`, scenario.SpecID()).Scan(&specSHA); err != nil || specSHA != envelope.SpecSHA256 {
+		return nil, fmt.Errorf("postgres: generated strategy scenario spec is missing or changed")
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO generated_strategy_scenarios(id,schema_name,state,spec_id,spec_sha256,manifest_id,manifest_sha256,mode,evaluation_start,evaluation_end,frame_count,sha256,canonical_bytes,canonical_json,created_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,convert_from($13,'UTF8')::jsonb,$14) ON CONFLICT(id) DO NOTHING`,
+		scenario.ID(), envelope.Schema, envelope.State, envelope.SpecID, envelope.SpecSHA256, envelope.ManifestID, envelope.ManifestSHA256, envelope.Mode, envelope.EvaluationStart, envelope.EvaluationEnd, len(envelope.Frames), scenario.Digest(), scenario.CanonicalBytes(), databaseNow())
+	if err != nil {
+		return nil, generatedStrategyWriteError("insert scenario", err)
+	}
+	if err = r.stage("scenario"); err != nil {
+		return nil, err
+	}
+	for _, frame := range envelope.Frames {
+		frameRaw, marshalErr := json.Marshal(frame)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO generated_strategy_scenario_frames(scenario_id,sequence,instrument_id,venue_contract_id,decision_at,route_at,action,input_count,canonical_frame)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb) ON CONFLICT(scenario_id,sequence) DO NOTHING`, scenario.ID(), frame.Sequence, frame.InstrumentID, frame.VenueContractID, frame.DecisionAt, frame.RouteAt, frame.Action, len(frame.Bindings), string(frameRaw))
+		if err != nil {
+			return nil, generatedStrategyWriteError("insert scenario frame", err)
+		}
+		if err = r.stage("scenario_frame"); err != nil {
+			return nil, err
+		}
+		for inputSequence, binding := range frame.Bindings {
+			bindingRaw, marshalErr := json.Marshal(binding)
+			if marshalErr != nil {
+				return nil, marshalErr
+			}
+			_, err = tx.Exec(ctx, `INSERT INTO generated_strategy_scenario_bindings(scenario_id,frame_sequence,input_sequence,input_name,dataset_kind,field_name,payload_id,payload_sha256,partition_content_sha256,source_key,available_at,canonical_value,canonical_binding)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb) ON CONFLICT(scenario_id,frame_sequence,input_sequence) DO NOTHING`, scenario.ID(), frame.Sequence, inputSequence, binding.Name, binding.DatasetKind, binding.Field, binding.PayloadID, binding.PayloadSHA256, binding.PartitionContentSHA256, binding.SourceKey, binding.AvailableAt, binding.Value, string(bindingRaw))
+			if err != nil {
+				return nil, generatedStrategyWriteError("insert scenario binding", err)
+			}
+			if err = r.stage("scenario_binding"); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, generatedStrategyWriteError("commit scenario", err)
+	}
+	loaded, err := r.GetScenario(ctx, scenario.ID())
+	if err != nil {
+		return nil, err
+	}
+	if loaded.Digest() != scenario.Digest() || !bytes.Equal(loaded.CanonicalBytes(), scenario.CanonicalBytes()) {
+		return nil, fmt.Errorf("postgres: generated strategy scenario conflict: %w", repository.ErrIdempotencyConflict)
+	}
+	return loaded, nil
+}
+
+func (r *GenerativeStrategyRepo) GetScenario(ctx context.Context, id uuid.UUID) (*generativestrategy.Scenario, error) {
+	if r == nil || r.pool == nil || id == uuid.Nil {
+		return nil, fmt.Errorf("postgres: generated strategy scenario identity is required")
+	}
+	var digest string
+	var raw []byte
+	var specID uuid.UUID
+	var manifestID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT sha256,canonical_bytes,spec_id,manifest_id FROM generated_strategy_scenarios WHERE id=$1`, id).Scan(&digest, &raw, &specID, &manifestID); errors.Is(err, pgx.ErrNoRows) {
+		return nil, repository.ErrNotFound
+	} else if err != nil {
+		return nil, err
+	}
+	spec, _, _, err := r.GetCompilation(ctx, specID)
+	if err != nil {
+		return nil, err
+	}
+	manifest, err := NewDatasetRepo(r.pool).GetDatasetManifest(ctx, manifestID)
+	if err != nil {
+		return nil, err
+	}
+	var envelope generatedScenarioEnvelope
+	if err = json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	payloads := map[uuid.UUID]*dataset.MarketPayload{}
+	datasets := NewDatasetRepo(r.pool)
+	for _, frame := range envelope.Frames {
+		for _, binding := range frame.Bindings {
+			payloadID, parseErr := uuid.Parse(binding.PayloadID)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			if _, exists := payloads[payloadID]; exists {
+				continue
+			}
+			payloads[payloadID], err = datasets.GetMarketPayload(ctx, payloadID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return generativestrategy.ScenarioFromCanonical(id, digest, raw, spec, manifest, payloads)
 }
 
 func (r *GenerativeStrategyRepo) stage(value string) error {

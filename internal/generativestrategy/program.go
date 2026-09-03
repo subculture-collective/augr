@@ -67,7 +67,7 @@ func (program *Program) Plan(ctx context.Context, input experimentrun.ProgramInp
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if input.ExperimentID == uuid.Nil || input.AccountID == uuid.Nil || input.ManifestID == uuid.Nil || input.EvaluationStart != scenarioFormatTime(program.scenario.EvaluationStart()) ||
+	if input.ExperimentID == uuid.Nil || input.AccountID == uuid.Nil || input.ManifestID != program.scenario.ManifestID() || input.EvaluationStart != scenarioFormatTime(program.scenario.EvaluationStart()) ||
 		input.EvaluationEnd != scenarioFormatTime(program.scenario.EvaluationEnd()) || input.Mode != program.scenario.Mode() {
 		return nil, fmt.Errorf("generated strategy program input does not match scenario")
 	}

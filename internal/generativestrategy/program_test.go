@@ -42,7 +42,7 @@ func programFixture(t *testing.T) (*Program, experimentrun.ProgramInput) {
 	capitalDigest := hex.EncodeToString(sum[:])
 	input := experimentrun.ProgramInput{
 		ExperimentID: uuid.New(), AccountID: uuid.New(), CapitalStateID: economicid.DeterministicUUID("capital-state", capitalDigest), CapitalStateSHA256: capitalDigest,
-		CapitalProjectionCheckpointID: uuid.New(), CapitalStateBytes: capitalBytes, ManifestID: uuid.New(), ManifestSHA256: strings.Repeat("e", 64),
+		CapitalProjectionCheckpointID: uuid.New(), CapitalStateBytes: capitalBytes, ManifestID: scenario.ManifestID(), ManifestSHA256: scenarioInput.Manifest.Digest(),
 		EvaluationStart: scenarioFormatTime(scenario.EvaluationStart()), EvaluationEnd: scenarioFormatTime(scenario.EvaluationEnd()), Seed: 42, Mode: scenario.Mode(), Evidence: program.expectedEvidence(),
 	}
 	return program, input

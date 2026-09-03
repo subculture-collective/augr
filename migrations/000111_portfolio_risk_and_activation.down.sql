@@ -1,5 +1,6 @@
 LOCK TABLE strategy_promotion_activations, portfolio_risk_policy_artifacts,
   account_portfolio_risk_policy_bindings, portfolio_account_snapshots,
+  generated_strategy_scenario_bindings, generated_strategy_scenario_frames, generated_strategy_scenarios,
   portfolio_opportunity_option_legs, allocation_risk_caps,
   portfolio_opportunities, allocation_decisions IN ACCESS EXCLUSIVE MODE;
 DO $$ DECLARE has_pipeline_evidence BOOLEAN := false; BEGIN
@@ -10,6 +11,7 @@ DO $$ DECLARE has_pipeline_evidence BOOLEAN := false; BEGIN
      OR EXISTS(SELECT 1 FROM portfolio_risk_policy_artifacts)
      OR EXISTS(SELECT 1 FROM account_portfolio_risk_policy_bindings)
      OR EXISTS(SELECT 1 FROM portfolio_account_snapshots)
+     OR EXISTS(SELECT 1 FROM generated_strategy_scenarios)
      OR EXISTS(SELECT 1 FROM portfolio_opportunity_option_legs)
      OR EXISTS(SELECT 1 FROM allocation_risk_caps)
 	 OR has_pipeline_evidence
@@ -40,6 +42,10 @@ ALTER TABLE allocation_decisions DROP CONSTRAINT IF EXISTS allocation_decision_r
 DROP TABLE portfolio_opportunity_option_legs;
 ALTER TABLE portfolio_opportunities DROP CONSTRAINT portfolio_opportunity_intent_hash,DROP CONSTRAINT portfolio_opportunity_promotion_lineage,DROP COLUMN intent_bytes,DROP COLUMN intent_sha256,DROP COLUMN vega,DROP COLUMN theta,DROP COLUMN gamma,DROP COLUMN delta,DROP COLUMN quote_observed_at,DROP COLUMN required_capital_per_unit,DROP COLUMN max_loss_per_unit,DROP COLUMN expected_loss_usd,DROP COLUMN deployment_budget_usd,DROP COLUMN risk_policy_version,DROP COLUMN risk_policy_id,DROP COLUMN IF EXISTS capital_binding_id,DROP COLUMN promotion_decision_id,DROP COLUMN deployment_id,DROP COLUMN quality_result_id,DROP COLUMN manifest_id,DROP COLUMN evaluation_scope_id,DROP COLUMN execution_version_id;
 DROP TABLE portfolio_account_snapshots;
+DROP TABLE generated_strategy_scenario_bindings;
+DROP TABLE generated_strategy_scenario_frames;
+DROP TABLE generated_strategy_scenarios;
+DROP FUNCTION validate_generated_strategy_scenario_graph();
 DROP TABLE account_portfolio_risk_policy_bindings;
 DROP TABLE portfolio_risk_policy_artifacts;
 DROP FUNCTION validate_portfolio_account_snapshot();
