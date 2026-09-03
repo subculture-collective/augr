@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // Validate validates the configuration required to start the application.
@@ -17,6 +19,11 @@ func Validate(cfg Config) error {
 	}
 	if strings.TrimSpace(cfg.CanonicalAccountID) == "" {
 		errs = append(errs, "PROJECTION_ACCOUNT_ID is required")
+	}
+	if cfg.DiscoveryEvaluationScopeID != "" {
+		if _, err := uuid.Parse(cfg.DiscoveryEvaluationScopeID); err != nil {
+			errs = append(errs, "DISCOVERY_EVALUATION_SCOPE_ID must be a UUID when set")
+		}
 	}
 
 	if cfg.Server.Port <= 0 {

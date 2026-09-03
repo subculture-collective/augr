@@ -667,6 +667,18 @@ func TestValidateRequiresExecutionAccount(t *testing.T) {
 	}
 }
 
+func TestValidateDiscoveryEvaluationScopeIDWhenSet(t *testing.T) {
+	cfg := validConfig()
+	cfg.DiscoveryEvaluationScopeID = "latest"
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "DISCOVERY_EVALUATION_SCOPE_ID must be a UUID") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	cfg.DiscoveryEvaluationScopeID = "10000000-0000-4000-8000-000000000001"
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() rejected UUID scope: %v", err)
+	}
+}
+
 func TestValidateRequiresDataProvider(t *testing.T) {
 	cfg := validConfig()
 	cfg.DataProviders.Polygon.APIKey = ""
@@ -929,6 +941,8 @@ func clearConfigEnv(t *testing.T) {
 		"APP_HOST",
 		"APP_PORT",
 		"PROJECTION_ACCOUNT_ID",
+		"DISCOVERY_EVALUATION_SCOPE_ID",
+		"AUTOMATIC_SHADOW_PROMOTION",
 		"DATABASE_URL",
 		"DATABASE_POOL_SIZE",
 		"DATABASE_SSL_MODE",

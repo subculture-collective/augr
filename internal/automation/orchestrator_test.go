@@ -87,6 +87,25 @@ func TestDiscoveryReadinessEvaluationFailureUsesGenericDiagnostics(t *testing.T)
 	}
 }
 
+func TestStockReadinessDoesNotHoldOptionsFailureAgainstStockJobs(t *testing.T) {
+	readiness := &DiscoveryReadiness{
+		Ready: true, CapabilitiesEvaluated: true, StockReady: true,
+		OptionsReason: "immutable option contract metadata is missing",
+	}
+	orch := NewJobOrchestrator(OrchestratorDeps{DiscoveryReadiness: readiness})
+	diagnostics := orch.UnavailableJobs()
+	if len(diagnostics) != 1 || diagnostics[0].Name != "options_discovery" || diagnostics[0].Reason != readiness.OptionsReason {
+		t.Fatalf("unavailable diagnostics = %#v", diagnostics)
+	}
+	for _, name := range stockDiscoveryDeploymentJobNames {
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Name == name {
+				t.Fatalf("stock job %q was held by options-only evidence gap", name)
+			}
+		}
+	}
+}
+
 func TestJobOrchestratorRunJob_TracksFailureFieldsAndReset(t *testing.T) {
 	t.Parallel()
 

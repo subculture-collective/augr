@@ -27,14 +27,15 @@ type AutomationJobHealth struct {
 
 // AutomationHealthResponse is the response body for GET /api/v1/automation/health.
 type AutomationHealthResponse struct {
-	Jobs                []AutomationJobHealth       `json:"jobs"`
-	Healthy             bool                        `json:"healthy"`
-	TotalJobs           int                         `json:"total_jobs"`
-	FailingJobs         int                         `json:"failing_jobs"`
-	DegradedJobs        int                         `json:"degraded_jobs"`
-	BlockedJobs         int                         `json:"blocked_jobs"`
-	UnavailableJobs     []automation.UnavailableJob `json:"unavailable_jobs"`
-	UnavailableJobCount int                         `json:"unavailable_job_count"`
+	Jobs                []AutomationJobHealth          `json:"jobs"`
+	Healthy             bool                           `json:"healthy"`
+	TotalJobs           int                            `json:"total_jobs"`
+	FailingJobs         int                            `json:"failing_jobs"`
+	DegradedJobs        int                            `json:"degraded_jobs"`
+	BlockedJobs         int                            `json:"blocked_jobs"`
+	UnavailableJobs     []automation.UnavailableJob    `json:"unavailable_jobs"`
+	UnavailableJobCount int                            `json:"unavailable_job_count"`
+	DiscoveryReadiness  *automation.DiscoveryReadiness `json:"discovery_readiness,omitempty"`
 }
 
 // handleGetAutomationStatus returns status for all registered jobs.
@@ -99,6 +100,7 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, _ *http.Reques
 		BlockedJobs:         blockedJobs,
 		UnavailableJobs:     unavailableJobs,
 		UnavailableJobCount: len(unavailableJobs),
+		DiscoveryReadiness:  s.automation.DiscoveryReadiness(),
 	})
 }
 

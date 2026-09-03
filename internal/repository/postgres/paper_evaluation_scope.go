@@ -84,9 +84,160 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadiness(context.Context) (bool
 	return false, DiscoveryDeploymentUnavailableReason, ErrDiscoveryDeploymentImmutableBinding
 }
 
+type DatasetCapabilityReadiness struct {
+	Ready          bool      `json:"ready"`
+	Reason         string    `json:"reason,omitempty"`
+	PayloadCount   int       `json:"payload_count"`
+	EffectiveStart time.Time `json:"effective_start,omitempty"`
+	EffectiveEnd   time.Time `json:"effective_end,omitempty"`
+}
+
+type DiscoveryDeploymentReadinessReport struct {
+	Ready            bool                       `json:"ready"`
+	Reason           string                     `json:"reason,omitempty"`
+	ScopeID          uuid.UUID                  `json:"-"`
+	ScopeIDRedacted  string                     `json:"scope_id"`
+	AccountID        uuid.UUID                  `json:"-"`
+	ManifestID       uuid.UUID                  `json:"manifest_id"`
+	ManifestSHA256   string                     `json:"manifest_sha256"`
+	QualityResultID  uuid.UUID                  `json:"quality_result_id"`
+	QualitySHA256    string                     `json:"quality_sha256"`
+	DecisionCutoff   time.Time                  `json:"decision_cutoff"`
+	ObservationCount int                        `json:"observation_count"`
+	BindingCount     int                        `json:"binding_count"`
+	Stock            DatasetCapabilityReadiness `json:"stock"`
+	Options          DatasetCapabilityReadiness `json:"options"`
+}
+
+// DiscoveryDeploymentReadinessForScope reconstructs the configured immutable
+// scope graph. It does not choose a latest scope and cannot call a provider or
+// the mutable historical cache.
+func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Context, scopeID, accountID uuid.UUID) (*DiscoveryDeploymentReadinessReport, error) {
+	if r == nil || r.pool == nil || scopeID == uuid.Nil || accountID == uuid.Nil {
+		reason := "DISCOVERY_EVALUATION_SCOPE_ID and canonical account are required"
+		return &DiscoveryDeploymentReadinessReport{Reason: reason}, repository.NewImmutableBindingLock(reason)
+	}
+	report := &DiscoveryDeploymentReadinessReport{ScopeID: scopeID, ScopeIDRedacted: redactScopeID(scopeID)}
+	var environment string
+	var quarantined bool
+	var evaluationStart, evaluationEnd time.Time
+	var stockStart, stockEnd, optionStart, optionEnd *time.Time
+	var optionBarCount, optionContractCount, optionQuoteCount, optionSnapshotCount int
+	err := r.pool.QueryRow(ctx, `SELECT s.account_id,b.environment,m.id,m.sha256,q.id,q.sha256,m.decision_cutoff,q.quarantined,
+		s.evaluation_start,s.evaluation_end,m.observation_count,
+		(SELECT count(*) FROM dataset_manifest_payload_bindings binding WHERE binding.manifest_id=m.id),
+		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='stock_bar'),
+		(SELECT min(payload.effective_at) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='stock_bar'),
+		(SELECT max(payload.effective_at) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='stock_bar'),
+		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_bar'),
+		(SELECT min(payload.effective_at) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_bar'),
+		(SELECT max(payload.effective_at) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_bar'),
+		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_contract'),
+		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_quote'),
+		(SELECT count(*) FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id WHERE binding.manifest_id=m.id AND payload.payload_kind='option_snapshot')
+		FROM paper_evaluation_scopes s
+		JOIN accounts a ON a.id=s.account_id
+		JOIN account_capital_policy_bindings b ON b.id=s.capital_binding_id AND b.account_id=s.account_id AND b.environment=a.environment
+		JOIN capital_margin_policy_artifacts cp ON cp.id=b.policy_artifact_id AND cp.policy_version=b.policy_version AND cp.sha256=s.capital_policy_sha256
+		JOIN dataset_manifests m ON m.sha256=s.manifest_sha256
+		JOIN dataset_quality_results q ON q.manifest_id=m.id AND q.sha256=s.quality_sha256
+		JOIN simulation_policy_artifacts sp ON sp.sha256=s.simulation_policy_sha256
+		WHERE s.id=$1`, scopeID).Scan(
+		&report.AccountID, &environment, &report.ManifestID, &report.ManifestSHA256, &report.QualityResultID,
+		&report.QualitySHA256, &report.DecisionCutoff, &quarantined, &evaluationStart, &evaluationEnd,
+		&report.ObservationCount, &report.BindingCount, &report.Stock.PayloadCount, &stockStart, &stockEnd,
+		&optionBarCount, &optionStart, &optionEnd, &optionContractCount, &optionQuoteCount, &optionSnapshotCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		reason := "configured evaluation scope evidence graph is missing or inconsistent"
+		report.Reason = reason
+		return report, repository.NewImmutableBindingLock(reason)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reconstruct discovery evaluation scope: %w", err)
+	}
+	if stockStart != nil {
+		report.Stock.EffectiveStart = stockStart.UTC()
+		report.Stock.EffectiveEnd = stockEnd.UTC()
+	}
+	report.Options.PayloadCount = optionBarCount + optionContractCount + optionQuoteCount + optionSnapshotCount
+	if optionStart != nil {
+		report.Options.EffectiveStart = optionStart.UTC()
+		report.Options.EffectiveEnd = optionEnd.UTC()
+	}
+	baseReason := ""
+	switch {
+	case report.AccountID != accountID:
+		baseReason = "configured evaluation scope belongs to a different account"
+	case environment != string(domain.AccountEnvironmentPaperScored):
+		baseReason = "configured evaluation scope is not paper_scored"
+	case quarantined:
+		baseReason = "configured evaluation scope quality result is quarantined"
+	case report.ObservationCount == 0 || report.BindingCount != report.ObservationCount:
+		baseReason = "configured evaluation scope does not bind every manifest observation to one immutable payload"
+	case report.DecisionCutoff.Before(evaluationEnd):
+		baseReason = "configured evaluation scope decision cutoff precedes its evaluation end"
+	}
+	if baseReason != "" {
+		report.Reason = baseReason
+		report.Stock.Reason = baseReason
+		report.Options.Reason = baseReason
+		return report, repository.NewImmutableBindingLock(baseReason)
+	}
+	if report.Stock.PayloadCount == 0 || stockStart == nil || stockStart.After(evaluationStart) || stockEnd.Before(evaluationEnd) {
+		report.Stock.Reason = "immutable stock bars do not cover the complete evaluation interval"
+	} else {
+		report.Stock.Ready = true
+	}
+	optionsMinimumStart := evaluationEnd.AddDate(0, -9, 0)
+	switch {
+	case optionBarCount == 0 || optionStart == nil || optionStart.After(evaluationStart) || optionEnd.Before(evaluationEnd):
+		report.Options.Reason = "immutable option bars do not cover the complete evaluation interval"
+	case evaluationStart.After(optionsMinimumStart):
+		report.Options.Reason = "options evidence lacks a complete six-month calibration plus three-month out-of-sample interval"
+	case optionContractCount == 0:
+		report.Options.Reason = "immutable option contract metadata is missing"
+	case optionQuoteCount == 0 && optionSnapshotCount == 0:
+		report.Options.Reason = "immutable executable option quote or chain evidence is missing"
+	default:
+		report.Options.Ready = true
+	}
+	report.Ready = report.Stock.Ready || report.Options.Ready
+	if !report.Ready {
+		report.Reason = report.Stock.Reason + "; " + report.Options.Reason
+		return report, repository.NewImmutableBindingLock(report.Reason)
+	}
+	if !report.Options.Ready {
+		report.Reason = report.Options.Reason
+	}
+	return report, nil
+}
+
 // ScopedExecutionBinding retains per-scope validation for backtest callers.
-func (r *ReportArtifactRepo) ScopedExecutionBinding(context.Context, uuid.UUID) (bool, string, error) {
-	return false, DiscoveryDeploymentUnavailableReason, ErrDiscoveryDeploymentImmutableBinding
+func (r *ReportArtifactRepo) ScopedExecutionBinding(ctx context.Context, scopeID uuid.UUID) (bool, string, error) {
+	if r == nil || r.pool == nil || scopeID == uuid.Nil {
+		return false, DiscoveryDeploymentUnavailableReason, ErrDiscoveryDeploymentImmutableBinding
+	}
+	var accountID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT account_id FROM paper_evaluation_scopes WHERE id=$1`, scopeID).Scan(&accountID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, "evaluation scope does not exist", repository.NewImmutableBindingLock("evaluation scope does not exist")
+		}
+		return false, DiscoveryDeploymentUnavailableReason, err
+	}
+	report, err := r.DiscoveryDeploymentReadinessForScope(ctx, scopeID, accountID)
+	if err != nil {
+		reason := DiscoveryDeploymentUnavailableReason
+		if report != nil && report.Reason != "" {
+			reason = report.Reason
+		}
+		return false, reason, err
+	}
+	return true, "", nil
+}
+
+func redactScopeID(id uuid.UUID) string {
+	value := id.String()
+	return value[:8] + "-...-" + value[len(value)-4:]
 }
 
 type paperEvaluationScopeCanonical struct {

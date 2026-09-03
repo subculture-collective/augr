@@ -81,8 +81,8 @@ func TestRunScheduledStrategyRejectsChangedExecutionVersionBeforeRunner(t *testi
 func TestMain(m *testing.M) {
 	original := runtimeDiscoveryDeploymentReadiness
 	originalAccountLoader := runtimeLoadCanonicalAccount
-	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
-		return true, "", nil
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
+		return &pgrepo.DiscoveryDeploymentReadinessReport{Ready: true, Stock: pgrepo.DatasetCapabilityReadiness{Ready: true}, Options: pgrepo.DatasetCapabilityReadiness{Ready: true}}, nil
 	}
 	runtimeLoadCanonicalAccount = func(_ context.Context, _ *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
 		account := validRuntimeAccount(accountID)
@@ -127,9 +127,9 @@ func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *tes
 	readinessCalls := 0
 	reconcileCalls := 0
 	completedAt := time.Date(2026, 8, 26, 4, 5, 6, 0, time.FixedZone("offset", 3600))
-	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
 		readinessCalls++
-		return false, pgrepo.DiscoveryDeploymentUnavailableReason, pgrepo.ErrDiscoveryDeploymentImmutableBinding
+		return &pgrepo.DiscoveryDeploymentReadinessReport{Reason: pgrepo.DiscoveryDeploymentUnavailableReason, Stock: pgrepo.DatasetCapabilityReadiness{Reason: pgrepo.DiscoveryDeploymentUnavailableReason}}, pgrepo.ErrDiscoveryDeploymentImmutableBinding
 	}
 	runtimeReconcileOvernightBacktests = func(_ context.Context, _ *pgrepo.OvernightBacktestRunRepo, at time.Time, reason string) (int, error) {
 		reconcileCalls++
@@ -139,7 +139,7 @@ func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *tes
 		return 1, nil
 	}
 
-	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, completedAt, slogDiscardLogger())
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, uuid.New(), uuid.New(), completedAt, slogDiscardLogger())
 	if err != nil || readiness.Ready || !errors.Is(readiness.Err, pgrepo.ErrDiscoveryDeploymentImmutableBinding) || readinessCalls != 1 || reconcileCalls != 1 {
 		t.Fatalf("evaluation = %+v, %v; calls readiness=%d reconcile=%d", readiness, err, readinessCalls, reconcileCalls)
 	}
@@ -153,8 +153,8 @@ func TestEvaluateRuntimeDiscoveryReadinessErrorRemainsDistinct(t *testing.T) {
 		runtimeReconcileOvernightBacktests = originalReconcile
 	})
 	wantErr := errors.New("readiness store unavailable")
-	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
-		return false, "", wantErr
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
+		return nil, wantErr
 	}
 	runtimeReconcileOvernightBacktests = func(_ context.Context, _ *pgrepo.OvernightBacktestRunRepo, _ time.Time, reason string) (int, error) {
 		if reason != automation.DiscoveryReadinessEvaluationErrorReason {
@@ -162,7 +162,7 @@ func TestEvaluateRuntimeDiscoveryReadinessErrorRemainsDistinct(t *testing.T) {
 		}
 		return 0, nil
 	}
-	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, time.Now(), slogDiscardLogger())
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, uuid.New(), uuid.New(), time.Now(), slogDiscardLogger())
 	if err != nil || !errors.Is(readiness.Err, wantErr) || readiness.Ready {
 		t.Fatalf("evaluation = %+v, %v", readiness, err)
 	}
@@ -180,6 +180,19 @@ func TestRuntimeSchemaVersionAcceptsExpansionAndEnforcement(t *testing.T) {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
+	}
+}
+
+func TestParseOptionalDiscoveryScopeID(t *testing.T) {
+	if id, err := parseOptionalDiscoveryScopeID(""); err != nil || id != uuid.Nil {
+		t.Fatalf("empty scope = %s, %v", id, err)
+	}
+	want := uuid.New()
+	if id, err := parseOptionalDiscoveryScopeID(want.String()); err != nil || id != want {
+		t.Fatalf("scope = %s, %v, want %s", id, err, want)
+	}
+	if _, err := parseOptionalDiscoveryScopeID("latest"); err == nil {
+		t.Fatal("parseOptionalDiscoveryScopeID() accepted latest selector")
 	}
 }
 

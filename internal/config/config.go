@@ -23,6 +23,8 @@ const (
 type Config struct {
 	Environment                  string
 	CanonicalAccountID           string
+	DiscoveryEvaluationScopeID   string
+	AutomaticShadowPromotion     bool
 	Server                       ServerConfig
 	Database                     DatabaseConfig
 	Redis                        RedisConfig
@@ -623,6 +625,10 @@ func loadFromEnvironment() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	automaticShadowPromotion, err := getEnvBool("AUTOMATIC_SHADOW_PROMOTION", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	// Polymarket is retained as a historical/read compatibility surface only.
 	// New installations must opt in explicitly; Kalshi is the active event-market
@@ -648,8 +654,10 @@ func loadFromEnvironment() (Config, error) {
 	}
 
 	cfg := Config{
-		Environment:        getEnvString("APP_ENV", "development"),
-		CanonicalAccountID: strings.TrimSpace(os.Getenv("PROJECTION_ACCOUNT_ID")),
+		Environment:                getEnvString("APP_ENV", "development"),
+		CanonicalAccountID:         strings.TrimSpace(os.Getenv("PROJECTION_ACCOUNT_ID")),
+		DiscoveryEvaluationScopeID: strings.TrimSpace(os.Getenv("DISCOVERY_EVALUATION_SCOPE_ID")),
+		AutomaticShadowPromotion:   automaticShadowPromotion,
 		Server: ServerConfig{
 			Host:      getEnvString("APP_HOST", "0.0.0.0"),
 			Port:      serverPort,

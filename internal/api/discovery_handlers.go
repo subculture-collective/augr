@@ -28,7 +28,7 @@ func (s *Server) handleRunDiscovery(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusServiceUnavailable, automation.DiscoveryReadinessEvaluationErrorReason, errCodeDiscoveryReadinessUnavailable)
 		return
 	}
-	if !s.discoveryReadiness.Ready {
+	if !s.discoveryReadiness.StockCapabilityReady() {
 		respondError(w, http.StatusServiceUnavailable, automation.DiscoveryReadinessEvaluationErrorReason, errCodeDiscoveryReadinessUnavailable)
 		return
 	}

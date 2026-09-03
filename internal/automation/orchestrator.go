@@ -61,9 +61,56 @@ const DiscoveryReadinessEvaluationErrorReason = "discovery deployment readiness 
 
 // DiscoveryReadiness is the single startup evaluation shared by automation and API.
 type DiscoveryReadiness struct {
-	Ready  bool
-	Reason string
-	Err    error
+	Ready                 bool      `json:"ready"`
+	Reason                string    `json:"reason,omitempty"`
+	Err                   error     `json:"-"`
+	CapabilitiesEvaluated bool      `json:"capabilities_evaluated"`
+	StockReady            bool      `json:"stock_ready"`
+	StockReason           string    `json:"stock_reason,omitempty"`
+	OptionsReady          bool      `json:"options_ready"`
+	OptionsReason         string    `json:"options_reason,omitempty"`
+	ScopeID               string    `json:"scope_id,omitempty"`
+	ManifestID            string    `json:"manifest_id,omitempty"`
+	ManifestSHA256        string    `json:"manifest_sha256,omitempty"`
+	QualityResultID       string    `json:"quality_result_id,omitempty"`
+	QualitySHA256         string    `json:"quality_sha256,omitempty"`
+	ObservationCount      int       `json:"observation_count"`
+	BindingCount          int       `json:"binding_count"`
+	StockPayloadCount     int       `json:"stock_payload_count"`
+	OptionsPayloadCount   int       `json:"options_payload_count"`
+	StockEffectiveStart   time.Time `json:"stock_effective_start,omitempty"`
+	StockEffectiveEnd     time.Time `json:"stock_effective_end,omitempty"`
+	OptionsEffectiveStart time.Time `json:"options_effective_start,omitempty"`
+	OptionsEffectiveEnd   time.Time `json:"options_effective_end,omitempty"`
+	DecisionCutoff        time.Time `json:"decision_cutoff,omitempty"`
+}
+
+func (o *JobOrchestrator) DiscoveryReadiness() *DiscoveryReadiness {
+	if o == nil || o.deps.DiscoveryReadiness == nil {
+		return nil
+	}
+	copyValue := *o.deps.DiscoveryReadiness
+	return &copyValue
+}
+
+func (readiness *DiscoveryReadiness) StockCapabilityReady() bool {
+	if readiness == nil || readiness.Err != nil {
+		return false
+	}
+	if readiness.CapabilitiesEvaluated {
+		return readiness.StockReady
+	}
+	return readiness.Ready
+}
+
+func (readiness *DiscoveryReadiness) OptionsCapabilityReady() bool {
+	if readiness == nil || readiness.Err != nil {
+		return false
+	}
+	if readiness.CapabilitiesEvaluated {
+		return readiness.OptionsReady
+	}
+	return readiness.Ready
 }
 
 // UnavailableJob describes an intentionally omitted job.
@@ -125,8 +172,10 @@ type OrchestratorDeps struct {
 	Polygon                      *polygon.Client
 	PolygonBulkSnapshotsEnabled  bool
 	DataService                  *data.DataService
+	DiscoveryDataService         *data.DataService
 	AlpacaReconciler             *AlpacaReconciler
 	OptionsProvider              data.OptionsDataProvider
+	DiscoveryOptionsProvider     data.OptionsDataProvider
 	LLMProvider                  llm.Provider
 	LLMQuickModel                string
 	GeneratorMetrics             discovery.GeneratorMetrics
@@ -303,11 +352,14 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 		now:    time.Now,
 		runs:   runcontrol.NewGroup(),
 	}
-	if deps.DiscoveryReadiness != nil && (!deps.DiscoveryReadiness.Ready || deps.DiscoveryReadiness.Err != nil) {
-		reason := discoveryReadinessUnavailableReason(deps.DiscoveryReadiness)
-		for _, name := range discoveryDeploymentJobNames {
+	if deps.DiscoveryReadiness != nil && !o.stockDiscoveryReady() {
+		reason := stockDiscoveryUnavailableReason(deps.DiscoveryReadiness)
+		for _, name := range stockDiscoveryDeploymentJobNames {
 			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: reason})
 		}
+	}
+	if deps.DiscoveryReadiness != nil && !o.optionsDiscoveryReady() {
+		o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: "options_discovery", Reason: optionsDiscoveryUnavailableReason(deps.DiscoveryReadiness)})
 	}
 	return o
 }
@@ -323,12 +375,61 @@ func discoveryReadinessUnavailableReason(readiness *DiscoveryReadiness) string {
 	return DiscoveryReadinessEvaluationErrorReason
 }
 
+var stockDiscoveryDeploymentJobNames = [...]string{
+	"discovery_run", "overnight_backtest", "overnight_generate", "ticker_discovery",
+}
+
 var discoveryDeploymentJobNames = [...]string{
 	"discovery_run", "options_discovery", "overnight_backtest", "overnight_generate", "ticker_discovery",
 }
 
 func (o *JobOrchestrator) discoveryDeploymentReady() bool {
-	return o.deps.DiscoveryReadiness != nil && o.deps.DiscoveryReadiness.Ready && o.deps.DiscoveryReadiness.Err == nil
+	return o.stockDiscoveryReady()
+}
+
+func (o *JobOrchestrator) discoveryDataService() *data.DataService {
+	if o.deps.DiscoveryDataService != nil {
+		return o.deps.DiscoveryDataService
+	}
+	// Compatibility for callers that predate capability-specific readiness.
+	// Production startup always sets CapabilitiesEvaluated and must supply the
+	// manifest-bound service explicitly.
+	if o.deps.DiscoveryReadiness != nil && !o.deps.DiscoveryReadiness.CapabilitiesEvaluated {
+		return o.deps.DataService
+	}
+	return nil
+}
+
+func (o *JobOrchestrator) discoveryOptionsProvider() data.OptionsDataProvider {
+	if o.deps.DiscoveryOptionsProvider != nil {
+		return o.deps.DiscoveryOptionsProvider
+	}
+	if o.deps.DiscoveryReadiness != nil && !o.deps.DiscoveryReadiness.CapabilitiesEvaluated {
+		return o.deps.OptionsProvider
+	}
+	return nil
+}
+
+func (o *JobOrchestrator) stockDiscoveryReady() bool {
+	return o.deps.DiscoveryReadiness.StockCapabilityReady()
+}
+
+func (o *JobOrchestrator) optionsDiscoveryReady() bool {
+	return o.deps.DiscoveryReadiness.OptionsCapabilityReady()
+}
+
+func stockDiscoveryUnavailableReason(readiness *DiscoveryReadiness) string {
+	if readiness != nil && readiness.CapabilitiesEvaluated && strings.TrimSpace(readiness.StockReason) != "" {
+		return readiness.StockReason
+	}
+	return discoveryReadinessUnavailableReason(readiness)
+}
+
+func optionsDiscoveryUnavailableReason(readiness *DiscoveryReadiness) string {
+	if readiness != nil && readiness.CapabilitiesEvaluated && strings.TrimSpace(readiness.OptionsReason) != "" {
+		return readiness.OptionsReason
+	}
+	return discoveryReadinessUnavailableReason(readiness)
 }
 
 // UnavailableJobs returns sorted diagnostics for jobs omitted at startup.
@@ -438,9 +539,14 @@ func (o *JobOrchestrator) RegisteredJobKeys() []string {
 
 // RegisterAll registers all automated jobs from every job group.
 func (o *JobOrchestrator) RegisterAll() {
-	if !o.discoveryDeploymentReady() && len(o.unavailableJobs) == 0 {
-		for _, name := range discoveryDeploymentJobNames {
-			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: DiscoveryReadinessEvaluationErrorReason})
+	if len(o.unavailableJobs) == 0 {
+		if !o.stockDiscoveryReady() {
+			for _, name := range stockDiscoveryDeploymentJobNames {
+				o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: stockDiscoveryUnavailableReason(o.deps.DiscoveryReadiness)})
+			}
+		}
+		if !o.optionsDiscoveryReady() {
+			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: "options_discovery", Reason: optionsDiscoveryUnavailableReason(o.deps.DiscoveryReadiness)})
 		}
 	}
 	o.registerBrokerReconciliationJobs()

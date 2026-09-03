@@ -197,8 +197,8 @@ var (
 		return pgrepo.NewAccountRepo(db.Pool).GetByID(ctx, accountID)
 	}
 	runtimeNewServer                    = api.NewServer
-	runtimeDiscoveryDeploymentReadiness = func(ctx context.Context, repo *pgrepo.ReportArtifactRepo) (bool, string, error) {
-		return repo.DiscoveryDeploymentReadiness(ctx)
+	runtimeDiscoveryDeploymentReadiness = func(ctx context.Context, repo *pgrepo.ReportArtifactRepo, scopeID, accountID uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
+		return repo.DiscoveryDeploymentReadinessForScope(ctx, scopeID, accountID)
 	}
 	runtimeReconcileOvernightBacktests = func(ctx context.Context, repo *pgrepo.OvernightBacktestRunRepo, at time.Time, reason string) (int, error) {
 		return automation.ReconcileUnavailableOvernightBacktests(ctx, repo, at, reason)
@@ -261,6 +261,17 @@ func parseCanonicalAccountID(raw string) (uuid.UUID, error) {
 		return uuid.Nil, fmt.Errorf("parse PROJECTION_ACCOUNT_ID: valid non-zero UUID required")
 	}
 	return accountID, nil
+}
+
+func parseOptionalDiscoveryScopeID(raw string) (uuid.UUID, error) {
+	if strings.TrimSpace(raw) == "" {
+		return uuid.Nil, nil
+	}
+	scopeID, err := uuid.Parse(strings.TrimSpace(raw))
+	if err != nil || scopeID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("parse DISCOVERY_EVALUATION_SCOPE_ID: valid non-zero UUID required when set")
+	}
+	return scopeID, nil
 }
 
 func validateExecutionAccountBinding(cfg config.Config, accountID uuid.UUID, account *domain.Account) (runtimeDependencies, error) {
@@ -485,15 +496,40 @@ func ensureRuntimeSchemaCompatible(ctx context.Context, db *pgrepo.DB) (int, int
 	return current, required, status, nil
 }
 
-func evaluateRuntimeDiscoveryReadiness(ctx context.Context, reportRepo *pgrepo.ReportArtifactRepo, runRepo *pgrepo.OvernightBacktestRunRepo, now time.Time, logger *slog.Logger) (*automation.DiscoveryReadiness, error) {
-	ready, reason, readinessErr := runtimeDiscoveryDeploymentReadiness(ctx, reportRepo)
-	readiness := &automation.DiscoveryReadiness{Ready: ready, Reason: reason, Err: readinessErr}
-	if ready && readinessErr == nil {
+func evaluateRuntimeDiscoveryReadiness(ctx context.Context, reportRepo *pgrepo.ReportArtifactRepo, runRepo *pgrepo.OvernightBacktestRunRepo, scopeID, accountID uuid.UUID, now time.Time, logger *slog.Logger) (*automation.DiscoveryReadiness, error) {
+	report, readinessErr := runtimeDiscoveryDeploymentReadiness(ctx, reportRepo, scopeID, accountID)
+	readiness := &automation.DiscoveryReadiness{CapabilitiesEvaluated: true, Err: readinessErr}
+	if report != nil {
+		readiness.Ready = report.Ready
+		readiness.Reason = report.Reason
+		readiness.StockReady = report.Stock.Ready
+		readiness.StockReason = report.Stock.Reason
+		readiness.OptionsReady = report.Options.Ready
+		readiness.OptionsReason = report.Options.Reason
+		readiness.ScopeID = report.ScopeIDRedacted
+		readiness.ManifestID = report.ManifestID.String()
+		readiness.ManifestSHA256 = report.ManifestSHA256
+		readiness.QualityResultID = report.QualityResultID.String()
+		readiness.QualitySHA256 = report.QualitySHA256
+		readiness.ObservationCount = report.ObservationCount
+		readiness.BindingCount = report.BindingCount
+		readiness.StockPayloadCount = report.Stock.PayloadCount
+		readiness.OptionsPayloadCount = report.Options.PayloadCount
+		readiness.StockEffectiveStart = report.Stock.EffectiveStart
+		readiness.StockEffectiveEnd = report.Stock.EffectiveEnd
+		readiness.OptionsEffectiveStart = report.Options.EffectiveStart
+		readiness.OptionsEffectiveEnd = report.Options.EffectiveEnd
+		readiness.DecisionCutoff = report.DecisionCutoff
+	}
+	if readiness.StockReady && readinessErr == nil {
 		return readiness, nil
 	}
-	reconciliationReason := reason
+	reconciliationReason := readiness.StockReason
+	if reconciliationReason == "" {
+		reconciliationReason = readiness.Reason
+	}
 	var bindingLock repository.ImmutableBindingLock
-	knownLock := !ready && errors.As(readinessErr, &bindingLock) && strings.TrimSpace(bindingLock.Reason()) != ""
+	knownLock := !readiness.StockReady && errors.As(readinessErr, &bindingLock) && strings.TrimSpace(bindingLock.Reason()) != ""
 	if !knownLock {
 		reconciliationReason = automation.DiscoveryReadinessEvaluationErrorReason
 	}
@@ -645,7 +681,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	riskBreakerRepo := pgrepo.NewRiskBreakerRepo(db.Pool)
 	riskBreaker := risk.NewDrawdownBreaker(risk.DrawdownBreakerConfig{}, riskBreakerRepo)
 	reportArtifactRepo := pgrepo.NewReportArtifactRepo(db.Pool)
-	discoveryReadiness, err := evaluateRuntimeDiscoveryReadiness(ctx, reportArtifactRepo, pgrepo.NewOvernightBacktestRunRepo(db.Pool), time.Now(), logger)
+	discoveryScopeID, err := parseOptionalDiscoveryScopeID(cfg.DiscoveryEvaluationScopeID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	discoveryReadiness, err := evaluateRuntimeDiscoveryReadiness(ctx, reportArtifactRepo, pgrepo.NewOvernightBacktestRunRepo(db.Pool), discoveryScopeID, accountID, time.Now(), logger)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -904,6 +944,14 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 		dataService := data.NewDataService(cfg, reg, marketDataCacheRepo, logger, socialTriage)
 		deps.DataService = dataService
+		var discoveryDataService *data.DataService
+		if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
+			manifestLoader := pgrepo.NewManifestBoundHistoricalLoader(db.Pool, reportArtifactRepo, accountID)
+			discoveryDataService, err = data.NewManifestBoundDataService(dataService, discoveryScopeID, manifestLoader)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("construct manifest-bound discovery data service: %w", err)
+			}
+		}
 		var alpacaReconciler *automation.AlpacaReconciler
 		var polymarketExecutionReconciler *polymarketexecution.Reconciler
 		if cfg.Features.EnablePolymarketAutomation && polymarketL2Configured(cfg.Brokers.Polymarket) && polymarketLiveExecutionAuthorized(cfg, runtimeDeps.executionAccount) {
@@ -961,6 +1009,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			optProviders = append(optProviders, polygon.NewOptionsProvider(polygon.NewClient(cfg.DataProviders.Polygon.APIKey, logger, polygonLimiter)))
 		}
 		deps.OptionsProvider = data.NewOptionsProviderChain(logger, optProviders...)
+		var discoveryOptionsProvider data.OptionsDataProvider
+		if discoveryScopeID != uuid.Nil && discoveryReadiness.OptionsCapabilityReady() {
+			discoveryOptionsProvider = pgrepo.NewManifestBoundOptionsProvider(db.Pool, reportArtifactRepo, discoveryScopeID, accountID)
+		}
 		deps.ResearchScanner = service.NewResearchScannerService(deps.OptionsProvider, deps.PolymarketClient, logger)
 		// Events provider: Finnhub provides earnings, filings, economic, IPO calendars.
 		if strings.TrimSpace(cfg.DataProviders.Finnhub.APIKey) != "" {
@@ -968,7 +1020,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			deps.EventsProvider = finnhub.NewProvider(eventsClient)
 		}
 		deps.DiscoveryDeps = &discovery.DiscoveryDeps{
-			DataService:      dataService,
+			DataService:      discoveryDataService,
 			LLMProvider:      deps.LLMProvider,
 			Strategies:       strategyRepo,
 			BacktestConfigs:  backtestConfigRepo,
@@ -1187,8 +1239,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						Polygon:                     polygonClientForAuto,
 						PolygonBulkSnapshotsEnabled: cfg.DataProviders.PolygonBulkSnapshotsEnabled,
 						DataService:                 dataService,
+						DiscoveryDataService:        discoveryDataService,
 						AlpacaReconciler:            alpacaReconciler,
 						OptionsProvider:             deps.OptionsProvider,
+						DiscoveryOptionsProvider:    discoveryOptionsProvider,
 						LLMProvider:                 deps.LLMProvider,
 						LLMQuickModel:               cfg.LLM.QuickThinkModel,
 						GeneratorMetrics:            appMetrics,

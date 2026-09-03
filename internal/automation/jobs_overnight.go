@@ -21,13 +21,13 @@ func (o *JobOrchestrator) registerOvernightJobs() {
 	if !o.discoveryDeploymentReady() {
 		return
 	}
-	if o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.OvernightBacktestRuns != nil {
+	if o.deps.Universe != nil && o.discoveryDataService() != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.OvernightBacktestRuns != nil {
 		o.Register("overnight_backtest", "Heavy 5-year backtests on promising candidates", overnightBacktestSpec, o.overnightBacktest, "history_refresh", "overnight_sweep")
 	}
-	if o.jobs["overnight_backtest"] != nil && o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil {
+	if o.jobs["overnight_backtest"] != nil && o.deps.Universe != nil && o.discoveryDataService() != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil {
 		o.Register("overnight_generate", "LLM generates new strategy ideas per index group", overnightGenerateSpec, o.overnightGenerate, "overnight_sweep", "overnight_backtest")
 	}
-	if o.jobs["overnight_generate"] != nil && o.deps.OptionsProvider != nil && o.deps.Universe != nil && o.deps.LLMProvider != nil && o.deps.DataService != nil && o.deps.StrategyRepo != nil && o.deps.DiscoveryRunRepo != nil && o.deps.BacktestConfigRepo != nil {
+	if o.optionsDiscoveryReady() && o.jobs["overnight_generate"] != nil && o.discoveryOptionsProvider() != nil && o.deps.Universe != nil && o.deps.LLMProvider != nil && o.discoveryDataService() != nil && o.deps.StrategyRepo != nil && o.deps.DiscoveryRunRepo != nil && o.deps.BacktestConfigRepo != nil {
 		o.Register("options_discovery", "Full options strategy discovery pipeline", optionsDiscoverySpec, o.optionsDiscovery, "overnight_generate")
 	}
 }
@@ -47,7 +47,9 @@ var overnightIndexGroups = []string{"nasdaq", "nyse", "other"}
 
 func (o *JobOrchestrator) overnightBacktest(ctx context.Context) error {
 	o.logger.Info("overnight_backtest: chunk starting")
-	chunker := newOvernightBacktestChunker(o.deps, o.logger)
+	deps := o.deps
+	deps.DataService = o.discoveryDataService()
+	chunker := newOvernightBacktestChunker(deps, o.logger)
 	if err := chunker.RunChunk(ctx); err != nil {
 		return fmt.Errorf("overnight_backtest: chunk failed: %w", err)
 	}
@@ -287,7 +289,7 @@ func (o *JobOrchestrator) overnightGenerate(ctx context.Context) error {
 	defer func() { o.SetLastSummary("overnight_generate", summary) }()
 
 	deps := discovery.DiscoveryDeps{
-		DataService:     o.deps.DataService,
+		DataService:     o.discoveryDataService(),
 		LLMProvider:     o.deps.LLMProvider,
 		Strategies:      o.deps.StrategyRepo,
 		BacktestConfigs: o.deps.BacktestConfigRepo,
@@ -548,7 +550,7 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	summary := map[string]int{"candidates": 0, "scored": 0, "generated": 0, "swept": 0, "validated": 0, "deployed": 0, "proposed": 0, "created": 0, "reused": 0, "errors": 0, "winners": 0}
 	defer func() { o.SetLastSummary("options_discovery", summary) }()
 
-	if o.deps.OptionsProvider == nil {
+	if o.discoveryOptionsProvider() == nil {
 		return fmt.Errorf("options_discovery: options provider not configured")
 	}
 	if o.deps.Universe == nil {
@@ -557,7 +559,7 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	if o.deps.LLMProvider == nil {
 		return fmt.Errorf("options_discovery: LLM provider not configured")
 	}
-	if o.deps.DataService == nil || o.deps.StrategyRepo == nil {
+	if o.discoveryDataService() == nil || o.deps.StrategyRepo == nil {
 		return fmt.Errorf("options_discovery: data service and strategy repository are required")
 	}
 	if o.deps.DiscoveryRunRepo == nil {
@@ -565,7 +567,7 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	}
 
 	// Get tradeable watchlist candidates.
-	watchlist, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.deps.DataService, 500, 100)
+	watchlist, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.discoveryDataService(), 500, 100)
 	if err != nil {
 		return fmt.Errorf("options_discovery: get watchlist: %w", err)
 	}
@@ -588,8 +590,8 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	}
 
 	deps := optdiscovery.OptionsDiscoveryDeps{
-		DataService:     o.deps.DataService,
-		OptionsProvider: o.deps.OptionsProvider,
+		DataService:     o.discoveryDataService(),
+		OptionsProvider: o.discoveryOptionsProvider(),
 		Strategies:      o.deps.StrategyRepo,
 		Logger:          o.logger,
 	}

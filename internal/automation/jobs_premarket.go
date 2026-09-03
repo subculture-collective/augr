@@ -48,7 +48,7 @@ func (o *JobOrchestrator) registerPreMarketJobs() {
 			o.Register("gap_scanner", "Detect overnight gaps and unusual volume", gapScannerSpec, o.gapScanner)
 		}
 	}
-	if o.discoveryDeploymentReady() && o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil && o.deps.DiscoveryRunRepo != nil {
+	if o.discoveryDeploymentReady() && o.deps.Universe != nil && o.discoveryDataService() != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil && o.deps.DiscoveryRunRepo != nil {
 		if o.deps.PolygonBulkSnapshotsEnabled && o.deps.Polygon != nil {
 			o.Register("discovery_run", "Full strategy discovery on top watchlist tickers", discoveryRunSpec, o.discoveryRun, "gap_scanner")
 		} else {
@@ -60,7 +60,7 @@ func (o *JobOrchestrator) registerPreMarketJobs() {
 
 func (o *JobOrchestrator) registerTickerDiscoveryJob() {
 	cfg := o.deps.TickerDiscovery
-	if !o.discoveryDeploymentReady() || !cfg.Enabled || !o.deps.PolygonBulkSnapshotsEnabled || o.deps.Polygon == nil || o.deps.Universe == nil || o.deps.DataService == nil || o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil || o.deps.BacktestConfigRepo == nil || o.deps.DiscoveryRunRepo == nil {
+	if !o.discoveryDeploymentReady() || !cfg.Enabled || !o.deps.PolygonBulkSnapshotsEnabled || o.deps.Polygon == nil || o.deps.Universe == nil || o.discoveryDataService() == nil || o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil || o.deps.BacktestConfigRepo == nil || o.deps.DiscoveryRunRepo == nil {
 		return
 	}
 	cron := cfg.Cron
@@ -85,7 +85,7 @@ func (o *JobOrchestrator) registerTickerDiscoveryJob() {
 func (o *JobOrchestrator) tickerDiscovery(ctx context.Context) error {
 	summary := map[string]int{"universe_refreshed": 0, "scored": 0, "candidates": 0, "generated": 0, "swept": 0, "validated": 0, "proposed": 0, "created": 0, "reused": 0, "deployed": 0, "errors": 0}
 	defer func() { o.SetLastSummary("ticker_discovery", summary) }()
-	if o.deps.Universe == nil || o.deps.DataService == nil || o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil || o.deps.DiscoveryRunRepo == nil {
+	if o.deps.Universe == nil || o.discoveryDataService() == nil || o.deps.LLMProvider == nil || o.deps.StrategyRepo == nil || o.deps.DiscoveryRunRepo == nil {
 		return fmt.Errorf("ticker_discovery: universe, data, LLM, strategy, and discovery run dependencies are required")
 	}
 
@@ -124,7 +124,7 @@ func (o *JobOrchestrator) tickerDiscovery(ctx context.Context) error {
 		Scoring:   discovery.DefaultScoringConfig(), Validation: discovery.ValidationConfig{}, MaxWinners: 3,
 	}
 	result, err := discovery.RunDiscovery(ctx, discoveryCfg, discovery.DiscoveryDeps{
-		DataService: o.deps.DataService, LLMProvider: o.deps.LLMProvider, Strategies: o.deps.StrategyRepo,
+		DataService: o.discoveryDataService(), LLMProvider: o.deps.LLMProvider, Strategies: o.deps.StrategyRepo,
 		BacktestConfigs: o.deps.BacktestConfigRepo, GeneratorMetrics: o.deps.GeneratorMetrics, Logger: o.logger,
 	})
 	if err != nil {
@@ -298,7 +298,7 @@ func (o *JobOrchestrator) discoveryRun(ctx context.Context) error {
 	if o.deps.DiscoveryRunRepo == nil {
 		return fmt.Errorf("discovery_run: discovery run repository is required")
 	}
-	tickers, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.deps.DataService, 300, 30)
+	tickers, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.discoveryDataService(), 300, 30)
 	if err != nil {
 		return fmt.Errorf("discovery_run: get watchlist: %w", err)
 	}
@@ -326,7 +326,7 @@ func (o *JobOrchestrator) discoveryRun(ctx context.Context) error {
 	}
 
 	deps := discovery.DiscoveryDeps{
-		DataService:     o.deps.DataService,
+		DataService:     o.discoveryDataService(),
 		LLMProvider:     o.deps.LLMProvider,
 		Strategies:      o.deps.StrategyRepo,
 		BacktestConfigs: o.deps.BacktestConfigRepo,
