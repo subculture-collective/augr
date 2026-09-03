@@ -1,0 +1,289 @@
+-- Migration 111 begins the content-addressed promotion/risk boundary. The
+-- portfolio-risk policy and normalized allocation relations are added by the
+-- same migration so activation and sizing deploy as one schema boundary.
+LOCK TABLE strategies, strategy_versions, strategy_deployments,
+  promotion_retirement_decisions, statistical_robustness_assessments,
+  paper_evaluation_scopes IN SHARE ROW EXCLUSIVE MODE;
+
+CREATE TABLE portfolio_risk_policy_artifacts (
+  id UUID PRIMARY KEY,
+  schema_name TEXT NOT NULL CHECK(schema_name='portfolio-risk-policy-v1'),
+  version TEXT NOT NULL CHECK(version<>''),
+  sha256 TEXT NOT NULL UNIQUE CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+  canonical_bytes BYTEA NOT NULL,
+  canonical_json JSONB NOT NULL CHECK(jsonb_typeof(canonical_json)='object'),
+  created_at TIMESTAMPTZ NOT NULL CHECK(created_at=date_trunc('microseconds',created_at)),
+  CHECK(sha256=encode(digest(canonical_bytes,'sha256'),'hex')),
+  CHECK(canonical_json=convert_from(canonical_bytes,'UTF8')::JSONB),
+  CHECK(id=economic_deterministic_uuid('portfolio-risk-policy',schema_name||'@sha256:'||sha256))
+);
+
+CREATE TABLE account_portfolio_risk_policy_bindings (
+  id UUID PRIMARY KEY,
+  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+  capital_binding_id UUID NOT NULL REFERENCES account_capital_policy_bindings(id) ON DELETE RESTRICT,
+  policy_id UUID NOT NULL REFERENCES portfolio_risk_policy_artifacts(id) ON DELETE RESTRICT,
+  policy_sha256 TEXT NOT NULL CHECK(policy_sha256 ~ '^[0-9a-f]{64}$'),
+  effective_at TIMESTAMPTZ NOT NULL CHECK(effective_at=date_trunc('microseconds',effective_at)),
+  sha256 TEXT NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+  canonical_bytes BYTEA NOT NULL,
+  canonical_json JSONB NOT NULL CHECK(jsonb_typeof(canonical_json)='object'),
+  created_at TIMESTAMPTZ NOT NULL CHECK(created_at=date_trunc('microseconds',created_at)),
+  CHECK(sha256=encode(digest(canonical_bytes,'sha256'),'hex')),
+  CHECK(canonical_json=convert_from(canonical_bytes,'UTF8')::JSONB),
+  CHECK(id=economic_deterministic_uuid('account-portfolio-risk-policy-binding','account-portfolio-risk-policy-binding-v1@sha256:'||sha256)),
+  UNIQUE(account_id,capital_binding_id,policy_id,effective_at)
+);
+
+CREATE TABLE portfolio_account_snapshots (
+  id UUID PRIMARY KEY,
+  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+  environment TEXT NOT NULL CHECK(environment='paper_scored'),
+  external_account_id TEXT NOT NULL CHECK(external_account_id<>''),
+  observed_at TIMESTAMPTZ NOT NULL CHECK(observed_at=date_trunc('microseconds',observed_at)),
+  equity NUMERIC(20,8) NOT NULL CHECK(equity>0),
+  buying_power NUMERIC(20,8) NOT NULL CHECK(buying_power>=0),
+  options_buying_power NUMERIC(20,8) NOT NULL CHECK(options_buying_power>=0),
+  fallback_used BOOLEAN NOT NULL CHECK(NOT fallback_used),
+  sha256 TEXT NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+  canonical_bytes BYTEA NOT NULL,
+  canonical_json JSONB NOT NULL CHECK(jsonb_typeof(canonical_json)='object'),
+  created_at TIMESTAMPTZ NOT NULL CHECK(created_at=date_trunc('microseconds',created_at)),
+  CHECK(sha256=encode(digest(canonical_bytes,'sha256'),'hex')),
+  CHECK(canonical_json=convert_from(canonical_bytes,'UTF8')::JSONB),
+  CHECK(id=economic_deterministic_uuid('portfolio-account-snapshot','portfolio-account-snapshot-v1@sha256:'||sha256))
+);
+
+CREATE FUNCTION validate_portfolio_risk_binding() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM 1
+  FROM account_portfolio_risk_policy_bindings binding
+  JOIN account_capital_policy_bindings capital ON capital.id=binding.capital_binding_id
+    AND capital.account_id=binding.account_id AND capital.environment='paper_scored'
+  JOIN portfolio_risk_policy_artifacts policy ON policy.id=binding.policy_id
+    AND policy.sha256=binding.policy_sha256
+  WHERE binding.id=NEW.id
+    AND binding.canonical_json=jsonb_build_object(
+      'schema','account-portfolio-risk-policy-binding-v1',
+      'account_id',binding.account_id::TEXT,
+      'capital_binding_id',binding.capital_binding_id::TEXT,
+      'policy_id',binding.policy_id::TEXT,
+      'policy_sha256',binding.policy_sha256,
+      'effective_at',to_char(binding.effective_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'));
+  IF NOT FOUND THEN RAISE EXCEPTION 'portfolio risk binding graph does not reconstruct'; END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_account_portfolio_risk_policy_bindings_validate
+  AFTER INSERT ON account_portfolio_risk_policy_bindings
+  FOR EACH ROW EXECUTE FUNCTION validate_portfolio_risk_binding();
+
+CREATE FUNCTION validate_portfolio_account_snapshot() RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM 1
+  FROM portfolio_account_snapshots snapshot
+  JOIN accounts account ON account.id=snapshot.account_id
+    AND account.environment=snapshot.environment
+    AND account.external_account_id=snapshot.external_account_id
+    AND account.status='active'
+  WHERE snapshot.id=NEW.id
+    AND snapshot.canonical_json=jsonb_build_object(
+      'schema','portfolio-account-snapshot-v1',
+      'account_id',snapshot.account_id::TEXT,
+      'environment',snapshot.environment,
+      'external_account_id',snapshot.external_account_id,
+      'observed_at',to_char(snapshot.observed_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+      'equity',to_char(snapshot.equity,'FM99999999999999999990.00000000'),
+      'buying_power',to_char(snapshot.buying_power,'FM99999999999999999990.00000000'),
+      'options_buying_power',to_char(snapshot.options_buying_power,'FM99999999999999999990.00000000'),
+      'fallback_used',false);
+  IF NOT FOUND THEN RAISE EXCEPTION 'portfolio account snapshot does not match the canonical account'; END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_portfolio_account_snapshots_validate
+  AFTER INSERT ON portfolio_account_snapshots
+  FOR EACH ROW EXECUTE FUNCTION validate_portfolio_account_snapshot();
+
+ALTER TABLE portfolio_opportunities
+  ADD COLUMN execution_version_id UUID REFERENCES strategy_versions(id) ON DELETE RESTRICT,
+  ADD COLUMN evaluation_scope_id UUID REFERENCES paper_evaluation_scopes(id) ON DELETE RESTRICT,
+  ADD COLUMN manifest_id UUID REFERENCES dataset_manifests(id) ON DELETE RESTRICT,
+  ADD COLUMN quality_result_id UUID REFERENCES dataset_quality_results(id) ON DELETE RESTRICT,
+  ADD COLUMN deployment_id UUID REFERENCES strategy_deployments(id) ON DELETE RESTRICT,
+  ADD COLUMN promotion_decision_id UUID REFERENCES promotion_retirement_decisions(id) ON DELETE RESTRICT,
+  ADD COLUMN risk_policy_id UUID REFERENCES portfolio_risk_policy_artifacts(id) ON DELETE RESTRICT,
+  ADD COLUMN risk_policy_version TEXT,
+  ADD COLUMN deployment_budget_usd NUMERIC(20,8),
+  ADD COLUMN expected_loss_usd NUMERIC(20,8),
+  ADD COLUMN max_loss_per_unit NUMERIC(20,8),
+  ADD COLUMN required_capital_per_unit NUMERIC(20,8),
+  ADD COLUMN quote_observed_at TIMESTAMPTZ,
+  ADD COLUMN delta NUMERIC(20,8), ADD COLUMN gamma NUMERIC(20,8), ADD COLUMN theta NUMERIC(20,8), ADD COLUMN vega NUMERIC(20,8),
+  ADD COLUMN intent_sha256 TEXT CHECK(intent_sha256 IS NULL OR intent_sha256 ~ '^[0-9a-f]{64}$'),
+  ADD COLUMN intent_bytes BYTEA,
+  ADD CONSTRAINT portfolio_opportunity_promotion_lineage CHECK(
+    (execution_version_id IS NULL AND evaluation_scope_id IS NULL AND manifest_id IS NULL AND quality_result_id IS NULL AND
+     deployment_id IS NULL AND promotion_decision_id IS NULL AND risk_policy_id IS NULL AND risk_policy_version IS NULL AND intent_sha256 IS NULL AND intent_bytes IS NULL) OR
+    (execution_version_id IS NOT NULL AND evaluation_scope_id IS NOT NULL AND manifest_id IS NOT NULL AND quality_result_id IS NOT NULL AND
+     deployment_id IS NOT NULL AND promotion_decision_id IS NOT NULL AND risk_policy_id IS NOT NULL AND risk_policy_version IS NOT NULL AND intent_sha256 IS NOT NULL AND intent_bytes IS NOT NULL)),
+  ADD CONSTRAINT portfolio_opportunity_intent_hash CHECK(intent_sha256 IS NULL OR intent_sha256=encode(digest(intent_bytes,'sha256'),'hex'));
+
+CREATE TABLE portfolio_opportunity_option_legs (
+  opportunity_id UUID NOT NULL REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK(sequence IN (0,1)),
+  contract_id UUID NOT NULL REFERENCES instruments(id) ON DELETE RESTRICT,
+  occ_symbol TEXT NOT NULL CHECK(occ_symbol<>''), underlying TEXT NOT NULL CHECK(underlying<>''),
+  expiry TIMESTAMPTZ NOT NULL, option_type TEXT NOT NULL CHECK(option_type IN ('call','put')),
+  strike NUMERIC(20,8) NOT NULL CHECK(strike>0), ratio INTEGER NOT NULL CHECK(ratio=1),
+  side TEXT NOT NULL CHECK(side IN ('buy','sell')),
+  position_intent TEXT NOT NULL CHECK(position_intent IN ('buy_to_open','sell_to_open')),
+  bid NUMERIC(20,8) NOT NULL CHECK(bid>0), ask NUMERIC(20,8) NOT NULL CHECK(ask>=bid),
+  multiplier INTEGER NOT NULL CHECK(multiplier=100),
+  PRIMARY KEY(opportunity_id,sequence), UNIQUE(opportunity_id,contract_id), UNIQUE(opportunity_id,occ_symbol)
+);
+
+ALTER TABLE allocation_decisions
+  ADD COLUMN risk_policy_id UUID REFERENCES portfolio_risk_policy_artifacts(id) ON DELETE RESTRICT,
+  ADD COLUMN risk_policy_version TEXT,
+  ADD COLUMN account_snapshot_id UUID REFERENCES portfolio_account_snapshots(id) ON DELETE RESTRICT,
+  ADD COLUMN proposed_quantity NUMERIC(20,8), ADD COLUMN max_loss_per_unit NUMERIC(20,8),
+  ADD COLUMN reserved_risk_usd NUMERIC(20,8), ADD COLUMN reserved_capital_usd NUMERIC(20,8),
+  ADD COLUMN exposure_before_usd NUMERIC(20,8), ADD COLUMN exposure_after_usd NUMERIC(20,8),
+  ADD COLUMN binding_constraint TEXT, ADD COLUMN execution_route TEXT;
+
+DROP INDEX orders_allocation_effect_once;
+CREATE UNIQUE INDEX orders_stock_allocation_effect_once
+  ON orders(account_id,allocation_opportunity_id)
+  WHERE allocation_opportunity_id IS NOT NULL AND leg_group_id IS NULL;
+CREATE UNIQUE INDEX orders_option_allocation_leg_once
+  ON orders(account_id,allocation_opportunity_id,leg_group_id,ticker)
+  WHERE allocation_opportunity_id IS NOT NULL AND leg_group_id IS NOT NULL;
+
+CREATE TABLE allocation_risk_caps (
+  decision_id UUID NOT NULL REFERENCES allocation_decisions(id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK(sequence>=0), name TEXT NOT NULL CHECK(name<>''),
+  available_amount NUMERIC(20,8) NOT NULL, unit_amount NUMERIC(20,8) NOT NULL CHECK(unit_amount>0),
+  quantity_cap NUMERIC(20,8) NOT NULL CHECK(quantity_cap>=0), binding BOOLEAN NOT NULL,
+  PRIMARY KEY(decision_id,sequence), UNIQUE(decision_id,name)
+);
+
+CREATE FUNCTION reject_portfolio_evidence_mutation() RETURNS TRIGGER AS $$
+BEGIN RAISE EXCEPTION 'portfolio evidence is append-only'; END; $$ LANGUAGE plpgsql;
+DO $$ DECLARE name TEXT; BEGIN FOREACH name IN ARRAY ARRAY['portfolio_risk_policy_artifacts','account_portfolio_risk_policy_bindings','portfolio_account_snapshots','portfolio_opportunity_option_legs','allocation_risk_caps'] LOOP
+  EXECUTE format('CREATE TRIGGER trg_%s_immutable BEFORE UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION reject_portfolio_evidence_mutation()',name,name);
+END LOOP; END $$;
+
+CREATE FUNCTION preserve_portfolio_opportunity_intent() RETURNS TRIGGER AS $$
+BEGIN
+  IF OLD.intent_sha256 IS NOT NULL AND (NEW.intent_sha256<>OLD.intent_sha256 OR NEW.intent_bytes<>OLD.intent_bytes OR
+    NEW.execution_version_id<>OLD.execution_version_id OR NEW.evaluation_scope_id<>OLD.evaluation_scope_id OR
+    NEW.manifest_id<>OLD.manifest_id OR NEW.quality_result_id<>OLD.quality_result_id OR NEW.deployment_id<>OLD.deployment_id OR
+    NEW.promotion_decision_id<>OLD.promotion_decision_id OR NEW.risk_policy_id<>OLD.risk_policy_id) THEN
+    RAISE EXCEPTION 'portfolio opportunity execution intent is immutable';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_portfolio_opportunity_preserve_intent BEFORE UPDATE ON portfolio_opportunities
+  FOR EACH ROW EXECUTE FUNCTION preserve_portfolio_opportunity_intent();
+
+CREATE TABLE strategy_promotion_activations (
+  id UUID PRIMARY KEY,
+  schema_name TEXT NOT NULL CHECK(schema_name='strategy-promotion-activation-v1'),
+  action TEXT NOT NULL CHECK(action IN ('activate','suspend')),
+  deployment_id UUID NOT NULL REFERENCES strategy_deployments(id) ON DELETE RESTRICT,
+  deployment_sha256 TEXT NOT NULL CHECK(deployment_sha256 ~ '^[0-9a-f]{64}$'),
+  decision_id UUID NOT NULL UNIQUE REFERENCES promotion_retirement_decisions(id) ON DELETE RESTRICT,
+  decision_sha256 TEXT NOT NULL CHECK(decision_sha256 ~ '^[0-9a-f]{64}$'),
+  strategy_id UUID NOT NULL REFERENCES strategies(id) ON DELETE RESTRICT,
+  source_version_id UUID NOT NULL REFERENCES strategy_versions(id) ON DELETE RESTRICT,
+  runtime_version_id UUID NOT NULL REFERENCES strategy_versions(id) ON DELETE RESTRICT,
+  runtime_version_sha256 TEXT NOT NULL CHECK(runtime_version_sha256 ~ '^[0-9a-f]{64}$'),
+  account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+  scope_id UUID NOT NULL REFERENCES paper_evaluation_scopes(id) ON DELETE RESTRICT,
+  capital_binding_id UUID NOT NULL REFERENCES account_capital_policy_bindings(id) ON DELETE RESTRICT,
+  schedule_cron TEXT NOT NULL,
+  timezone_name TEXT NOT NULL CHECK(timezone_name<>''),
+  risk_policy_version TEXT NOT NULL CHECK(risk_policy_version<>''),
+  prior_activation_id UUID REFERENCES strategy_promotion_activations(id) ON DELETE RESTRICT,
+  prior_activation_sha256 TEXT NOT NULL DEFAULT '' CHECK(
+    (prior_activation_id IS NULL AND prior_activation_sha256='') OR
+    (prior_activation_id IS NOT NULL AND prior_activation_sha256 ~ '^[0-9a-f]{64}$')),
+  sha256 TEXT NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'),
+  canonical_bytes BYTEA NOT NULL,
+  canonical_json JSONB NOT NULL CHECK(jsonb_typeof(canonical_json)='object'),
+  created_at TIMESTAMPTZ NOT NULL CHECK(created_at=date_trunc('microseconds',created_at)),
+  CHECK((action='activate' AND schedule_cron<>'') OR (action='suspend' AND schedule_cron='')),
+  CHECK(sha256=encode(digest(canonical_bytes,'sha256'),'hex')),
+  CHECK(canonical_json=convert_from(canonical_bytes,'UTF8')::JSONB),
+  CHECK(id=economic_deterministic_uuid('strategy-promotion-activation',schema_name||'@sha256:'||sha256)),
+  UNIQUE(deployment_id,prior_activation_id)
+);
+
+CREATE UNIQUE INDEX uq_strategy_promotion_initial_activation
+  ON strategy_promotion_activations(deployment_id)
+  WHERE prior_activation_id IS NULL;
+
+CREATE FUNCTION validate_strategy_promotion_activation() RETURNS TRIGGER AS $$
+DECLARE target UUID;
+BEGIN
+  target:=COALESCE((to_jsonb(NEW)->>'id')::UUID,(to_jsonb(NEW)->>'prior_activation_id')::UUID);
+  PERFORM 1
+  FROM strategy_promotion_activations activation
+  JOIN strategy_deployments deployment ON deployment.id=activation.deployment_id
+  JOIN promotion_retirement_decisions decision ON decision.id=activation.decision_id
+  JOIN statistical_robustness_assessments assessment ON assessment.id=decision.assessment_id
+  JOIN strategy_versions runtime_version ON runtime_version.id=activation.runtime_version_id
+  JOIN paper_evaluation_scopes scope ON scope.id=activation.scope_id
+  JOIN portfolio_risk_policy_artifacts risk_policy ON risk_policy.schema_name||'@sha256:'||risk_policy.sha256=activation.risk_policy_version
+  JOIN account_portfolio_risk_policy_bindings risk_binding ON risk_binding.account_id=activation.account_id
+    AND risk_binding.capital_binding_id=activation.capital_binding_id AND risk_binding.policy_id=risk_policy.id
+  LEFT JOIN strategy_promotion_activations prior ON prior.id=activation.prior_activation_id
+  WHERE activation.id=target
+    AND activation.deployment_sha256=deployment.sha256
+    AND activation.decision_sha256=decision.sha256
+    AND decision.deployment_id=deployment.id
+    AND decision.version_id=deployment.version_id
+    AND activation.source_version_id=deployment.version_id
+    AND activation.runtime_version_sha256=runtime_version.sha256
+    AND activation.account_id=deployment.account_id
+    AND activation.account_id=scope.account_id
+    AND activation.capital_binding_id=deployment.capital_binding_id
+    AND activation.capital_binding_id=scope.capital_binding_id
+    AND assessment.scope_id=scope.id
+    AND activation.schedule_cron=CASE WHEN activation.action='activate' THEN deployment.schedule_cron ELSE '' END
+    AND activation.timezone_name=deployment.timezone_name
+    AND activation.risk_policy_version=deployment.risk_policy_version
+    AND ((activation.prior_activation_id IS NULL AND activation.prior_activation_sha256='') OR
+         (prior.deployment_id=activation.deployment_id AND activation.prior_activation_sha256=prior.sha256))
+    AND ((activation.action='activate' AND decision.outcome='approved' AND decision.next_state='shadow') OR
+         (activation.action='suspend' AND decision.outcome IN ('held','retired')))
+    AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions child WHERE child.prior_decision_id=decision.id)
+    AND activation.canonical_json=jsonb_build_object(
+      'schema',activation.schema_name,'action',activation.action,
+      'deployment_id',activation.deployment_id::TEXT,'deployment_sha256',activation.deployment_sha256,
+      'decision_id',activation.decision_id::TEXT,'decision_sha256',activation.decision_sha256,
+      'strategy_id',activation.strategy_id::TEXT,'source_version_id',activation.source_version_id::TEXT,
+      'runtime_version_id',activation.runtime_version_id::TEXT,'runtime_version_sha256',activation.runtime_version_sha256,
+      'account_id',activation.account_id::TEXT,'scope_id',activation.scope_id::TEXT,
+      'capital_binding_id',activation.capital_binding_id::TEXT,'schedule_cron',activation.schedule_cron,
+      'timezone',activation.timezone_name,'risk_policy_version',activation.risk_policy_version,
+      'prior_activation_id',COALESCE(activation.prior_activation_id::TEXT,''),
+      'prior_activation_sha256',activation.prior_activation_sha256)
+    AND (EXISTS(SELECT 1 FROM strategy_promotion_activations child WHERE child.prior_activation_id=activation.id) OR
+         EXISTS(SELECT 1 FROM strategies strategy WHERE strategy.id=activation.strategy_id
+           AND strategy.execution_strategy_version_id=activation.runtime_version_id
+           AND strategy.is_paper
+           AND strategy.status=CASE WHEN activation.action='activate' THEN 'active' ELSE 'inactive' END
+           AND strategy.schedule_cron=activation.schedule_cron));
+  IF NOT FOUND THEN RAISE EXCEPTION 'strategy promotion activation graph does not reconstruct'; END IF;
+  RETURN NULL;
+END; $$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER trg_strategy_promotion_activation_graph
+  AFTER INSERT ON strategy_promotion_activations DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW EXECUTE FUNCTION validate_strategy_promotion_activation();
+CREATE CONSTRAINT TRIGGER trg_strategy_promotion_activation_prior_graph
+  AFTER INSERT ON strategy_promotion_activations DEFERRABLE INITIALLY DEFERRED
+  FOR EACH ROW WHEN(NEW.prior_activation_id IS NOT NULL) EXECUTE FUNCTION validate_strategy_promotion_activation();
+CREATE TRIGGER trg_strategy_promotion_activation_immutable
+  BEFORE UPDATE OR DELETE ON strategy_promotion_activations
+  FOR EACH ROW EXECUTE FUNCTION reject_promotion_mutation();

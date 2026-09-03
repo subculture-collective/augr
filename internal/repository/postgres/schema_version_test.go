@@ -57,11 +57,11 @@ func TestCompareSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestSchemaVersionCompatibilityRequiresImmutableMarketPayloads(t *testing.T) {
+func TestSchemaVersionCompatibilityRequiresPortfolioRiskAndActivation(t *testing.T) {
 	tests := []struct {
 		version int
 		want    bool
-	}{{108, false}, {109, false}, {110, true}, {111, false}}
+	}{{109, false}, {110, false}, {111, true}, {112, false}}
 	for _, tt := range tests {
 		if got := IsSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("IsSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
