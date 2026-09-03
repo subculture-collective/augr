@@ -66,6 +66,9 @@ type PortfolioState struct {
 	Gamma                  float64
 	Theta                  float64
 	Vega                   float64
+	ReconciliationID       string
+	RiskStateSHA256        string
+	RiskStateBytes         []byte
 }
 
 type AllocationSummary struct {

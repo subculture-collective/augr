@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +50,8 @@ type AllocationDecision struct {
 	Quantity             float64                  `json:"quantity"`
 	RiskPolicyVersion    string                   `json:"risk_policy_version,omitempty"`
 	AccountSnapshotID    uuid.UUID                `json:"account_snapshot_id,omitempty"`
+	RiskStateSHA256      string                   `json:"risk_state_sha256,omitempty"`
+	RiskStateBytes       json.RawMessage          `json:"risk_state,omitempty"`
 	ProposedQuantity     float64                  `json:"proposed_quantity"`
 	MaxLossPerUnit       float64                  `json:"max_loss_per_unit"`
 	ReservedRiskUSD      float64                  `json:"reserved_risk_usd"`

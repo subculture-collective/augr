@@ -35,6 +35,10 @@ type PortfolioAccountSnapshotSource interface {
 	CaptureAccountSnapshot(context.Context) (portfolio.AccountSnapshot, error)
 }
 
+type PortfolioRiskStateSource interface {
+	LoadPortfolioRiskState(context.Context, uuid.UUID, time.Time) (portfolio.RuntimeRiskState, error)
+}
+
 func (o *JobOrchestrator) registerPortfolioAllocatorJobs() {
 	if o.deps.OpportunityRepo == nil || o.deps.AllocationDecisionRepo == nil {
 		o.logger.Info("portfolio_allocator: skipped — repositories not configured")
@@ -100,6 +104,8 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 			decision.RiskPolicyVersion = opportunity.RiskPolicyVersion
 		}
 		decision.AccountSnapshotID = state.AccountSnapshotID
+		decision.RiskStateSHA256 = state.RiskStateSHA256
+		decision.RiskStateBytes = append([]byte(nil), state.RiskStateBytes...)
 
 		if mode == portfolio.AllocatorModePaper && decision.Action == domain.AllocationDecisionActionShadowSelected {
 			claimed, err := o.preclaimPaperOpportunity(ctx, decision, claimID, asOf)
@@ -220,6 +226,11 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 			reason = "source_run_not_completed"
 		case run.AccountID != opportunity.AccountID || run.Environment != opportunity.Environment || run.OriginType != opportunity.OriginType || run.OriginID != opportunity.OriginID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate):
 			reason = "source_scope_mismatch"
+		case run.ExecutionVersionID != opportunity.ExecutionVersionID || run.EvaluationScopeID != opportunity.EvaluationScopeID ||
+			run.ManifestID != opportunity.ManifestID || run.QualityResultID != opportunity.QualityResultID ||
+			run.DeploymentID != opportunity.DeploymentID || run.PromotionDecisionID != opportunity.PromotionDecisionID ||
+			run.RiskPolicyVersion != opportunity.RiskPolicyVersion:
+			reason = "source_promotion_lineage_mismatch"
 		case run.StrategyID != opportunity.StrategyID:
 			reason = "source_strategy_mismatch"
 		case run.Signal != opportunity.Signal || (run.Signal != domain.PipelineSignalBuy && run.Signal != domain.PipelineSignalSell):
@@ -676,6 +687,30 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 
 	var grossExposure float64
 	for _, position := range positions {
+		state.OpenPositionCount++
+		if position.AssetClass == domain.AssetClassOption {
+			multiplier := position.ContractMultiplier
+			if multiplier <= 0 {
+				multiplier = 100
+			}
+			sign := 1.0
+			if position.Side == domain.PositionSideShort {
+				sign = -1
+			}
+			if position.Delta != nil {
+				state.Delta += sign * *position.Delta * position.Quantity * multiplier
+			}
+			if position.Gamma != nil {
+				state.Gamma += sign * *position.Gamma * position.Quantity * multiplier
+			}
+			if position.Theta != nil {
+				state.Theta += sign * *position.Theta * position.Quantity * multiplier
+			}
+			if position.Vega != nil {
+				state.Vega += sign * *position.Vega * position.Quantity * multiplier
+			}
+			continue
+		}
 		exposure := portfolioPositionExposure(position)
 		grossExposure += exposure
 		state.MarketExposure[position.MarketType] += exposure
@@ -700,7 +735,28 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 	state.Equity = snapshot.Equity
 	state.BuyingPower = snapshot.BuyingPower
 	state.OptionsBuyingPower = snapshot.OptionsBuyingPower
+	if o.deps.PortfolioRiskState == nil {
+		return state, warnings, fmt.Errorf("portfolio_allocator: %s mode requires canonical risk-state source", mode)
+	} else {
+		riskState, err := o.deps.PortfolioRiskState.LoadPortfolioRiskState(ctx, snapshot.ID, snapshot.ObservedAt)
+		if err != nil {
+			return state, warnings, fmt.Errorf("portfolio_allocator: load canonical risk state: %w", err)
+		}
+		state.DailyLossPct = riskState.DailyLossPct
+		state.DrawdownPct = riskState.DrawdownPct
+		state.NewOrdersToday = riskState.NewOrdersToday
+		state.CircuitBreakerOpen = riskState.CircuitBreakerOpen
+		state.ReconciliationID = riskState.ReconciliationID
+		state.UnderlyingRisk = riskState.UnderlyingRisk
+		for _, reservedRisk := range riskState.UnderlyingRisk {
+			grossExposure += reservedRisk
+			state.MarketExposure[domain.MarketTypeOptions] += reservedRisk
+		}
+	}
 	state.GrossExposure = grossExposure
+	if err := portfolio.BindRiskStateEvidence(&state, snapshot.ObservedAt); err != nil {
+		return state, warnings, fmt.Errorf("portfolio_allocator: bind risk-state evidence: %w", err)
+	}
 	return state, warnings, nil
 }
 

@@ -41,6 +41,9 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 	if decision.AccountID != uuid.Nil && decision.AccountID != r.accountID {
 		return fmt.Errorf("postgres: create allocation decision: account mismatch")
 	}
+	if decision.RiskPolicyVersion != "" && (decision.AccountSnapshotID == uuid.Nil || len(decision.RiskStateBytes) == 0 || digestBytes(decision.RiskStateBytes) != decision.RiskStateSHA256) {
+		return fmt.Errorf("postgres: create allocation decision: complete canonical risk-state evidence is required")
+	}
 	decision.AccountID = r.accountID
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -68,10 +71,10 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 				account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date,
 				opportunity_id, strategy_id, mode, action, score, notional_usd, quantity, reasons, created_order_id,
 				risk_policy_id,risk_policy_version,account_snapshot_id,proposed_quantity,max_loss_per_unit,
-				reserved_risk_usd,reserved_capital_usd,exposure_before_usd,exposure_after_usd,binding_constraint,execution_route
+				reserved_risk_usd,reserved_capital_usd,exposure_before_usd,exposure_after_usd,binding_constraint,execution_route,risk_state_sha256,risk_state_bytes
 			)
 			SELECT $1,$2,$3,$4,$6,$7,$5,$8,$9,$10,$11,$12,$13,$14,$15,
-				(SELECT id FROM portfolio_risk_policy_artifacts WHERE schema_name||'@sha256:'||sha256=$17),NULLIF($17,''),$18,$19,$20,$21,$22,$23,$24,NULLIF($25,''),NULLIF($26,'') FROM authorized
+				(SELECT id FROM portfolio_risk_policy_artifacts WHERE schema_name||'@sha256:'||sha256=$17),NULLIF($17,''),$18,$19,$20,$21,$22,$23,$24,NULLIF($25,''),NULLIF($26,''),NULLIF($27,''),$28 FROM authorized
 			WHERE $16::uuid IS NULL OR EXISTS (SELECT 1 FROM portfolio_opportunities claimed WHERE claimed.id=$5 AND claimed.account_id=$1 AND claimed.status='selected' AND claimed.allocation_claim_id=$16 AND claimed.allocation_claim_expires_at>clock_timestamp())
 			ON CONFLICT (opportunity_id) WHERE opportunity_id IS NOT NULL AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL AND pipeline_run_id IS NOT NULL AND pipeline_run_trade_date IS NOT NULL DO NOTHING
 			RETURNING id, created_at
@@ -103,6 +106,8 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 		  AND d.exposure_after_usd IS NOT DISTINCT FROM $24
 		  AND d.binding_constraint IS NOT DISTINCT FROM NULLIF($25,'')
 		  AND d.execution_route IS NOT DISTINCT FROM NULLIF($26,'')
+		  AND d.risk_state_sha256 IS NOT DISTINCT FROM NULLIF($27,'')
+		  AND d.risk_state_bytes IS NOT DISTINCT FROM $28
 		LIMIT 1`,
 		r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.OpportunityID,
 		decision.PipelineRunID, decision.PipelineRunTradeDate, decision.StrategyID,
@@ -124,6 +129,8 @@ func (r *AllocationDecisionRepo) Create(ctx context.Context, decision *domain.Al
 		decision.ExposureAfterUSD,
 		decision.BindingConstraint,
 		decision.ExecutionRoute,
+		decision.RiskStateSHA256,
+		nullableJSON(decision.RiskStateBytes),
 	)
 	if err := row.Scan(&decision.ID, &decision.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -222,12 +229,13 @@ const allocationDecisionSelectSQL = `SELECT id, account_id, environment, origin_
 	score::double precision, notional_usd::double precision, quantity::double precision,
 	reasons, created_order_id, created_at,risk_policy_version,account_snapshot_id,proposed_quantity::double precision,
 	max_loss_per_unit::double precision,reserved_risk_usd::double precision,reserved_capital_usd::double precision,
-	exposure_before_usd::double precision,exposure_after_usd::double precision,binding_constraint,execution_route
+	exposure_before_usd::double precision,exposure_after_usd::double precision,binding_constraint,execution_route,risk_state_sha256,risk_state_bytes
 	FROM allocation_decisions`
 
 func scanAllocationDecision(sc scanner) (*domain.AllocationDecision, error) {
 	var decision domain.AllocationDecision
-	var riskPolicyVersion, bindingConstraint, executionRoute *string
+	var riskPolicyVersion, bindingConstraint, executionRoute, riskStateSHA256 *string
+	var riskStateBytes []byte
 	var accountSnapshotID *uuid.UUID
 	var proposedQuantity, maxLossPerUnit, reservedRisk, reservedCapital, exposureBefore, exposureAfter *float64
 	if err := sc.Scan(
@@ -254,6 +262,8 @@ func scanAllocationDecision(sc scanner) (*domain.AllocationDecision, error) {
 		&exposureAfter,
 		&bindingConstraint,
 		&executionRoute,
+		&riskStateSHA256,
+		&riskStateBytes,
 	); err != nil {
 		return nil, err
 	}
@@ -274,6 +284,10 @@ func scanAllocationDecision(sc scanner) (*domain.AllocationDecision, error) {
 	}
 	if executionRoute != nil {
 		decision.ExecutionRoute = *executionRoute
+	}
+	if riskStateSHA256 != nil {
+		decision.RiskStateSHA256 = *riskStateSHA256
+		decision.RiskStateBytes = append([]byte(nil), riskStateBytes...)
 	}
 	return &decision, nil
 }

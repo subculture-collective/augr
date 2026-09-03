@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -117,6 +119,75 @@ func (repo *PortfolioRiskRepo) CaptureAccountSnapshot(ctx context.Context) (port
 		return snapshot, err
 	}
 	return portfolio.AccountSnapshot{ID: id, ObservedAt: observedAt, Equity: balance.Equity, BuyingPower: balance.BuyingPower, OptionsBuyingPower: balance.OptionsBuyingPower}, nil
+}
+
+func (repo *PortfolioRiskRepo) LoadPortfolioRiskState(ctx context.Context, accountSnapshotID uuid.UUID, asOf time.Time) (portfolio.RuntimeRiskState, error) {
+	state := portfolio.RuntimeRiskState{UnderlyingRisk: map[string]float64{}}
+	if repo == nil || repo.pool == nil || repo.accountID == uuid.Nil || accountSnapshotID == uuid.Nil || asOf.IsZero() {
+		return state, fmt.Errorf("postgres: portfolio risk state identity is incomplete")
+	}
+	var currentEquity, dayOpeningEquity, peakEquity float64
+	err := repo.pool.QueryRow(ctx, `SELECT current.equity::double precision,
+		COALESCE((SELECT equity::double precision FROM portfolio_account_snapshots day_open
+			WHERE day_open.account_id=current.account_id AND (day_open.observed_at AT TIME ZONE 'America/New_York')::date=(current.observed_at AT TIME ZONE 'America/New_York')::date
+			ORDER BY day_open.observed_at,day_open.id LIMIT 1),current.equity::double precision),
+		COALESCE((SELECT max(equity)::double precision FROM portfolio_account_snapshots peak WHERE peak.account_id=current.account_id AND peak.observed_at<=current.observed_at),current.equity::double precision)
+		FROM portfolio_account_snapshots current WHERE current.id=$1 AND current.account_id=$2`, accountSnapshotID, repo.accountID).
+		Scan(&currentEquity, &dayOpeningEquity, &peakEquity)
+	if err != nil || currentEquity <= 0 || dayOpeningEquity <= 0 || peakEquity <= 0 {
+		return state, fmt.Errorf("postgres: load canonical equity history: %w", err)
+	}
+	state.DailyLossPct = math.Max(0, (dayOpeningEquity-currentEquity)/dayOpeningEquity)
+	state.DrawdownPct = math.Max(0, (peakEquity-currentEquity)/peakEquity)
+	if err = repo.pool.QueryRow(ctx, `SELECT count(*) FROM allocation_decisions WHERE account_id=$1
+		AND (created_at AT TIME ZONE 'America/New_York')::date=($2::timestamptz AT TIME ZONE 'America/New_York')::date
+		AND action IN ('shadow_selected','paper_order_intent','executed')`, repo.accountID, asOf).Scan(&state.NewOrdersToday); err != nil {
+		return state, fmt.Errorf("postgres: count daily allocation selections: %w", err)
+	}
+	if err = repo.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM risk_breaker_state WHERE reset_at IS NULL)`).Scan(&state.CircuitBreakerOpen); err != nil {
+		return state, fmt.Errorf("postgres: load risk breaker state: %w", err)
+	}
+	var reconciliationID uuid.UUID
+	var reconciliationClean bool
+	err = repo.pool.QueryRow(ctx, `SELECT run.id,run.clean FROM venue_reconciliation_runs run
+		JOIN venue_local_snapshots snapshot ON snapshot.id=run.local_snapshot_id
+		WHERE snapshot.account_id=$1 AND snapshot.provider='alpaca'
+		ORDER BY run.created_at DESC,run.id DESC LIMIT 1`, repo.accountID).Scan(&reconciliationID, &reconciliationClean)
+	if err != nil {
+		return state, fmt.Errorf("postgres: load latest Alpaca reconciliation: %w", err)
+	}
+	if reconciliationID == uuid.Nil || !reconciliationClean {
+		return state, fmt.Errorf("postgres: latest Alpaca reconciliation is not clean")
+	}
+	state.ReconciliationID = reconciliationID.String()
+	rows, err := repo.pool.Query(ctx, `SELECT upper(opportunity.ticker),sum(decision.reserved_risk_usd)::double precision
+		FROM allocation_decisions decision
+		JOIN portfolio_opportunities opportunity ON opportunity.id=decision.opportunity_id AND opportunity.account_id=decision.account_id AND opportunity.market_type='options'
+		JOIN orders opening_order ON opening_order.id=decision.created_order_id AND opening_order.account_id=decision.account_id AND opening_order.leg_group_id IS NOT NULL
+		WHERE decision.account_id=$1 AND decision.action IN ('paper_order_intent','executed')
+		AND opening_order.status NOT IN ('rejected','cancelled')
+		AND EXISTS(SELECT 1 FROM positions position WHERE position.account_id=decision.account_id AND position.leg_group_id=opening_order.leg_group_id AND position.closed_at IS NULL)
+		GROUP BY upper(opportunity.ticker)`, repo.accountID)
+	if err != nil {
+		return state, fmt.Errorf("postgres: load open options reserved risk: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var underlying string
+		var reserved float64
+		if err := rows.Scan(&underlying, &reserved); err != nil {
+			return state, err
+		}
+		underlying = strings.ToUpper(strings.TrimSpace(underlying))
+		if underlying == "" || reserved <= 0 {
+			return state, fmt.Errorf("postgres: open options reserved risk is invalid")
+		}
+		state.UnderlyingRisk[underlying] = reserved
+	}
+	if err := rows.Err(); err != nil {
+		return state, err
+	}
+	return state, nil
 }
 
 func digestBytes(raw []byte) string { sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }

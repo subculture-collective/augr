@@ -196,6 +196,12 @@ ALTER TABLE allocation_decisions
   ADD COLUMN exposure_before_usd NUMERIC(20,8), ADD COLUMN exposure_after_usd NUMERIC(20,8),
   ADD COLUMN binding_constraint TEXT, ADD COLUMN execution_route TEXT;
 
+ALTER TABLE allocation_decisions
+  ADD COLUMN risk_state_sha256 TEXT CHECK(risk_state_sha256 IS NULL OR risk_state_sha256 ~ '^[0-9a-f]{64}$'),
+  ADD COLUMN risk_state_bytes BYTEA,
+  ADD CONSTRAINT allocation_decision_risk_state_pair CHECK((risk_state_sha256 IS NULL)=(risk_state_bytes IS NULL)),
+  ADD CONSTRAINT allocation_decision_risk_state_hash CHECK(risk_state_sha256 IS NULL OR risk_state_sha256=encode(digest(risk_state_bytes,'sha256'),'hex'));
+
 DROP INDEX orders_allocation_effect_once;
 CREATE UNIQUE INDEX orders_stock_allocation_effect_once
   ON orders(account_id,allocation_opportunity_id)
@@ -230,6 +236,22 @@ BEGIN
 END; $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_portfolio_opportunity_preserve_intent BEFORE UPDATE ON portfolio_opportunities
   FOR EACH ROW EXECUTE FUNCTION preserve_portfolio_opportunity_intent();
+
+CREATE FUNCTION preserve_allocation_risk_evidence() RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.risk_policy_id IS DISTINCT FROM OLD.risk_policy_id OR NEW.risk_policy_version IS DISTINCT FROM OLD.risk_policy_version OR
+    NEW.account_snapshot_id IS DISTINCT FROM OLD.account_snapshot_id OR NEW.risk_state_sha256 IS DISTINCT FROM OLD.risk_state_sha256 OR
+    NEW.risk_state_bytes IS DISTINCT FROM OLD.risk_state_bytes OR NEW.proposed_quantity IS DISTINCT FROM OLD.proposed_quantity OR
+    NEW.max_loss_per_unit IS DISTINCT FROM OLD.max_loss_per_unit OR NEW.reserved_risk_usd IS DISTINCT FROM OLD.reserved_risk_usd OR
+    NEW.reserved_capital_usd IS DISTINCT FROM OLD.reserved_capital_usd OR NEW.exposure_before_usd IS DISTINCT FROM OLD.exposure_before_usd OR
+    NEW.exposure_after_usd IS DISTINCT FROM OLD.exposure_after_usd OR NEW.binding_constraint IS DISTINCT FROM OLD.binding_constraint OR
+    NEW.execution_route IS DISTINCT FROM OLD.execution_route THEN
+    RAISE EXCEPTION 'allocation risk evidence is immutable';
+  END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_allocation_decision_preserve_risk BEFORE UPDATE ON allocation_decisions
+  FOR EACH ROW EXECUTE FUNCTION preserve_allocation_risk_evidence();
 
 CREATE TABLE strategy_promotion_activations (
   id UUID PRIMARY KEY,

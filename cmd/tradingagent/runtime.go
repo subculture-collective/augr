@@ -1287,6 +1287,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						PortfolioOptionsProcessor:    portfolioOptionsProcessor,
 						PortfolioAccountBalance:      alpacaAdapter,
 						PortfolioAccountSnapshot:     portfolioRiskRepo,
+						PortfolioRiskState:           portfolioRiskRepo,
 						JobRunRepo:                   jobRunRepo,
 						JobControlRepo:               jobControlRepo,
 						OptionsScanRepo:              optionsScanRepo,
