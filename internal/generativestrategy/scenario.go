@@ -273,6 +273,13 @@ func (scenario *Scenario) ManifestID() uuid.UUID {
 	return uuid.MustParse(scenario.canonical.ManifestID)
 }
 
+func (scenario *Scenario) ManifestDigest() string {
+	if scenario == nil {
+		return ""
+	}
+	return scenario.canonical.ManifestSHA256
+}
+
 func (scenario *Scenario) Mode() strategycatalog.ExperimentMode {
 	if scenario == nil {
 		return ""
