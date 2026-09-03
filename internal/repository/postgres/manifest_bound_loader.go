@@ -90,6 +90,11 @@ func (loader *ManifestBoundHistoricalLoader) load(ctx context.Context, scopeID, 
 	if kind == dataset.MarketPayloadOptionBar && !report.Options.Ready {
 		return nil, receipt, fmt.Errorf("manifest-bound options evidence: %s", report.Options.Reason)
 	}
+	if start.Before(report.EvaluationStart) || end.After(report.EvaluationEnd) {
+		return nil, receipt, fmt.Errorf("manifest-bound requested interval %s..%s escapes evaluation scope %s..%s",
+			start.Format(time.RFC3339Nano), end.Format(time.RFC3339Nano),
+			report.EvaluationStart.Format(time.RFC3339Nano), report.EvaluationEnd.Format(time.RFC3339Nano))
+	}
 	rows, err := loader.pool.Query(ctx, `SELECT payload.id,payload.content_sha256,payload.canonical_bytes,binding.partition_sequence,
 		payload.provider,payload.feed,payload.adjustment_policy
 		FROM paper_evaluation_scopes scope
@@ -149,8 +154,8 @@ func (loader *ManifestBoundHistoricalLoader) load(ctx context.Context, scopeID, 
 	if err := rows.Err(); err != nil {
 		return nil, data.ManifestBindingReceipt{}, fmt.Errorf("read manifest-bound payloads: %w", err)
 	}
-	if len(bars) == 0 || !bars[0].Timestamp.Equal(start) || !bars[len(bars)-1].Timestamp.Equal(end) {
-		return nil, data.ManifestBindingReceipt{}, fmt.Errorf("manifest-bound payloads do not exactly cover requested interval endpoints")
+	if len(bars) == 0 {
+		return nil, data.ManifestBindingReceipt{}, fmt.Errorf("manifest-bound payloads contain no observations in the requested interval")
 	}
 	for sequence := range partitionSet {
 		receipt.PartitionSequences = append(receipt.PartitionSequences, sequence)

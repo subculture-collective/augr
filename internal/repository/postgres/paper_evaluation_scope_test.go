@@ -98,6 +98,16 @@ func TestConfiguredScopeEnablesStockAndKeepsOptionsFailClosed(t *testing.T) {
 	if err != nil || len(bars) != 2 || receipt.ManifestID != manifest.ID() || len(receipt.ContentSHA256) != 2 {
 		t.Fatalf("manifest-bound load = %#v, %+v, %v", bars, receipt, err)
 	}
+	// Research requests use wall-clock bounds while daily observations are
+	// session-aligned. The scope and quality result prove coverage; the receipt
+	// preserves the exact observations actually returned.
+	bars, receipt, err = loader.Load(fixture.ctx, scope.ID, instrumentID, data.Timeframe1d, start.Add(time.Hour), end)
+	if err != nil || len(bars) != 1 || !receipt.EffectiveStart.Equal(end) || !receipt.EffectiveEnd.Equal(end) {
+		t.Fatalf("session-aligned manifest-bound load = %#v, %+v, %v", bars, receipt, err)
+	}
+	if _, _, err := loader.Load(fixture.ctx, scope.ID, instrumentID, data.Timeframe1d, start.Add(-time.Microsecond), end); err == nil || !strings.Contains(err.Error(), "escapes evaluation scope") {
+		t.Fatalf("scope escape error = %v", err)
+	}
 	if _, _, err := loader.LoadOptions(fixture.ctx, scope.ID, instrumentID, data.Timeframe1d, start, end); err == nil || !strings.Contains(err.Error(), "options") {
 		t.Fatalf("options load error = %v", err)
 	}

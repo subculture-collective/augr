@@ -103,6 +103,8 @@ type DiscoveryDeploymentReadinessReport struct {
 	QualityResultID  uuid.UUID                  `json:"quality_result_id"`
 	QualitySHA256    string                     `json:"quality_sha256"`
 	DecisionCutoff   time.Time                  `json:"decision_cutoff"`
+	EvaluationStart  time.Time                  `json:"evaluation_start"`
+	EvaluationEnd    time.Time                  `json:"evaluation_end"`
 	ObservationCount int                        `json:"observation_count"`
 	BindingCount     int                        `json:"binding_count"`
 	Stock            DatasetCapabilityReadiness `json:"stock"`
@@ -155,6 +157,8 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 	if err != nil {
 		return nil, fmt.Errorf("reconstruct discovery evaluation scope: %w", err)
 	}
+	report.EvaluationStart = evaluationStart.UTC()
+	report.EvaluationEnd = evaluationEnd.UTC()
 	if stockStart != nil {
 		report.Stock.EffectiveStart = stockStart.UTC()
 		report.Stock.EffectiveEnd = stockEnd.UTC()
