@@ -50,6 +50,17 @@ func TestCreateOrReusePaperStrategyCreatesThenReuses(t *testing.T) {
 	if len(config[researchLifecycleConfigKey]) == 0 {
 		t.Fatalf("created config = %s, want %q metadata", created.Config, researchLifecycleConfigKey)
 	}
+	var lifecycle struct {
+		Stage                 string `json:"stage"`
+		Activation            string `json:"activation"`
+		AutoActivationBlocked bool   `json:"auto_activation_blocked"`
+	}
+	if err := json.Unmarshal(config[researchLifecycleConfigKey], &lifecycle); err != nil {
+		t.Fatalf("research lifecycle is invalid: %v", err)
+	}
+	if lifecycle.Stage != "idea" || lifecycle.Activation != "promotion_evaluator_v1" || !lifecycle.AutoActivationBlocked {
+		t.Fatalf("research lifecycle = %+v, want evaluator-controlled inactive idea", lifecycle)
+	}
 
 	reused, didCreate, err := CreateOrReusePaperStrategy(ctx, repo, strategy)
 	if err != nil {

@@ -109,6 +109,9 @@ func (repo *PromotionRepo) RecordDecision(ctx context.Context, value *promotion.
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, value.DeploymentID().String()); err != nil {
+		return nil, err
+	}
 	created := databaseNow()
 	var prior any
 	if value.PriorDecisionID() != uuid.Nil {

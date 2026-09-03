@@ -36,7 +36,7 @@ func PrepareResearchIdea(strategy domain.Strategy) (domain.Strategy, error) {
 	}
 	config[researchLifecycleConfigKey] = map[string]any{
 		"stage":                   "idea",
-		"activation":              "manual_promotion_only",
+		"activation":              "promotion_evaluator_v1",
 		"auto_activation_blocked": true,
 	}
 	preparedConfig, err := json.Marshal(config)
