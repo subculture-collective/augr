@@ -247,6 +247,16 @@ func NewSpec(input SpecInput) (*Spec, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, example := range examples {
+		values := make(map[string]string, len(example.Values))
+		for _, binding := range example.Values {
+			values[binding.Name] = binding.Value
+		}
+		entry, exit, evaluateErr := evaluateExpressions(entry, exit, types, values)
+		if evaluateErr != nil || entry != example.ExpectedEntry || exit != example.ExpectedExit {
+			return nil, fmt.Errorf("generated strategy example %q does not satisfy its expected decisions", example.Key)
+		}
+	}
 	retirement, err := normalizeRetirement(input.Retirement)
 	if err != nil {
 		return nil, err
@@ -535,6 +545,20 @@ func (s *Spec) RequiredDatasetKinds() []dataset.Kind {
 	}
 	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
 	return values
+}
+
+// Evaluate applies the compiled strategy's deterministic entry and exit
+// expressions to one complete, canonically encoded input row. Provider reads,
+// evidence selection, freshness, and missing-value policy remain caller-owned.
+func (s *Spec) Evaluate(values map[string]string) (bool, bool, error) {
+	if s == nil {
+		return false, false, fmt.Errorf("generated strategy spec is required")
+	}
+	types := make(map[string]string, len(s.canonical.Inputs))
+	for _, input := range s.canonical.Inputs {
+		types[input.Name] = input.Type
+	}
+	return evaluateExpressions(s.canonical.Entry, s.canonical.Exit, types, values)
 }
 
 func SpecFromCanonical(id uuid.UUID, digest string, raw []byte, family *strategycatalog.Family) (*Spec, error) {
