@@ -41,9 +41,13 @@ func scenarioFixture(t *testing.T) (*Spec, ScenarioInput, map[uuid.UUID]*dataset
 	}
 	first, second := bar(start.Add(time.Minute), "101"), bar(start.Add(2*time.Minute), "99")
 	contractID := uuid.New()
+	evidence := func(payload *dataset.MarketPayload, source string) map[string]ScenarioEvidenceInput {
+		bound := ScenarioEvidenceInput{Payload: payload, PartitionContentSHA256: strings.Repeat("d", 64), SourceKey: source}
+		return map[string]ScenarioEvidenceInput{"price": bound, "average": bound}
+	}
 	input := ScenarioInput{Spec: spec, Mode: strategycatalog.ExperimentPaperScored, EvaluationStart: start, EvaluationEnd: start.Add(time.Hour), Frames: []DecisionFrameInput{
-		{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: first.AvailableAt(), RouteAt: first.AvailableAt(), ExecutionInput: "price", PayloadsByInput: map[string]*dataset.MarketPayload{"price": first, "average": first}},
-		{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: second.AvailableAt(), RouteAt: second.AvailableAt(), ExecutionInput: "price", PayloadsByInput: map[string]*dataset.MarketPayload{"price": second, "average": second}},
+		{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: first.AvailableAt(), RouteAt: first.AvailableAt(), ExecutionInput: "price", EvidenceByInput: evidence(first, "aapl-first")},
+		{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: second.AvailableAt(), RouteAt: second.AvailableAt(), ExecutionInput: "price", EvidenceByInput: evidence(second, "aapl-second")},
 	}}
 	return spec, input, map[uuid.UUID]*dataset.MarketPayload{first.ID(): first, second.ID(): second}
 }

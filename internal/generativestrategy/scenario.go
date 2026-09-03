@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,7 +32,13 @@ type DecisionFrameInput struct {
 	DecisionAt      time.Time
 	RouteAt         time.Time
 	ExecutionInput  string
-	PayloadsByInput map[string]*dataset.MarketPayload
+	EvidenceByInput map[string]ScenarioEvidenceInput
+}
+
+type ScenarioEvidenceInput struct {
+	Payload                *dataset.MarketPayload
+	PartitionContentSHA256 string
+	SourceKey              string
 }
 
 type ScenarioInput struct {
@@ -43,13 +50,15 @@ type ScenarioInput struct {
 }
 
 type scenarioBindingCanonical struct {
-	Name          string       `json:"name"`
-	DatasetKind   dataset.Kind `json:"dataset_kind"`
-	Field         string       `json:"field"`
-	PayloadID     string       `json:"payload_id"`
-	PayloadSHA256 string       `json:"payload_sha256"`
-	AvailableAt   string       `json:"available_at"`
-	Value         string       `json:"value"`
+	Name                   string       `json:"name"`
+	DatasetKind            dataset.Kind `json:"dataset_kind"`
+	Field                  string       `json:"field"`
+	PayloadID              string       `json:"payload_id"`
+	PayloadSHA256          string       `json:"payload_sha256"`
+	PartitionContentSHA256 string       `json:"partition_content_sha256"`
+	SourceKey              string       `json:"source_key"`
+	AvailableAt            string       `json:"available_at"`
+	Value                  string       `json:"value"`
 }
 
 type scenarioFrameCanonical struct {
@@ -96,6 +105,7 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 	}
 	frames := make([]scenarioFrameCanonical, len(input.Frames))
 	open := map[uuid.UUID]bool{}
+	executionEvidence := map[string]struct{}{}
 	lastDecision := time.Time{}
 	for sequence, source := range input.Frames {
 		if source.InstrumentID == uuid.Nil || source.VenueContractID == uuid.Nil || !scenarioTime(source.DecisionAt) || !scenarioTime(source.RouteAt) ||
@@ -107,15 +117,17 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 			return nil, fmt.Errorf("generated strategy scenario frame %d escapes the declared universe", sequence)
 		}
 		lastDecision = source.DecisionAt
-		if len(source.PayloadsByInput) != len(input.Spec.canonical.Inputs) {
+		if len(source.EvidenceByInput) != len(input.Spec.canonical.Inputs) {
 			return nil, fmt.Errorf("generated strategy scenario frame %d requires every declared input", sequence)
 		}
 		values := make(map[string]string, len(input.Spec.canonical.Inputs))
 		bindings := make([]scenarioBindingCanonical, 0, len(input.Spec.canonical.Inputs))
 		for _, declaration := range input.Spec.canonical.Inputs {
-			payload := source.PayloadsByInput[declaration.Name]
+			evidence := source.EvidenceByInput[declaration.Name]
+			payload := evidence.Payload
 			if payload == nil || payload.InstrumentID() != source.InstrumentID || payload.AvailableAt().After(source.DecisionAt) ||
-				source.DecisionAt.Sub(payload.AvailableAt()) > time.Duration(declaration.FreshnessSeconds)*time.Second {
+				source.DecisionAt.Sub(payload.AvailableAt()) > time.Duration(declaration.FreshnessSeconds)*time.Second ||
+				!digestPattern.MatchString(evidence.PartitionContentSHA256) || evidence.SourceKey == "" || evidence.SourceKey != strings.TrimSpace(evidence.SourceKey) || len(evidence.SourceKey) > 512 {
 				return nil, fmt.Errorf("generated strategy scenario input %q is missing, stale, future, or cross-instrument", declaration.Name)
 			}
 			value, err := payload.Field(declaration.DatasetKind, declaration.Field)
@@ -131,7 +143,8 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 			}
 			values[declaration.Name] = value
 			bindings = append(bindings, scenarioBindingCanonical{Name: declaration.Name, DatasetKind: declaration.DatasetKind, Field: declaration.Field,
-				PayloadID: payload.ID().String(), PayloadSHA256: payload.Digest(), AvailableAt: scenarioFormatTime(payload.AvailableAt()), Value: value})
+				PayloadID: payload.ID().String(), PayloadSHA256: payload.Digest(), PartitionContentSHA256: evidence.PartitionContentSHA256,
+				SourceKey: evidence.SourceKey, AvailableAt: scenarioFormatTime(payload.AvailableAt()), Value: value})
 		}
 		entry, exit, err := input.Spec.Evaluate(values)
 		if err != nil {
@@ -145,6 +158,11 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 		if err != nil || !executionPrice.IsPositive() {
 			return nil, fmt.Errorf("generated strategy scenario frame %d execution price is invalid", sequence)
 		}
+		executionKey := bindings[executionIndex].PartitionContentSHA256 + "\x00" + bindings[executionIndex].SourceKey + "\x00" + bindings[executionIndex].PayloadSHA256
+		if _, duplicate := executionEvidence[executionKey]; duplicate {
+			return nil, fmt.Errorf("generated strategy scenario execution evidence is duplicated")
+		}
+		executionEvidence[executionKey] = struct{}{}
 		action := ScenarioNoop
 		if entry && !exit && !open[source.InstrumentID] {
 			action, open[source.InstrumentID] = ScenarioBuy, true
@@ -189,14 +207,14 @@ func ScenarioFromCanonical(id uuid.UUID, digest string, raw []byte, spec *Spec, 
 		if instrumentErr != nil || contractErr != nil {
 			return nil, fmt.Errorf("generated strategy scenario frame identity is invalid")
 		}
-		rebuilt := DecisionFrameInput{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: scenarioParseTime(frame.DecisionAt), RouteAt: scenarioParseTime(frame.RouteAt), ExecutionInput: frame.ExecutionInput, PayloadsByInput: map[string]*dataset.MarketPayload{}}
+		rebuilt := DecisionFrameInput{InstrumentID: instrumentID, VenueContractID: contractID, DecisionAt: scenarioParseTime(frame.DecisionAt), RouteAt: scenarioParseTime(frame.RouteAt), ExecutionInput: frame.ExecutionInput, EvidenceByInput: map[string]ScenarioEvidenceInput{}}
 		for _, binding := range frame.Bindings {
 			payloadID, err := uuid.Parse(binding.PayloadID)
 			payload := payloads[payloadID]
 			if err != nil || payload == nil || payload.Digest() != binding.PayloadSHA256 {
 				return nil, fmt.Errorf("generated strategy scenario payload does not reconstruct")
 			}
-			rebuilt.PayloadsByInput[binding.Name] = payload
+			rebuilt.EvidenceByInput[binding.Name] = ScenarioEvidenceInput{Payload: payload, PartitionContentSHA256: binding.PartitionContentSHA256, SourceKey: binding.SourceKey}
 		}
 		input.Frames = append(input.Frames, rebuilt)
 	}
