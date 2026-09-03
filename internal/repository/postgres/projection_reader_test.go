@@ -61,6 +61,9 @@ func TestProjectionReaderRejectsForeignAccountBeforeDatabaseAccess(t *testing.T)
 	if _, err := reader.GetCutoverEvidenceInventory(context.Background(), foreignAccountID); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("GetCutoverEvidenceInventory() error = %v, want ErrNotFound", err)
 	}
+	if _, err := reader.GetCutoverEvidenceInventoryForScope(context.Background(), foreignAccountID, uuid.New()); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("GetCutoverEvidenceInventoryForScope() error = %v, want ErrNotFound", err)
+	}
 }
 
 func TestProjectionReaderReturnsOutstandingProjectionWorkAsDegradedEvidence(t *testing.T) {

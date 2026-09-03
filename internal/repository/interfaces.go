@@ -178,6 +178,12 @@ type CutoverEvidenceReader interface {
 	GetCutoverEvidenceInventory(context.Context, uuid.UUID) (*CutoverEvidenceInventory, error)
 }
 
+// ScopedCutoverEvidenceReader resolves only the caller-selected evaluation
+// scope. Promotion-quality automation must never infer a latest scope.
+type ScopedCutoverEvidenceReader interface {
+	GetCutoverEvidenceInventoryForScope(context.Context, uuid.UUID, uuid.UUID) (*CutoverEvidenceInventory, error)
+}
+
 // CanonicalOpenLot identifies an account-scoped open position whose Kalshi
 // contract identity is complete. Legacy positions never enter this read path.
 type CanonicalOpenLot struct {

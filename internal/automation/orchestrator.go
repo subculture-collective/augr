@@ -26,6 +26,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/embedding"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
+	"github.com/PatrickFanella/get-rich-quick/internal/promotion"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
@@ -245,10 +246,18 @@ type OrchestratorDeps struct {
 	PromotionActivation    interface {
 		ProjectEligibleActivations(context.Context, uuid.UUID, uuid.UUID, bool) (pgrepo.PromotionActivationBatch, error)
 	}
-	AutomaticShadowPromotion bool
-	DiscoveryScopeID         uuid.UUID
-	JobTimeout               time.Duration
-	Logger                   *slog.Logger
+	PromotionEvaluation interface {
+		EvaluateEligiblePromotions(context.Context, uuid.UUID, uuid.UUID, promotion.Readiness) (pgrepo.PromotionEvaluationBatch, error)
+	}
+	PromotionAccountSource interface {
+		GetByID(context.Context, uuid.UUID) (*domain.Account, error)
+	}
+	PromotionProjectionSource repository.ProjectionReader
+	PromotionEvidenceSource   repository.ScopedCutoverEvidenceReader
+	AutomaticShadowPromotion  bool
+	DiscoveryScopeID          uuid.UUID
+	JobTimeout                time.Duration
+	Logger                    *slog.Logger
 }
 
 // RegisteredJob tracks a single automated job and its runtime state.
@@ -579,6 +588,7 @@ func (o *JobOrchestrator) RegisterAll() {
 	o.registerKalshiReconciliationJob()
 	o.registerReportJobs()
 	o.registerPortfolioAllocatorJobs()
+	o.registerPromotionEvaluationJob()
 	o.registerPromotionActivationJob()
 }
 

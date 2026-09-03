@@ -149,3 +149,28 @@ func (reader *ProjectionReader) GetCutoverEvidenceInventory(ctx context.Context,
 	}
 	return &inventory, nil
 }
+
+func (reader *ProjectionReader) GetCutoverEvidenceInventoryForScope(ctx context.Context, accountID, scopeID uuid.UUID) (*repository.CutoverEvidenceInventory, error) {
+	if reader == nil || accountID != reader.executionAccount.AccountID() || scopeID == uuid.Nil {
+		return nil, repository.ErrNotFound
+	}
+	if reader.pool == nil {
+		return nil, fmt.Errorf("postgres: scoped cutover evidence reader is required")
+	}
+	inventory := &repository.CutoverEvidenceInventory{ScopeID: scopeID}
+	err := reader.pool.QueryRow(ctx, `SELECT selected.account_id,
+		(SELECT count(*) FROM report_artifacts r WHERE r.scope_id=selected.id AND r.status='completed'),
+		(SELECT count(*) FROM report_artifacts WHERE scope_id IS NULL),
+		(SELECT count(*) FROM report_artifacts r JOIN backtest_runs br ON br.id=r.backtest_run_id WHERE r.scope_id=selected.id AND br.scope_id IS DISTINCT FROM r.scope_id),
+		(SELECT count(*) FROM report_artifacts r WHERE r.scope_id=selected.id AND r.status='completed' AND (r.backtest_run_id IS NULL OR r.report_sha256 IS NULL OR r.report_bytes IS NULL))
+		FROM paper_evaluation_scopes selected WHERE selected.id=$1 AND selected.account_id=$2`, scopeID, accountID).Scan(
+		&inventory.ScopeAccountID, &inventory.ScopedArtifacts, &inventory.LegacyArtifacts, &inventory.ScopeMismatchCount, &inventory.MissingCanonicalLinks,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, repository.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: read scoped cutover evidence inventory: %w", err)
+	}
+	return inventory, nil
+}
