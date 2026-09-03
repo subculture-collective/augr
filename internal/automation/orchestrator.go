@@ -22,6 +22,7 @@ import (
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	prediction "github.com/PatrickFanella/get-rich-quick/internal/execution/prediction"
+	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	kalshidiscovery "github.com/PatrickFanella/get-rich-quick/internal/kalshidiscovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/embedding"
@@ -248,7 +249,10 @@ type OrchestratorDeps struct {
 	BacktestRunRepo        repository.BacktestRunRepository    // optional; needed by report jobs
 	DiscoveryRunRepo       discovery.RunRepository             // required by stock discovery jobs
 	OvernightBacktestRuns  repository.OvernightBacktestRunRepository
-	PromotionActivation    interface {
+	GeneratedResearch      interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int, time.Time) (generativestrategy.BatchSummary, error)
+	}
+	PromotionActivation interface {
 		ProjectEligibleActivations(context.Context, uuid.UUID, uuid.UUID, bool) (pgrepo.PromotionActivationBatch, error)
 	}
 	PromotionEvaluation interface {
@@ -593,6 +597,7 @@ func (o *JobOrchestrator) RegisterAll() {
 	o.registerKalshiReconciliationJob()
 	o.registerReportJobs()
 	o.registerPortfolioAllocatorJobs()
+	o.registerGeneratedResearchJob()
 	o.registerPromotionEvaluationJob()
 	o.registerPromotionActivationJob()
 }
