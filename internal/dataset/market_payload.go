@@ -503,6 +503,93 @@ func (value *MarketPayload) AvailableAt() time.Time {
 	return parseTime(value.canonical.AvailableAt)
 }
 
+// Field returns one canonically encoded research input only when the requested
+// dataset kind and field are represented by this exact immutable payload.
+// Derived midpoints are calculated from the stored bid and ask, never fetched.
+func (value *MarketPayload) Field(kind Kind, field string) (string, error) {
+	if value == nil || !canonicalToken(field) {
+		return "", fmt.Errorf("dataset market payload field request is invalid")
+	}
+	barField := func(bar *BarPayload) (string, bool) {
+		if bar == nil {
+			return "", false
+		}
+		fields := map[string]string{"open": bar.Open, "high": bar.High, "low": bar.Low, "close": bar.Close, "volume": bar.Volume, "trade_count": bar.TradeCount, "vwap": bar.VWAP}
+		result, ok := fields[field]
+		return result, ok
+	}
+	quoteField := func(quote *QuotePayload) (string, bool, error) {
+		if quote == nil {
+			return "", false, nil
+		}
+		fields := map[string]string{"bid_price": quote.BidPrice, "bid_size": quote.BidSize, "ask_price": quote.AskPrice, "ask_size": quote.AskSize}
+		if result, ok := fields[field]; ok {
+			return result, true, nil
+		}
+		if field == "midpoint" {
+			bid, bidErr := exactPayloadDecimal(quote.BidPrice)
+			ask, askErr := exactPayloadDecimal(quote.AskPrice)
+			if bidErr != nil || askErr != nil {
+				return "", false, fmt.Errorf("dataset market payload quote does not reconstruct")
+			}
+			return bid.Add(ask).Div(decimal.NewFromInt(2)).String(), true, nil
+		}
+		return "", false, nil
+	}
+	var result string
+	var ok bool
+	var err error
+	switch kind {
+	case KindBars:
+		if value.canonical.Kind == MarketPayloadStockBar || value.canonical.Kind == MarketPayloadOptionBar {
+			result, ok = barField(value.canonical.Bar)
+		}
+	case KindQuotes:
+		if value.canonical.Kind == MarketPayloadOptionQuote {
+			result, ok, err = quoteField(value.canonical.Quote)
+		}
+	case KindOptionChains:
+		if value.canonical.Kind == MarketPayloadOptionSnapshot && value.canonical.Snapshot != nil {
+			result, ok, err = quoteField(&value.canonical.Snapshot.Quote)
+			if !ok && err == nil {
+				fields := map[string]string{
+					"last_trade_price": value.canonical.Snapshot.LastTradePrice, "last_trade_size": value.canonical.Snapshot.LastTradeSize,
+					"implied_volatility": value.canonical.Snapshot.ImpliedVolatility, "delta": value.canonical.Snapshot.Delta,
+					"gamma": value.canonical.Snapshot.Gamma, "theta": value.canonical.Snapshot.Theta, "vega": value.canonical.Snapshot.Vega, "rho": value.canonical.Snapshot.Rho,
+				}
+				result, ok = fields[field]
+			}
+		}
+	case KindOptionContracts:
+		if value.canonical.Kind == MarketPayloadOptionContract && value.canonical.Contract != nil {
+			fields := map[string]string{"strike": value.canonical.Contract.Strike, "multiplier": value.canonical.Contract.Multiplier}
+			result, ok = fields[field]
+		}
+	case KindExternalObject:
+		if value.canonical.Kind == MarketPayloadOptionTrade && value.canonical.Trade != nil {
+			fields := map[string]string{"price": value.canonical.Trade.Price, "size": value.canonical.Trade.Size}
+			result, ok = fields[field]
+		}
+	default:
+		return "", fmt.Errorf("dataset kind %q has no typed immutable market payload reader", kind)
+	}
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("dataset field %q is not available from %s as %s", field, value.canonical.Kind, kind)
+	}
+	return result, nil
+}
+
+func exactPayloadDecimal(value string) (decimal.Decimal, error) {
+	parsed, err := decimal.NewFromString(value)
+	if err != nil || parsed.String() != value {
+		return decimal.Zero, fmt.Errorf("payload decimal is not canonical")
+	}
+	return parsed, nil
+}
+
 func (value *MarketPayload) Symbol() string {
 	if value == nil {
 		return ""

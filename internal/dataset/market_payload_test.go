@@ -109,6 +109,67 @@ func TestMarketPayloadSupportsReviewedOptionPayloads(t *testing.T) {
 	}
 }
 
+func TestMarketPayloadFieldReconstructsTypedValues(t *testing.T) {
+	t.Parallel()
+	stock := testStockBarPayloadInput()
+	option := func(kind MarketPayloadKind) MarketPayloadInput {
+		input := testOptionPayloadInput()
+		input.Kind = kind
+		return input
+	}
+	quote := option(MarketPayloadOptionQuote)
+	quote.Quote = &QuotePayload{BidPrice: "4.4", BidSize: "10", AskPrice: "4.6", AskSize: "12", Exchange: "OPRA"}
+	snapshot := option(MarketPayloadOptionSnapshot)
+	snapshot.Snapshot = &OptionSnapshotPayload{Quote: *quote.Quote, LastTradePrice: "4.5", LastTradeSize: "2", ImpliedVolatility: "0.22", Delta: "0.51", Gamma: "0.04", Theta: "-0.03", Vega: "0.11", Rho: "0.02"}
+	contract := option(MarketPayloadOptionContract)
+	contract.Contract = &OptionContractPayload{OptionType: "call", Strike: "500", Expiry: "2026-12-18", Multiplier: "100", Style: "american"}
+	trade := option(MarketPayloadOptionTrade)
+	trade.Trade = &TradePayload{Price: "4.5", Size: "2", Exchange: "CBOE"}
+	tests := []struct {
+		name  string
+		input MarketPayloadInput
+		kind  Kind
+		field string
+		want  string
+	}{
+		{name: "stock close", input: stock, kind: KindBars, field: "close", want: "501.25"},
+		{name: "option midpoint", input: quote, kind: KindQuotes, field: "midpoint", want: "4.5"},
+		{name: "snapshot delta", input: snapshot, kind: KindOptionChains, field: "delta", want: "0.51"},
+		{name: "contract strike", input: contract, kind: KindOptionContracts, field: "strike", want: "500"},
+		{name: "trade price", input: trade, kind: KindExternalObject, field: "price", want: "4.5"},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			payload, err := NewMarketPayload(test.input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := payload.Field(test.kind, test.field)
+			if err != nil || got != test.want {
+				t.Fatalf("Field() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
+func TestMarketPayloadFieldRejectsKindAndFieldEscape(t *testing.T) {
+	t.Parallel()
+	payload, err := NewMarketPayload(testStockBarPayloadInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []struct {
+		kind  Kind
+		field string
+	}{{KindQuotes, "close"}, {KindBars, "future_close"}, {KindFundamentals, "close"}} {
+		if got, fieldErr := payload.Field(request.kind, request.field); fieldErr == nil || got != "" {
+			t.Fatalf("Field(%q,%q) = %q, %v; want fail closed", request.kind, request.field, got, fieldErr)
+		}
+	}
+}
+
 func TestMarketPayloadRestoreRejectsUnknownOrChangedContent(t *testing.T) {
 	payload, err := NewMarketPayload(testStockBarPayloadInput())
 	if err != nil {
