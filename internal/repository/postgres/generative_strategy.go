@@ -24,9 +24,17 @@ type GenerativeStrategyRepo struct {
 }
 
 var _ generativestrategy.Store = (*GenerativeStrategyRepo)(nil)
+var _ generativestrategy.ResearchStore = (*GenerativeStrategyRepo)(nil)
 
 func NewGenerativeStrategyRepo(pool *pgxpool.Pool) *GenerativeStrategyRepo {
 	return &GenerativeStrategyRepo{pool: pool}
+}
+
+func (r *GenerativeStrategyRepo) DeclareResearchExperiment(ctx context.Context, value *strategycatalog.Experiment) (*strategycatalog.Experiment, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("postgres: generated strategy research repository is not configured")
+	}
+	return NewStrategyCatalogRepo(r.pool).DeclareResearchExperiment(ctx, value)
 }
 
 type generatedSpecEnvelope struct {
