@@ -56,15 +56,20 @@ type OptionGreeks struct {
 
 // OptionSnapshot is a point-in-time view of a contract including price and Greeks.
 type OptionSnapshot struct {
-	Contract     OptionContract `json:"contract"`
-	Greeks       OptionGreeks   `json:"greeks"`
-	Bid          float64        `json:"bid"`
-	Ask          float64        `json:"ask"`
-	Mid          float64        `json:"mid"`
-	Last         float64        `json:"last"`
-	Volume       float64        `json:"volume"`
-	OpenInterest float64        `json:"open_interest"`
-	ObservedAt   time.Time      `json:"observed_at,omitempty"`
+	Contract            OptionContract `json:"contract"`
+	Greeks              OptionGreeks   `json:"greeks"`
+	Bid                 float64        `json:"bid"`
+	BidSize             float64        `json:"bid_size"`
+	Ask                 float64        `json:"ask"`
+	AskSize             float64        `json:"ask_size"`
+	Mid                 float64        `json:"mid"`
+	Last                float64        `json:"last"`
+	LastSize            float64        `json:"last_size"`
+	Volume              float64        `json:"volume"`
+	OpenInterest        float64        `json:"open_interest"`
+	ObservedAt          time.Time      `json:"observed_at,omitempty"`
+	QuoteObservedAt     time.Time      `json:"quote_observed_at,omitempty"`
+	LastTradeObservedAt time.Time      `json:"last_trade_observed_at,omitempty"`
 }
 
 // SpreadLeg is one leg of a multi-leg options spread.

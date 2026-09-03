@@ -22,8 +22,9 @@ import (
 type Mode string
 
 const (
-	ModeStockBars  Mode = "stock_bars"
-	ModeOptionBars Mode = "option_bars"
+	ModeStockBars           Mode = "stock_bars"
+	ModeOptionBars          Mode = "option_bars"
+	ModeOptionChainSnapshot Mode = "option_chain_snapshot"
 )
 
 type InstrumentResolver interface {
@@ -48,21 +49,29 @@ type fetchedBars struct {
 	receipt      data.HistoricalFetchReceipt
 }
 
+type fetchedSnapshot struct {
+	snapshot     domain.OptionSnapshot
+	instrumentID uuid.UUID
+	underlyingID uuid.UUID
+	receipt      data.HistoricalFetchReceipt
+}
+
 func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request dataset.MarketImportRequest) (dataset.MarketImportSourceResult, error) {
 	if source == nil || source.Instruments == nil || source.Clock == nil {
 		return dataset.MarketImportSourceResult{}, fmt.Errorf("provider market import source is incomplete")
-	}
-	timeframe, err := parseTimeframe(request.Timeframe)
-	if err != nil {
-		return dataset.MarketImportSourceResult{}, err
 	}
 	resolveAt := request.DecisionCutoff
 	if resolveAt.IsZero() {
 		resolveAt = source.Clock().UTC().Truncate(time.Microsecond)
 	}
 	var fetched []fetchedBars
+	var snapshots []fetchedSnapshot
 	switch source.Mode {
 	case ModeStockBars:
+		timeframe, err := parseTimeframe(request.Timeframe)
+		if err != nil {
+			return dataset.MarketImportSourceResult{}, err
+		}
 		if source.Stock == nil {
 			return dataset.MarketImportSourceResult{}, fmt.Errorf("stock provider is not configured")
 		}
@@ -85,6 +94,10 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			fetched = append(fetched, fetchedBars{symbol: symbol, instrumentID: resolved.ID, bars: bars, receipt: receipt})
 		}
 	case ModeOptionBars:
+		timeframe, err := parseTimeframe(request.Timeframe)
+		if err != nil {
+			return dataset.MarketImportSourceResult{}, err
+		}
 		if source.Options == nil || len(source.OptionSymbols) == 0 {
 			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider and explicit OCC symbols are required")
 		}
@@ -127,6 +140,40 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 				symbol: symbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, bars: bars, receipt: receipt,
 			})
 		}
+	case ModeOptionChainSnapshot:
+		if request.Timeframe != "snapshot" || request.AdjustmentPolicy != "raw" {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("option chain snapshots require timeframe snapshot and raw adjustment policy")
+		}
+		verified, ok := source.Options.(data.VerifiedOptionsSnapshotProvider)
+		if !ok {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot prove snapshot entitlement and pagination")
+		}
+		for _, underlyingSymbol := range request.Universe {
+			underlying, err := source.Instruments.ResolveAlias(ctx, request.Provider, instrument.AliasTicker, underlyingSymbol, resolveAt)
+			if err != nil {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("resolve option underlying %s: %w", underlyingSymbol, err)
+			}
+			chain, receipt, err := verified.GetOptionsChainWithReceipt(ctx, underlyingSymbol, time.Time{}, "", request.Feed)
+			if err != nil {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("fetch option chain for %s: %w", underlyingSymbol, err)
+			}
+			if len(chain) == 0 {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider returned no option snapshots for %s", underlyingSymbol)
+			}
+			for _, snapshot := range chain {
+				if snapshot.Contract.Underlying != underlyingSymbol || snapshot.ObservedAt.IsZero() {
+					return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot for %s lacks exact canonical identity or observation time", snapshot.Contract.OCCSymbol)
+				}
+				resolved, err := source.Instruments.ResolveAlias(ctx, request.Provider, instrument.AliasOCC, snapshot.Contract.OCCSymbol, resolveAt)
+				if err != nil {
+					return dataset.MarketImportSourceResult{}, fmt.Errorf("resolve option %s: %w", snapshot.Contract.OCCSymbol, err)
+				}
+				if resolved.UnderlyingID == nil || *resolved.UnderlyingID != underlying.ID {
+					return dataset.MarketImportSourceResult{}, fmt.Errorf("option %s canonical underlying binding does not reconstruct", snapshot.Contract.OCCSymbol)
+				}
+				snapshots = append(snapshots, fetchedSnapshot{snapshot: snapshot, instrumentID: resolved.ID, underlyingID: underlying.ID, receipt: receipt})
+			}
+		}
 	default:
 		return dataset.MarketImportSourceResult{}, fmt.Errorf("unsupported provider import mode %q", source.Mode)
 	}
@@ -165,9 +212,90 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			payloads = append(payloads, payload)
 		}
 	}
+	for _, result := range snapshots {
+		if err := validateReceipt(result.snapshot.Contract.OCCSymbol, result.receipt, request); err != nil {
+			return dataset.MarketImportSourceResult{}, err
+		}
+		effectiveAt := result.snapshot.ObservedAt.UTC().Truncate(time.Microsecond)
+		if result.snapshot.QuoteObservedAt.IsZero() {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot %s lacks quote observation time", result.snapshot.Contract.OCCSymbol)
+		}
+		if effectiveAt.Before(request.From) || effectiveAt.After(request.To) || (!request.DecisionCutoff.IsZero() && effectiveAt.After(request.DecisionCutoff)) {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot %s escapes requested observation window", result.snapshot.Contract.OCCSymbol)
+		}
+		common := dataset.MarketPayloadInput{
+			InstrumentID: result.instrumentID, UnderlyingInstrumentID: result.underlyingID,
+			Provider: request.Provider, Feed: request.Feed, Symbol: result.snapshot.Contract.OCCSymbol,
+			UnderlyingSymbol: result.snapshot.Contract.Underlying, Timeframe: request.Timeframe,
+			AdjustmentPolicy: request.AdjustmentPolicy, EffectiveAt: effectiveAt, ObservedAt: observedAt,
+			AvailableAt: observedAt, Revision: "original",
+		}
+		contractInput := common
+		contractInput.Kind = dataset.MarketPayloadOptionContract
+		contractInput.Contract = &dataset.OptionContractPayload{
+			OptionType: string(result.snapshot.Contract.OptionType), Strike: canonicalFloat(result.snapshot.Contract.Strike),
+			Expiry: result.snapshot.Contract.Expiry.UTC().Format("2006-01-02"), Multiplier: canonicalFloat(result.snapshot.Contract.Multiplier),
+			Style: result.snapshot.Contract.Style,
+		}
+		contractPayload, err := dataset.NewMarketPayload(contractInput)
+		if err != nil {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option contract %s: %w", result.snapshot.Contract.OCCSymbol, err)
+		}
+		quoteInput := common
+		quoteInput.Kind = dataset.MarketPayloadOptionQuote
+		quoteInput.EffectiveAt = result.snapshot.QuoteObservedAt.UTC().Truncate(time.Microsecond)
+		quoteInput.Quote = &dataset.QuotePayload{
+			BidPrice: canonicalFloat(result.snapshot.Bid), BidSize: canonicalFloat(result.snapshot.BidSize),
+			AskPrice: canonicalFloat(result.snapshot.Ask), AskSize: canonicalFloat(result.snapshot.AskSize),
+		}
+		quotePayload, err := dataset.NewMarketPayload(quoteInput)
+		if err != nil {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option quote %s: %w", result.snapshot.Contract.OCCSymbol, err)
+		}
+		snapshotInput := common
+		snapshotInput.Kind = dataset.MarketPayloadOptionSnapshot
+		snapshotInput.Snapshot = &dataset.OptionSnapshotPayload{
+			Quote:          dataset.QuotePayload{BidPrice: canonicalFloat(result.snapshot.Bid), BidSize: canonicalFloat(result.snapshot.BidSize), AskPrice: canonicalFloat(result.snapshot.Ask), AskSize: canonicalFloat(result.snapshot.AskSize)},
+			LastTradePrice: canonicalFloat(result.snapshot.Last), LastTradeSize: canonicalFloat(result.snapshot.LastSize),
+			ImpliedVolatility: canonicalFloat(result.snapshot.Greeks.IV), Delta: canonicalFloat(result.snapshot.Greeks.Delta),
+			Gamma: canonicalFloat(result.snapshot.Greeks.Gamma), Theta: canonicalFloat(result.snapshot.Greeks.Theta),
+			Vega: canonicalFloat(result.snapshot.Greeks.Vega), Rho: canonicalFloat(result.snapshot.Greeks.Rho),
+		}
+		snapshotPayload, err := dataset.NewMarketPayload(snapshotInput)
+		if err != nil {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option snapshot %s: %w", result.snapshot.Contract.OCCSymbol, err)
+		}
+		payloads = append(payloads, contractPayload, quotePayload)
+		if result.snapshot.Last > 0 && result.snapshot.LastSize > 0 &&
+			!result.snapshot.LastTradeObservedAt.Before(request.From) && !result.snapshot.LastTradeObservedAt.After(request.To) {
+			if result.snapshot.LastTradeObservedAt.IsZero() {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot %s has a trade without its event time", result.snapshot.Contract.OCCSymbol)
+			}
+			tradeInput := common
+			tradeInput.Kind = dataset.MarketPayloadOptionTrade
+			tradeInput.EffectiveAt = result.snapshot.LastTradeObservedAt.UTC().Truncate(time.Microsecond)
+			tradeInput.Trade = &dataset.TradePayload{Price: canonicalFloat(result.snapshot.Last), Size: canonicalFloat(result.snapshot.LastSize)}
+			tradePayload, err := dataset.NewMarketPayload(tradeInput)
+			if err != nil {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option trade %s: %w", result.snapshot.Contract.OCCSymbol, err)
+			}
+			payloads = append(payloads, tradePayload)
+		}
+		payloads = append(payloads, snapshotPayload)
+	}
 	return dataset.MarketImportSourceResult{
 		Origin: dataset.MarketImportOriginProviderAPI, Entitled: true, PaginationComplete: true, Payloads: payloads,
 	}, nil
+}
+
+func validateReceipt(symbol string, receipt data.HistoricalFetchReceipt, request dataset.MarketImportRequest) error {
+	if !receipt.Entitled || !receipt.PaginationComplete || receipt.Pages <= 0 {
+		return fmt.Errorf("provider receipt for %s is incomplete", symbol)
+	}
+	if receipt.Provider != request.Provider || receipt.Feed != request.Feed || receipt.AdjustmentPolicy != request.AdjustmentPolicy {
+		return fmt.Errorf("provider receipt for %s does not match requested provenance", symbol)
+	}
+	return nil
 }
 
 func parseTimeframe(value string) (data.Timeframe, error) {

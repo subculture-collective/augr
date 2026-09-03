@@ -39,12 +39,20 @@ func (stub stockProviderStub) GetOHLCVWithReceipt(_ context.Context, _ string, _
 }
 
 type optionsProviderStub struct {
-	bars    []domain.OHLCV
-	receipt *data.HistoricalFetchReceipt
+	bars      []domain.OHLCV
+	snapshots []domain.OptionSnapshot
+	receipt   *data.HistoricalFetchReceipt
 }
 
-func (optionsProviderStub) GetOptionsChain(context.Context, string, time.Time, domain.OptionType) ([]domain.OptionSnapshot, error) {
-	return nil, nil
+func (stub optionsProviderStub) GetOptionsChain(context.Context, string, time.Time, domain.OptionType) ([]domain.OptionSnapshot, error) {
+	return stub.snapshots, nil
+}
+func (stub optionsProviderStub) GetOptionsChainWithReceipt(_ context.Context, _ string, _ time.Time, _ domain.OptionType, feed string) ([]domain.OptionSnapshot, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true}
+	if stub.receipt != nil {
+		receipt = *stub.receipt
+	}
+	return stub.snapshots, receipt, nil
 }
 func (stub optionsProviderStub) GetOptionsOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return stub.bars, nil
@@ -139,5 +147,34 @@ func TestProviderSourceRejectsUnverifiedOrMismatchedReceipt(t *testing.T) {
 				t.Fatal("FetchMarketPayloads() accepted invalid provider receipt")
 			}
 		})
+	}
+}
+
+func TestProviderSourceCapturesPointInTimeOptionContractAndSnapshot(t *testing.T) {
+	observedAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
+	resolver := resolverStub{stockID: uuid.New(), optionID: uuid.New()}
+	contract, err := domain.ParseOCC("AAPL260116C00150000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &ProviderSource{
+		Mode: ModeOptionChainSnapshot,
+		Options: optionsProviderStub{snapshots: []domain.OptionSnapshot{{
+			Contract: *contract, ObservedAt: observedAt, QuoteObservedAt: observedAt, LastTradeObservedAt: observedAt, Bid: 5, BidSize: 10, Ask: 5.2, AskSize: 8,
+			Last: 5.1, LastSize: 2, Greeks: domain.OptionGreeks{IV: .3, Delta: .5, Gamma: .02, Theta: -.04, Vega: .1},
+		}}},
+		Instruments: resolver, Clock: func() time.Time { return observedAt },
+	}
+	result, err := source.FetchMarketPayloads(context.Background(), dataset.MarketImportRequest{
+		Provider: "alpaca", Feed: "opra", Timeframe: "snapshot", AdjustmentPolicy: "raw",
+		From: observedAt, To: observedAt, DecisionCutoff: observedAt, Universe: []string{"AAPL"},
+	})
+	if err != nil {
+		t.Fatalf("FetchMarketPayloads() error = %v", err)
+	}
+	if len(result.Payloads) != 4 || result.Payloads[0].Kind() != dataset.MarketPayloadOptionContract ||
+		result.Payloads[1].Kind() != dataset.MarketPayloadOptionQuote || result.Payloads[2].Kind() != dataset.MarketPayloadOptionTrade ||
+		result.Payloads[3].Kind() != dataset.MarketPayloadOptionSnapshot {
+		t.Fatalf("payloads = %#v, want contract, quote, trade, and snapshot", result.Payloads)
 	}
 }

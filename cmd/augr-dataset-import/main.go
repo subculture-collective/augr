@@ -90,9 +90,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) 
 			return errors.New("augr-dataset-import: stock_bars requires provider polygon and POLYGON_API_KEY")
 		}
 		providerSource.Stock = polygon.NewProvider(polygon.NewClient(os.Getenv("POLYGON_API_KEY"), slog.Default()))
-	case datasetimport.ModeOptionBars:
+	case datasetimport.ModeOptionBars, datasetimport.ModeOptionChainSnapshot:
 		if input.Provider != "alpaca" || strings.TrimSpace(os.Getenv("ALPACA_API_KEY")) == "" || strings.TrimSpace(os.Getenv("ALPACA_API_SECRET")) == "" {
-			return errors.New("augr-dataset-import: option_bars requires provider alpaca and ALPACA_API_KEY plus ALPACA_API_SECRET")
+			return errors.New("augr-dataset-import: option imports require provider alpaca and ALPACA_API_KEY plus ALPACA_API_SECRET")
 		}
 		providerSource.Options = alpaca.NewOptionsDataProvider(os.Getenv("ALPACA_API_KEY"), os.Getenv("ALPACA_API_SECRET"), slog.Default())
 	default:

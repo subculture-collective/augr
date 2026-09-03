@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -110,21 +111,43 @@ func (p *OptionsDataProvider) GetOptionsChain(
 	expiry time.Time,
 	optionType domain.OptionType,
 ) ([]domain.OptionSnapshot, error) {
+	snapshots, _, err := p.GetOptionsChainWithReceipt(ctx, underlying, expiry, optionType, "indicative")
+	return snapshots, err
+}
+
+// GetOptionsChainWithReceipt returns current snapshots and proves the exact
+// requested feed plus terminal pagination. It does not claim historical chain
+// coverage.
+func (p *OptionsDataProvider) GetOptionsChainWithReceipt(
+	ctx context.Context,
+	underlying string,
+	expiry time.Time,
+	optionType domain.OptionType,
+	feed string,
+) ([]domain.OptionSnapshot, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw"}
 	if p == nil {
-		return nil, fmt.Errorf("alpaca/options: provider is nil")
+		return nil, receipt, fmt.Errorf("alpaca/options: provider is nil")
 	}
 
 	underlying = strings.TrimSpace(strings.ToUpper(underlying))
 	if underlying == "" {
-		return nil, fmt.Errorf("alpaca/options: underlying ticker is required")
+		return nil, receipt, fmt.Errorf("alpaca/options: underlying ticker is required")
 	}
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed != "indicative" && feed != "opra" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported feed %q", feed)
+	}
+	receipt.Feed = feed
 
 	var allSnapshots []domain.OptionSnapshot
 	var pageToken string
+	seenPageTokens := make(map[string]struct{})
+	seenSymbols := make(map[string]struct{})
 
 	for {
 		params := url.Values{}
-		params.Set("feed", "indicative")
+		params.Set("feed", feed)
 		params.Set("limit", "100")
 		if pageToken != "" {
 			params.Set("page_token", pageToken)
@@ -133,24 +156,24 @@ func (p *OptionsDataProvider) GetOptionsChain(
 		requestPath := fmt.Sprintf("/v1beta1/options/snapshots/%s", url.PathEscape(underlying))
 		body, err := p.doGet(ctx, requestPath, params)
 		if err != nil {
-			return nil, fmt.Errorf("alpaca/options: chain request failed: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: chain request failed: %w", err)
 		}
+		receipt.Pages++
 
 		var resp snapshotsResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("alpaca/options: unmarshal chain response: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: unmarshal chain response: %w", err)
 		}
 
 		for occSymbol, snap := range resp.Snapshots {
 			parsed, err := domain.ParseOCC(occSymbol)
 			if err != nil {
-				// Skip unparseable OCC symbols.
-				p.logger.Debug("alpaca/options: skipping unparseable OCC symbol",
-					slog.String("symbol", occSymbol),
-					slog.Any("error", err),
-				)
-				continue
+				return nil, receipt, fmt.Errorf("alpaca/options: unparseable OCC symbol %s: %w", occSymbol, err)
 			}
+			if _, duplicate := seenSymbols[parsed.OCCSymbol]; duplicate {
+				return nil, receipt, fmt.Errorf("alpaca/options: duplicate OCC symbol %s across pages", parsed.OCCSymbol)
+			}
+			seenSymbols[parsed.OCCSymbol] = struct{}{}
 
 			// Client-side filters.
 			if !expiry.IsZero() && !parsed.Expiry.Equal(expiry) {
@@ -179,7 +202,13 @@ func (p *OptionsDataProvider) GetOptionsChain(
 
 			if snap.LatestQuote != nil {
 				ds.Bid = snap.LatestQuote.BidPrice
+				ds.BidSize = snap.LatestQuote.BidSize
 				ds.Ask = snap.LatestQuote.AskPrice
+				ds.AskSize = snap.LatestQuote.AskSize
+				if observedAt, parseErr := parseAlpacaTime(snap.LatestQuote.Time); parseErr == nil {
+					ds.ObservedAt = observedAt
+					ds.QuoteObservedAt = observedAt
+				}
 				if ds.Bid > 0 && ds.Ask > 0 {
 					ds.Mid = (ds.Bid + ds.Ask) / 2
 				}
@@ -187,18 +216,42 @@ func (p *OptionsDataProvider) GetOptionsChain(
 
 			if snap.LatestTrade != nil {
 				ds.Last = snap.LatestTrade.Price
+				ds.LastSize = snap.LatestTrade.Size
+				if observedAt, parseErr := parseAlpacaTime(snap.LatestTrade.Time); parseErr == nil {
+					ds.LastTradeObservedAt = observedAt
+					if ds.ObservedAt.IsZero() {
+						ds.ObservedAt = observedAt
+					}
+				}
 			}
 
 			allSnapshots = append(allSnapshots, ds)
 		}
 
 		if resp.NextPageToken == "" {
+			receipt.Entitled = true
+			receipt.PaginationComplete = true
 			break
 		}
+		if _, duplicate := seenPageTokens[resp.NextPageToken]; duplicate {
+			return nil, receipt, fmt.Errorf("alpaca/options: repeated page token")
+		}
+		seenPageTokens[resp.NextPageToken] = struct{}{}
 		pageToken = resp.NextPageToken
 	}
 
-	return allSnapshots, nil
+	sort.Slice(allSnapshots, func(i, j int) bool {
+		return allSnapshots[i].Contract.OCCSymbol < allSnapshots[j].Contract.OCCSymbol
+	})
+	return allSnapshots, receipt, nil
+}
+
+func parseAlpacaTime(value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed.UTC().Truncate(time.Microsecond), nil
 }
 
 // ------------------------------------------------------------------

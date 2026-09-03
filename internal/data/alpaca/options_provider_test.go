@@ -135,6 +135,37 @@ func TestGetOptionsChainEmptyUnderlying(t *testing.T) {
 	}
 }
 
+func TestGetOptionsChainWithReceiptMapsObservationAndPagination(t *testing.T) {
+	t.Parallel()
+	responses := []snapshotsResponse{
+		{Snapshots: map[string]optionSnapshot{"AAPL241220C00150000": {LatestQuote: &optionQuote{BidPrice: 5, BidSize: 4, AskPrice: 5.2, AskSize: 3, Time: "2026-01-02T14:30:00.123456789Z"}}}, NextPageToken: "next"},
+		{Snapshots: map[string]optionSnapshot{"AAPL241220P00150000": {LatestTrade: &optionTrade{Price: 2, Size: 7, Time: "2026-01-02T14:30:01Z"}}}},
+	}
+	requestIndex := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("feed"); got != "opra" {
+			t.Errorf("feed = %q, want opra", got)
+		}
+		response := responses[requestIndex]
+		requestIndex++
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	t.Cleanup(server.Close)
+	provider := NewOptionsDataProvider("key", "secret", nil)
+	provider.SetBaseURL(server.URL)
+	snapshots, receipt, err := provider.GetOptionsChainWithReceipt(context.Background(), "AAPL", time.Time{}, "", "opra")
+	if err != nil {
+		t.Fatalf("GetOptionsChainWithReceipt() error = %v", err)
+	}
+	if len(snapshots) != 2 || receipt.Pages != 2 || !receipt.Entitled || !receipt.PaginationComplete || receipt.Feed != "opra" {
+		t.Fatalf("snapshots/receipt = %d/%+v", len(snapshots), receipt)
+	}
+	if snapshots[0].QuoteObservedAt.IsZero() && snapshots[1].QuoteObservedAt.IsZero() ||
+		snapshots[0].LastTradeObservedAt.IsZero() && snapshots[1].LastTradeObservedAt.IsZero() {
+		t.Fatal("snapshots lack exact quote or trade event time")
+	}
+}
+
 func TestGetOptionsOHLCV(t *testing.T) {
 	t.Parallel()
 

@@ -28,3 +28,10 @@ type VerifiedStockHistoricalProvider interface {
 type VerifiedOptionsHistoricalProvider interface {
 	GetOptionsOHLCVWithReceipt(context.Context, string, Timeframe, time.Time, time.Time, string, string) ([]domain.OHLCV, HistoricalFetchReceipt, error)
 }
+
+// VerifiedOptionsSnapshotProvider returns the current chain snapshot with the
+// same explicit provenance guarantees. Snapshot observations are point-in-time
+// evidence and must never be represented as historical observations.
+type VerifiedOptionsSnapshotProvider interface {
+	GetOptionsChainWithReceipt(context.Context, string, time.Time, domain.OptionType, string) ([]domain.OptionSnapshot, HistoricalFetchReceipt, error)
+}
