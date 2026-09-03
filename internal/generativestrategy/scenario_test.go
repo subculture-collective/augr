@@ -74,6 +74,12 @@ func TestScenarioDerivesActionsOnlyFromImmutablePayloads(t *testing.T) {
 		scenario.canonical.Frames[0].ExecutionPrice != "101" || scenario.canonical.Frames[1].ExecutionPrice != "99" {
 		t.Fatalf("scenario frames = %+v", scenario.canonical.Frames)
 	}
+	execution := scenario.ExecutionEvidence()
+	if len(execution) != 2 || execution[0].Sequence != 0 || execution[0].InstrumentID != input.Frames[0].InstrumentID ||
+		execution[0].PayloadID != input.Frames[0].EvidenceByInput["price"].Payload.ID() || execution[0].ExecutionPrice != "101" ||
+		execution[1].PayloadID != input.Frames[1].EvidenceByInput["price"].Payload.ID() || execution[1].ExecutionPrice != "99" {
+		t.Fatalf("execution evidence = %+v", execution)
+	}
 	restored, err := ScenarioFromCanonical(scenario.ID(), scenario.Digest(), scenario.CanonicalBytes(), spec, input.Manifest, payloads)
 	if err != nil || restored.ID() != scenario.ID() || !bytes.Equal(restored.CanonicalBytes(), scenario.CanonicalBytes()) {
 		t.Fatalf("restored = %v, %v", restored, err)

@@ -96,6 +96,22 @@ type Scenario struct {
 	id        uuid.UUID
 }
 
+type ScenarioExecutionEvidence struct {
+	Sequence               int
+	InstrumentID           uuid.UUID
+	VenueContractID        uuid.UUID
+	DecisionAt             time.Time
+	RouteAt                time.Time
+	Action                 ScenarioAction
+	ExecutionInput         string
+	ExecutionPrice         string
+	PayloadID              uuid.UUID
+	PayloadSHA256          string
+	PartitionContentSHA256 string
+	SourceKey              string
+	AvailableAt            time.Time
+}
+
 func NewScenario(input ScenarioInput) (*Scenario, error) {
 	if input.Spec == nil || input.Manifest == nil || (input.Mode != strategycatalog.ExperimentPaperScored && input.Mode != strategycatalog.ExperimentPaperStress) ||
 		!scenarioTime(input.EvaluationStart) || !scenarioTime(input.EvaluationEnd) || !input.EvaluationStart.Before(input.EvaluationEnd) ||
@@ -299,6 +315,33 @@ func (scenario *Scenario) EvaluationEnd() time.Time {
 		return time.Time{}
 	}
 	return scenarioParseTime(scenario.canonical.EvaluationEnd)
+}
+
+func (scenario *Scenario) ExecutionEvidence() []ScenarioExecutionEvidence {
+	if scenario == nil {
+		return nil
+	}
+	values := make([]ScenarioExecutionEvidence, len(scenario.canonical.Frames))
+	for index, frame := range scenario.canonical.Frames {
+		value := ScenarioExecutionEvidence{
+			Sequence: frame.Sequence, InstrumentID: uuid.MustParse(frame.InstrumentID), VenueContractID: uuid.MustParse(frame.VenueContractID),
+			DecisionAt: scenarioParseTime(frame.DecisionAt), RouteAt: scenarioParseTime(frame.RouteAt), Action: frame.Action,
+			ExecutionInput: frame.ExecutionInput, ExecutionPrice: frame.ExecutionPrice,
+		}
+		for _, binding := range frame.Bindings {
+			if binding.Name != frame.ExecutionInput {
+				continue
+			}
+			value.PayloadID = uuid.MustParse(binding.PayloadID)
+			value.PayloadSHA256 = binding.PayloadSHA256
+			value.PartitionContentSHA256 = binding.PartitionContentSHA256
+			value.SourceKey = binding.SourceKey
+			value.AvailableAt = scenarioParseTime(binding.AvailableAt)
+			break
+		}
+		values[index] = value
+	}
+	return values
 }
 
 func scenarioTime(value time.Time) bool {
