@@ -37,6 +37,17 @@ func NewGeneratedExperimentEvidenceLoader(pool *pgxpool.Pool, capitalState Exper
 }
 
 func (loader *GeneratedExperimentEvidenceLoader) LoadExperimentEvidence(ctx context.Context, experimentID uuid.UUID) (*experimentrun.EvidenceGraph, error) {
+	return loader.loadExperimentEvidence(ctx, experimentID, true)
+}
+
+// LoadExperimentReferenceEvidence reconstructs immutable experiment parents
+// without selecting a new capital snapshot. Delayed consumers must restore the
+// exact sealed capital state from the persisted replay plan instead.
+func (loader *GeneratedExperimentEvidenceLoader) LoadExperimentReferenceEvidence(ctx context.Context, experimentID uuid.UUID) (*experimentrun.EvidenceGraph, error) {
+	return loader.loadExperimentEvidence(ctx, experimentID, false)
+}
+
+func (loader *GeneratedExperimentEvidenceLoader) loadExperimentEvidence(ctx context.Context, experimentID uuid.UUID, loadCurrentCapital bool) (*experimentrun.EvidenceGraph, error) {
 	if loader == nil || loader.pool == nil || loader.capitalState == nil || experimentID == uuid.Nil {
 		return nil, fmt.Errorf("postgres: generated experiment identity and dependencies are required")
 	}
@@ -87,12 +98,15 @@ func (loader *GeneratedExperimentEvidenceLoader) LoadExperimentEvidence(ctx cont
 	if err != nil {
 		return nil, fmt.Errorf("postgres: load generated experiment quality: %w", err)
 	}
-	state, err := loader.capitalState.LoadExperimentCapitalState(ctx, experiment, account, binding, capitalPolicy)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: load generated experiment capital state: %w", err)
-	}
-	if state == nil {
-		return nil, fmt.Errorf("postgres: generated experiment capital state is unavailable")
+	var state *capital.State
+	if loadCurrentCapital {
+		state, err = loader.capitalState.LoadExperimentCapitalState(ctx, experiment, account, binding, capitalPolicy)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: load generated experiment capital state: %w", err)
+		}
+		if state == nil {
+			return nil, fmt.Errorf("postgres: generated experiment capital state is unavailable")
+		}
 	}
 	graph := &experimentrun.EvidenceGraph{
 		Experiment: experiment, Version: prepared.Version, Manifest: manifest, Quality: quality, Account: account,

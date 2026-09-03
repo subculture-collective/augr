@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/capital"
 	"github.com/PatrickFanella/get-rich-quick/internal/evaluation"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
@@ -98,10 +99,20 @@ func (source *GeneratedEvaluationSource) ListEligibleGeneratedEvaluations(ctx co
 		if err != nil {
 			return nil, fmt.Errorf("postgres: load generated evaluation plan: %w", err)
 		}
-		graph, err := source.evidence.LoadExperimentEvidence(ctx, candidate.experimentID)
+		graph, err := source.evidence.LoadExperimentReferenceEvidence(ctx, candidate.experimentID)
 		if err != nil {
 			return nil, fmt.Errorf("postgres: load generated evaluation evidence: %w", err)
 		}
+		sealedState, err := capital.StateFromCanonical(
+			plan.CapitalStateID(), plan.CapitalStateSHA256(), plan.CapitalStateBytes(), *graph.Account, *graph.CapitalBinding, graph.CapitalPolicy,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: restore generated evaluation plan capital state: %w", err)
+		}
+		if sealedState.ProjectionCheckpointID() != plan.CapitalProjectionCheckpointID() {
+			return nil, fmt.Errorf("postgres: generated evaluation plan capital checkpoint differs")
+		}
+		graph.CapitalState = sealedState
 		lifecycles := make(map[uuid.UUID]*lifecycle.Aggregate)
 		for sequence, step := range plan.Steps() {
 			if step.Intent == nil {
