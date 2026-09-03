@@ -860,6 +860,8 @@ func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 
 	completed := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategy.ID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
 	strategy.Config = promotedStrategyConfig(completed.AccountID)
+	lineage, _ := domain.ParseActivePromotionExecutionLineage(strategy.Config, completed.AccountID)
+	bindPromotionRunLineage(completed, versionID, lineage)
 	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, completed, finalSignal, plan, nil); err != nil {
 		t.Fatalf("recordPortfolioOpportunity() error = %v", err)
 	}
@@ -914,6 +916,8 @@ func TestRecordPortfolioOpportunitySurfacesRequiredPersistenceLoss(t *testing.T)
 
 	runner.opportunityRepo = &recordingOpportunityRepo{err: errors.New("store unavailable")}
 	strategy.Config = promotedStrategyConfig(run.AccountID)
+	lineage, _ := domain.ParseActivePromotionExecutionLineage(strategy.Config, run.AccountID)
+	bindPromotionRunLineage(run, versionID, lineage)
 	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, run, signal, plan, nil); err == nil || !strings.Contains(err.Error(), "portfolio opportunity: persist") {
 		t.Fatalf("persistence error = %v", err)
 	}

@@ -1671,7 +1671,11 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 	if r.hub != nil {
 		eventsCh = make(chan agent.PipelineEvent, 64)
 	}
-	persister := &strategyVersionPersister{delegate: agent.NewRepoPersister(r.runRepo, r.snapshotRepo, r.decisionRepo, r.eventRepo, r.logger), executionAccount: r.executionAccount, versionID: executionVersionID}
+	lineage, err := optionalActivePromotionLineage(strategy.Config, r.executionAccount.AccountID())
+	if err != nil {
+		return nil, agent.PreparedRun{}, nil, nil, err
+	}
+	persister := &strategyVersionPersister{delegate: agent.NewRepoPersister(r.runRepo, r.snapshotRepo, r.decisionRepo, r.eventRepo, r.logger), executionAccount: r.executionAccount, versionID: executionVersionID, promotionLineage: lineage}
 	runner := agent.NewRunner(definition, agent.Dependencies{
 		Persister:   persister,
 		Events:      eventsCh,
@@ -1697,6 +1701,7 @@ type strategyVersionPersister struct {
 	delegate         agent.DecisionPersister
 	executionAccount domain.ExecutionAccountBinding
 	versionID        uuid.UUID
+	promotionLineage *domain.PromotionExecutionLineage
 	mu               sync.RWMutex
 	scopes           map[pipelineRunScopeKey]persistedRunScope
 }
@@ -1715,6 +1720,9 @@ func (p *strategyVersionPersister) RecordRunStart(ctx context.Context, run *doma
 	if p.versionID != uuid.Nil {
 		if err := bindStrategyRunScope(run, p.executionAccount, p.versionID); err != nil {
 			return err
+		}
+		if p.promotionLineage != nil {
+			bindPromotionRunLineage(run, p.versionID, *p.promotionLineage)
 		}
 	}
 	scope, err := persistenceScopeFromRun(run)
@@ -1741,6 +1749,32 @@ func (p *strategyVersionPersister) RecordRunStart(ctx context.Context, run *doma
 		return err
 	}
 	return nil
+}
+
+func optionalActivePromotionLineage(config json.RawMessage, accountID uuid.UUID) (*domain.PromotionExecutionLineage, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(config, &envelope); err != nil {
+		return nil, fmt.Errorf("parse strategy config for promotion lineage: %w", err)
+	}
+	if _, exists := envelope["research_lifecycle"]; !exists {
+		return nil, nil
+	}
+	lineage, err := domain.ParseActivePromotionExecutionLineage(config, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return &lineage, nil
+}
+
+func bindPromotionRunLineage(run *domain.PipelineRun, versionID uuid.UUID, lineage domain.PromotionExecutionLineage) {
+	run.ExecutionVersionID = versionID
+	run.EvaluationScopeID = lineage.EvaluationScopeID
+	run.ManifestID = lineage.ManifestID
+	run.QualityResultID = lineage.QualityResultID
+	run.DeploymentID = lineage.DeploymentID
+	run.PromotionDecisionID = lineage.PromotionDecisionID
+	run.CapitalBindingID = lineage.CapitalBindingID
+	run.RiskPolicyVersion = lineage.RiskPolicyVersion
 }
 
 func (p *strategyVersionPersister) FinalizeRun(ctx context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {

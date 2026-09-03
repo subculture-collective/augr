@@ -44,21 +44,6 @@ type OpportunityBuildInput struct {
 	QuoteObservedAt   *time.Time
 }
 
-type promotedOpportunityLifecycle struct {
-	Stage               string    `json:"stage"`
-	Activation          string    `json:"activation"`
-	AutoBlocked         bool      `json:"auto_activation_blocked"`
-	DeploymentID        uuid.UUID `json:"deployment_id"`
-	PromotionDecisionID uuid.UUID `json:"promotion_decision_id"`
-	EvaluationScopeID   uuid.UUID `json:"evaluation_scope_id"`
-	AccountID           uuid.UUID `json:"account_id"`
-	ManifestID          uuid.UUID `json:"manifest_id"`
-	QualityResultID     uuid.UUID `json:"quality_result_id"`
-	CapitalBindingID    uuid.UUID `json:"capital_binding_id"`
-	DeploymentBudgetUSD float64   `json:"deployment_budget_usd"`
-	RiskPolicyVersion   string    `json:"risk_policy_version"`
-}
-
 func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig) (*domain.Opportunity, NoActionReason, error) {
 	now := cfg.Now
 	if now == nil {
@@ -136,7 +121,7 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		CreatedAt:         createdAt,
 		UpdatedAt:         createdAt,
 	}
-	if err := bindPromotedOpportunityLineage(opportunity, input.Strategy); err != nil {
+	if err := bindPromotedOpportunityLineage(opportunity, input.Strategy, input.Run); err != nil {
 		return nil, NoActionReasonUnknown, err
 	}
 	if marketType == domain.MarketTypeOptions {
@@ -162,25 +147,16 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 	return opportunity, "", nil
 }
 
-func bindPromotedOpportunityLineage(opportunity *domain.Opportunity, strategy domain.Strategy) error {
+func bindPromotedOpportunityLineage(opportunity *domain.Opportunity, strategy domain.Strategy, run *domain.PipelineRun) error {
 	if opportunity == nil || strategy.ExecutionStrategyVersionID == nil {
 		return errors.New("promoted opportunity requires an execution version")
 	}
-	var config struct {
-		ResearchLifecycle *promotedOpportunityLifecycle `json:"research_lifecycle"`
+	lifecycle, err := domain.ParseActivePromotionExecutionLineage(strategy.Config, opportunity.AccountID)
+	if err != nil {
+		return err
 	}
-	if err := json.Unmarshal(strategy.Config, &config); err != nil {
-		return fmt.Errorf("parse strategy promotion lifecycle: %w", err)
-	}
-	lifecycle := config.ResearchLifecycle
-	if lifecycle == nil {
-		return errors.New("scheduled strategy lacks promotion lifecycle evidence")
-	}
-	if lifecycle.Stage != "shadow" || lifecycle.Activation != "promotion_evaluator_v1" || lifecycle.AutoBlocked || lifecycle.AccountID != opportunity.AccountID ||
-		lifecycle.DeploymentID == uuid.Nil || lifecycle.PromotionDecisionID == uuid.Nil || lifecycle.EvaluationScopeID == uuid.Nil ||
-		lifecycle.ManifestID == uuid.Nil || lifecycle.QualityResultID == uuid.Nil || lifecycle.CapitalBindingID == uuid.Nil ||
-		lifecycle.DeploymentBudgetUSD <= 0 || strings.TrimSpace(lifecycle.RiskPolicyVersion) == "" {
-		return errors.New("scheduled strategy promotion lifecycle is incomplete or inactive")
+	if err := validateOpportunityRunLineage(run, *strategy.ExecutionStrategyVersionID, lifecycle); err != nil {
+		return err
 	}
 	opportunity.ExecutionVersionID = *strategy.ExecutionStrategyVersionID
 	opportunity.EvaluationScopeID = lifecycle.EvaluationScopeID
@@ -190,6 +166,16 @@ func bindPromotedOpportunityLineage(opportunity *domain.Opportunity, strategy do
 	opportunity.PromotionDecisionID = lifecycle.PromotionDecisionID
 	opportunity.RiskPolicyVersion = lifecycle.RiskPolicyVersion
 	opportunity.DeploymentBudgetUSD = lifecycle.DeploymentBudgetUSD
+	return nil
+}
+
+func validateOpportunityRunLineage(run *domain.PipelineRun, versionID uuid.UUID, lifecycle domain.PromotionExecutionLineage) error {
+	if run == nil || run.ExecutionVersionID != versionID || run.EvaluationScopeID != lifecycle.EvaluationScopeID ||
+		run.ManifestID != lifecycle.ManifestID || run.QualityResultID != lifecycle.QualityResultID ||
+		run.DeploymentID != lifecycle.DeploymentID || run.PromotionDecisionID != lifecycle.PromotionDecisionID ||
+		run.CapitalBindingID != lifecycle.CapitalBindingID || run.RiskPolicyVersion != lifecycle.RiskPolicyVersion {
+		return errors.New("source run promotion lineage does not match scheduled strategy")
+	}
 	return nil
 }
 

@@ -2,18 +2,25 @@ LOCK TABLE strategy_promotion_activations, portfolio_risk_policy_artifacts,
   account_portfolio_risk_policy_bindings, portfolio_account_snapshots,
   portfolio_opportunity_option_legs, allocation_risk_caps,
   portfolio_opportunities, allocation_decisions IN ACCESS EXCLUSIVE MODE;
-DO $$ BEGIN
+DO $$ DECLARE has_pipeline_evidence BOOLEAN := false; BEGIN
+  IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='pipeline_runs' AND column_name='execution_version_id') THEN
+    EXECUTE 'SELECT EXISTS(SELECT 1 FROM pipeline_runs WHERE execution_version_id IS NOT NULL)' INTO has_pipeline_evidence;
+  END IF;
   IF EXISTS(SELECT 1 FROM strategy_promotion_activations)
      OR EXISTS(SELECT 1 FROM portfolio_risk_policy_artifacts)
      OR EXISTS(SELECT 1 FROM account_portfolio_risk_policy_bindings)
      OR EXISTS(SELECT 1 FROM portfolio_account_snapshots)
      OR EXISTS(SELECT 1 FROM portfolio_opportunity_option_legs)
      OR EXISTS(SELECT 1 FROM allocation_risk_caps)
+	 OR has_pipeline_evidence
      OR EXISTS(SELECT 1 FROM portfolio_opportunities WHERE execution_version_id IS NOT NULL)
      OR EXISTS(SELECT 1 FROM allocation_decisions WHERE risk_policy_id IS NOT NULL OR account_snapshot_id IS NOT NULL) THEN
     RAISE EXCEPTION 'cannot roll back migration 111: portfolio risk, opportunity, or activation evidence exists';
   END IF;
 END $$;
+DROP TRIGGER IF EXISTS trg_pipeline_run_promotion_lineage ON pipeline_runs;
+DROP FUNCTION IF EXISTS validate_pipeline_run_promotion_lineage();
+ALTER TABLE pipeline_runs DROP CONSTRAINT IF EXISTS pipeline_run_promotion_lineage,DROP COLUMN IF EXISTS risk_policy_version,DROP COLUMN IF EXISTS capital_binding_id,DROP COLUMN IF EXISTS promotion_decision_id,DROP COLUMN IF EXISTS deployment_id,DROP COLUMN IF EXISTS quality_result_id,DROP COLUMN IF EXISTS manifest_id,DROP COLUMN IF EXISTS evaluation_scope_id,DROP COLUMN IF EXISTS execution_version_id;
 DROP TABLE strategy_promotion_activations;
 DROP FUNCTION validate_strategy_promotion_activation();
 DROP TRIGGER trg_portfolio_opportunity_preserve_intent ON portfolio_opportunities;

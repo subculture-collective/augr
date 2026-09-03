@@ -24,7 +24,9 @@ type PipelineRunRepo struct {
 // Compile-time check that PipelineRunRepo satisfies PipelineRunRepository.
 var _ repository.PipelineRunRepository = (*PipelineRunRepo)(nil)
 
-const pipelineRunSelectColumns = `id, account_id, environment, origin_type, origin_id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings`
+const pipelineRunSelectColumns = `id, account_id, environment, origin_type, origin_id,
+	execution_version_id,evaluation_scope_id,manifest_id,quality_result_id,deployment_id,promotion_decision_id,capital_binding_id,risk_policy_version,
+	strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings`
 
 // NewPipelineRunRepo returns a PipelineRunRepo backed by the given connection
 // pool.
@@ -39,6 +41,9 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 		return fmt.Errorf("postgres: create pipeline run: account mismatch")
 	}
 	run.AccountID = r.accountID
+	if err := validatePipelineRunPromotionLineage(run); err != nil {
+		return fmt.Errorf("postgres: create pipeline run: %w", err)
+	}
 	configSnapshot, err := marshalConfigSnapshot(run.ConfigSnapshot)
 	if err != nil {
 		return err
@@ -50,8 +55,9 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 
 	query := `INSERT INTO pipeline_runs (
 			id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings,
-			account_id, environment, origin_type, origin_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
+			account_id, environment, origin_type, origin_id, execution_version_id,evaluation_scope_id,manifest_id,quality_result_id,
+			deployment_id,promotion_decision_id,capital_binding_id,risk_policy_version
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,$16,$17,$18,$19,$20,$21,$22,$23)`
 	args := []any{
 		run.ID,
 		run.StrategyID,
@@ -65,12 +71,35 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 		configSnapshot,
 		run.PhaseTimings,
 		r.accountID, run.Environment, run.OriginType, run.OriginID,
+		nullableUUID(run.ExecutionVersionID), nullableUUID(run.EvaluationScopeID), nullableUUID(run.ManifestID), nullableUUID(run.QualityResultID),
+		nullableUUID(run.DeploymentID), nullableUUID(run.PromotionDecisionID), nullableUUID(run.CapitalBindingID), nullString(run.RiskPolicyVersion),
 	}
 	_, err = r.pool.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("postgres: create pipeline run: %w", err)
 	}
 
+	return nil
+}
+
+func validatePipelineRunPromotionLineage(run *domain.PipelineRun) error {
+	if run == nil {
+		return errors.New("pipeline run is required")
+	}
+	ids := []uuid.UUID{run.ExecutionVersionID, run.EvaluationScopeID, run.ManifestID, run.QualityResultID, run.DeploymentID, run.PromotionDecisionID, run.CapitalBindingID}
+	nonzero := 0
+	for _, id := range ids {
+		if id != uuid.Nil {
+			nonzero++
+		}
+	}
+	if nonzero == 0 && run.RiskPolicyVersion == "" {
+		return nil
+	}
+	if nonzero != len(ids) || strings.TrimSpace(run.RiskPolicyVersion) == "" || run.Environment != domain.AccountEnvironmentPaperScored ||
+		run.OriginType != "strategy_version" || run.OriginID != run.ExecutionVersionID.String() {
+		return errors.New("promotion lineage is incomplete or conflicts with execution scope")
+	}
 	return nil
 }
 
@@ -394,15 +423,20 @@ func insertTerminalAgentEvent(ctx context.Context, tx pgx.Tx, event *domain.Agen
 // scanPipelineRun scans a single row (pgx.Row or pgx.Rows) into a PipelineRun.
 func scanPipelineRun(sc scanner) (*domain.PipelineRun, error) {
 	var (
-		run                domain.PipelineRun
-		signal             string
-		configSnapshotJSON []byte
-		phaseTimingsJSON   []byte
+		run                                                                domain.PipelineRun
+		signal                                                             string
+		configSnapshotJSON                                                 []byte
+		phaseTimingsJSON                                                   []byte
+		executionVersionID, evaluationScopeID, manifestID, qualityResultID *uuid.UUID
+		deploymentID, promotionDecisionID, capitalBindingID                *uuid.UUID
+		riskPolicyVersion                                                  *string
 	)
 
 	err := sc.Scan(
 		&run.ID,
 		&run.AccountID, &run.Environment, &run.OriginType, &run.OriginID,
+		&executionVersionID, &evaluationScopeID, &manifestID, &qualityResultID,
+		&deploymentID, &promotionDecisionID, &capitalBindingID, &riskPolicyVersion,
 		&run.StrategyID,
 		&run.Ticker,
 		&run.TradeDate,
@@ -419,6 +453,30 @@ func scanPipelineRun(sc scanner) (*domain.PipelineRun, error) {
 	}
 
 	run.Signal = domain.PipelineSignal(signal)
+	if executionVersionID != nil {
+		run.ExecutionVersionID = *executionVersionID
+	}
+	if evaluationScopeID != nil {
+		run.EvaluationScopeID = *evaluationScopeID
+	}
+	if manifestID != nil {
+		run.ManifestID = *manifestID
+	}
+	if qualityResultID != nil {
+		run.QualityResultID = *qualityResultID
+	}
+	if deploymentID != nil {
+		run.DeploymentID = *deploymentID
+	}
+	if promotionDecisionID != nil {
+		run.PromotionDecisionID = *promotionDecisionID
+	}
+	if capitalBindingID != nil {
+		run.CapitalBindingID = *capitalBindingID
+	}
+	if riskPolicyVersion != nil {
+		run.RiskPolicyVersion = *riskPolicyVersion
+	}
 	if configSnapshotJSON != nil {
 		run.ConfigSnapshot = json.RawMessage(configSnapshotJSON)
 	}

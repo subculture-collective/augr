@@ -103,6 +103,52 @@ CREATE TRIGGER trg_portfolio_account_snapshots_validate
   AFTER INSERT ON portfolio_account_snapshots
   FOR EACH ROW EXECUTE FUNCTION validate_portfolio_account_snapshot();
 
+ALTER TABLE pipeline_runs
+  ADD COLUMN execution_version_id UUID REFERENCES strategy_versions(id) ON DELETE RESTRICT,
+  ADD COLUMN evaluation_scope_id UUID REFERENCES paper_evaluation_scopes(id) ON DELETE RESTRICT,
+  ADD COLUMN manifest_id UUID REFERENCES dataset_manifests(id) ON DELETE RESTRICT,
+  ADD COLUMN quality_result_id UUID REFERENCES dataset_quality_results(id) ON DELETE RESTRICT,
+  ADD COLUMN deployment_id UUID REFERENCES strategy_deployments(id) ON DELETE RESTRICT,
+  ADD COLUMN promotion_decision_id UUID REFERENCES promotion_retirement_decisions(id) ON DELETE RESTRICT,
+  ADD COLUMN capital_binding_id UUID REFERENCES account_capital_policy_bindings(id) ON DELETE RESTRICT,
+  ADD COLUMN risk_policy_version TEXT,
+  ADD CONSTRAINT pipeline_run_promotion_lineage CHECK(
+    (execution_version_id IS NULL AND evaluation_scope_id IS NULL AND manifest_id IS NULL AND quality_result_id IS NULL AND
+     deployment_id IS NULL AND promotion_decision_id IS NULL AND capital_binding_id IS NULL AND risk_policy_version IS NULL) OR
+    (execution_version_id IS NOT NULL AND evaluation_scope_id IS NOT NULL AND manifest_id IS NOT NULL AND quality_result_id IS NOT NULL AND
+     deployment_id IS NOT NULL AND promotion_decision_id IS NOT NULL AND capital_binding_id IS NOT NULL AND risk_policy_version IS NOT NULL));
+
+CREATE FUNCTION validate_pipeline_run_promotion_lineage() RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.execution_version_id IS NULL THEN RETURN NEW; END IF;
+  PERFORM 1
+  FROM strategy_promotion_activations activation
+  JOIN strategy_deployments deployment ON deployment.id=NEW.deployment_id
+    AND deployment.id=activation.deployment_id AND deployment.account_id=NEW.account_id
+    AND deployment.capital_binding_id=NEW.capital_binding_id AND deployment.risk_policy_version=NEW.risk_policy_version
+  JOIN promotion_retirement_decisions decision ON decision.id=NEW.promotion_decision_id
+    AND decision.id=activation.decision_id AND decision.deployment_id=deployment.id
+    AND decision.outcome='approved' AND decision.next_state='shadow'
+  JOIN paper_evaluation_scopes scope ON scope.id=NEW.evaluation_scope_id
+    AND scope.id=activation.scope_id AND scope.account_id=NEW.account_id
+    AND scope.capital_binding_id=NEW.capital_binding_id
+  JOIN dataset_manifests manifest ON manifest.id=NEW.manifest_id AND manifest.sha256=scope.manifest_sha256
+  JOIN dataset_quality_results quality ON quality.id=NEW.quality_result_id
+    AND quality.manifest_id=manifest.id AND quality.sha256=scope.quality_sha256 AND NOT quality.quarantined
+  WHERE activation.action='activate' AND activation.strategy_id=NEW.strategy_id
+    AND activation.runtime_version_id=NEW.execution_version_id
+    AND activation.account_id=NEW.account_id AND activation.capital_binding_id=NEW.capital_binding_id
+    AND activation.risk_policy_version=NEW.risk_policy_version
+    AND NEW.environment='paper_scored' AND NEW.origin_type='strategy_version'
+    AND NEW.origin_id=NEW.execution_version_id::TEXT
+    AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions child WHERE child.prior_decision_id=decision.id)
+    AND NOT EXISTS(SELECT 1 FROM strategy_promotion_activations child WHERE child.prior_activation_id=activation.id);
+  IF NOT FOUND THEN RAISE EXCEPTION 'pipeline run promotion graph does not reconstruct'; END IF;
+  RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+CREATE TRIGGER trg_pipeline_run_promotion_lineage BEFORE INSERT ON pipeline_runs
+  FOR EACH ROW EXECUTE FUNCTION validate_pipeline_run_promotion_lineage();
+
 ALTER TABLE portfolio_opportunities
   ADD COLUMN execution_version_id UUID REFERENCES strategy_versions(id) ON DELETE RESTRICT,
   ADD COLUMN evaluation_scope_id UUID REFERENCES paper_evaluation_scopes(id) ON DELETE RESTRICT,

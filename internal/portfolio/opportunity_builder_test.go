@@ -15,12 +15,17 @@ import (
 func scopedOpportunitySource(market domain.MarketType, ticker string) (domain.Strategy, *domain.PipelineRun, execution.ExecutionScope) {
 	strategyID, versionID := uuid.New(), uuid.New()
 	run := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC)}
+	deploymentID, decisionID, scopeID := uuid.New(), uuid.New(), uuid.New()
+	manifestID, qualityID, capitalBindingID := uuid.New(), uuid.New(), uuid.New()
+	riskPolicyVersion := "portfolio-risk-policy-v1@sha256:" + strings.Repeat("a", 64)
 	config, _ := json.Marshal(map[string]any{"research_lifecycle": map[string]any{
 		"stage": "shadow", "activation": "promotion_evaluator_v1", "auto_activation_blocked": false,
-		"deployment_id": uuid.New(), "promotion_decision_id": uuid.New(), "evaluation_scope_id": uuid.New(),
-		"account_id": run.AccountID, "manifest_id": uuid.New(), "quality_result_id": uuid.New(), "capital_binding_id": uuid.New(),
-		"deployment_budget_usd": 2500, "risk_policy_version": "portfolio-risk-policy-v1@sha256:" + strings.Repeat("a", 64),
+		"deployment_id": deploymentID, "promotion_decision_id": decisionID, "evaluation_scope_id": scopeID,
+		"account_id": run.AccountID, "manifest_id": manifestID, "quality_result_id": qualityID, "capital_binding_id": capitalBindingID,
+		"deployment_budget_usd": 2500, "risk_policy_version": riskPolicyVersion,
 	}})
+	run.ExecutionVersionID, run.EvaluationScopeID, run.ManifestID, run.QualityResultID = versionID, scopeID, manifestID, qualityID
+	run.DeploymentID, run.PromotionDecisionID, run.CapitalBindingID, run.RiskPolicyVersion = deploymentID, decisionID, capitalBindingID, riskPolicyVersion
 	strategy := domain.Strategy{ID: strategyID, Ticker: ticker, MarketType: market, Status: domain.StrategyStatusActive, ExecutionStrategyVersionID: &versionID, Config: config}
 	scope, err := execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategyID)
 	if err != nil {
@@ -277,6 +282,18 @@ func TestBuildOpportunityRejectsMissingPromotionLifecycle(t *testing.T) {
 	}, OpportunityBuilderConfig{})
 	if err == nil || opportunity != nil || !strings.Contains(err.Error(), "lacks promotion lifecycle") {
 		t.Fatalf("BuildOpportunity() = %#v, %v; want missing promotion lifecycle rejection", opportunity, err)
+	}
+}
+
+func TestBuildOpportunityRejectsRunPromotionLineageMismatch(t *testing.T) {
+	t.Parallel()
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeStock, "AAPL")
+	run.ManifestID = uuid.New()
+	opportunity, _, err := BuildOpportunity(OpportunityBuildInput{
+		Scope: scope, Strategy: strategy, Run: run, Signal: domain.PipelineSignalBuy,
+	}, OpportunityBuilderConfig{})
+	if err == nil || opportunity != nil || !strings.Contains(err.Error(), "source run promotion lineage") {
+		t.Fatalf("BuildOpportunity() = %#v, %v; want run lineage rejection", opportunity, err)
 	}
 }
 
