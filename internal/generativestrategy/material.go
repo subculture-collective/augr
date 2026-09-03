@@ -3,6 +3,7 @@ package generativestrategy
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -19,7 +20,7 @@ import (
 func BuildObservationMaterial(evidence ScenarioExecutionEvidence, payload *dataset.MarketPayload, contract *instrument.VenueContract) (experimentrun.ObservationMaterial, error) {
 	if payload == nil || contract == nil || evidence.PayloadID != payload.ID() || evidence.PayloadSHA256 != payload.Digest() ||
 		evidence.InstrumentID != payload.InstrumentID() || evidence.VenueContractID != contract.ID || contract.InstrumentID != evidence.InstrumentID ||
-		evidence.AvailableAt != payload.AvailableAt() || evidence.ExecutionPrice == "" {
+		evidence.AvailableAt != payload.ReplayAvailableAt() || evidence.ExecutionPrice == "" {
 		return experimentrun.ObservationMaterial{}, fmt.Errorf("generated strategy execution material identities do not reconstruct")
 	}
 	price, err := decimal.NewFromString(evidence.ExecutionPrice)
@@ -31,10 +32,12 @@ func BuildObservationMaterial(evidence ScenarioExecutionEvidence, payload *datas
 		return experimentrun.ObservationMaterial{}, err
 	}
 	metadata := payload.Metadata()
-	exchangeAt, availableAt := metadata.EffectiveAt, metadata.AvailableAt
+	exchangeAt, availableAt := metadata.EffectiveAt, payload.ReplayAvailableAt()
 	quoteMetadata, err := json.Marshal(map[string]string{
 		"dataset_payload_id": payload.ID().String(), "dataset_payload_sha256": payload.Digest(),
 		"partition_content_sha256": evidence.PartitionContentSHA256,
+		"dataset_observed_at":      metadata.ObservedAt.Format(time.RFC3339Nano),
+		"dataset_available_at":     metadata.AvailableAt.Format(time.RFC3339Nano),
 	})
 	if err != nil {
 		return experimentrun.ObservationMaterial{}, err
@@ -43,7 +46,7 @@ func BuildObservationMaterial(evidence ScenarioExecutionEvidence, payload *datas
 		InstrumentID: evidence.InstrumentID, VenueContractID: &contract.ID, Provider: metadata.Provider, Venue: contract.Venue,
 		Source: metadata.Feed, ObservationNamespace: "immutable-dataset/" + evidence.PartitionContentSHA256,
 		ObservationID: evidence.SourceKey, SourceRevision: metadata.Revision, ExchangeAt: &exchangeAt,
-		ReceivedAt: metadata.ObservedAt, AvailableAt: &availableAt, Bid: &bid, Ask: &ask, BidSize: &bidSize, AskSize: &askSize,
+		ReceivedAt: availableAt, AvailableAt: &availableAt, Bid: &bid, Ask: &ask, BidSize: &bidSize, AskSize: &askSize,
 		MarketStatus: "open", SessionStatus: "regular",
 		Bids: []marketdata.DepthLevelInput{{Price: bid, Size: bidSize}}, Asks: []marketdata.DepthLevelInput{{Price: ask, Size: askSize}},
 		Metadata: quoteMetadata, CreatedAt: availableAt,

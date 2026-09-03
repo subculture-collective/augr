@@ -28,10 +28,30 @@ func TestMarketPayloadCanonicalIdentityAndRestore(t *testing.T) {
 	if restored.ID() != payload.ID() || restored.Symbol() != "SPY" || restored.Timeframe() != "1Day" || restored.Bar().Close != "501.25" {
 		t.Fatalf("restored payload = %+v", restored)
 	}
+	metadata := restored.Metadata()
+	if metadata.PublishedAt == nil {
+		t.Fatal("restored payload lost publication time")
+	}
+	wantReplay := time.Date(2026, 9, 3, 20, 0, 2, 123456000, time.UTC)
+	if !restored.ReplayAvailableAt().Equal(wantReplay) || restored.ReplayAvailableAt().Equal(restored.AvailableAt()) {
+		t.Fatalf("replay availability = %s, want publication time", restored.ReplayAvailableAt())
+	}
 	bar := restored.Bar()
 	bar.Close = "1"
 	if restored.Bar().Close != "501.25" {
 		t.Fatal("market payload exposed mutable bar state")
+	}
+}
+
+func TestMarketPayloadReplayAvailabilityFallsBackToLocalAvailability(t *testing.T) {
+	input := testStockBarPayloadInput()
+	input.PublishedAt = nil
+	payload, err := NewMarketPayload(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.ReplayAvailableAt() != payload.AvailableAt() {
+		t.Fatalf("replay availability = %s, want %s", payload.ReplayAvailableAt(), payload.AvailableAt())
 	}
 }
 
@@ -51,6 +71,11 @@ func TestMarketPayloadRejectsInvalidTypedBodiesAndEconomics(t *testing.T) {
 			value := input.ObservedAt.Add(time.Microsecond)
 			input.PublishedAt = &value
 		}},
+		{"publication before event", func(input *MarketPayloadInput) {
+			value := input.EffectiveAt.Add(-time.Microsecond)
+			input.PublishedAt = &value
+		}},
+		{"event after observation", func(input *MarketPayloadInput) { input.EffectiveAt = input.ObservedAt.Add(time.Microsecond) }},
 		{"option identity on stock", func(input *MarketPayloadInput) {
 			input.UnderlyingInstrumentID = uuid.New()
 			input.UnderlyingSymbol = "SPY"

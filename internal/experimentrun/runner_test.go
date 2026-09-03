@@ -206,7 +206,7 @@ func newRunnerFixture(t *testing.T) *runnerFixture {
 		Kind: dataset.KindQuotes, Provider: "fixture", Source: "fixture-feed", Namespace: "ovr303/quote", RequestSHA256: strings.Repeat("1", 64),
 		MediaType: "application/json", SymbologyVersion: "figi-v1", AdjustmentPolicy: "not_applicable", Timezone: "UTC", Calendar: "24x7", Revision: "r1",
 		License: "test-only", RetentionPolicy: "retain", Observations: []dataset.ObservationInput{{
-			SourceKey: snapshot.ObservationID, InstrumentID: inst.ID, EffectiveAt: exchange, ObservedAt: available, AvailableAt: available,
+			SourceKey: snapshot.ObservationID, InstrumentID: inst.ID, EffectiveAt: exchange, PublishedAt: &available, ObservedAt: end, AvailableAt: end,
 			Revision: "r1", ContentSHA256: contentSHA, Bid: stringPtr(bid.String()), Ask: stringPtr(ask.String()),
 		}},
 	}}})

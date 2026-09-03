@@ -230,6 +230,13 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		}
 		for _, bar := range result.bars {
 			effectiveAt := bar.Timestamp.UTC().Truncate(time.Microsecond)
+			publishedAt, err := barPublicationAt(effectiveAt, request.Timeframe)
+			if err != nil {
+				return dataset.MarketImportSourceResult{}, err
+			}
+			if publishedAt.After(observedAt) {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider bar %s at %s was imported before its conservative publication boundary %s", result.symbol, effectiveAt, publishedAt)
+			}
 			payloadKind := dataset.MarketPayloadStockBar
 			if source.Mode == ModeOptionBars {
 				payloadKind = dataset.MarketPayloadOptionBar
@@ -237,7 +244,7 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
 				Kind: payloadKind, InstrumentID: result.instrumentID, UnderlyingInstrumentID: result.underlyingID,
 				Provider: request.Provider, Feed: request.Feed, Symbol: result.symbol, UnderlyingSymbol: result.underlying,
-				Timeframe: request.Timeframe, AdjustmentPolicy: request.AdjustmentPolicy, EffectiveAt: effectiveAt,
+				Timeframe: request.Timeframe, AdjustmentPolicy: request.AdjustmentPolicy, EffectiveAt: effectiveAt, PublishedAt: &publishedAt,
 				ObservedAt: observedAt, AvailableAt: observedAt, Revision: "original",
 				Bar: &dataset.BarPayload{
 					Open: canonicalFloat(bar.Open), High: canonicalFloat(bar.High), Low: canonicalFloat(bar.Low),
@@ -391,6 +398,25 @@ func parseTimeframe(value string) (data.Timeframe, error) {
 	default:
 		return "", fmt.Errorf("unsupported market import timeframe %q", value)
 	}
+}
+
+func barPublicationAt(effectiveAt time.Time, timeframe string) (time.Time, error) {
+	var duration time.Duration
+	switch data.Timeframe(timeframe) {
+	case data.Timeframe1m:
+		duration = time.Minute
+	case data.Timeframe5m:
+		duration = 5 * time.Minute
+	case data.Timeframe15m:
+		duration = 15 * time.Minute
+	case data.Timeframe1h:
+		duration = time.Hour
+	case data.Timeframe1d:
+		duration = 24 * time.Hour
+	default:
+		return time.Time{}, fmt.Errorf("unsupported market import timeframe %q", timeframe)
+	}
+	return effectiveAt.Add(duration).UTC().Truncate(time.Microsecond), nil
 }
 
 func canonicalFloat(value float64) string {

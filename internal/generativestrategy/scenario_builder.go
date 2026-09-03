@@ -56,10 +56,11 @@ func BuildScenarioFromDataset(request ScenarioBuildRequest) (*Scenario, error) {
 		if payload == nil {
 			return nil, fmt.Errorf("generated strategy bound dataset contains a nil payload")
 		}
-		if _, inUniverse := allowed[payload.InstrumentID()]; !inUniverse || payload.AvailableAt().Before(request.EvaluationStart) || !payload.AvailableAt().Before(request.EvaluationEnd) {
+		replayAvailableAt := payload.ReplayAvailableAt()
+		if _, inUniverse := allowed[payload.InstrumentID()]; !inUniverse || replayAvailableAt.Before(request.EvaluationStart) || !replayAvailableAt.Before(request.EvaluationEnd) {
 			continue
 		}
-		available = append(available, boundScenarioPayload{payload: payload, evidence: byPayloadID[payload.ID()], available: payload.AvailableAt()})
+		available = append(available, boundScenarioPayload{payload: payload, evidence: byPayloadID[payload.ID()], available: replayAvailableAt})
 	}
 	sort.Slice(available, func(i, j int) bool {
 		if !available[i].available.Equal(available[j].available) {

@@ -145,8 +145,8 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 		for _, declaration := range input.Spec.canonical.Inputs {
 			evidence := source.EvidenceByInput[declaration.Name]
 			payload := evidence.Payload
-			if payload == nil || payload.InstrumentID() != source.InstrumentID || payload.AvailableAt().After(source.DecisionAt) ||
-				source.DecisionAt.Sub(payload.AvailableAt()) > time.Duration(declaration.FreshnessSeconds)*time.Second ||
+			if payload == nil || payload.InstrumentID() != source.InstrumentID || payload.ReplayAvailableAt().After(source.DecisionAt) ||
+				source.DecisionAt.Sub(payload.ReplayAvailableAt()) > time.Duration(declaration.FreshnessSeconds)*time.Second ||
 				!digestPattern.MatchString(evidence.PartitionContentSHA256) || evidence.SourceKey == "" || evidence.SourceKey != strings.TrimSpace(evidence.SourceKey) || len(evidence.SourceKey) > 512 ||
 				!scenarioManifestContains(input.Manifest, declaration.DatasetKind, evidence) {
 				return nil, fmt.Errorf("generated strategy scenario input %q is missing, stale, future, or cross-instrument", declaration.Name)
@@ -166,7 +166,7 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 			bindings = append(bindings, scenarioBindingCanonical{
 				Name: declaration.Name, DatasetKind: declaration.DatasetKind, Field: declaration.Field,
 				PayloadID: payload.ID().String(), PayloadSHA256: payload.Digest(), PartitionContentSHA256: evidence.PartitionContentSHA256,
-				SourceKey: evidence.SourceKey, AvailableAt: scenarioFormatTime(payload.AvailableAt()), Value: value,
+				SourceKey: evidence.SourceKey, AvailableAt: scenarioFormatTime(payload.ReplayAvailableAt()), Value: value,
 			})
 		}
 		entry, exit, err := input.Spec.Evaluate(values)
@@ -398,7 +398,11 @@ func scenarioManifestContains(manifest *dataset.Manifest, kind dataset.Kind, evi
 			continue
 		}
 		for _, observation := range partition.Observations {
-			if observation.SourceKey == evidence.SourceKey && observation.ContentSHA256 == evidence.Payload.Digest() && observation.AvailableAt == scenarioFormatTime(evidence.Payload.AvailableAt()) {
+			replayAvailableAt := observation.AvailableAt
+			if observation.PublishedAt != "" {
+				replayAvailableAt = observation.PublishedAt
+			}
+			if observation.SourceKey == evidence.SourceKey && observation.ContentSHA256 == evidence.Payload.Digest() && replayAvailableAt == scenarioFormatTime(evidence.Payload.ReplayAvailableAt()) {
 				return true
 			}
 		}

@@ -96,7 +96,7 @@ func (stub resolverStub) ResolveAlias(_ context.Context, _ string, kind instrume
 
 func TestProviderSourceFetchesCanonicalStockAndOptionBars(t *testing.T) {
 	barAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
-	observedAt := barAt.Add(time.Hour)
+	observedAt := barAt.Add(25 * time.Hour)
 	bars := []domain.OHLCV{{Timestamp: barAt, Open: 10, High: 12, Low: 9, Close: 11, Volume: 100}}
 	resolver := resolverStub{stockID: uuid.New(), optionID: uuid.New()}
 	base := dataset.MarketImportRequest{
@@ -120,7 +120,28 @@ func TestProviderSourceFetchesCanonicalStockAndOptionBars(t *testing.T) {
 			if result.Origin != dataset.MarketImportOriginProviderAPI || !result.Entitled || !result.PaginationComplete || len(result.Payloads) != 1 {
 				t.Fatalf("result = %+v", result)
 			}
+			metadata := result.Payloads[0].Metadata()
+			if metadata.PublishedAt == nil || *metadata.PublishedAt != barAt.Add(24*time.Hour) || metadata.ObservedAt != observedAt || metadata.AvailableAt != observedAt {
+				t.Fatalf("payload times = %+v", metadata)
+			}
 		})
+	}
+}
+
+func TestProviderSourceRejectsBarBeforeConservativePublication(t *testing.T) {
+	barAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
+	observedAt := barAt.Add(time.Hour)
+	request := dataset.MarketImportRequest{
+		Provider: "alpaca", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
+		From: barAt, To: barAt, DecisionCutoff: observedAt, Universe: []string{"AAPL"},
+	}
+	source := &ProviderSource{
+		Mode:        ModeStockBars,
+		Stock:       stockProviderStub{bars: []domain.OHLCV{{Timestamp: barAt, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}},
+		Instruments: resolverStub{stockID: uuid.New()}, Clock: func() time.Time { return observedAt },
+	}
+	if _, err := source.FetchMarketPayloads(context.Background(), request); err == nil {
+		t.Fatal("FetchMarketPayloads() accepted an incomplete daily bar")
 	}
 }
 

@@ -268,11 +268,15 @@ func validateEvidenceGraph(experimentID uuid.UUID, graph *EvidenceGraph, program
 	for _, partition := range graph.Manifest.Partitions() {
 		manifestKinds[partition.Kind] = struct{}{}
 		for _, observation := range partition.Observations {
-			available := parseTime(observation.AvailableAt)
+			replayAvailableAt := observation.AvailableAt
+			if observation.PublishedAt != "" {
+				replayAvailableAt = observation.PublishedAt
+			}
+			available := parseTime(replayAvailableAt)
 			if available.Before(experiment.EvaluationStart()) || available.After(experiment.EvaluationEnd()) {
 				continue
 			}
-			value := ObservationEvidence{PartitionContentSHA256: partition.ContentSHA256, SourceKey: observation.SourceKey, ContentSHA256: observation.ContentSHA256, AvailableAt: observation.AvailableAt}
+			value := ObservationEvidence{PartitionContentSHA256: partition.ContentSHA256, SourceKey: observation.SourceKey, ContentSHA256: observation.ContentSHA256, AvailableAt: replayAvailableAt}
 			key := evidenceKey(value.PartitionContentSHA256, value.SourceKey, value.ContentSHA256)
 			if _, duplicate := manifestRows[key]; duplicate {
 				return ProgramInput{}, nil, fmt.Errorf("manifest contains duplicate in-window observation evidence")

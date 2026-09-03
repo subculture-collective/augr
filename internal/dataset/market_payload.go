@@ -232,11 +232,11 @@ func validateMarketPayloadInput(input *MarketPayloadInput) error {
 		!canonicalToken(input.UnderlyingSymbol) || !canonicalRequired(input.Timeframe) ||
 		!canonicalRequired(input.AdjustmentPolicy) || !canonicalTimeValue(input.EffectiveAt) ||
 		!canonicalTimeValue(input.ObservedAt) || !canonicalTimeValue(input.AvailableAt) ||
-		input.ObservedAt.After(input.AvailableAt) || !canonicalToken(input.Revision) ||
+		input.EffectiveAt.After(input.ObservedAt) || input.ObservedAt.After(input.AvailableAt) || !canonicalToken(input.Revision) ||
 		(input.CorrectionOfSHA256 != "" && !sha256Pattern.MatchString(input.CorrectionOfSHA256)) {
 		return fmt.Errorf("dataset market payload metadata is invalid")
 	}
-	if input.PublishedAt != nil && (!canonicalTimeValue(*input.PublishedAt) || input.PublishedAt.After(input.ObservedAt)) {
+	if input.PublishedAt != nil && (!canonicalTimeValue(*input.PublishedAt) || input.PublishedAt.Before(input.EffectiveAt) || input.PublishedAt.After(input.ObservedAt)) {
 		return fmt.Errorf("dataset market payload publication time is invalid")
 	}
 	variants := 0
@@ -501,6 +501,22 @@ func (value *MarketPayload) AvailableAt() time.Time {
 		return time.Time{}
 	}
 	return parseTime(value.canonical.AvailableAt)
+}
+
+// ReplayAvailableAt is the earliest immutable source-time boundary at which a
+// historical observation may be used in a point-in-time replay. PublishedAt
+// records that boundary when the provider exposes or the importer can derive
+// it conservatively. AvailableAt remains the later, truthful local-ingestion
+// boundary and is used as the fallback for observations without publication
+// metadata.
+func (value *MarketPayload) ReplayAvailableAt() time.Time {
+	if value == nil {
+		return time.Time{}
+	}
+	if value.canonical.PublishedAt != "" {
+		return parseTime(value.canonical.PublishedAt)
+	}
+	return value.AvailableAt()
 }
 
 // Field returns one canonically encoded research input only when the requested

@@ -31,9 +31,10 @@ func TestBuildObservationMaterialUsesOnlyExactImmutablePayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	importedAt := at.Add(time.Hour)
 	payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
 		Kind: dataset.MarketPayloadStockBar, InstrumentID: instrumentValue.ID, Provider: "alpaca", Feed: "sip", Symbol: "AAPL",
-		Timeframe: "1Min", AdjustmentPolicy: "all", EffectiveAt: at.Add(-time.Minute), ObservedAt: at, AvailableAt: at,
+		Timeframe: "1Min", AdjustmentPolicy: "all", EffectiveAt: at.Add(-time.Minute), PublishedAt: &at, ObservedAt: importedAt, AvailableAt: importedAt,
 		Revision: "original", Bar: &dataset.BarPayload{Open: "100", High: "102", Low: "99", Close: "101", Volume: "1000", TradeCount: "10", VWAP: "100.5"},
 	})
 	if err != nil {
@@ -49,7 +50,8 @@ func TestBuildObservationMaterialUsesOnlyExactImmutablePayload(t *testing.T) {
 	}
 	if material.ObservationContentSHA256 != payload.Digest() || string(material.CanonicalContent) != string(payload.CanonicalBytes()) ||
 		material.Snapshot.Bid == nil || material.Snapshot.Ask == nil || !material.Snapshot.Bid.Equal(decimal.NewFromInt(101)) ||
-		material.Snapshot.ObservationID != evidence.SourceKey || material.Snapshot.VenueContractID == nil || *material.Snapshot.VenueContractID != contract.ID {
+		material.Snapshot.ObservationID != evidence.SourceKey || material.Snapshot.VenueContractID == nil || *material.Snapshot.VenueContractID != contract.ID ||
+		material.AvailableAt != at || material.Snapshot.ReceivedAt != at || payload.AvailableAt() != importedAt {
 		t.Fatalf("material = %+v", material)
 	}
 	tampered := evidence

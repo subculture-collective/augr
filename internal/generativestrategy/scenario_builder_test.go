@@ -34,6 +34,57 @@ func TestBuildScenarioFromExactBoundDataset(t *testing.T) {
 	}
 }
 
+func TestBuildScenarioUsesImmutablePublicationTimeForHistoricalReplay(t *testing.T) {
+	t.Parallel()
+	spec, fixture, payloadMap := scenarioFixture(t)
+	var original *dataset.MarketPayload
+	for _, payload := range payloadMap {
+		original = payload
+		break
+	}
+	publication := original.AvailableAt()
+	importedAt := fixture.EvaluationEnd.Add(time.Hour)
+	metadata := original.Metadata()
+	payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
+		Kind: metadata.Kind, InstrumentID: metadata.InstrumentID, Provider: metadata.Provider, Feed: metadata.Feed,
+		Symbol: metadata.Symbol, Timeframe: metadata.Timeframe, AdjustmentPolicy: metadata.AdjustmentPolicy,
+		EffectiveAt: metadata.EffectiveAt, PublishedAt: &publication, ObservedAt: importedAt, AvailableAt: importedAt,
+		Revision: metadata.Revision, Bar: original.Bar(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := dataset.NewManifest(dataset.ManifestInput{DecisionCutoff: importedAt, Partitions: []dataset.PartitionInput{{
+		Kind: dataset.KindBars, Provider: metadata.Provider, Source: "historical-bars", Namespace: "alpaca/sip",
+		RequestSHA256: strings.Repeat("a", 64), MediaType: "application/json", SymbologyVersion: "alpaca-v1",
+		AdjustmentPolicy: metadata.AdjustmentPolicy, Timezone: "UTC", Calendar: "XNYS", Revision: "original", License: "licensed", RetentionPolicy: "immutable",
+		Observations: []dataset.ObservationInput{
+			{
+				SourceKey: "historical", InstrumentID: metadata.InstrumentID, EffectiveAt: metadata.EffectiveAt,
+				PublishedAt: &publication, ObservedAt: importedAt, AvailableAt: importedAt,
+				Revision: metadata.Revision, ContentSHA256: payload.Digest(),
+			},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := dataset.NewBoundMarketDataset(manifest, []*dataset.MarketPayload{payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenario, err := BuildScenarioFromDataset(ScenarioBuildRequest{
+		Spec: spec, Dataset: bound, Mode: fixture.Mode, EvaluationStart: fixture.EvaluationStart, EvaluationEnd: fixture.EvaluationEnd,
+		ExecutionInput: "price", VenueContractIDs: map[uuid.UUID]uuid.UUID{metadata.InstrumentID: fixture.Frames[0].VenueContractID}, MaximumFrames: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := scenario.ExecutionEvidence()[0].AvailableAt; got != publication {
+		t.Fatalf("scenario replay availability = %s, want %s", got, publication)
+	}
+}
+
 func TestBuildScenarioFailsClosedOnMissingContractAndFrameLimit(t *testing.T) {
 	t.Parallel()
 	spec, input, payloadMap := scenarioFixture(t)
