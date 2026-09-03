@@ -3,6 +3,7 @@ package evaluation
 import (
 	"bytes"
 	"testing"
+	"time"
 )
 
 func TestReviewedPolicyV1IsStableAndDefensive(t *testing.T) {
@@ -23,5 +24,20 @@ func TestReviewedPolicyV1IsStableAndDefensive(t *testing.T) {
 	third, err := ReviewedPolicyV1()
 	if err != nil || third.ID() != first.ID() {
 		t.Fatal("caller mutation changed package-owned reviewed policy")
+	}
+}
+
+func TestReviewedDailyPolicyAllowsClosedSessionsButRejectsOffGridEvidence(t *testing.T) {
+	policy, err := ReviewedPolicyV1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	friday := time.Date(2026, time.September, 4, 21, 0, 0, 0, time.UTC)
+	canonical := func(at time.Time) observationCanonical { return observationCanonical{ObservedAt: formatTime(at)} }
+	if err := validateFrequency(policy, []observationCanonical{canonical(friday), canonical(friday.Add(72 * time.Hour))}); err != nil {
+		t.Fatalf("weekend market closure rejected: %v", err)
+	}
+	if err := validateFrequency(policy, []observationCanonical{canonical(friday), canonical(friday.Add(25 * time.Hour))}); err == nil {
+		t.Fatal("off-grid daily observation unexpectedly passed")
 	}
 }

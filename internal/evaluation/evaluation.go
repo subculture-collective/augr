@@ -681,17 +681,30 @@ func validateFrequency(policy *Policy, observations []observationCanonical) erro
 		valid := false
 		switch policy.Frequency() {
 		case "minute":
-			valid = current.Equal(prior.Add(time.Minute))
+			valid = wholePeriodGap(prior, current, time.Minute)
 		case "daily":
-			valid = current.Equal(prior.Add(24 * time.Hour))
+			valid = wholePeriodGap(prior, current, 24*time.Hour)
 		case "weekly":
-			valid = current.Equal(prior.Add(7 * 24 * time.Hour))
+			valid = wholePeriodGap(prior, current, 7*24*time.Hour)
 		case "monthly":
-			valid = current.Equal(prior.AddDate(0, 1, 0))
+			for candidate := prior.AddDate(0, 1, 0); !candidate.After(current); candidate = candidate.AddDate(0, 1, 0) {
+				if current.Equal(candidate) {
+					valid = true
+					break
+				}
+			}
 		}
 		if !valid {
 			return fmt.Errorf("evaluation observation %d violates declared %s frequency", index, policy.Frequency())
 		}
 	}
 	return nil
+}
+
+// wholePeriodGap permits absent observations for closed or unavailable
+// sessions while requiring every retained point to remain exactly on the
+// declared frequency grid.
+func wholePeriodGap(prior, current time.Time, period time.Duration) bool {
+	gap := current.Sub(prior)
+	return gap >= period && gap%period == 0
 }
