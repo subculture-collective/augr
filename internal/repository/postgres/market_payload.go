@@ -277,6 +277,24 @@ func (repo *DatasetRepo) ListBoundMarketPayloads(ctx context.Context, manifestID
 	return values, nil
 }
 
+// LoadBoundMarketDataset reconstructs an exact persisted manifest and every
+// payload reachable through it. It never resolves a latest/current manifest.
+func (repo *DatasetRepo) LoadBoundMarketDataset(ctx context.Context, manifestID uuid.UUID) (*dataset.BoundMarketDataset, error) {
+	manifest, err := repo.GetDatasetManifest(ctx, manifestID)
+	if err != nil {
+		return nil, err
+	}
+	payloads, err := repo.ListBoundMarketPayloads(ctx, manifestID, "")
+	if err != nil {
+		return nil, err
+	}
+	bound, err := dataset.NewBoundMarketDataset(manifest, payloads)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: reconstruct bound market dataset: %w", err)
+	}
+	return bound, nil
+}
+
 func optionalUUIDText(value uuid.UUID) string {
 	if value == uuid.Nil {
 		return ""

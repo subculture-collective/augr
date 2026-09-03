@@ -48,6 +48,10 @@ func TestRecordBoundMarketDatasetIsAtomicAndIdempotent(t *testing.T) {
 	if err := fixture.pool.QueryRow(fixture.ctx, `SELECT COUNT(*) FROM dataset_manifest_payload_bindings WHERE manifest_id=$1`, manifest.ID()).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("binding count = %d, %v", count, err)
 	}
+	reloaded, err := fixture.repo.LoadBoundMarketDataset(fixture.ctx, manifest.ID())
+	if err != nil || reloaded.Manifest().Digest() != manifest.Digest() || len(reloaded.Payloads()) != 1 || reloaded.Payloads()[0].Digest() != payload.Digest() {
+		t.Fatalf("LoadBoundMarketDataset() = %+v, %v", reloaded, err)
+	}
 }
 
 func TestMarketPayloadRepositoryPersistsBindsAndRejectsMutation(t *testing.T) {
