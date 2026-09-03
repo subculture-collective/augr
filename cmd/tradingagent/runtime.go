@@ -44,6 +44,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data/yahoo"
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/evaluation"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	alpacaexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/alpaca"
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
@@ -1252,6 +1253,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					portfolioRiskRepo = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID, alpacaAdapter)
 				}
 				var generatedResearch *generativestrategy.BatchService
+				var generatedEvaluation *generativestrategy.EvaluationBatchService
 				if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
 					if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
 						capitalState, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
@@ -1273,6 +1275,18 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						generatedResearch, constructErr = generativestrategy.NewBatchService(pgrepo.NewGenerativeStrategyRepo(db.Pool), executor)
 						if constructErr != nil {
 							return nil, nil, nil, fmt.Errorf("construct generated research batch: %w", constructErr)
+						}
+						evaluationSource, constructErr := pgrepo.NewGeneratedEvaluationSource(db.Pool, loader)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated evaluation source: %w", constructErr)
+						}
+						evaluationService, constructErr := evaluation.NewService(pgrepo.NewEvaluationRepo(db.Pool))
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated evaluation service: %w", constructErr)
+						}
+						generatedEvaluation, constructErr = generativestrategy.NewEvaluationBatchService(evaluationSource, evaluationService)
+						if constructErr != nil {
+							return nil, nil, nil, fmt.Errorf("construct generated evaluation batch: %w", constructErr)
 						}
 					} else {
 						logger.Warn("generated research unavailable: projection attestation is not configured")
@@ -1359,6 +1373,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						DiscoveryRunRepo:             discoveryRunRepo,
 						OvernightBacktestRuns:        overnightBacktestRunRepo,
 						GeneratedResearch:            generatedResearch,
+						GeneratedEvaluation:          generatedEvaluation,
 						PromotionEvaluation:          pgrepo.NewPromotionRepo(db.Pool),
 						PromotionAccountSource:       accountRepo,
 						PromotionProjectionSource:    projectionReader,
