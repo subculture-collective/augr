@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
@@ -83,6 +84,25 @@ func TestScenarioDerivesActionsOnlyFromImmutablePayloads(t *testing.T) {
 	restored, err := ScenarioFromCanonical(scenario.ID(), scenario.Digest(), scenario.CanonicalBytes(), spec, input.Manifest, payloads)
 	if err != nil || restored.ID() != scenario.ID() || !bytes.Equal(restored.CanonicalBytes(), scenario.CanonicalBytes()) {
 		t.Fatalf("restored = %v, %v", restored, err)
+	}
+}
+
+func TestScenarioExecutablePricePaysRecordedQuoteSpread(t *testing.T) {
+	base := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
+	payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
+		Kind: dataset.MarketPayloadOptionQuote, InstrumentID: uuid.New(), UnderlyingInstrumentID: uuid.New(), UnderlyingSymbol: "AAPL",
+		Provider: "alpaca", Feed: "opra", Symbol: "AAPL260102C00100000",
+		Timeframe: "tick", AdjustmentPolicy: "not_applicable", EffectiveAt: base, ObservedAt: base, AvailableAt: base, Revision: "original",
+		Quote: &dataset.QuotePayload{BidPrice: "1.9", BidSize: "10", AskPrice: "2.1", AskSize: "12", Exchange: "OPRA"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for action, want := range map[ScenarioAction]string{ScenarioBuy: "2.1", ScenarioSell: "1.9"} {
+		got, priceErr := scenarioExecutablePrice(payload, action, decimal.RequireFromString("2"))
+		if priceErr != nil || got.String() != want {
+			t.Fatalf("action=%s price=%s err=%v", action, got, priceErr)
+		}
 	}
 }
 

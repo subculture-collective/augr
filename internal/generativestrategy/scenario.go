@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/economicid"
@@ -191,6 +192,12 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 		} else if exit && !entry && open[source.InstrumentID] {
 			action, open[source.InstrumentID] = ScenarioSell, false
 		}
+		if action != ScenarioNoop {
+			executionPrice, err = scenarioExecutablePrice(source.EvidenceByInput[source.ExecutionInput].Payload, action, executionPrice)
+			if err != nil {
+				return nil, fmt.Errorf("generated strategy scenario frame %d: %w", sequence, err)
+			}
+		}
 		frames[sequence] = scenarioFrameCanonical{
 			Sequence: sequence, InstrumentID: source.InstrumentID.String(), VenueContractID: source.VenueContractID.String(),
 			DecisionAt: scenarioFormatTime(source.DecisionAt), RouteAt: scenarioFormatTime(source.RouteAt), ExecutionInput: source.ExecutionInput,
@@ -208,6 +215,31 @@ func NewScenario(input ScenarioInput) (*Scenario, error) {
 	}
 	digest := hash(encoded)
 	return &Scenario{canonical: canonical, bytes: encoded, digest: digest, id: economicid.DeterministicUUID("typed-generative-strategy-scenario", ScenarioSchemaV1+"@sha256:"+digest)}, nil
+}
+
+// scenarioExecutablePrice preserves a bar/trade mark exactly, while quote
+// evidence pays the recorded spread: buys cross the ask and sells cross the
+// bid. This prevents a midpoint limit from becoming a silently resting order.
+func scenarioExecutablePrice(payload *dataset.MarketPayload, action ScenarioAction, fallback decimal.Decimal) (decimal.Decimal, error) {
+	if payload == nil || !fallback.IsPositive() || action != ScenarioBuy && action != ScenarioSell {
+		return decimal.Zero, fmt.Errorf("execution payload, action, or price is invalid")
+	}
+	quote := payload.Quote()
+	if snapshot := payload.Snapshot(); snapshot != nil {
+		quote = &snapshot.Quote
+	}
+	if quote == nil {
+		return fallback, nil
+	}
+	raw := quote.AskPrice
+	if action == ScenarioSell {
+		raw = quote.BidPrice
+	}
+	price, err := exactDecimal(raw)
+	if err != nil || !price.IsPositive() {
+		return decimal.Zero, fmt.Errorf("recorded executable quote is invalid")
+	}
+	return price, nil
 }
 
 func ScenarioFromCanonical(id uuid.UUID, digest string, raw []byte, spec *Spec, manifest *dataset.Manifest, payloads map[uuid.UUID]*dataset.MarketPayload) (*Scenario, error) {
