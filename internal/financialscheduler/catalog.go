@@ -22,6 +22,7 @@ func Catalog() map[string]JobDefinition {
 		{"filing_monitor", []MutationClass{MutationEvidence, MutationProvider}},
 		{"gap_scanner", []MutationClass{MutationEvidence, MutationProvider}},
 		{"generated_proposal", []MutationClass{MutationEvidence, MutationProvider}},
+		{"generated_research_prepare", []MutationClass{MutationEvidence}},
 		{"history_refresh", []MutationClass{MutationEvidence, MutationProvider}},
 		{"hot_scan", []MutationClass{MutationEvidence}},
 		{"kalshi_discovery", []MutationClass{MutationEvidence, MutationProvider}},

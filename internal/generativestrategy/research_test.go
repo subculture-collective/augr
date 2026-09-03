@@ -19,6 +19,15 @@ type researchStoreFixture struct {
 	experiment *strategycatalog.Experiment
 }
 
+type preparationSourceFixture struct {
+	items []EligiblePreparation
+	err   error
+}
+
+func (source *preparationSourceFixture) ListEligibleGeneratedResearchPreparations(context.Context, uuid.UUID, uuid.UUID, int) ([]EligiblePreparation, error) {
+	return source.items, source.err
+}
+
 func (store *researchStoreFixture) GetCompilation(context.Context, uuid.UUID) (*Spec, *strategycatalog.Version, *Receipt, error) {
 	return store.spec, store.version, store.receipt, nil
 }
@@ -87,5 +96,38 @@ func TestResearchPreparerRejectsVersionAndQuarantineBeforeProgram(t *testing.T) 
 	request.DatasetQuarantined = true
 	if prepared, err := preparer.Prepare(context.Background(), request); err == nil || prepared != nil || store.experiment != nil {
 		t.Fatalf("quarantined scored research = %+v, %v", prepared, err)
+	}
+}
+
+func TestPreparationBatchPersistsEachExactEligibleRequest(t *testing.T) {
+	t.Parallel()
+	preparer, request, store := researchFixture(t)
+	source := &preparationSourceFixture{items: []EligiblePreparation{{Key: request.SpecID.String(), Request: request}}}
+	service, err := NewPreparationBatchService(source, preparer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := service.RunEligible(context.Background(), request.AccountID, uuid.New(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Eligible != 1 || summary.Completed != 1 || summary.Failed != 0 || store.scenario == nil || store.experiment == nil {
+		t.Fatalf("summary=%+v store=%+v", summary, store)
+	}
+}
+
+func TestPreparationBatchRejectsDuplicateAndOversizedWork(t *testing.T) {
+	t.Parallel()
+	preparer, request, _ := researchFixture(t)
+	item := EligiblePreparation{Key: request.SpecID.String(), Request: request}
+	service, err := NewPreparationBatchService(&preparationSourceFixture{items: []EligiblePreparation{item, item}}, preparer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary, runErr := service.RunEligible(context.Background(), request.AccountID, uuid.New(), 2); runErr == nil || summary.Failed != 1 || summary.Completed != 0 {
+		t.Fatalf("duplicate summary=%+v error=%v", summary, runErr)
+	}
+	if summary, runErr := service.RunEligible(context.Background(), request.AccountID, uuid.New(), MaximumResearchBatchSize+1); runErr == nil || summary.Completed != 0 {
+		t.Fatalf("oversized summary=%+v error=%v", summary, runErr)
 	}
 }

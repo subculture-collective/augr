@@ -55,6 +55,68 @@ type PreparedResearch struct {
 	Program    *Program
 }
 
+type EligiblePreparation struct {
+	Key     string
+	Request ResearchRequest
+}
+
+type EligiblePreparationSource interface {
+	ListEligibleGeneratedResearchPreparations(context.Context, uuid.UUID, uuid.UUID, int) ([]EligiblePreparation, error)
+}
+
+type PreparationBatchSummary struct {
+	Eligible  int
+	Completed int
+	Failed    int
+}
+
+type PreparationBatchService struct {
+	source   EligiblePreparationSource
+	preparer *ResearchPreparer
+}
+
+func NewPreparationBatchService(source EligiblePreparationSource, preparer *ResearchPreparer) (*PreparationBatchService, error) {
+	if source == nil || preparer == nil {
+		return nil, fmt.Errorf("generated research preparation source and preparer are required")
+	}
+	return &PreparationBatchService{source: source, preparer: preparer}, nil
+}
+
+func (service *PreparationBatchService) RunEligible(ctx context.Context, accountID, scopeID uuid.UUID, limit int) (PreparationBatchSummary, error) {
+	summary := PreparationBatchSummary{}
+	if service == nil || service.source == nil || service.preparer == nil || accountID == uuid.Nil || scopeID == uuid.Nil || limit <= 0 || limit > MaximumResearchBatchSize {
+		return summary, fmt.Errorf("generated research preparation requires exact account, scope, and bounded limit")
+	}
+	items, err := service.source.ListEligibleGeneratedResearchPreparations(ctx, accountID, scopeID, limit)
+	if err != nil {
+		return summary, fmt.Errorf("list eligible generated research preparations: %w", err)
+	}
+	if len(items) > limit {
+		return summary, fmt.Errorf("generated research preparation source exceeded requested batch limit")
+	}
+	summary.Eligible = len(items)
+	seen := make(map[string]struct{}, len(items))
+	for index, item := range items {
+		if item.Key == "" || item.Request.SpecID == uuid.Nil || item.Request.ExpectedVersionID == uuid.Nil || item.Request.Dataset == nil {
+			summary.Failed++
+			return summary, fmt.Errorf("generated research preparation work item %d is incomplete", index)
+		}
+		if _, duplicate := seen[item.Key]; duplicate {
+			summary.Failed++
+			return summary, fmt.Errorf("generated research preparation key %q is duplicated", item.Key)
+		}
+		seen[item.Key] = struct{}{}
+	}
+	for index, item := range items {
+		if _, err := service.preparer.Prepare(ctx, item.Request); err != nil {
+			summary.Failed++
+			return summary, fmt.Errorf("generated research preparation work item %d: %w", index, err)
+		}
+		summary.Completed++
+	}
+	return summary, nil
+}
+
 // Prepare reloads the exact compilation, derives and records its immutable
 // manifest-bound scenario, and declares one exact experiment. It creates no
 // deployment, promotion decision, schedule, allocation, or broker effect.

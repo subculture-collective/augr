@@ -1253,10 +1253,19 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					portfolioRiskRepo = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID, alpacaAdapter)
 				}
 				var generatedResearch *generativestrategy.BatchService
+				var generatedResearchPreparation *generativestrategy.PreparationBatchService
 				var generatedEvaluation *generativestrategy.EvaluationBatchService
 				var generatedProposal *generativestrategy.ProposalBatchService
 				if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
 					generatedRepo := pgrepo.NewGenerativeStrategyRepo(db.Pool)
+					researchPreparer, constructErr := generativestrategy.NewResearchPreparer(generatedRepo)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated research preparer: %w", constructErr)
+					}
+					generatedResearchPreparation, constructErr = generativestrategy.NewPreparationBatchService(generatedRepo, researchPreparer)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated research preparation batch: %w", constructErr)
+					}
 					if deps.LLMProvider != nil && len(sourceCommit) == 40 && len(sourceTreeSHA256) == 64 {
 						family, constructErr := generativestrategy.ReviewedDailyStockFamily()
 						if constructErr != nil {
@@ -1401,6 +1410,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						DiscoveryRunRepo:             discoveryRunRepo,
 						OvernightBacktestRuns:        overnightBacktestRunRepo,
 						GeneratedResearch:            generatedResearch,
+						GeneratedResearchPreparation: generatedResearchPreparation,
 						GeneratedEvaluation:          generatedEvaluation,
 						GeneratedProposal:            generatedProposal,
 						PromotionEvaluation:          pgrepo.NewPromotionRepo(db.Pool),

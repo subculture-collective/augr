@@ -29,14 +29,14 @@ func TestGeneratedResearchRegistersAndRunsOnlyWithExactCapability(t *testing.T) 
 	stub := &generatedResearchStub{summary: generativestrategy.BatchSummary{Eligible: 2, Completed: 2}}
 	orchestrator := NewJobOrchestrator(OrchestratorDeps{
 		DiscoveryReadiness: &DiscoveryReadiness{CapabilitiesEvaluated: true, StockReady: true},
-		CanonicalAccountID: accountID, DiscoveryScopeID: scopeID, GeneratedResearch: stub,
+		CanonicalAccountID: accountID, DiscoveryScopeID: scopeID, GeneratedResearch: stub, GeneratedResearchPreparation: &generatedResearchPreparationStub{},
 	})
 	orchestrator.registerGeneratedResearchJob()
 	job := orchestrator.jobs["generated_research"]
 	if job == nil {
 		t.Fatal("generated research job was not registered")
 	}
-	if len(job.DependsOn) != 1 || job.DependsOn[0] != "generated_proposal" {
+	if len(job.DependsOn) != 1 || job.DependsOn[0] != "generated_research_prepare" {
 		t.Fatalf("generated research dependencies = %v", job.DependsOn)
 	}
 	now := time.Date(2026, 9, 3, 12, 0, 0, 123456789, time.UTC)

@@ -531,6 +531,52 @@ func (s *Spec) FamilyDigest() string {
 	return s.canonical.FamilySHA256
 }
 
+func (s *Spec) SpecKey() string {
+	if s == nil {
+		return ""
+	}
+	return s.canonical.SpecKey
+}
+
+func (s *Spec) Inputs() []InputField {
+	if s == nil {
+		return nil
+	}
+	values := make([]InputField, len(s.canonical.Inputs))
+	for index, input := range s.canonical.Inputs {
+		values[index] = InputField(input)
+	}
+	return values
+}
+
+func (s *Spec) Universe() Universe {
+	if s == nil {
+		return Universe{}
+	}
+	value := Universe{AssetClass: s.canonical.Universe.AssetClass, Benchmark: uuid.MustParse(s.canonical.Universe.Benchmark)}
+	value.Instruments = make([]uuid.UUID, len(s.canonical.Universe.Instruments))
+	for index, raw := range s.canonical.Universe.Instruments {
+		value.Instruments[index] = uuid.MustParse(raw)
+	}
+	return value
+}
+
+// PreferredExecutionInput selects a declared executable mark without inventing
+// a field or deriving a price outside the immutable strategy specification.
+func (s *Spec) PreferredExecutionInput() (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("generated strategy spec is required")
+	}
+	for _, preferred := range []string{"close", "vwap", "open", "high", "low"} {
+		for _, input := range s.canonical.Inputs {
+			if input.Type == "decimal" && input.DatasetKind == dataset.KindBars && input.Field == preferred {
+				return input.Name, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("generated strategy spec has no declared executable bar price")
+}
+
 func (s *Spec) RequiredDatasetKinds() []dataset.Kind {
 	if s == nil {
 		return nil

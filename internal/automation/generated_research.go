@@ -20,9 +20,9 @@ func (o *JobOrchestrator) registerGeneratedResearchJob() {
 	if !o.stockDiscoveryReady() {
 		return
 	}
-	if o.deps.GeneratedResearch == nil || o.deps.CanonicalAccountID == uuid.Nil || o.deps.DiscoveryScopeID == uuid.Nil {
+	if o.deps.GeneratedResearch == nil || o.deps.GeneratedResearchPreparation == nil || o.deps.CanonicalAccountID == uuid.Nil || o.deps.DiscoveryScopeID == uuid.Nil {
 		o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{
-			Name: "generated_research", Reason: "generated research requires canonical account, exact scope, and immutable experiment runner",
+			Name: "generated_research", Reason: "generated research requires canonical account, exact scope, immutable scenario preparation, and experiment runner",
 		})
 		return
 	}
@@ -36,5 +36,5 @@ func (o *JobOrchestrator) registerGeneratedResearchJob() {
 			return fmt.Errorf("generated_research: %w", err)
 		}
 		return nil
-	}, "generated_proposal")
+	}, "generated_research_prepare")
 }
