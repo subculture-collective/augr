@@ -43,6 +43,13 @@ func (r *GenerativeStrategyRepo) RegisterStrategyFamily(ctx context.Context, fam
 	return NewStrategyCatalogRepo(r.pool).RegisterStrategyFamily(ctx, family)
 }
 
+func (r *GenerativeStrategyRepo) RegisterStrategyVersion(ctx context.Context, version *strategycatalog.Version) (*strategycatalog.Version, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("postgres: generated strategy version repository is not configured")
+	}
+	return NewStrategyCatalogRepo(r.pool).RegisterStrategyVersion(ctx, version)
+}
+
 func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearch(
 	ctx context.Context,
 	accountID, scopeID uuid.UUID,
