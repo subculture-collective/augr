@@ -11,9 +11,15 @@ import (
 )
 
 type proposalStore struct {
+	family  *strategycatalog.Family
 	spec    *Spec
 	version *strategycatalog.Version
 	receipt *Receipt
+}
+
+func (store *proposalStore) RegisterStrategyFamily(_ context.Context, family *strategycatalog.Family) (*strategycatalog.Family, error) {
+	store.family = family
+	return family, nil
 }
 
 func (store *proposalStore) RegisterCompilation(_ context.Context, spec *Spec, version *strategycatalog.Version, receipt *Receipt) (*Spec, *strategycatalog.Version, *Receipt, error) {
@@ -36,7 +42,7 @@ func TestProposalServiceRecordsOnlyTypedInactiveCompilation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if proposal.Spec != store.spec || proposal.Version != store.version || proposal.Receipt != store.receipt || proposal.Version.FamilyID() != input.Family.ID() ||
+	if store.family != input.Family || proposal.Spec != store.spec || proposal.Version != store.version || proposal.Receipt != store.receipt || proposal.Version.FamilyID() != input.Family.ID() ||
 		strings.Contains(string(proposal.Version.Config()), "deployment") || strings.Contains(string(proposal.Version.Config()), "active") {
 		t.Fatalf("proposal=%+v config=%s", proposal, proposal.Version.Config())
 	}

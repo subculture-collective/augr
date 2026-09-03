@@ -22,6 +22,7 @@ type Proposal struct {
 }
 
 type ProposalStore interface {
+	RegisterStrategyFamily(context.Context, *strategycatalog.Family) (*strategycatalog.Family, error)
 	RegisterCompilation(context.Context, *Spec, *strategycatalog.Version, *Receipt) (*Spec, *strategycatalog.Version, *Receipt, error)
 }
 
@@ -44,6 +45,13 @@ func (service *ProposalService) Propose(ctx context.Context, request ProposalReq
 	spec, err := NewSpec(request.Input)
 	if err != nil {
 		return nil, fmt.Errorf("validate generated proposal: %w", err)
+	}
+	family, err := service.store.RegisterStrategyFamily(ctx, request.Input.Family)
+	if err != nil {
+		return nil, fmt.Errorf("record generated proposal family: %w", err)
+	}
+	if family == nil || family.ID() != request.Input.Family.ID() || family.Digest() != request.Input.Family.Digest() {
+		return nil, fmt.Errorf("persisted generated proposal family diverged")
 	}
 	version, receipt, err := Compile(spec, request.SourceCommit, request.SourceTreeSHA256)
 	if err != nil {
