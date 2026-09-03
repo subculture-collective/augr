@@ -124,10 +124,10 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 		}
 		result = append(result, domain.OptionSnapshot{
 			Contract: domain.OptionContract{
-				OCCSymbol: snapshotPayload.Symbol(), Underlying: underlying, OptionType: kind, Strike: strike,
+				InstrumentID: snapshotPayload.InstrumentID(), OCCSymbol: snapshotPayload.Symbol(), Underlying: underlying, OptionType: kind, Strike: strike,
 				Expiry: parsedExpiry, Multiplier: multiplier, Style: contractBody.Style,
 			},
-			Greeks: greeks, Bid: bid, Ask: ask, Mid: (bid + ask) / 2, Last: last,
+			Greeks: greeks, Bid: bid, Ask: ask, Mid: (bid + ask) / 2, Last: last, ObservedAt: snapshotPayload.EffectiveAt(),
 		})
 	}
 	if err := rows.Err(); err != nil {

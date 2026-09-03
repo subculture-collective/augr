@@ -34,13 +34,14 @@ const (
 
 // OptionContract describes a single options contract.
 type OptionContract struct {
-	OCCSymbol  string     `json:"occ_symbol"`
-	Underlying string     `json:"underlying"`
-	OptionType OptionType `json:"option_type"`
-	Strike     float64    `json:"strike"`
-	Expiry     time.Time  `json:"expiry"`
-	Multiplier float64    `json:"multiplier"`
-	Style      string     `json:"style,omitempty"` // "american" or "european"
+	InstrumentID uuid.UUID  `json:"instrument_id,omitempty"`
+	OCCSymbol    string     `json:"occ_symbol"`
+	Underlying   string     `json:"underlying"`
+	OptionType   OptionType `json:"option_type"`
+	Strike       float64    `json:"strike"`
+	Expiry       time.Time  `json:"expiry"`
+	Multiplier   float64    `json:"multiplier"`
+	Style        string     `json:"style,omitempty"` // "american" or "european"
 }
 
 // OptionGreeks holds the sensitivity measures for an options contract.
@@ -63,6 +64,7 @@ type OptionSnapshot struct {
 	Last         float64        `json:"last"`
 	Volume       float64        `json:"volume"`
 	OpenInterest float64        `json:"open_interest"`
+	ObservedAt   time.Time      `json:"observed_at,omitempty"`
 }
 
 // SpreadLeg is one leg of a multi-leg options spread.
@@ -73,6 +75,9 @@ type SpreadLeg struct {
 	Ratio           int            `json:"ratio"`
 	Quantity        float64        `json:"quantity"`
 	ExecutablePrice float64        `json:"executable_price"`
+	Bid             float64        `json:"bid"`
+	Ask             float64        `json:"ask"`
+	QuoteObservedAt time.Time      `json:"quote_observed_at,omitempty"`
 	Greeks          OptionGreeks   `json:"greeks"`
 	ClosePositionID uuid.UUID      `json:"-"`
 }
@@ -101,9 +106,10 @@ const (
 
 // OptionSpread describes a multi-leg options position.
 type OptionSpread struct {
-	StrategyType OptionStrategyType `json:"strategy_type"`
-	Underlying   string             `json:"underlying"`
-	Legs         []SpreadLeg        `json:"legs"`
-	MaxRisk      float64            `json:"max_risk"`
-	MaxReward    float64            `json:"max_reward"`
+	StrategyType    OptionStrategyType `json:"strategy_type"`
+	Underlying      string             `json:"underlying"`
+	Legs            []SpreadLeg        `json:"legs"`
+	MaxRisk         float64            `json:"max_risk"`
+	MaxReward       float64            `json:"max_reward"`
+	QuoteObservedAt time.Time          `json:"quote_observed_at,omitempty"`
 }

@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -39,6 +40,23 @@ type OpportunityBuildInput struct {
 	ProposedNotional  float64
 	Reason            string
 	Evidence          json.RawMessage
+	OptionSpread      *domain.OptionSpread
+	QuoteObservedAt   *time.Time
+}
+
+type promotedOpportunityLifecycle struct {
+	Stage               string    `json:"stage"`
+	Activation          string    `json:"activation"`
+	AutoBlocked         bool      `json:"auto_activation_blocked"`
+	DeploymentID        uuid.UUID `json:"deployment_id"`
+	PromotionDecisionID uuid.UUID `json:"promotion_decision_id"`
+	EvaluationScopeID   uuid.UUID `json:"evaluation_scope_id"`
+	AccountID           uuid.UUID `json:"account_id"`
+	ManifestID          uuid.UUID `json:"manifest_id"`
+	QualityResultID     uuid.UUID `json:"quality_result_id"`
+	CapitalBindingID    uuid.UUID `json:"capital_binding_id"`
+	DeploymentBudgetUSD float64   `json:"deployment_budget_usd"`
+	RiskPolicyVersion   string    `json:"risk_policy_version"`
 }
 
 func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig) (*domain.Opportunity, NoActionReason, error) {
@@ -118,6 +136,14 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		CreatedAt:         createdAt,
 		UpdatedAt:         createdAt,
 	}
+	if err := bindPromotedOpportunityLineage(opportunity, input.Strategy); err != nil {
+		return nil, NoActionReasonUnknown, err
+	}
+	if marketType == domain.MarketTypeOptions {
+		if err := bindDefinedRiskOptionIntent(opportunity, input.OptionSpread, input.QuoteObservedAt); err != nil {
+			return nil, NoActionReasonUnknown, err
+		}
+	}
 
 	runID, tradeDate := runRef.ID, runRef.TradeDate
 	opportunity.PipelineRunID = &runID
@@ -134,6 +160,63 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 
 	opportunity.DedupeKey = dedupeKey(createdAt, opportunity.AccountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, runRef, input.Strategy.ID, opportunity.MarketType, opportunity.Ticker, side, input.Signal)
 	return opportunity, "", nil
+}
+
+func bindPromotedOpportunityLineage(opportunity *domain.Opportunity, strategy domain.Strategy) error {
+	if opportunity == nil || strategy.ExecutionStrategyVersionID == nil {
+		return errors.New("promoted opportunity requires an execution version")
+	}
+	var config struct {
+		ResearchLifecycle *promotedOpportunityLifecycle `json:"research_lifecycle"`
+	}
+	if err := json.Unmarshal(strategy.Config, &config); err != nil {
+		return fmt.Errorf("parse strategy promotion lifecycle: %w", err)
+	}
+	lifecycle := config.ResearchLifecycle
+	if lifecycle == nil {
+		return errors.New("scheduled strategy lacks promotion lifecycle evidence")
+	}
+	if lifecycle.Stage != "shadow" || lifecycle.Activation != "promotion_evaluator_v1" || lifecycle.AutoBlocked || lifecycle.AccountID != opportunity.AccountID ||
+		lifecycle.DeploymentID == uuid.Nil || lifecycle.PromotionDecisionID == uuid.Nil || lifecycle.EvaluationScopeID == uuid.Nil ||
+		lifecycle.ManifestID == uuid.Nil || lifecycle.QualityResultID == uuid.Nil || lifecycle.CapitalBindingID == uuid.Nil ||
+		lifecycle.DeploymentBudgetUSD <= 0 || strings.TrimSpace(lifecycle.RiskPolicyVersion) == "" {
+		return errors.New("scheduled strategy promotion lifecycle is incomplete or inactive")
+	}
+	opportunity.ExecutionVersionID = *strategy.ExecutionStrategyVersionID
+	opportunity.EvaluationScopeID = lifecycle.EvaluationScopeID
+	opportunity.ManifestID = lifecycle.ManifestID
+	opportunity.QualityResultID = lifecycle.QualityResultID
+	opportunity.DeploymentID = lifecycle.DeploymentID
+	opportunity.PromotionDecisionID = lifecycle.PromotionDecisionID
+	opportunity.RiskPolicyVersion = lifecycle.RiskPolicyVersion
+	opportunity.DeploymentBudgetUSD = lifecycle.DeploymentBudgetUSD
+	return nil
+}
+
+func bindDefinedRiskOptionIntent(opportunity *domain.Opportunity, spread *domain.OptionSpread, quoteObservedAt *time.Time) error {
+	if opportunity == nil || spread == nil || len(spread.Legs) != 2 || spread.MaxRisk <= 0 || quoteObservedAt == nil {
+		return errors.New("options opportunity requires an exact quoted defined-risk spread")
+	}
+	opportunity.MaxLossPerUnit = spread.MaxRisk
+	opportunity.RequiredCapitalUnit = spread.MaxRisk
+	opportunity.QuoteObservedAt = quoteObservedAt
+	opportunity.OptionLegs = make([]domain.OpportunityOptionLeg, 0, 2)
+	for sequence, leg := range spread.Legs {
+		if leg.Contract.InstrumentID == uuid.Nil {
+			return errors.New("option opportunity contract lacks immutable instrument identity")
+		}
+		opportunity.OptionLegs = append(opportunity.OptionLegs, domain.OpportunityOptionLeg{
+			Sequence: sequence, ContractID: leg.Contract.InstrumentID, OCCSymbol: leg.Contract.OCCSymbol, Underlying: leg.Contract.Underlying,
+			Expiry: leg.Contract.Expiry, OptionType: string(leg.Contract.OptionType), Strike: leg.Contract.Strike, Ratio: leg.Ratio,
+			Side: leg.Side, PositionIntent: string(leg.PositionIntent), Bid: leg.Bid, Ask: leg.Ask,
+			Multiplier: int(leg.Contract.Multiplier),
+		})
+		opportunity.Delta += leg.Greeks.Delta * float64(leg.Ratio)
+		opportunity.Gamma += leg.Greeks.Gamma * float64(leg.Ratio)
+		opportunity.Theta += leg.Greeks.Theta * float64(leg.Ratio)
+		opportunity.Vega += leg.Greeks.Vega * float64(leg.Ratio)
+	}
+	return nil
 }
 
 func orderSideFromSignal(signal domain.PipelineSignal) domain.OrderSide {

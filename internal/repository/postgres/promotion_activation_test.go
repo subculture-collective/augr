@@ -12,8 +12,9 @@ import (
 
 func TestProjectedResearchLifecycleIsExplicitAndPreservesConfig(t *testing.T) {
 	deploymentID, decisionID, scopeID, accountID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	manifestID, qualityID, capitalID := uuid.New(), uuid.New(), uuid.New()
 	raw, err := projectedResearchLifecycle(json.RawMessage(`{"rules_engine":{"name":"momentum"}}`), promotion.ActivationAction,
-		deploymentID, decisionID, scopeID, accountID)
+		deploymentID, decisionID, scopeID, accountID, manifestID, qualityID, capitalID, 2500, "portfolio-risk-policy-v1@sha256:"+strings.Repeat("a", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +27,8 @@ func TestProjectedResearchLifecycleIsExplicitAndPreservesConfig(t *testing.T) {
 		!strings.Contains(string(got["research_lifecycle"]), scopeID.String()) {
 		t.Fatalf("projected config = %s", raw)
 	}
-	suspended, err := projectedResearchLifecycle(raw, promotion.SuspensionAction, deploymentID, decisionID, scopeID, accountID)
+	suspended, err := projectedResearchLifecycle(raw, promotion.SuspensionAction, deploymentID, decisionID, scopeID, accountID,
+		manifestID, qualityID, capitalID, 2500, "portfolio-risk-policy-v1@sha256:"+strings.Repeat("a", 64))
 	if err != nil || !strings.Contains(string(suspended), `"stage":"held"`) ||
 		!strings.Contains(string(suspended), `"auto_activation_blocked":true`) {
 		t.Fatalf("suspended config = %s err=%v", suspended, err)

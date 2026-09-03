@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -186,7 +187,12 @@ func (repo *PromotionRepo) ProjectAuthoritativeActivation(ctx context.Context, d
 		strategy.Status = domain.StrategyStatusInactive
 		strategy.ScheduleCron = ""
 	}
-	strategy.Config, err = projectedResearchLifecycle(strategy.Config, action, deploymentID, decision.ID(), scopeID, accountID)
+	deploymentBudget, err := strconv.ParseFloat(deployment.Budget(), 64)
+	if err != nil || deploymentBudget <= 0 {
+		return nil, fmt.Errorf("postgres: deployment budget is not executable")
+	}
+	strategy.Config, err = projectedResearchLifecycle(strategy.Config, action, deploymentID, decision.ID(), scopeID, accountID,
+		readiness.ManifestID, readiness.QualityResultID, deployment.CapitalBindingID(), deploymentBudget, deployment.RiskPolicyVersion())
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +290,7 @@ func loadActivationStrategyTx(ctx context.Context, tx pgx.Tx, sourceVersionID uu
 	return strategy, nil
 }
 
-func projectedResearchLifecycle(raw json.RawMessage, action string, deploymentID, decisionID, scopeID, accountID uuid.UUID) (json.RawMessage, error) {
+func projectedResearchLifecycle(raw json.RawMessage, action string, deploymentID, decisionID, scopeID, accountID, manifestID, qualityResultID, capitalBindingID uuid.UUID, deploymentBudget float64, riskPolicyVersion string) (json.RawMessage, error) {
 	config := map[string]any{}
 	if len(raw) != 0 {
 		if err := json.Unmarshal(raw, &config); err != nil || config == nil {
@@ -300,6 +306,9 @@ func projectedResearchLifecycle(raw json.RawMessage, action string, deploymentID
 		"stage": stage, "activation": "promotion_evaluator_v1", "auto_activation_blocked": blocked,
 		"deployment_id": deploymentID.String(), "promotion_decision_id": decisionID.String(),
 		"evaluation_scope_id": scopeID.String(), "account_id": accountID.String(),
+		"manifest_id": manifestID.String(), "quality_result_id": qualityResultID.String(),
+		"capital_binding_id": capitalBindingID.String(), "deployment_budget_usd": deploymentBudget,
+		"risk_policy_version": riskPolicyVersion,
 	}
 	return json.Marshal(config)
 }

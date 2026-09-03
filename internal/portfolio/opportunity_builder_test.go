@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +14,14 @@ import (
 
 func scopedOpportunitySource(market domain.MarketType, ticker string) (domain.Strategy, *domain.PipelineRun, execution.ExecutionScope) {
 	strategyID, versionID := uuid.New(), uuid.New()
-	strategy := domain.Strategy{ID: strategyID, Ticker: ticker, MarketType: market, Status: domain.StrategyStatusActive, ExecutionStrategyVersionID: &versionID}
 	run := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, TradeDate: time.Date(2026, 6, 19, 0, 0, 0, 0, time.UTC)}
+	config, _ := json.Marshal(map[string]any{"research_lifecycle": map[string]any{
+		"stage": "shadow", "activation": "promotion_evaluator_v1", "auto_activation_blocked": false,
+		"deployment_id": uuid.New(), "promotion_decision_id": uuid.New(), "evaluation_scope_id": uuid.New(),
+		"account_id": run.AccountID, "manifest_id": uuid.New(), "quality_result_id": uuid.New(), "capital_binding_id": uuid.New(),
+		"deployment_budget_usd": 2500, "risk_policy_version": "portfolio-risk-policy-v1@sha256:" + strings.Repeat("a", 64),
+	}})
+	strategy := domain.Strategy{ID: strategyID, Ticker: ticker, MarketType: market, Status: domain.StrategyStatusActive, ExecutionStrategyVersionID: &versionID, Config: config}
 	scope, err := execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategyID)
 	if err != nil {
 		panic(err)
@@ -189,7 +196,7 @@ func TestBuildOpportunityDecisionSideOverridesSignal(t *testing.T) {
 
 func TestBuildOpportunityClampsNegativeMetrics(t *testing.T) {
 	t.Parallel()
-	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeOptions, "SPY")
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeStock, "SPY")
 
 	opportunity, reason, err := BuildOpportunity(OpportunityBuildInput{
 		Scope:             scope,
@@ -257,6 +264,54 @@ func TestBuildOpportunityRejectsScopeThatConflictsWithPersistedRun(t *testing.T)
 	opportunity, _, err := BuildOpportunity(OpportunityBuildInput{Scope: conflicting, Strategy: strategy, Run: run, Signal: domain.PipelineSignalBuy}, OpportunityBuilderConfig{})
 	if err == nil || opportunity != nil {
 		t.Fatalf("BuildOpportunity() = %#v, %v; want scope mismatch", opportunity, err)
+	}
+}
+
+func TestBuildOpportunityRejectsMissingPromotionLifecycle(t *testing.T) {
+	t.Parallel()
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeStock, "AAPL")
+	strategy.Config = json.RawMessage(`{}`)
+
+	opportunity, _, err := BuildOpportunity(OpportunityBuildInput{
+		Scope: scope, Strategy: strategy, Run: run, Signal: domain.PipelineSignalBuy,
+	}, OpportunityBuilderConfig{})
+	if err == nil || opportunity != nil || !strings.Contains(err.Error(), "lacks promotion lifecycle") {
+		t.Fatalf("BuildOpportunity() = %#v, %v; want missing promotion lifecycle rejection", opportunity, err)
+	}
+}
+
+func TestBuildOpportunityBindsDefinedRiskOptionPackage(t *testing.T) {
+	t.Parallel()
+	strategy, run, scope := scopedOpportunitySource(domain.MarketTypeOptions, "AAPL")
+	observedAt := time.Date(2026, 6, 19, 15, 0, 0, 0, time.UTC)
+	expiry := time.Date(2026, 7, 17, 20, 0, 0, 0, time.UTC)
+	longID, shortID := uuid.New(), uuid.New()
+	spread := &domain.OptionSpread{
+		StrategyType: domain.StrategyBullCallSpread,
+		Underlying:   "AAPL",
+		MaxRisk:      250,
+		MaxReward:    250,
+		Legs: []domain.SpreadLeg{
+			{Contract: domain.OptionContract{InstrumentID: longID, OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5.0, Greeks: domain.OptionGreeks{Delta: .55, Gamma: .03, Theta: -.05, Vega: .12}},
+			{Contract: domain.OptionContract{InstrumentID: shortID, OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, Greeks: domain.OptionGreeks{Delta: .4, Gamma: .02, Theta: -.03, Vega: .09}},
+		},
+	}
+
+	opportunity, _, err := BuildOpportunity(OpportunityBuildInput{
+		Scope: scope, Strategy: strategy, Run: run, Signal: domain.PipelineSignalBuy,
+		EntryPrice: 2.5, ProposedNotional: 250, OptionSpread: spread, QuoteObservedAt: &observedAt,
+	}, OpportunityBuilderConfig{})
+	if err != nil {
+		t.Fatalf("BuildOpportunity() error = %v", err)
+	}
+	if opportunity.MaxLossPerUnit != 250 || opportunity.RequiredCapitalUnit != 250 || opportunity.QuoteObservedAt == nil || !opportunity.QuoteObservedAt.Equal(observedAt) {
+		t.Fatalf("option risk binding = %+v", opportunity)
+	}
+	if len(opportunity.OptionLegs) != 2 || opportunity.OptionLegs[0].ContractID != longID || opportunity.OptionLegs[1].ContractID != shortID || opportunity.OptionLegs[0].Sequence != 0 || opportunity.OptionLegs[1].Sequence != 1 {
+		t.Fatalf("option legs = %+v", opportunity.OptionLegs)
+	}
+	if math.Abs(opportunity.Delta-.95) > 1e-12 || math.Abs(opportunity.Gamma-.05) > 1e-12 || math.Abs(opportunity.Theta+.08) > 1e-12 || math.Abs(opportunity.Vega-.21) > 1e-12 {
+		t.Fatalf("aggregate greeks = delta %v gamma %v theta %v vega %v", opportunity.Delta, opportunity.Gamma, opportunity.Theta, opportunity.Vega)
 	}
 }
 

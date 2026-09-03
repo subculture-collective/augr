@@ -847,11 +847,11 @@ func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 	plan := execution.TradingPlan{EntryPrice: 100, PositionSize: 2, RiskReward: 3, Confidence: 0.8}
 
 	failed := &domain.PipelineRun{ID: uuid.New(), Status: domain.PipelineStatusFailed, Signal: domain.PipelineSignalHold}
-	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, failed, finalSignal, plan); err == nil {
+	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, failed, finalSignal, plan, nil); err == nil {
 		t.Fatal("failed source run was not rejected")
 	}
 	mismatched := &domain.PipelineRun{ID: uuid.New(), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalSell}
-	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, mismatched, finalSignal, plan); err == nil {
+	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, mismatched, finalSignal, plan, nil); err == nil {
 		t.Fatal("signal-mismatched source run was not rejected")
 	}
 	if len(repo.queued) != 0 {
@@ -859,7 +859,8 @@ func TestRecordPortfolioOpportunityRequiresCompletedSourceRun(t *testing.T) {
 	}
 
 	completed := &domain.PipelineRun{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategy.ID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy}
-	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, completed, finalSignal, plan); err != nil {
+	strategy.Config = promotedStrategyConfig(completed.AccountID)
+	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, completed, finalSignal, plan, nil); err != nil {
 		t.Fatalf("recordPortfolioOpportunity() error = %v", err)
 	}
 	if len(repo.queued) != 1 || repo.queued[0].PipelineRunID == nil || *repo.queued[0].PipelineRunID != completed.ID {
@@ -907,14 +908,28 @@ func TestRecordPortfolioOpportunitySurfacesRequiredPersistenceLoss(t *testing.T)
 	plan := execution.TradingPlan{EntryPrice: 100, PositionSize: 2, RiskReward: 3, Confidence: 0.8}
 
 	runner := &realStrategyRunner{portfolioAllocatorMode: portfolio.AllocatorModePaper}
-	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, run, signal, plan); err == nil || !strings.Contains(err.Error(), "requires opportunity repository") {
+	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, run, signal, plan, nil); err == nil || !strings.Contains(err.Error(), "requires opportunity repository") {
 		t.Fatalf("missing repository error = %v", err)
 	}
 
 	runner.opportunityRepo = &recordingOpportunityRepo{err: errors.New("store unavailable")}
-	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, run, signal, plan); err == nil || !strings.Contains(err.Error(), "portfolio opportunity: persist") {
+	strategy.Config = promotedStrategyConfig(run.AccountID)
+	if err := runner.recordPortfolioOpportunity(context.Background(), strategy, run, signal, plan, nil); err == nil || !strings.Contains(err.Error(), "portfolio opportunity: persist") {
 		t.Fatalf("persistence error = %v", err)
 	}
+}
+
+func promotedStrategyConfig(accountID uuid.UUID) json.RawMessage {
+	config, err := json.Marshal(map[string]any{"research_lifecycle": map[string]any{
+		"stage": "shadow", "activation": "promotion_evaluator_v1", "auto_activation_blocked": false,
+		"deployment_id": uuid.New(), "promotion_decision_id": uuid.New(), "evaluation_scope_id": uuid.New(),
+		"account_id": accountID, "manifest_id": uuid.New(), "quality_result_id": uuid.New(), "capital_binding_id": uuid.New(),
+		"deployment_budget_usd": 2500, "risk_policy_version": "portfolio-risk-policy-v1@sha256:" + strings.Repeat("a", 64),
+	}})
+	if err != nil {
+		panic(err)
+	}
+	return config
 }
 
 func TestCompleteNativeRunPersistsTerminalEvent(t *testing.T) {

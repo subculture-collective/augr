@@ -362,13 +362,21 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		Side:             result.State.TradingPlan.Side,
 		DecisionMetadata: decisionMetadata,
 	}
+	var opportunitySpread *domain.OptionSpread
 	if strategy.MarketType.Normalize() == domain.MarketTypeOptions {
 		scope, err := executionScopeFromPersistedRun(run, strategy)
 		if err != nil {
 			return canonical, err
 		}
-		if err := r.executeOptionsSignal(ctx, scope, strategy, finalSignal); err != nil {
-			return canonical, err
+		if r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
+			opportunitySpread, err = r.buildAllocatorOptionsOpportunity(ctx, strategy, finalSignal)
+			if err != nil {
+				return canonical, err
+			}
+		} else {
+			if err := r.executeOptionsSignal(ctx, scope, strategy, finalSignal); err != nil {
+				return canonical, err
+			}
 		}
 	} else if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
 		scope, err := executionScopeFromPersistedRun(run, strategy)
@@ -383,7 +391,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, run, finalSignal, tradingPlan); err != nil {
+	if err := r.recordPortfolioOpportunity(ctx, strategy, run, finalSignal, tradingPlan, opportunitySpread); err != nil {
 		return canonical, err
 	}
 
@@ -413,6 +421,35 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		Orders:    orders,
 		Positions: positions,
 	}, nil
+}
+
+func (r *realStrategyRunner) buildAllocatorOptionsOpportunity(ctx context.Context, strategy domain.Strategy, signal execution.FinalSignal) (*domain.OptionSpread, error) {
+	if signal.Signal != domain.PipelineSignalBuy {
+		return nil, errors.New("options allocator: only new defined-risk opening packages are eligible")
+	}
+	if r.optionsProvider == nil {
+		return nil, errors.New("options allocator: manifest-bound options provider is required")
+	}
+	var sections map[string]json.RawMessage
+	if err := json.Unmarshal(strategy.Config, &sections); err != nil {
+		return nil, fmt.Errorf("options allocator: parse strategy config: %w", err)
+	}
+	cfg, err := rules.ParseOptions(sections["options_rules"])
+	if err != nil || cfg == nil || len(cfg.LegSelection) != 2 {
+		return nil, errors.New("options allocator: exactly two vertical legs are required")
+	}
+	chain, err := r.optionsProvider.GetOptionsChain(ctx, cfg.Underlying, time.Time{}, "")
+	if err != nil {
+		return nil, fmt.Errorf("options allocator: load immutable option chain: %w", err)
+	}
+	spread, _, err := buildPaperDebitSpreadPlan(cfg, chain, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if spread.QuoteObservedAt.IsZero() {
+		return nil, errors.New("options allocator: immutable quote observation time is required")
+	}
+	return spread, nil
 }
 
 func (r *realStrategyRunner) strategyRunGroup() *runcontrol.Group {
@@ -625,16 +662,29 @@ func buildPaperDebitSpreadPlan(cfg *rules.OptionsRulesConfig, chain []domain.Opt
 			leg.ExecutablePrice = snapshot.Bid
 			netDebit -= snapshot.Bid * float64(leg.Ratio)
 		}
+		leg.Bid = snapshot.Bid
+		leg.Ask = snapshot.Ask
+		leg.QuoteObservedAt = snapshot.ObservedAt
+		if spread.QuoteObservedAt.IsZero() || (!snapshot.ObservedAt.IsZero() && snapshot.ObservedAt.Before(spread.QuoteObservedAt)) {
+			spread.QuoteObservedAt = snapshot.ObservedAt
+		}
 		leg.Greeks = snapshot.Greeks
 		minStrike = math.Min(minStrike, leg.Contract.Strike)
 		maxStrike = math.Max(maxStrike, leg.Contract.Strike)
 	}
-	if netDebit <= 0 || len(spread.Legs) == 0 {
-		return nil, 0, errors.New("options runtime: only net-debit verticals are enabled")
+	if netDebit == 0 || len(spread.Legs) == 0 {
+		return nil, 0, errors.New("options runtime: vertical package must have a finite nonzero debit or credit")
 	}
 	multiplier := spread.Legs[0].Contract.Multiplier
-	spread.MaxRisk = netDebit * multiplier
-	spread.MaxReward = ((maxStrike - minStrike) - netDebit) * multiplier
+	width := maxStrike - minStrike
+	if netDebit > 0 {
+		spread.MaxRisk = netDebit * multiplier
+		spread.MaxReward = (width - netDebit) * multiplier
+	} else {
+		credit := -netDebit
+		spread.MaxRisk = (width - credit) * multiplier
+		spread.MaxReward = credit * multiplier
+	}
 	if spread.MaxReward <= 0 {
 		return nil, 0, errors.New("options runtime: debit vertical has no finite positive max reward")
 	}
@@ -841,7 +891,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
+	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan, nil); err != nil {
 		return canonical, err
 	}
 	orders, err := loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
@@ -993,7 +1043,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
+	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan, nil); err != nil {
 		return canonical, err
 	}
 
@@ -2400,7 +2450,7 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper).WithAcceptedOrderFillWriter(r.economicWriter), nil
 }
 
-func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, finalSignal execution.FinalSignal, plan execution.TradingPlan) error {
+func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, finalSignal execution.FinalSignal, plan execution.TradingPlan, optionSpread *domain.OptionSpread) error {
 	if r == nil {
 		return nil
 	}
@@ -2436,6 +2486,14 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 		ProposedNotional:  proposedNotional,
 		Reason:            plan.Rationale,
 		Evidence:          opportunityEvidence(plan),
+		OptionSpread:      optionSpread,
+		QuoteObservedAt: func() *time.Time {
+			if optionSpread == nil || optionSpread.QuoteObservedAt.IsZero() {
+				return nil
+			}
+			value := optionSpread.QuoteObservedAt
+			return &value
+		}(),
 	}, portfolio.OpportunityBuilderConfig{})
 	if err != nil {
 		return fmt.Errorf("portfolio opportunity: build (%s): %w", reason, err)
@@ -2452,6 +2510,9 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 func (r *realStrategyRunner) portfolioAllocatorOwnsPaperExecution(strategy domain.Strategy, signal domain.PipelineSignal) bool {
 	if r == nil || r.portfolioAllocatorMode != portfolio.AllocatorModePaper || !strategy.IsPaper {
 		return false
+	}
+	if strategy.MarketType.Normalize() == domain.MarketTypeOptions {
+		return signal == domain.PipelineSignalBuy
 	}
 	return signal == domain.PipelineSignalBuy || signal == domain.PipelineSignalSell
 }
