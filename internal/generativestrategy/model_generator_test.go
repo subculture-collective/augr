@@ -25,7 +25,7 @@ func TestModelProposalGeneratorBindsTrustedAuthorityAndProvenance(t *testing.T) 
 		return &llm.CompletionResponse{Content: string(raw), Model: "reviewed-model", Usage: llm.CompletionUsage{PromptTokens: 12, CompletionTokens: 34}, CostUSD: 0.125}, nil
 	})
 	request, err := (ModelProposalGenerator{}).Generate(context.Background(), ModelProposalRequest{
-		Family: family, Universe: input.Universe, ProviderName: "openai", Provider: provider, Model: "requested-model", ImmutableSummary: "Manifest abc contains reviewed daily AAPL bars.",
+		Family: family, Universe: input.Universe, SpecKey: input.SpecKey, ProviderName: "openai", Provider: provider, Model: "requested-model", ImmutableSummary: "Manifest abc contains reviewed daily AAPL bars.",
 		SourceCommit: strings.Repeat("b", 40), SourceTreeSHA256: strings.Repeat("c", 64),
 	})
 	if err != nil {
@@ -48,9 +48,22 @@ func TestModelProposalGeneratorRejectsUnknownAuthorityFields(t *testing.T) {
 		return &llm.CompletionResponse{Content: `{"spec_key":"x","deployment":{"live":true}}`}, nil
 	})
 	request, err := (ModelProposalGenerator{}).Generate(context.Background(), ModelProposalRequest{
-		Family: family, Universe: input.Universe, ProviderName: "openai", Provider: provider, Model: "model", ImmutableSummary: "immutable evidence",
+		Family: family, Universe: input.Universe, SpecKey: input.SpecKey, ProviderName: "openai", Provider: provider, Model: "model", ImmutableSummary: "immutable evidence",
 	})
 	if err == nil || request.Input.Family != nil {
+		t.Fatalf("request=%+v err=%v", request, err)
+	}
+}
+
+func TestModelProposalGeneratorRejectsChangedTrustedSpecKey(t *testing.T) {
+	family, input := specFixture(t)
+	provider := llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		return &llm.CompletionResponse{Content: `{"spec_key":"model_selected_key"}`}, nil
+	})
+	request, err := (ModelProposalGenerator{}).Generate(context.Background(), ModelProposalRequest{
+		Family: family, Universe: input.Universe, SpecKey: input.SpecKey, ProviderName: "openai", Provider: provider, Model: "model", ImmutableSummary: "immutable evidence",
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed trusted spec key") || request.Input.Family != nil {
 		t.Fatalf("request=%+v err=%v", request, err)
 	}
 }

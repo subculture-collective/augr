@@ -21,6 +21,7 @@ const typedProposalSystemPrompt = `Return one constrained stock strategy proposa
 type ModelProposalRequest struct {
 	Family           *strategycatalog.Family
 	Universe         Universe
+	SpecKey          string
 	ProviderName     string
 	Provider         llm.Provider
 	Model            string
@@ -48,7 +49,7 @@ type ModelProposalGenerator struct{}
 // universe, authority prohibitions, source identity, and authoring provenance
 // are supplied by trusted runtime inputs before the normal Spec validator runs.
 func (ModelProposalGenerator) Generate(ctx context.Context, request ModelProposalRequest) (ProposalRequest, error) {
-	if request.Family == nil || request.Provider == nil || !tokenPattern.MatchString(request.ProviderName) || strings.TrimSpace(request.Model) == "" ||
+	if request.Family == nil || request.Provider == nil || !tokenPattern.MatchString(request.SpecKey) || !tokenPattern.MatchString(request.ProviderName) || strings.TrimSpace(request.Model) == "" ||
 		strings.TrimSpace(request.ImmutableSummary) == "" {
 		return ProposalRequest{}, fmt.Errorf("typed model proposal requires family, provider, model, and immutable summary")
 	}
@@ -76,6 +77,9 @@ func (ModelProposalGenerator) Generate(ctx context.Context, request ModelProposa
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return ProposalRequest{}, fmt.Errorf("typed strategy proposal has trailing content")
+	}
+	if draft.SpecKey != request.SpecKey {
+		return ProposalRequest{}, fmt.Errorf("typed strategy proposal changed trusted spec key")
 	}
 	promptDigest := sha256.Sum256([]byte(typedProposalSystemPrompt + "\x00" + userPrompt))
 	model := strings.TrimSpace(response.Model)
