@@ -3,6 +3,7 @@ package rules
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -84,7 +85,13 @@ func BuildSpread(
 		Underlying:   underlying,
 	}
 
-	for name, snap := range selectedLegs {
+	names := make([]string, 0, len(selectedLegs))
+	for name := range selectedLegs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		snap := selectedLegs[name]
 		sel, ok := selectors[name]
 		if !ok {
 			return nil, fmt.Errorf("leg_selector: missing selector for leg %q", name)

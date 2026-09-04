@@ -80,6 +80,51 @@ func ValidateOptions(cfg *OptionsRulesConfig) error {
 	return nil
 }
 
+// ValidateDefinedRiskVertical narrows the broad research rule schema to the
+// only option packages the allocator and atomic paper route can execute.
+func ValidateDefinedRiskVertical(cfg *OptionsRulesConfig) error {
+	if err := ValidateOptions(cfg); err != nil {
+		return err
+	}
+	expectedType := domain.OptionType("")
+	switch cfg.StrategyType {
+	case domain.StrategyBullCallSpread, domain.StrategyBearCallSpread:
+		expectedType = domain.OptionTypeCall
+	case domain.StrategyBullPutSpread, domain.StrategyBearPutSpread:
+		expectedType = domain.OptionTypePut
+	default:
+		return fmt.Errorf("options_rules: strategy_type %q is not an executable defined-risk vertical", cfg.StrategyType)
+	}
+	if len(cfg.LegSelection) != 2 {
+		return fmt.Errorf("options_rules: defined-risk vertical requires exactly two legs")
+	}
+	buys, sells := 0, 0
+	var commonMin, commonMax int
+	first := true
+	for name, leg := range cfg.LegSelection {
+		if leg.OptionType != expectedType || leg.Ratio != 1 {
+			return fmt.Errorf("options_rules: vertical leg %q has incompatible type or ratio", name)
+		}
+		if first {
+			commonMin, commonMax, first = leg.DTEMin, leg.DTEMax, false
+		} else if leg.DTEMin != commonMin || leg.DTEMax != commonMax {
+			return fmt.Errorf("options_rules: vertical legs must use one shared expiry window")
+		}
+		switch {
+		case leg.Side == domain.OrderSideBuy && leg.Intent == domain.PositionIntentBuyToOpen:
+			buys++
+		case leg.Side == domain.OrderSideSell && leg.Intent == domain.PositionIntentSellToOpen:
+			sells++
+		default:
+			return fmt.Errorf("options_rules: vertical leg %q must be buy_to_open or sell_to_open", name)
+		}
+	}
+	if buys != 1 || sells != 1 {
+		return fmt.Errorf("options_rules: defined-risk vertical requires one long and one short opening leg")
+	}
+	return nil
+}
+
 func validateLegSelector(name string, sel LegSelector) error {
 	if sel.OptionType != domain.OptionTypeCall && sel.OptionType != domain.OptionTypePut {
 		return fmt.Errorf("options_rules: leg %q: option_type must be %q or %q, got %q",

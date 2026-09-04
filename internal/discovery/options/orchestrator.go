@@ -141,6 +141,10 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 			result.Errors = append(result.Errors, fmt.Sprintf("generate %s: %v", candidate.Ticker, genErr))
 			continue
 		}
+		if eligibilityErr := rules.ValidateDefinedRiskVertical(optConfig); eligibilityErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("ineligible generated vertical %s: %v", candidate.Ticker, eligibilityErr))
+			continue
+		}
 		result.Generated++
 
 		// Download history for backtesting.
