@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/polygon"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/rss"
@@ -269,7 +270,12 @@ type OrchestratorDeps struct {
 	GeneratedDeployment interface {
 		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.BatchSummary, error)
 	}
-	PromotionActivation interface {
+	ObservedOptionsCandidates interface {
+		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, string, string) (*domain.Strategy, bool, error)
+	}
+	OptionsSourceCommit     string
+	OptionsSourceTreeSHA256 string
+	PromotionActivation     interface {
 		ProjectEligibleActivations(context.Context, uuid.UUID, uuid.UUID, bool) (pgrepo.PromotionActivationBatch, error)
 	}
 	PromotionEvaluation interface {

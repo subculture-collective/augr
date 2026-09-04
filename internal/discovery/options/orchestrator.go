@@ -15,22 +15,25 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
-	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
 // OptionsDiscoveryConfig controls the full options discovery pipeline.
 type OptionsDiscoveryConfig struct {
-	Screener        OptionsScreenerConfig
-	Scoring         OptionsScoringConfig
-	Generator       discovery.GeneratorConfig
-	BacktestCfg     discovery.ScoringConfig // reuse stock scoring thresholds
-	Validation      discovery.ValidationConfig
-	MaxWinners      int
-	DryRun          bool
-	ScheduleCron    string
-	EvaluationStart time.Time
-	EvaluationEnd   time.Time
-	DecisionCutoff  time.Time
+	Screener         OptionsScreenerConfig
+	Scoring          OptionsScoringConfig
+	Generator        discovery.GeneratorConfig
+	BacktestCfg      discovery.ScoringConfig // reuse stock scoring thresholds
+	Validation       discovery.ValidationConfig
+	MaxWinners       int
+	DryRun           bool
+	ScheduleCron     string
+	EvaluationStart  time.Time
+	EvaluationEnd    time.Time
+	DecisionCutoff   time.Time
+	AccountID        uuid.UUID
+	ScopeID          uuid.UUID
+	SourceCommit     string
+	SourceTreeSHA256 string
 }
 
 // OptionsDiscoveryDeps holds dependencies for the options pipeline.
@@ -41,8 +44,10 @@ type OptionsDiscoveryDeps struct {
 	LLMProvider      interface {
 		Complete(context.Context, interface{}) (interface{}, error)
 	} // unused — use Generator
-	Strategies repository.StrategyRepository
-	Logger     *slog.Logger
+	CandidateRegistrar interface {
+		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, string, string) (*domain.Strategy, bool, error)
+	}
+	Logger *slog.Logger
 }
 
 // OptionsDeployedStrategy is the backward-compatible result envelope for a
@@ -102,6 +107,9 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 	}
 	if deps.HistoricalReader == nil {
 		return nil, fmt.Errorf("options/discovery: manifest-bound historical options reader is required")
+	}
+	if !cfg.DryRun && (deps.CandidateRegistrar == nil || cfg.AccountID == uuid.Nil || cfg.ScopeID == uuid.Nil) {
+		return nil, fmt.Errorf("options/discovery: native candidate registrar, canonical account, and exact scope are required")
 	}
 	evaluationCutoff := cfg.EvaluationEnd
 	if cfg.DecisionCutoff.Before(evaluationCutoff) {
@@ -282,12 +290,16 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 
 		wasCreated := false
 		if !cfg.DryRun {
-			createdStrategy, created, createErr := discovery.CreateOrReusePaperStrategy(ctx, deps.Strategies, strategy)
+			createdStrategy, created, createErr := deps.CandidateRegistrar.RegisterCandidate(ctx, cfg.AccountID, cfg.ScopeID, w.config, cfg.SourceCommit, cfg.SourceTreeSHA256)
 			if createErr != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("deploy %s: %v", w.ticker, createErr))
 				continue
 			}
-			strategy = createdStrategy
+			if createdStrategy == nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("deploy %s: candidate registrar returned no strategy", w.ticker))
+				continue
+			}
+			strategy = *createdStrategy
 			if !created {
 				logger.Info("options/discovery: strategy already exists, reusing",
 					slog.String("id", strategy.ID.String()),

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 )
 
@@ -34,15 +36,19 @@ func PersistRun(ctx context.Context, repo discovery.RunRepository, cfg OptionsDi
 			Model      string `json:"model,omitempty"`
 			MaxRetries int    `json:"max_retries"`
 		} `json:"generator"`
-		Scoring         OptionsScoringConfig       `json:"scoring"`
-		Backtest        discovery.ScoringConfig    `json:"backtest"`
-		Validation      discovery.ValidationConfig `json:"validation"`
-		MaxWinners      int                        `json:"max_winners"`
-		DryRun          bool                       `json:"dry_run"`
-		ScheduleCron    string                     `json:"schedule_cron"`
-		EvaluationStart time.Time                  `json:"evaluation_start"`
-		EvaluationEnd   time.Time                  `json:"evaluation_end"`
-		DecisionCutoff  time.Time                  `json:"decision_cutoff"`
+		Scoring          OptionsScoringConfig       `json:"scoring"`
+		Backtest         discovery.ScoringConfig    `json:"backtest"`
+		Validation       discovery.ValidationConfig `json:"validation"`
+		MaxWinners       int                        `json:"max_winners"`
+		DryRun           bool                       `json:"dry_run"`
+		ScheduleCron     string                     `json:"schedule_cron"`
+		EvaluationStart  time.Time                  `json:"evaluation_start"`
+		EvaluationEnd    time.Time                  `json:"evaluation_end"`
+		DecisionCutoff   time.Time                  `json:"decision_cutoff"`
+		AccountID        uuid.UUID                  `json:"account_id"`
+		ScopeID          uuid.UUID                  `json:"scope_id"`
+		SourceCommit     string                     `json:"source_commit"`
+		SourceTreeSHA256 string                     `json:"source_tree_sha256"`
 	}{
 		Version: 2,
 		Kind:    "options",
@@ -66,6 +72,7 @@ func PersistRun(ctx context.Context, repo discovery.RunRepository, cfg OptionsDi
 		MaxWinners: cfg.MaxWinners, DryRun: cfg.DryRun, ScheduleCron: cfg.ScheduleCron,
 		EvaluationStart: cfg.EvaluationStart, EvaluationEnd: cfg.EvaluationEnd,
 		DecisionCutoff: cfg.DecisionCutoff,
+		AccountID:      cfg.AccountID, ScopeID: cfg.ScopeID, SourceCommit: cfg.SourceCommit, SourceTreeSHA256: cfg.SourceTreeSHA256,
 	})
 	if err != nil {
 		return fmt.Errorf("options/discovery: marshal run config: %w", err)
