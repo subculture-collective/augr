@@ -145,6 +145,28 @@ func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *tes
 	}
 }
 
+func TestEvaluateRuntimeDiscoveryReadinessCarriesCanonicalEvaluationInterval(t *testing.T) {
+	originalReadiness := runtimeDiscoveryDeploymentReadiness
+	t.Cleanup(func() { runtimeDiscoveryDeploymentReadiness = originalReadiness })
+	start := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
+		return &pgrepo.DiscoveryDeploymentReadinessReport{
+			Ready: true, EvaluationStart: start, EvaluationEnd: end,
+			Stock:   pgrepo.DatasetCapabilityReadiness{Ready: true},
+			Options: pgrepo.DatasetCapabilityReadiness{Ready: true},
+		}, nil
+	}
+
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, uuid.New(), uuid.New(), end, slogDiscardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !readiness.EvaluationStart.Equal(start) || !readiness.EvaluationEnd.Equal(end) {
+		t.Fatalf("evaluation interval = %v..%v, want %v..%v", readiness.EvaluationStart, readiness.EvaluationEnd, start, end)
+	}
+}
+
 func TestEvaluateRuntimeDiscoveryReadinessErrorRemainsDistinct(t *testing.T) {
 	originalReadiness := runtimeDiscoveryDeploymentReadiness
 	originalReconcile := runtimeReconcileOvernightBacktests

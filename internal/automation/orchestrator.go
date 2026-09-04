@@ -85,6 +85,8 @@ type DiscoveryReadiness struct {
 	OptionQuoteCount      int       `json:"option_quote_count"`
 	OptionTradeCount      int       `json:"option_trade_count"`
 	OptionSnapshotCount   int       `json:"option_snapshot_count"`
+	EvaluationStart       time.Time `json:"evaluation_start,omitempty"`
+	EvaluationEnd         time.Time `json:"evaluation_end,omitempty"`
 	StockEffectiveStart   time.Time `json:"stock_effective_start,omitempty"`
 	StockEffectiveEnd     time.Time `json:"stock_effective_end,omitempty"`
 	OptionsEffectiveStart time.Time `json:"options_effective_start,omitempty"`
