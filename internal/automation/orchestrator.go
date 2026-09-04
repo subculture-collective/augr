@@ -271,7 +271,7 @@ type OrchestratorDeps struct {
 		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.BatchSummary, error)
 	}
 	ObservedOptionsCandidates interface {
-		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, string, string) (*domain.Strategy, bool, error)
+		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, time.Time, time.Time, string, string) (*domain.Strategy, bool, error)
 	}
 	OptionsSourceCommit     string
 	OptionsSourceTreeSHA256 string

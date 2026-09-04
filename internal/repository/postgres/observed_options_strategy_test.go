@@ -3,6 +3,7 @@ package postgres
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -43,7 +44,7 @@ func TestStrategyRepoResolvesNativeObservedOptionsVersion(t *testing.T) {
 }
 
 func TestObservedOptionsStrategyRepoRejectsMissingScope(t *testing.T) {
-	if _, _, err := NewObservedOptionsStrategyRepo(nil).RegisterCandidate(t.Context(), uuid.Nil, uuid.Nil, observedOptionsConfig(), strings.Repeat("a", 40), strings.Repeat("b", 64)); err == nil {
+	if _, _, err := NewObservedOptionsStrategyRepo(nil).RegisterCandidate(t.Context(), uuid.Nil, uuid.Nil, observedOptionsConfig(), time.Time{}, time.Time{}, strings.Repeat("a", 40), strings.Repeat("b", 64)); err == nil {
 		t.Fatal("missing database and scope accepted")
 	}
 }

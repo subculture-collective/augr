@@ -45,7 +45,7 @@ type OptionsDiscoveryDeps struct {
 		Complete(context.Context, interface{}) (interface{}, error)
 	} // unused — use Generator
 	CandidateRegistrar interface {
-		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, string, string) (*domain.Strategy, bool, error)
+		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, time.Time, time.Time, string, string) (*domain.Strategy, bool, error)
 	}
 	Logger *slog.Logger
 }
@@ -290,7 +290,7 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 
 		wasCreated := false
 		if !cfg.DryRun {
-			createdStrategy, created, createErr := deps.CandidateRegistrar.RegisterCandidate(ctx, cfg.AccountID, cfg.ScopeID, w.config, cfg.SourceCommit, cfg.SourceTreeSHA256)
+			createdStrategy, created, createErr := deps.CandidateRegistrar.RegisterCandidate(ctx, cfg.AccountID, cfg.ScopeID, w.config, evaluationStart, evaluationEnd, cfg.SourceCommit, cfg.SourceTreeSHA256)
 			if createErr != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("deploy %s: %v", w.ticker, createErr))
 				continue
