@@ -103,6 +103,7 @@ const (
 	reasonNotQueued                = "not_queued"
 	reasonExpired                  = "expired"
 	reasonUndefinedOptionRisk      = "undefined_option_maximum_loss"
+	reasonUndefinedStockRisk       = "undefined_stock_maximum_loss"
 	reasonUnsupportedOptionPackage = "unsupported_option_package"
 	reasonStaleOptionQuote         = "stale_option_quote"
 	reasonRiskPolicyMismatch       = "risk_policy_mismatch"
@@ -549,12 +550,6 @@ func sizeOpportunity(opp domain.Opportunity, score float64, state PortfolioState
 	if remainingBuyingPower <= 0 {
 		return 0, 0, reasonCashReserveInsufficient, nil, []string{reasonCashReserveInsufficient}
 	}
-	if opp.MarketCapUSD > 0 {
-		marketCapCap := opp.MarketCapUSD * 0.02
-		if marketCapCap > 0 {
-			base = math.Min(base, marketCapCap)
-		}
-	}
 	if opp.MarketType == domain.MarketTypeOptions {
 		return sizeOptionsOpportunity(opp, base, remainingTarget, remainingHard, remainingMarket, remainingBuyingPower, state, cfg)
 	}
@@ -562,7 +557,25 @@ func sizeOpportunity(opp domain.Opportunity, score float64, state PortfolioState
 	capValues := []struct {
 		name  string
 		value float64
-	}{{"position_risk", base}, {"target_exposure", remainingTarget}, {"hard_exposure", remainingHard}, {"market_exposure", remainingMarket}, {"buying_power", remainingBuyingPower}}
+	}{{"position_exposure", base}, {"target_exposure", remainingTarget}, {"hard_exposure", remainingHard}, {"market_exposure", remainingMarket}, {"buying_power", remainingBuyingPower}}
+	if opp.MaxLossPct > 0 {
+		capValues = append(capValues, struct {
+			name  string
+			value float64
+		}{"position_risk", state.Equity * cfg.MaxPositionRiskPct * multiplier / opp.MaxLossPct})
+	}
+	if opp.ProposedNotional > 0 {
+		capValues = append(capValues, struct {
+			name  string
+			value float64
+		}{"opportunity_proposal", opp.ProposedNotional})
+	}
+	if opp.MarketCapUSD > 0 {
+		capValues = append(capValues, struct {
+			name  string
+			value float64
+		}{"market_liquidity", opp.MarketCapUSD * 0.02})
+	}
 	if opp.DeploymentBudgetUSD > 0 {
 		capValues = append(capValues, struct {
 			name  string
@@ -572,7 +585,11 @@ func sizeOpportunity(opp domain.Opportunity, score float64, state PortfolioState
 	final, binding := smallestPositiveCap(capValues)
 	caps := make([]domain.AllocationRiskCap, 0, len(capValues))
 	for sequence, capValue := range capValues {
-		caps = append(caps, domain.AllocationRiskCap{Sequence: sequence, Name: capValue.name, AvailableAmount: capValue.value, UnitAmount: 1, QuantityCap: capValue.value, Binding: capValue.name == binding})
+		unit, quantityCap := opp.EntryPrice, 0.0
+		if unit > 0 {
+			quantityCap = math.Floor(capValue.value / unit)
+		}
+		caps = append(caps, domain.AllocationRiskCap{Sequence: sequence, Name: capValue.name, AvailableAmount: capValue.value, UnitAmount: unit, QuantityCap: quantityCap, Binding: capValue.name == binding})
 	}
 	if final <= 0 {
 		return 0, 0, reasonSizingZero, caps, []string{reasonSizingZero}
@@ -604,6 +621,9 @@ func sizeOptionsOpportunity(opp domain.Opportunity, positionRisk, remainingTarge
 		{"hard_exposure", remainingHard, opp.MaxLossPerUnit, math.Floor(remainingHard / opp.MaxLossPerUnit)},
 		{"market_exposure", remainingMarket, opp.MaxLossPerUnit, math.Floor(remainingMarket / opp.MaxLossPerUnit)},
 		{"buying_power", math.Min(remainingBuyingPower, state.OptionsBuyingPower), opp.RequiredCapitalUnit, math.Floor(math.Min(remainingBuyingPower, state.OptionsBuyingPower) / opp.RequiredCapitalUnit)},
+	}
+	if opp.ProposedNotional > 0 {
+		caps = append(caps, unitCap{"opportunity_proposal", opp.ProposedNotional, opp.RequiredCapitalUnit, math.Floor(opp.ProposedNotional / opp.RequiredCapitalUnit)})
 	}
 	if opp.DeploymentBudgetUSD > 0 {
 		caps = append(caps, unitCap{"deployment_budget", opp.DeploymentBudgetUSD, opp.RequiredCapitalUnit, math.Floor(opp.DeploymentBudgetUSD / opp.RequiredCapitalUnit)})
@@ -678,6 +698,11 @@ func portfolioRiskRejectionReasons(opp domain.Opportunity, state PortfolioState,
 	}
 	if opp.RiskPolicyVersion != "" && opp.RiskPolicyVersion != cfg.RiskPolicyVersion {
 		reasons = append(reasons, reasonRiskPolicyMismatch)
+	}
+	if opp.MarketType == domain.MarketTypeStock || opp.MarketType == domain.MarketTypeCrypto {
+		if opp.MaxLossPct <= 0 || opp.MaxLossPct > 1 {
+			reasons = append(reasons, reasonUndefinedStockRisk)
+		}
 	}
 	if opp.MarketType != domain.MarketTypeOptions {
 		return reasons

@@ -36,6 +36,7 @@ func TestAllocatorSelectsAndSizesHighQualityStock(t *testing.T) {
 		LiquidityUSD:     2_000_000,
 		SpreadPct:        0.004,
 		ProposedNotional: 500,
+		MaxLossPct:       0.05,
 		MarketCapUSD:     3_000_000_000_000,
 		CreatedAt:        now.Add(-30 * time.Minute),
 		ExpiresAt:        now.Add(6 * time.Hour),
@@ -51,8 +52,8 @@ func TestAllocatorSelectsAndSizesHighQualityStock(t *testing.T) {
 	if dec.Mode != domain.AllocationDecisionModeShadow {
 		t.Fatalf("mode = %q, want shadow", dec.Mode)
 	}
-	if math.Abs(dec.NotionalUSD-2000) > 1e-9 {
-		t.Fatalf("notional = %v, want 2000", dec.NotionalUSD)
+	if math.Abs(dec.NotionalUSD-500) > 1e-9 {
+		t.Fatalf("notional = %v, want proposal cap 500", dec.NotionalUSD)
 	}
 	if res.Summary.Selected != 1 || res.Summary.Rejected != 0 {
 		t.Fatalf("summary = %+v, want 1 selected / 0 rejected", res.Summary)
@@ -62,6 +63,32 @@ func TestAllocatorSelectsAndSizesHighQualityStock(t *testing.T) {
 	}
 	if len(dec.Reasons) == 0 {
 		t.Fatal("selected decision reasons empty")
+	}
+}
+
+func TestAllocatorCapsStockNotionalByExpectedLossBudget(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	cfg := DefaultAllocatorConfig()
+	cfg.Now = func() time.Time { return now }
+	cfg.MaxPerPositionPct[domain.MarketTypeStock] = .50
+	cfg.MaxPositionRiskPct = .01
+	opp := strongOpportunity("RISK", now, .99)
+	opp.EntryPrice = 100
+	opp.ProposedNotional = 50000
+	opp.MaxLossPct = .10
+	result := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{Equity: 100000, BuyingPower: 100000, MarketExposure: map[domain.MarketType]float64{}}, cfg)
+	decision := result.Decisions[0]
+	if decision.Action != domain.AllocationDecisionActionShadowSelected || decision.NotionalUSD != 10000 || decision.Quantity != 100 || decision.BindingConstraint != "position_risk" {
+		t.Fatalf("decision=%+v", decision)
+	}
+	if decision.ExposureAfterUSD != 10000 || len(decision.RiskCaps) == 0 {
+		t.Fatalf("risk evidence=%+v", decision)
+	}
+	opp.MaxLossPct = 0
+	rejected := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{Equity: 100000, BuyingPower: 100000}, cfg).Decisions[0]
+	if rejected.Action != domain.AllocationDecisionActionShadowRejected || !containsReason(rejected.Reasons, reasonUndefinedStockRisk) {
+		t.Fatalf("undefined stock risk decision=%+v", rejected)
 	}
 }
 
@@ -322,8 +349,8 @@ func TestAllocatorConsumesMaximumLossAcrossSelectedOptionPackages(t *testing.T) 
 	if result.Summary.Selected != 2 {
 		t.Fatalf("selected=%d decisions=%+v", result.Summary.Selected, result.Decisions)
 	}
-	if result.Decisions[0].ExposureBeforeUSD != 0 || result.Decisions[0].ExposureAfterUSD != 1500 ||
-		result.Decisions[1].ExposureBeforeUSD != 1500 || result.Decisions[1].ExposureAfterUSD != 2000 {
+	if result.Decisions[0].ExposureBeforeUSD != 0 || result.Decisions[0].ExposureAfterUSD != 1000 ||
+		result.Decisions[1].ExposureBeforeUSD != 1000 || result.Decisions[1].ExposureAfterUSD != 2000 {
 		t.Fatalf("maximum-loss exposure was not consumed sequentially: %+v", result.Decisions)
 	}
 }
@@ -401,6 +428,7 @@ func strongOpportunity(ticker string, now time.Time, confidence float64) domain.
 		LiquidityUSD:     2_000_000,
 		SpreadPct:        0.004,
 		ProposedNotional: 100,
+		MaxLossPct:       0.05,
 		MarketCapUSD:     3_000_000_000_000,
 		CreatedAt:        now,
 		ExpiresAt:        now.Add(1 * time.Hour),
