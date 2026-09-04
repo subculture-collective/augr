@@ -33,6 +33,7 @@ import (
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
+	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
 
@@ -271,7 +272,7 @@ type OrchestratorDeps struct {
 		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.BatchSummary, error)
 	}
 	ObservedOptionsCandidates interface {
-		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, time.Time, time.Time, string, string) (*domain.Strategy, bool, error)
+		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, time.Time, time.Time, string, string) (*domain.Strategy, *strategycatalog.Experiment, bool, error)
 	}
 	OptionsSourceCommit     string
 	OptionsSourceTreeSHA256 string

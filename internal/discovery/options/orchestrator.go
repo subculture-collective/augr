@@ -15,6 +15,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
 // OptionsDiscoveryConfig controls the full options discovery pipeline.
@@ -45,7 +46,7 @@ type OptionsDiscoveryDeps struct {
 		Complete(context.Context, interface{}) (interface{}, error)
 	} // unused — use Generator
 	CandidateRegistrar interface {
-		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, time.Time, time.Time, string, string) (*domain.Strategy, bool, error)
+		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, time.Time, time.Time, string, string) (*domain.Strategy, *strategycatalog.Experiment, bool, error)
 	}
 	Logger *slog.Logger
 }
@@ -65,6 +66,8 @@ type OptionsDeployedStrategy struct {
 	EvaluationStart          time.Time                `json:"evaluation_start"`
 	CalibrationEnd           time.Time                `json:"calibration_end"`
 	EvaluationEnd            time.Time                `json:"evaluation_end"`
+	VersionID                uuid.UUID                `json:"version_id"`
+	ExperimentID             uuid.UUID                `json:"experiment_id"`
 }
 
 // OptionsDiscoveryResult summarises the pipeline run.
@@ -289,17 +292,19 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 		}
 
 		wasCreated := false
+		experimentID := uuid.Nil
 		if !cfg.DryRun {
-			createdStrategy, created, createErr := deps.CandidateRegistrar.RegisterCandidate(ctx, cfg.AccountID, cfg.ScopeID, w.config, evaluationStart, evaluationEnd, cfg.SourceCommit, cfg.SourceTreeSHA256)
+			createdStrategy, experiment, created, createErr := deps.CandidateRegistrar.RegisterCandidate(ctx, cfg.AccountID, cfg.ScopeID, w.config, evaluationStart, evaluationEnd, cfg.SourceCommit, cfg.SourceTreeSHA256)
 			if createErr != nil {
 				result.Errors = append(result.Errors, fmt.Sprintf("deploy %s: %v", w.ticker, createErr))
 				continue
 			}
-			if createdStrategy == nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("deploy %s: candidate registrar returned no strategy", w.ticker))
+			if createdStrategy == nil || experiment == nil || createdStrategy.ExecutionStrategyVersionID == nil || experiment.VersionID() != *createdStrategy.ExecutionStrategyVersionID {
+				result.Errors = append(result.Errors, fmt.Sprintf("deploy %s: candidate lineage did not reconstruct", w.ticker))
 				continue
 			}
 			strategy = *createdStrategy
+			experimentID = experiment.ID()
 			if !created {
 				logger.Info("options/discovery: strategy already exists, reusing",
 					slog.String("id", strategy.ID.String()),
@@ -323,6 +328,8 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 			EvaluationStart:          evaluationStart,
 			CalibrationEnd:           calibrationEnd,
 			EvaluationEnd:            evaluationEnd,
+			VersionID:                strategyExecutionVersionID(strategy),
+			ExperimentID:             experimentID,
 		})
 		selected++
 		recordOptionsDeploymentOutcome(result, cfg.DryRun, wasCreated)
@@ -349,6 +356,13 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 	)
 
 	return result, nil
+}
+
+func strategyExecutionVersionID(strategy domain.Strategy) uuid.UUID {
+	if strategy.ExecutionStrategyVersionID == nil {
+		return uuid.Nil
+	}
+	return *strategy.ExecutionStrategyVersionID
 }
 
 func historicalFramesBetween(frames []HistoricalOptionFrame, start, end time.Time, includeEnd bool) []HistoricalOptionFrame {
