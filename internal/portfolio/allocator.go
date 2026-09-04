@@ -1,6 +1,7 @@
 package portfolio
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
 	"sort"
@@ -738,6 +739,9 @@ func validVertical(legs []domain.OpportunityOptionLeg) bool {
 	}
 	a, b := legs[0], legs[1]
 	if a.ContractID == uuid.Nil || b.ContractID == uuid.Nil || a.ContractID == b.ContractID || a.OCCSymbol == "" || b.OCCSymbol == "" ||
+		a.ContractPayloadID == uuid.Nil || b.ContractPayloadID == uuid.Nil || a.QuotePayloadID == uuid.Nil || b.QuotePayloadID == uuid.Nil ||
+		a.SnapshotPayloadID == uuid.Nil || b.SnapshotPayloadID == uuid.Nil || !validEvidenceSHA(a.ContractSHA256) || !validEvidenceSHA(b.ContractSHA256) ||
+		!validEvidenceSHA(a.QuoteSHA256) || !validEvidenceSHA(b.QuoteSHA256) || !validEvidenceSHA(a.SnapshotSHA256) || !validEvidenceSHA(b.SnapshotSHA256) ||
 		a.Underlying == "" || a.Underlying != b.Underlying || !a.Expiry.Equal(b.Expiry) || a.OptionType != b.OptionType ||
 		(a.OptionType != "call" && a.OptionType != "put") || a.Strike == b.Strike || a.Ratio != 1 || b.Ratio != 1 ||
 		a.Multiplier != 100 || b.Multiplier != 100 || a.Side == b.Side {
@@ -756,6 +760,14 @@ func validVertical(legs []domain.OpportunityOptionLeg) bool {
 		}
 	}
 	return longs == 1 && shorts == 1
+}
+
+func validEvidenceSHA(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func scoreMultiplier(score float64) float64 {

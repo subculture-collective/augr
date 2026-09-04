@@ -798,6 +798,12 @@ func buildPaperDebitSpreadPlan(cfg *rules.OptionsRulesConfig, chain []domain.Opt
 		leg.Ask = snapshot.Ask
 		leg.BidSize = snapshot.BidSize
 		leg.AskSize = snapshot.AskSize
+		leg.ContractPayloadID = snapshot.ContractPayloadID
+		leg.ContractSHA256 = snapshot.ContractSHA256
+		leg.QuotePayloadID = snapshot.QuotePayloadID
+		leg.QuoteSHA256 = snapshot.QuoteSHA256
+		leg.SnapshotPayloadID = snapshot.SnapshotPayloadID
+		leg.SnapshotSHA256 = snapshot.SnapshotSHA256
 		leg.QuoteObservedAt = snapshot.QuoteObservedAt
 		if spread.QuoteObservedAt.IsZero() || (!snapshot.QuoteObservedAt.IsZero() && snapshot.QuoteObservedAt.Before(spread.QuoteObservedAt)) {
 			spread.QuoteObservedAt = snapshot.QuoteObservedAt

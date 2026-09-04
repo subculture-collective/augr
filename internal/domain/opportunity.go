@@ -78,17 +78,23 @@ type Opportunity struct {
 // OpportunityOptionLeg is one normalized leg in an executable two-leg
 // defined-risk package. Sequence is economically significant.
 type OpportunityOptionLeg struct {
-	Sequence       int       `json:"sequence"`
-	ContractID     uuid.UUID `json:"contract_id"`
-	OCCSymbol      string    `json:"occ_symbol"`
-	Underlying     string    `json:"underlying"`
-	Expiry         time.Time `json:"expiry"`
-	OptionType     string    `json:"option_type"`
-	Strike         float64   `json:"strike"`
-	Ratio          int       `json:"ratio"`
-	Side           OrderSide `json:"side"`
-	PositionIntent string    `json:"position_intent"`
-	Bid            float64   `json:"bid"`
-	Ask            float64   `json:"ask"`
-	Multiplier     int       `json:"multiplier"`
+	Sequence          int       `json:"sequence"`
+	ContractID        uuid.UUID `json:"contract_id"`
+	ContractPayloadID uuid.UUID `json:"contract_payload_id"`
+	ContractSHA256    string    `json:"contract_sha256"`
+	QuotePayloadID    uuid.UUID `json:"quote_payload_id"`
+	QuoteSHA256       string    `json:"quote_sha256"`
+	SnapshotPayloadID uuid.UUID `json:"snapshot_payload_id"`
+	SnapshotSHA256    string    `json:"snapshot_sha256"`
+	OCCSymbol         string    `json:"occ_symbol"`
+	Underlying        string    `json:"underlying"`
+	Expiry            time.Time `json:"expiry"`
+	OptionType        string    `json:"option_type"`
+	Strike            float64   `json:"strike"`
+	Ratio             int       `json:"ratio"`
+	Side              OrderSide `json:"side"`
+	PositionIntent    string    `json:"position_intent"`
+	Bid               float64   `json:"bid"`
+	Ask               float64   `json:"ask"`
+	Multiplier        int       `json:"multiplier"`
 }

@@ -313,8 +313,8 @@ func TestBuildOpportunityBindsDefinedRiskOptionPackage(t *testing.T) {
 		MaxReward:       250,
 		QuoteObservedAt: observedAt,
 		Legs: []domain.SpreadLeg{
-			{Contract: domain.OptionContract{InstrumentID: longID, OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5.0, QuoteObservedAt: observedAt, Greeks: domain.OptionGreeks{Delta: .55, Gamma: .03, Theta: -.05, Vega: .12}},
-			{Contract: domain.OptionContract{InstrumentID: shortID, OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, QuoteObservedAt: observedAt, Greeks: domain.OptionGreeks{Delta: .4, Gamma: .02, Theta: -.03, Vega: .09}},
+			spreadLegEvidence(domain.SpreadLeg{Contract: domain.OptionContract{InstrumentID: longID, OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5.0, QuoteObservedAt: observedAt, Greeks: domain.OptionGreeks{Delta: .55, Gamma: .03, Theta: -.05, Vega: .12}}, "a"),
+			spreadLegEvidence(domain.SpreadLeg{Contract: domain.OptionContract{InstrumentID: shortID, OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, QuoteObservedAt: observedAt, Greeks: domain.OptionGreeks{Delta: .4, Gamma: .02, Theta: -.03, Vega: .09}}, "b"),
 		},
 	}
 
@@ -344,8 +344,8 @@ func TestBuildOpportunityRejectsOptionPackageThatDoesNotReconstruct(t *testing.T
 		return &domain.OptionSpread{
 			StrategyType: domain.StrategyBullCallSpread, Underlying: "AAPL", MaxRisk: 250, MaxReward: 250, QuoteObservedAt: baseObservedAt,
 			Legs: []domain.SpreadLeg{
-				{Contract: domain.OptionContract{InstrumentID: uuid.New(), OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5, QuoteObservedAt: baseObservedAt},
-				{Contract: domain.OptionContract{InstrumentID: uuid.New(), OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, QuoteObservedAt: baseObservedAt},
+				spreadLegEvidence(domain.SpreadLeg{Contract: domain.OptionContract{InstrumentID: uuid.New(), OCCSymbol: "AAPL260717C00200000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 200, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideBuy, PositionIntent: domain.PositionIntentBuyToOpen, Ratio: 1, Bid: 4.9, Ask: 5, QuoteObservedAt: baseObservedAt}, "c"),
+				spreadLegEvidence(domain.SpreadLeg{Contract: domain.OptionContract{InstrumentID: uuid.New(), OCCSymbol: "AAPL260717C00205000", Underlying: "AAPL", OptionType: domain.OptionTypeCall, Strike: 205, Expiry: expiry, Multiplier: 100}, Side: domain.OrderSideSell, PositionIntent: domain.PositionIntentSellToOpen, Ratio: 1, Bid: 2.5, Ask: 2.6, QuoteObservedAt: baseObservedAt}, "d"),
 			},
 		}
 	}
@@ -380,6 +380,12 @@ func TestBuildOpportunityRejectsOptionPackageThatDoesNotReconstruct(t *testing.T
 			}
 		})
 	}
+}
+
+func spreadLegEvidence(leg domain.SpreadLeg, digestByte string) domain.SpreadLeg {
+	leg.ContractPayloadID, leg.QuotePayloadID, leg.SnapshotPayloadID = uuid.New(), uuid.New(), uuid.New()
+	leg.ContractSHA256, leg.QuoteSHA256, leg.SnapshotSHA256 = strings.Repeat(digestByte, 64), strings.Repeat(digestByte, 64), strings.Repeat(digestByte, 64)
+	return leg
 }
 
 func TestNormalizeEvidencePreservesExplicitPayload(t *testing.T) {

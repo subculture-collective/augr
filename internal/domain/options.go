@@ -57,6 +57,12 @@ type OptionGreeks struct {
 // OptionSnapshot is a point-in-time view of a contract including price and Greeks.
 type OptionSnapshot struct {
 	Contract            OptionContract `json:"contract"`
+	ContractPayloadID   uuid.UUID      `json:"contract_payload_id,omitempty"`
+	ContractSHA256      string         `json:"contract_sha256,omitempty"`
+	QuotePayloadID      uuid.UUID      `json:"quote_payload_id,omitempty"`
+	QuoteSHA256         string         `json:"quote_sha256,omitempty"`
+	SnapshotPayloadID   uuid.UUID      `json:"snapshot_payload_id,omitempty"`
+	SnapshotSHA256      string         `json:"snapshot_sha256,omitempty"`
 	Greeks              OptionGreeks   `json:"greeks"`
 	Bid                 float64        `json:"bid"`
 	BidSize             float64        `json:"bid_size"`
@@ -74,19 +80,25 @@ type OptionSnapshot struct {
 
 // SpreadLeg is one leg of a multi-leg options spread.
 type SpreadLeg struct {
-	Contract        OptionContract `json:"contract"`
-	Side            OrderSide      `json:"side"`
-	PositionIntent  PositionIntent `json:"position_intent"`
-	Ratio           int            `json:"ratio"`
-	Quantity        float64        `json:"quantity"`
-	ExecutablePrice float64        `json:"executable_price"`
-	Bid             float64        `json:"bid"`
-	BidSize         float64        `json:"bid_size"`
-	Ask             float64        `json:"ask"`
-	AskSize         float64        `json:"ask_size"`
-	QuoteObservedAt time.Time      `json:"quote_observed_at,omitempty"`
-	Greeks          OptionGreeks   `json:"greeks"`
-	ClosePositionID uuid.UUID      `json:"-"`
+	Contract          OptionContract `json:"contract"`
+	ContractPayloadID uuid.UUID      `json:"contract_payload_id,omitempty"`
+	ContractSHA256    string         `json:"contract_sha256,omitempty"`
+	QuotePayloadID    uuid.UUID      `json:"quote_payload_id,omitempty"`
+	QuoteSHA256       string         `json:"quote_sha256,omitempty"`
+	SnapshotPayloadID uuid.UUID      `json:"snapshot_payload_id,omitempty"`
+	SnapshotSHA256    string         `json:"snapshot_sha256,omitempty"`
+	Side              OrderSide      `json:"side"`
+	PositionIntent    PositionIntent `json:"position_intent"`
+	Ratio             int            `json:"ratio"`
+	Quantity          float64        `json:"quantity"`
+	ExecutablePrice   float64        `json:"executable_price"`
+	Bid               float64        `json:"bid"`
+	BidSize           float64        `json:"bid_size"`
+	Ask               float64        `json:"ask"`
+	AskSize           float64        `json:"ask_size"`
+	QuoteObservedAt   time.Time      `json:"quote_observed_at,omitempty"`
+	Greeks            OptionGreeks   `json:"greeks"`
+	ClosePositionID   uuid.UUID      `json:"-"`
 }
 
 // OptionStrategyType identifies a named options strategy.

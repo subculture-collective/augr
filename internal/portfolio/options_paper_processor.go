@@ -176,8 +176,11 @@ func DefinedRiskSpreadFromOpportunity(opportunity domain.Opportunity) (*domain.O
 			executable = source.Bid
 		}
 		legs = append(legs, domain.SpreadLeg{
-			Contract: domain.OptionContract{OCCSymbol: source.OCCSymbol, Underlying: source.Underlying, OptionType: domain.OptionType(source.OptionType), Strike: source.Strike, Expiry: source.Expiry, Multiplier: float64(source.Multiplier)},
-			Side:     source.Side, PositionIntent: domain.PositionIntent(source.PositionIntent), Ratio: source.Ratio, Quantity: 1, ExecutablePrice: executable,
+			Contract:          domain.OptionContract{InstrumentID: source.ContractID, OCCSymbol: source.OCCSymbol, Underlying: source.Underlying, OptionType: domain.OptionType(source.OptionType), Strike: source.Strike, Expiry: source.Expiry, Multiplier: float64(source.Multiplier)},
+			ContractPayloadID: source.ContractPayloadID, ContractSHA256: source.ContractSHA256,
+			QuotePayloadID: source.QuotePayloadID, QuoteSHA256: source.QuoteSHA256,
+			SnapshotPayloadID: source.SnapshotPayloadID, SnapshotSHA256: source.SnapshotSHA256,
+			Side: source.Side, PositionIntent: domain.PositionIntent(source.PositionIntent), Ratio: source.Ratio, Quantity: 1, ExecutablePrice: executable,
 		})
 	}
 	strategyType, err := verticalStrategyType(legs)

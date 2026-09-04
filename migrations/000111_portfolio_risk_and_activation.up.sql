@@ -321,6 +321,12 @@ CREATE TABLE portfolio_opportunity_option_legs (
   opportunity_id UUID NOT NULL REFERENCES portfolio_opportunities(id) ON DELETE RESTRICT,
   sequence INTEGER NOT NULL CHECK(sequence IN (0,1)),
   contract_id UUID NOT NULL REFERENCES instruments(id) ON DELETE RESTRICT,
+  contract_payload_id UUID NOT NULL REFERENCES dataset_market_payloads(id) ON DELETE RESTRICT,
+  contract_sha256 TEXT NOT NULL CHECK(contract_sha256 ~ '^[0-9a-f]{64}$'),
+  quote_payload_id UUID NOT NULL REFERENCES dataset_market_payloads(id) ON DELETE RESTRICT,
+  quote_sha256 TEXT NOT NULL CHECK(quote_sha256 ~ '^[0-9a-f]{64}$'),
+  snapshot_payload_id UUID NOT NULL REFERENCES dataset_market_payloads(id) ON DELETE RESTRICT,
+  snapshot_sha256 TEXT NOT NULL CHECK(snapshot_sha256 ~ '^[0-9a-f]{64}$'),
   occ_symbol TEXT NOT NULL CHECK(occ_symbol<>''), underlying TEXT NOT NULL CHECK(underlying<>''),
   expiry TIMESTAMPTZ NOT NULL, option_type TEXT NOT NULL CHECK(option_type IN ('call','put')),
   strike NUMERIC(20,8) NOT NULL CHECK(strike>0), ratio INTEGER NOT NULL CHECK(ratio=1),
@@ -349,7 +355,8 @@ BEGIN
       SELECT 1 FROM portfolio_opportunity_option_legs leg WHERE leg.opportunity_id=opportunity.id AND NOT EXISTS(
         SELECT 1 FROM dataset_manifest_payload_bindings binding
         JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
-        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_contract'
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.id=leg.contract_payload_id
+          AND payload.content_sha256=leg.contract_sha256 AND payload.payload_kind='option_contract'
           AND payload.instrument_id=leg.contract_id AND payload.symbol=leg.occ_symbol AND payload.underlying_symbol=leg.underlying
           AND payload.canonical_json#>>'{contract,option_type}'=leg.option_type
           AND (payload.canonical_json#>>'{contract,strike}')::numeric=leg.strike
@@ -357,31 +364,35 @@ BEGIN
           AND (payload.canonical_json#>>'{contract,multiplier}')::numeric=leg.multiplier))
     AND NOT EXISTS(
       SELECT 1 FROM portfolio_opportunity_option_legs leg WHERE leg.opportunity_id=opportunity.id AND NOT EXISTS(
-        SELECT 1 FROM dataset_manifest_payload_bindings binding
-        JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
-        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot'
-          AND payload.instrument_id=leg.contract_id AND payload.symbol=leg.occ_symbol
-          AND payload.observed_at=opportunity.quote_observed_at
-          AND (payload.canonical_json#>>'{snapshot,quote,bid_price}')::numeric=leg.bid
-          AND (payload.canonical_json#>>'{snapshot,quote,ask_price}')::numeric=leg.ask))
+        SELECT 1 FROM dataset_manifest_payload_bindings quote_binding
+        JOIN dataset_market_payloads quote ON quote.id=quote_binding.payload_id
+        JOIN dataset_manifest_payload_bindings snapshot_binding ON snapshot_binding.manifest_id=quote_binding.manifest_id
+        JOIN dataset_market_payloads snapshot ON snapshot.id=snapshot_binding.payload_id
+        WHERE quote_binding.manifest_id=opportunity.manifest_id
+          AND quote.id=leg.quote_payload_id AND quote.content_sha256=leg.quote_sha256 AND quote.payload_kind='option_quote'
+          AND snapshot.id=leg.snapshot_payload_id AND snapshot.content_sha256=leg.snapshot_sha256 AND snapshot.payload_kind='option_snapshot'
+          AND quote.instrument_id=leg.contract_id AND snapshot.instrument_id=leg.contract_id
+          AND quote.symbol=leg.occ_symbol AND snapshot.symbol=leg.occ_symbol
+          AND quote.effective_at=opportunity.quote_observed_at AND quote.effective_at<=snapshot.effective_at
+          AND (quote.canonical_json#>>'{quote,bid_price}')::numeric=leg.bid
+          AND (quote.canonical_json#>>'{quote,ask_price}')::numeric=leg.ask
+          AND snapshot.canonical_json->'snapshot'->'quote'=quote.canonical_json->'quote'))
     AND opportunity.delta=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,delta}')::numeric)
       FROM portfolio_opportunity_option_legs leg
       JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding
         JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
-        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot'
-          AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at
-          AND (payload.canonical_json#>>'{snapshot,quote,bid_price}')::numeric=leg.bid
-          AND (payload.canonical_json#>>'{snapshot,quote,ask_price}')::numeric=leg.ask LIMIT 1) payload ON true
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.id=leg.snapshot_payload_id
+          AND payload.content_sha256=leg.snapshot_sha256 AND payload.payload_kind='option_snapshot' LIMIT 1) payload ON true
       WHERE leg.opportunity_id=opportunity.id)
     AND opportunity.gamma=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,gamma}')::numeric)
       FROM portfolio_opportunity_option_legs leg JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
-        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot' AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.id=leg.snapshot_payload_id AND payload.content_sha256=leg.snapshot_sha256 AND payload.payload_kind='option_snapshot' LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
     AND opportunity.theta=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,theta}')::numeric)
       FROM portfolio_opportunity_option_legs leg JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
-        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot' AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.id=leg.snapshot_payload_id AND payload.content_sha256=leg.snapshot_sha256 AND payload.payload_kind='option_snapshot' LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
     AND opportunity.vega=(SELECT sum(CASE side WHEN 'buy' THEN 1 ELSE -1 END*ratio*multiplier*(payload.canonical_json#>>'{snapshot,vega}')::numeric)
       FROM portfolio_opportunity_option_legs leg JOIN LATERAL (SELECT payload.canonical_json FROM dataset_manifest_payload_bindings binding JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
-        WHERE binding.manifest_id=opportunity.manifest_id AND payload.payload_kind='option_snapshot' AND payload.instrument_id=leg.contract_id AND payload.observed_at=opportunity.quote_observed_at LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
+        WHERE binding.manifest_id=opportunity.manifest_id AND payload.id=leg.snapshot_payload_id AND payload.content_sha256=leg.snapshot_sha256 AND payload.payload_kind='option_snapshot' LIMIT 1) payload ON true WHERE leg.opportunity_id=opportunity.id)
   ));
   IF NOT FOUND THEN RAISE EXCEPTION 'portfolio option package does not reconstruct immutable manifest evidence'; END IF;
   RETURN NULL;

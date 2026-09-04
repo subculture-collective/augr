@@ -38,19 +38,25 @@ type executionIntentCanonical struct {
 	Legs                   []executionIntentLeg `json:"legs"`
 }
 type executionIntentLeg struct {
-	Sequence       int    `json:"sequence"`
-	ContractID     string `json:"contract_id"`
-	OCCSymbol      string `json:"occ_symbol"`
-	Underlying     string `json:"underlying"`
-	Expiry         string `json:"expiry"`
-	OptionType     string `json:"option_type"`
-	Strike         string `json:"strike"`
-	Ratio          int    `json:"ratio"`
-	Side           string `json:"side"`
-	PositionIntent string `json:"position_intent"`
-	Bid            string `json:"bid"`
-	Ask            string `json:"ask"`
-	Multiplier     int    `json:"multiplier"`
+	Sequence          int    `json:"sequence"`
+	ContractID        string `json:"contract_id"`
+	ContractPayloadID string `json:"contract_payload_id"`
+	ContractSHA256    string `json:"contract_sha256"`
+	QuotePayloadID    string `json:"quote_payload_id"`
+	QuoteSHA256       string `json:"quote_sha256"`
+	SnapshotPayloadID string `json:"snapshot_payload_id"`
+	SnapshotSHA256    string `json:"snapshot_sha256"`
+	OCCSymbol         string `json:"occ_symbol"`
+	Underlying        string `json:"underlying"`
+	Expiry            string `json:"expiry"`
+	OptionType        string `json:"option_type"`
+	Strike            string `json:"strike"`
+	Ratio             int    `json:"ratio"`
+	Side              string `json:"side"`
+	PositionIntent    string `json:"position_intent"`
+	Bid               string `json:"bid"`
+	Ask               string `json:"ask"`
+	Multiplier        int    `json:"multiplier"`
 }
 
 func NewExecutionIntent(opportunity domain.Opportunity) (*ExecutionIntent, error) {
@@ -70,7 +76,7 @@ func NewExecutionIntent(opportunity domain.Opportunity) (*ExecutionIntent, error
 			return nil, fmt.Errorf("portfolio option execution intent is not defined-risk executable")
 		}
 		for _, leg := range opportunity.OptionLegs {
-			legs = append(legs, executionIntentLeg{Sequence: leg.Sequence, ContractID: leg.ContractID.String(), OCCSymbol: leg.OCCSymbol, Underlying: leg.Underlying, Expiry: formatIntentTime(leg.Expiry), OptionType: leg.OptionType, Strike: intentDecimal(leg.Strike), Ratio: leg.Ratio, Side: leg.Side.String(), PositionIntent: leg.PositionIntent, Bid: intentDecimal(leg.Bid), Ask: intentDecimal(leg.Ask), Multiplier: leg.Multiplier})
+			legs = append(legs, executionIntentLeg{Sequence: leg.Sequence, ContractID: leg.ContractID.String(), ContractPayloadID: leg.ContractPayloadID.String(), ContractSHA256: leg.ContractSHA256, QuotePayloadID: leg.QuotePayloadID.String(), QuoteSHA256: leg.QuoteSHA256, SnapshotPayloadID: leg.SnapshotPayloadID.String(), SnapshotSHA256: leg.SnapshotSHA256, OCCSymbol: leg.OCCSymbol, Underlying: leg.Underlying, Expiry: formatIntentTime(leg.Expiry), OptionType: leg.OptionType, Strike: intentDecimal(leg.Strike), Ratio: leg.Ratio, Side: leg.Side.String(), PositionIntent: leg.PositionIntent, Bid: intentDecimal(leg.Bid), Ask: intentDecimal(leg.Ask), Multiplier: leg.Multiplier})
 		}
 	} else if len(opportunity.OptionLegs) != 0 {
 		return nil, fmt.Errorf("stock execution intent cannot contain option legs")

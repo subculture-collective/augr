@@ -155,6 +155,8 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 				InstrumentID: snapshotPayload.InstrumentID(), OCCSymbol: snapshotPayload.Symbol(), Underlying: underlying, OptionType: kind, Strike: strike,
 				Expiry: parsedExpiry, Multiplier: multiplier, Style: contractBody.Style,
 			},
+			ContractPayloadID: contractID, ContractSHA256: contractDigest, QuotePayloadID: quoteID, QuoteSHA256: quoteDigest,
+			SnapshotPayloadID: snapshotID, SnapshotSHA256: snapshotDigest,
 			Greeks: greeks, Bid: bid, BidSize: bidSize, Ask: ask, AskSize: askSize, Mid: (bid + ask) / 2, Last: last, LastSize: lastSize,
 			ObservedAt: snapshotPayload.EffectiveAt(), QuoteObservedAt: quotePayload.EffectiveAt(), LastTradeObservedAt: snapshotPayload.EffectiveAt(),
 		})

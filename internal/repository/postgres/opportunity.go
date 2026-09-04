@@ -339,7 +339,7 @@ func (r *OpportunityRepo) saveScoped(ctx context.Context, opportunity *domain.Op
 		return err
 	}
 	for _, leg := range opportunity.OptionLegs {
-		result, insertErr := tx.Exec(ctx, `INSERT INTO portfolio_opportunity_option_legs(opportunity_id,sequence,contract_id,occ_symbol,underlying,expiry,option_type,strike,ratio,side,position_intent,bid,ask,multiplier) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT(opportunity_id,sequence) DO NOTHING`, opportunity.ID, leg.Sequence, leg.ContractID, leg.OCCSymbol, leg.Underlying, leg.Expiry, leg.OptionType, leg.Strike, leg.Ratio, leg.Side, leg.PositionIntent, leg.Bid, leg.Ask, leg.Multiplier)
+		result, insertErr := tx.Exec(ctx, `INSERT INTO portfolio_opportunity_option_legs(opportunity_id,sequence,contract_id,contract_payload_id,contract_sha256,quote_payload_id,quote_sha256,snapshot_payload_id,snapshot_sha256,occ_symbol,underlying,expiry,option_type,strike,ratio,side,position_intent,bid,ask,multiplier) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT(opportunity_id,sequence) DO NOTHING`, opportunity.ID, leg.Sequence, leg.ContractID, leg.ContractPayloadID, leg.ContractSHA256, leg.QuotePayloadID, leg.QuoteSHA256, leg.SnapshotPayloadID, leg.SnapshotSHA256, leg.OCCSymbol, leg.Underlying, leg.Expiry, leg.OptionType, leg.Strike, leg.Ratio, leg.Side, leg.PositionIntent, leg.Bid, leg.Ask, leg.Multiplier)
 		if insertErr != nil {
 			return insertErr
 		}
@@ -531,7 +531,8 @@ func (r *OpportunityRepo) loadOptionLegs(ctx context.Context, opportunity *domai
 	if opportunity == nil || opportunity.MarketType != domain.MarketTypeOptions || opportunity.EvaluationScopeID == uuid.Nil {
 		return nil
 	}
-	rows, err := r.pool.Query(ctx, `SELECT sequence,contract_id,occ_symbol,underlying,expiry,option_type,strike::double precision,
+	rows, err := r.pool.Query(ctx, `SELECT sequence,contract_id,contract_payload_id,contract_sha256,quote_payload_id,quote_sha256,
+		snapshot_payload_id,snapshot_sha256,occ_symbol,underlying,expiry,option_type,strike::double precision,
 		ratio,side,position_intent,bid::double precision,ask::double precision,multiplier
 		FROM portfolio_opportunity_option_legs WHERE opportunity_id=$1 ORDER BY sequence`, opportunity.ID)
 	if err != nil {
@@ -540,7 +541,8 @@ func (r *OpportunityRepo) loadOptionLegs(ctx context.Context, opportunity *domai
 	defer rows.Close()
 	for rows.Next() {
 		var leg domain.OpportunityOptionLeg
-		if err := rows.Scan(&leg.Sequence, &leg.ContractID, &leg.OCCSymbol, &leg.Underlying, &leg.Expiry, &leg.OptionType,
+		if err := rows.Scan(&leg.Sequence, &leg.ContractID, &leg.ContractPayloadID, &leg.ContractSHA256, &leg.QuotePayloadID, &leg.QuoteSHA256,
+			&leg.SnapshotPayloadID, &leg.SnapshotSHA256, &leg.OCCSymbol, &leg.Underlying, &leg.Expiry, &leg.OptionType,
 			&leg.Strike, &leg.Ratio, &leg.Side, &leg.PositionIntent, &leg.Bid, &leg.Ask, &leg.Multiplier); err != nil {
 			return err
 		}

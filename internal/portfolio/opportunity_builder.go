@@ -209,7 +209,11 @@ func bindDefinedRiskOptionIntent(opportunity *domain.Opportunity, spread *domain
 			return errors.New("option opportunity leg quote timestamp does not match the spread observation")
 		}
 		opportunity.OptionLegs = append(opportunity.OptionLegs, domain.OpportunityOptionLeg{
-			Sequence: sequence, ContractID: leg.Contract.InstrumentID, OCCSymbol: leg.Contract.OCCSymbol, Underlying: leg.Contract.Underlying,
+			Sequence: sequence, ContractID: leg.Contract.InstrumentID,
+			ContractPayloadID: leg.ContractPayloadID, ContractSHA256: leg.ContractSHA256,
+			QuotePayloadID: leg.QuotePayloadID, QuoteSHA256: leg.QuoteSHA256,
+			SnapshotPayloadID: leg.SnapshotPayloadID, SnapshotSHA256: leg.SnapshotSHA256,
+			OCCSymbol: leg.Contract.OCCSymbol, Underlying: leg.Contract.Underlying,
 			Expiry: leg.Contract.Expiry, OptionType: string(leg.Contract.OptionType), Strike: leg.Contract.Strike, Ratio: leg.Ratio,
 			Side: leg.Side, PositionIntent: string(leg.PositionIntent), Bid: leg.Bid, Ask: leg.Ask,
 			Multiplier: int(leg.Contract.Multiplier),

@@ -410,9 +410,18 @@ func strongOptionOpportunity(now, quoteAt time.Time) domain.Opportunity {
 		QuoteObservedAt: &quoteAt, Delta: 20, Gamma: 2, Theta: -5, Vega: 10, RiskPolicyVersion: policy.Reference(),
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 		OptionLegs: []domain.OpportunityOptionLeg{
-			{Sequence: 0, ContractID: uuid.New(), OCCSymbol: "SPY261016C00500000", Underlying: "SPY", Expiry: expiry, OptionType: "call", Strike: 500, Ratio: 1, Side: domain.OrderSideBuy, PositionIntent: "buy_to_open", Bid: 10, Ask: 10.2, Multiplier: 100},
-			{Sequence: 1, ContractID: uuid.New(), OCCSymbol: "SPY261016C00505000", Underlying: "SPY", Expiry: expiry, OptionType: "call", Strike: 505, Ratio: 1, Side: domain.OrderSideSell, PositionIntent: "sell_to_open", Bid: 5.5, Ask: 5.7, Multiplier: 100},
+			optionOpportunityLegEvidence(0, "SPY261016C00500000", expiry, 500, domain.OrderSideBuy, "buy_to_open", 10, 10.2),
+			optionOpportunityLegEvidence(1, "SPY261016C00505000", expiry, 505, domain.OrderSideSell, "sell_to_open", 5.5, 5.7),
 		},
+	}
+}
+
+func optionOpportunityLegEvidence(sequence int, symbol string, expiry time.Time, strike float64, side domain.OrderSide, intent string, bid, ask float64) domain.OpportunityOptionLeg {
+	return domain.OpportunityOptionLeg{
+		Sequence: sequence, ContractID: uuid.New(), ContractPayloadID: uuid.New(), ContractSHA256: strings.Repeat("a", 64),
+		QuotePayloadID: uuid.New(), QuoteSHA256: strings.Repeat("b", 64), SnapshotPayloadID: uuid.New(), SnapshotSHA256: strings.Repeat("c", 64),
+		OCCSymbol: symbol, Underlying: "SPY", Expiry: expiry, OptionType: "call", Strike: strike, Ratio: 1,
+		Side: side, PositionIntent: intent, Bid: bid, Ask: ask, Multiplier: 100,
 	}
 }
 
