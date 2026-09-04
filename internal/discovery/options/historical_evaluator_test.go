@@ -37,8 +37,12 @@ func TestEvaluateManifestBoundOptionsUsesExecutableObservedQuotes(t *testing.T) 
 	if result.Metrics.OrderAttempts != 4 || result.Metrics.OrderFills != 4 || result.Metrics.FillRate != 1 {
 		t.Fatalf("execution metrics = %+v", result.Metrics)
 	}
-	if len(result.PayloadSHA256) != 12 {
-		t.Fatalf("payload hashes = %d, want 12", len(result.PayloadSHA256))
+	if len(result.PayloadSHA256) != 14 || len(result.Evidence) != 14 {
+		t.Fatalf("payload evidence = %d/%d, want 14/14", len(result.PayloadSHA256), len(result.Evidence))
+	}
+	if result.ScopeID != frames[0].Receipt.ScopeID || result.AccountID != frames[0].Receipt.AccountID ||
+		result.ManifestID != frames[0].Receipt.ManifestID || result.QualityResultID != frames[0].Receipt.QualityResultID {
+		t.Fatalf("evaluation parent identity does not reconstruct: %+v", result)
 	}
 }
 

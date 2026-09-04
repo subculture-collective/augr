@@ -7,6 +7,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
 	"github.com/PatrickFanella/get-rich-quick/internal/backtest"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
@@ -17,11 +19,18 @@ import (
 // exclusively from manifest-bound market observations. Synthetic chains are
 // deliberately not accepted by this API.
 type HistoricalOptionsEvaluation struct {
-	Metrics        backtest.Metrics       `json:"metrics"`
-	EquityCurve    []backtest.EquityPoint `json:"equity_curve"`
-	OpenedPackages int                    `json:"opened_packages"`
-	ClosedPackages int                    `json:"closed_packages"`
-	PayloadSHA256  []string               `json:"payload_sha256"`
+	Metrics         backtest.Metrics              `json:"metrics"`
+	EquityCurve     []backtest.EquityPoint        `json:"equity_curve"`
+	OpenedPackages  int                           `json:"opened_packages"`
+	ClosedPackages  int                           `json:"closed_packages"`
+	ScopeID         uuid.UUID                     `json:"scope_id"`
+	AccountID       uuid.UUID                     `json:"account_id"`
+	ManifestID      uuid.UUID                     `json:"manifest_id"`
+	ManifestSHA256  string                        `json:"manifest_sha256"`
+	QualityResultID uuid.UUID                     `json:"quality_result_id"`
+	QualitySHA256   string                        `json:"quality_sha256"`
+	Evidence        []data.ManifestPayloadReceipt `json:"evidence"`
+	PayloadSHA256   []string                      `json:"payload_sha256"`
 }
 
 type historicalObservedPosition struct {
@@ -75,18 +84,26 @@ func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRules
 	cash, realized := initialCash, 0.0
 	var position *historicalObservedPosition
 	var previous *rules.Snapshot
-	result := &HistoricalOptionsEvaluation{EquityCurve: make([]backtest.EquityPoint, 0, len(frames))}
+	result := &HistoricalOptionsEvaluation{
+		EquityCurve: make([]backtest.EquityPoint, 0, len(frames)), ScopeID: firstReceipt.ScopeID, AccountID: firstReceipt.AccountID,
+		ManifestID: firstReceipt.ManifestID, ManifestSHA256: firstReceipt.ManifestSHA256,
+		QualityResultID: firstReceipt.QualityResultID, QualitySHA256: firstReceipt.QualitySHA256,
+	}
 	content := make(map[string]struct{})
+	evidenceByID := make(map[uuid.UUID]data.ManifestPayloadReceipt)
 	orderAttempts, orderFills := 0, 0
 
 	for index, frame := range frames {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		for _, snapshot := range frame.Chain {
-			content[snapshot.ContractSHA256] = struct{}{}
-			content[snapshot.QuoteSHA256] = struct{}{}
-			content[snapshot.SnapshotSHA256] = struct{}{}
+		frameEvidence := append([]data.ManifestPayloadReceipt{frame.UnderlyingReceipt}, frame.Receipt.Observations...)
+		for _, observation := range frameEvidence {
+			if prior, exists := evidenceByID[observation.PayloadID]; exists && prior != observation {
+				return nil, fmt.Errorf("options/historical: payload receipt changes within evaluation interval")
+			}
+			evidenceByID[observation.PayloadID] = observation
+			content[observation.ContentSHA256] = struct{}{}
 		}
 
 		closeValue, closeFees, pnl := 0.0, 0.0, 0.0
@@ -176,6 +193,20 @@ func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRules
 		result.PayloadSHA256 = append(result.PayloadSHA256, digest)
 	}
 	sort.Strings(result.PayloadSHA256)
+	result.Evidence = make([]data.ManifestPayloadReceipt, 0, len(evidenceByID))
+	for _, observation := range evidenceByID {
+		result.Evidence = append(result.Evidence, observation)
+	}
+	sort.Slice(result.Evidence, func(i, j int) bool {
+		left, right := result.Evidence[i], result.Evidence[j]
+		if left.PartitionSequence != right.PartitionSequence {
+			return left.PartitionSequence < right.PartitionSequence
+		}
+		if left.ObservationSequence != right.ObservationSequence {
+			return left.ObservationSequence < right.ObservationSequence
+		}
+		return left.PayloadID.String() < right.PayloadID.String()
+	})
 	return result, nil
 }
 
