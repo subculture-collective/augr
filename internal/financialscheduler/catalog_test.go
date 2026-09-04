@@ -26,6 +26,11 @@ func TestCatalogCoversEveryRegisteredAutomationJob(t *testing.T) {
 			t.Fatalf("catalog lacks conditional/dynamic job %q", dynamic)
 		}
 	}
+	for _, conditional := range []string{"generated_proposal", "generated_research_prepare", "generated_research", "generated_evaluation", "generated_robustness", "promotion_evaluation", "promotion_activation"} {
+		if _, exists := catalog[conditional]; !exists {
+			t.Fatalf("catalog lacks conditional job %q", conditional)
+		}
+	}
 }
 
 func TestCatalogCoverageRejectsDrift(t *testing.T) {

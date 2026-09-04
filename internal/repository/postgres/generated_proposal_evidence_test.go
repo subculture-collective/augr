@@ -18,8 +18,10 @@ import (
 func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	fixture := newStrategyCatalogFixture(t)
 	for _, migration := range []string{
-		"000078_reproducible_experiment_runs.up.sql", "000095_typed_generative_strategy_compiler.up.sql",
-		"000106_paper_evaluation_scopes.up.sql", "000110_immutable_market_payloads.up.sql",
+		"000078_reproducible_experiment_runs.up.sql", "000079_trade_portfolio_evaluations.up.sql",
+		"000080_statistical_robustness_assessments.up.sql", "000095_typed_generative_strategy_compiler.up.sql",
+		"000106_paper_evaluation_scopes.up.sql", "000107_robustness_assessment_scope.up.sql",
+		"000110_immutable_market_payloads.up.sql",
 	} {
 		if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, migration)); err != nil {
 			t.Fatalf("apply %s: %v", migration, err)
@@ -218,6 +220,10 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 		if item.Prepared == nil || !item.Prepared.Experiment.EvaluationStart().Equal(fold.TestStart) || !item.Prepared.Experiment.EvaluationEnd().Equal(fold.TestEnd) {
 			t.Fatalf("eligible research[%d]=%+v", index, item)
 		}
+	}
+	robustnessItems, err := repo.ListEligibleGeneratedRobustness(fixture.ctx, fixture.account.ID, scope.ID, 20)
+	if err != nil || len(robustnessItems) != 0 {
+		t.Fatalf("incomplete robustness items=%+v error=%v", robustnessItems, err)
 	}
 	outsideReviewedFold := preparations[0].Request
 	outsideReviewedFold.EvaluationStart = start

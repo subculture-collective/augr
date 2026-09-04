@@ -1255,6 +1255,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				var generatedResearch *generativestrategy.BatchService
 				var generatedResearchPreparation *generativestrategy.PreparationBatchService
 				var generatedEvaluation *generativestrategy.EvaluationBatchService
+				var generatedRobustness *generativestrategy.RobustnessBatchService
 				var generatedProposal *generativestrategy.ProposalBatchService
 				if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
 					generatedRepo := pgrepo.NewGenerativeStrategyRepo(db.Pool)
@@ -1265,6 +1266,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 					generatedResearchPreparation, constructErr = generativestrategy.NewPreparationBatchService(generatedRepo, researchPreparer)
 					if constructErr != nil {
 						return nil, nil, nil, fmt.Errorf("construct generated research preparation batch: %w", constructErr)
+					}
+					generatedRobustness, constructErr = generativestrategy.NewRobustnessBatchService(generatedRepo, pgrepo.NewRobustnessRepo(db.Pool))
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated robustness batch: %w", constructErr)
 					}
 					if deps.LLMProvider != nil && len(sourceCommit) == 40 && len(sourceTreeSHA256) == 64 {
 						family, constructErr := generativestrategy.ReviewedDailyStockFamily()
@@ -1412,6 +1417,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						GeneratedResearch:            generatedResearch,
 						GeneratedResearchPreparation: generatedResearchPreparation,
 						GeneratedEvaluation:          generatedEvaluation,
+						GeneratedRobustness:          generatedRobustness,
 						GeneratedProposal:            generatedProposal,
 						PromotionEvaluation:          pgrepo.NewPromotionRepo(db.Pool),
 						PromotionAccountSource:       accountRepo,
