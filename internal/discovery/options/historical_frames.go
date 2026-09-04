@@ -17,9 +17,10 @@ import (
 // HistoricalOptionFrame binds an immutable underlying observation to the
 // complete option chain that was knowable at that observation's decision time.
 type HistoricalOptionFrame struct {
-	DecisionAt time.Time               `json:"decision_at"`
-	Underlying domain.OHLCV            `json:"underlying"`
-	Chain      []domain.OptionSnapshot `json:"chain"`
+	DecisionAt time.Time                       `json:"decision_at"`
+	Underlying domain.OHLCV                    `json:"underlying"`
+	Chain      []domain.OptionSnapshot         `json:"chain"`
+	Receipt    data.ManifestOptionChainReceipt `json:"receipt"`
 }
 
 // LoadManifestBoundOptionFrames constructs a deterministic, no-lookahead
@@ -60,12 +61,16 @@ func LoadManifestBoundOptionFrames(
 		}
 	}
 
+	evidenceReader, ok := reader.(data.ManifestBoundOptionChainEvidenceReader)
+	if !ok {
+		return nil, fmt.Errorf("options/historical: manifest-bound reader does not expose immutable observation receipts")
+	}
 	frames := make([]HistoricalOptionFrame, 0, len(selected))
 	for _, bar := range selected {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		chain, err := reader.GetOptionsChainAt(ctx, underlying, bar.Timestamp)
+		chain, receipt, err := evidenceReader.GetOptionsChainAtWithReceipt(ctx, underlying, bar.Timestamp)
 		if err != nil {
 			return nil, fmt.Errorf("options/historical: load chain at %s: %w", bar.Timestamp.Format(time.RFC3339Nano), err)
 		}
@@ -78,9 +83,49 @@ func LoadManifestBoundOptionFrames(
 		if err := validateHistoricalChain(underlying, bar.Timestamp, active); err != nil {
 			return nil, err
 		}
-		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: bar, Chain: active})
+		if err := validateHistoricalReceipt(bar.Timestamp, active, receipt); err != nil {
+			return nil, err
+		}
+		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: bar, Chain: active, Receipt: receipt})
 	}
 	return frames, nil
+}
+
+func validateHistoricalReceipt(decisionAt time.Time, chain []domain.OptionSnapshot, receipt data.ManifestOptionChainReceipt) error {
+	if receipt.ScopeID == uuid.Nil || receipt.AccountID == uuid.Nil || receipt.ManifestID == uuid.Nil ||
+		receipt.QualityResultID == uuid.Nil || !validHistoricalSHA(receipt.ManifestSHA256) ||
+		!validHistoricalSHA(receipt.QualitySHA256) || !receipt.DecisionAt.Equal(decisionAt) ||
+		!canonicalDecisionTime(receipt.DecisionAt) || !canonicalDecisionTime(receipt.DecisionCutoff) ||
+		receipt.DecisionAt.After(receipt.DecisionCutoff) || len(receipt.Observations) != len(chain)*3 {
+		return fmt.Errorf("options/historical: option chain receipt does not reconstruct at %s", decisionAt.Format(time.RFC3339Nano))
+	}
+	seen := make(map[uuid.UUID]struct{}, len(receipt.Observations))
+	for index, snapshot := range chain {
+		expected := []struct {
+			kind   string
+			id     uuid.UUID
+			digest string
+		}{
+			{kind: "option_contract", id: snapshot.ContractPayloadID, digest: snapshot.ContractSHA256},
+			{kind: "option_quote", id: snapshot.QuotePayloadID, digest: snapshot.QuoteSHA256},
+			{kind: "option_snapshot", id: snapshot.SnapshotPayloadID, digest: snapshot.SnapshotSHA256},
+		}
+		for offset, want := range expected {
+			observation := receipt.Observations[index*3+offset]
+			if observation.PayloadID != want.id || observation.PayloadKind != want.kind || observation.ContentSHA256 != want.digest ||
+				observation.PartitionSequence < 0 || !validHistoricalSHA(observation.PartitionContentSHA256) ||
+				observation.ObservationSequence < 0 || strings.TrimSpace(observation.SourceKey) == "" ||
+				!canonicalDecisionTime(observation.EffectiveAt) || !canonicalDecisionTime(observation.AvailableAt) ||
+				observation.AvailableAt.After(decisionAt) {
+				return fmt.Errorf("options/historical: option chain receipt payload does not reconstruct for %q", snapshot.Contract.OCCSymbol)
+			}
+			if _, exists := seen[observation.PayloadID]; exists {
+				return fmt.Errorf("options/historical: option chain receipt repeats payload %s", observation.PayloadID)
+			}
+			seen[observation.PayloadID] = struct{}{}
+		}
+	}
+	return nil
 }
 
 func validateHistoricalChain(underlying string, decisionAt time.Time, chain []domain.OptionSnapshot) error {

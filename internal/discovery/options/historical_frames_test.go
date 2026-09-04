@@ -3,12 +3,14 @@ package options
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
@@ -24,6 +26,38 @@ func (stub *historicalChainReaderStub) GetOptionsChainAt(_ context.Context, _ st
 		return nil, stub.err
 	}
 	return stub.chains[at], nil
+}
+
+func (stub *historicalChainReaderStub) GetOptionsChainAtWithReceipt(ctx context.Context, underlying string, at time.Time) ([]domain.OptionSnapshot, data.ManifestOptionChainReceipt, error) {
+	chain, err := stub.GetOptionsChainAt(ctx, underlying, at)
+	if err != nil {
+		return nil, data.ManifestOptionChainReceipt{}, err
+	}
+	receipt := data.ManifestOptionChainReceipt{
+		ScopeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("scope")), AccountID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("account")),
+		ManifestID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("manifest")), ManifestSHA256: strings.Repeat("d", 64),
+		QualityResultID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("quality")), QualitySHA256: strings.Repeat("e", 64),
+		DecisionAt: at, DecisionCutoff: at,
+	}
+	for index, snapshot := range chain {
+		for offset, value := range []struct {
+			kind   string
+			id     uuid.UUID
+			digest string
+		}{
+			{"option_contract", snapshot.ContractPayloadID, snapshot.ContractSHA256},
+			{"option_quote", snapshot.QuotePayloadID, snapshot.QuoteSHA256},
+			{"option_snapshot", snapshot.SnapshotPayloadID, snapshot.SnapshotSHA256},
+		} {
+			receipt.Observations = append(receipt.Observations, data.ManifestPayloadReceipt{
+				PayloadID: value.id, PayloadKind: value.kind, PartitionSequence: offset,
+				PartitionContentSHA256: strings.Repeat(string(rune('f'-offset)), 64), ObservationSequence: index,
+				SourceKey: fmt.Sprintf("%s/%d", snapshot.Contract.OCCSymbol, offset), ContentSHA256: value.digest,
+				EffectiveAt: at, AvailableAt: at,
+			})
+		}
+	}
+	return chain, receipt, nil
 }
 
 func TestLoadManifestBoundOptionFramesUsesEachCanonicalDecisionTime(t *testing.T) {
