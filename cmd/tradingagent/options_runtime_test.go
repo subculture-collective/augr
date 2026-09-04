@@ -19,7 +19,10 @@ func runtimeOptionSnapshot(symbol string, optionType domain.OptionType, delta, b
 	}
 	contract.OptionType = optionType
 	contract.Expiry = expiry
-	return domain.OptionSnapshot{Contract: *contract, Greeks: domain.OptionGreeks{Delta: delta, IV: 0.25}, Bid: bid, Ask: ask, OpenInterest: 100, Volume: 20}
+	return domain.OptionSnapshot{
+		Contract: *contract, Greeks: domain.OptionGreeks{Delta: delta, IV: 0.25}, Bid: bid, BidSize: 20, Ask: ask, AskSize: 20,
+		OpenInterest: 100, Volume: 20, ObservedAt: expiry.AddDate(0, -1, 0), QuoteObservedAt: expiry.AddDate(0, -1, 0),
+	}
 }
 
 func TestBuildPaperSingleLegPlanSelectsExecutableContract(t *testing.T) {
@@ -91,6 +94,9 @@ func TestBuildPaperDebitSpreadPlanUsesExecutableSides(t *testing.T) {
 	}
 	if quantity != 3 || spread.MaxRisk != 300 || spread.MaxReward != 200 {
 		t.Fatalf("unexpected spread sizing: quantity=%v spread=%+v", quantity, spread)
+	}
+	if spread.LiquidityUSD != 6000 || spread.SpreadPct <= 0 {
+		t.Fatalf("spread liquidity evidence = %+v", spread)
 	}
 }
 

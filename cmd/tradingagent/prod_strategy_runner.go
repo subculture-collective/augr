@@ -377,6 +377,8 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 			if err != nil {
 				return canonical, err
 			}
+			tradingPlan.Depth = opportunitySpread.LiquidityUSD
+			tradingPlan.Spread = opportunitySpread.SpreadPct
 		} else {
 			if err := r.executeOptionsSignal(ctx, scope, strategy, finalSignal); err != nil {
 				return canonical, err
@@ -794,9 +796,11 @@ func buildPaperDebitSpreadPlan(cfg *rules.OptionsRulesConfig, chain []domain.Opt
 		}
 		leg.Bid = snapshot.Bid
 		leg.Ask = snapshot.Ask
-		leg.QuoteObservedAt = snapshot.ObservedAt
-		if spread.QuoteObservedAt.IsZero() || (!snapshot.ObservedAt.IsZero() && snapshot.ObservedAt.Before(spread.QuoteObservedAt)) {
-			spread.QuoteObservedAt = snapshot.ObservedAt
+		leg.BidSize = snapshot.BidSize
+		leg.AskSize = snapshot.AskSize
+		leg.QuoteObservedAt = snapshot.QuoteObservedAt
+		if spread.QuoteObservedAt.IsZero() || (!snapshot.QuoteObservedAt.IsZero() && snapshot.QuoteObservedAt.Before(spread.QuoteObservedAt)) {
+			spread.QuoteObservedAt = snapshot.QuoteObservedAt
 		}
 		leg.Greeks = snapshot.Greeks
 		minStrike = math.Min(minStrike, leg.Contract.Strike)
@@ -818,6 +822,10 @@ func buildPaperDebitSpreadPlan(cfg *rules.OptionsRulesConfig, chain []domain.Opt
 	if spread.MaxReward <= 0 {
 		return nil, 0, errors.New("options runtime: debit vertical has no finite positive max reward")
 	}
+	spread.LiquidityUSD, spread.SpreadPct = optionSpreadLiquidity(spread)
+	if spread.LiquidityUSD <= 0 || spread.SpreadPct <= 0 || math.IsNaN(spread.SpreadPct) || math.IsInf(spread.SpreadPct, 0) {
+		return nil, 0, errors.New("options runtime: vertical lacks executable quote depth or spread evidence")
+	}
 	quantity := 0.0
 	switch cfg.PositionSizing.Method {
 	case "fixed_contracts":
@@ -831,6 +839,31 @@ func buildPaperDebitSpreadPlan(cfg *rules.OptionsRulesConfig, chain []domain.Opt
 		return nil, 0, errors.New("options runtime: sizing budget cannot purchase one spread")
 	}
 	return spread, quantity, nil
+}
+
+func optionSpreadLiquidity(spread *domain.OptionSpread) (float64, float64) {
+	if spread == nil || len(spread.Legs) != 2 || spread.MaxRisk <= 0 {
+		return 0, 0
+	}
+	availableContracts := math.Inf(1)
+	var netMid, quoteWidth float64
+	for _, leg := range spread.Legs {
+		size := leg.AskSize
+		sign := 1.0
+		if leg.Side == domain.OrderSideSell {
+			size, sign = leg.BidSize, -1
+		}
+		if size <= 0 || leg.Bid <= 0 || leg.Ask < leg.Bid {
+			return 0, 0
+		}
+		availableContracts = math.Min(availableContracts, size/float64(leg.Ratio))
+		netMid += sign * ((leg.Bid + leg.Ask) / 2) * float64(leg.Ratio)
+		quoteWidth += (leg.Ask - leg.Bid) * float64(leg.Ratio)
+	}
+	if availableContracts <= 0 || math.IsInf(availableContracts, 1) || netMid == 0 || quoteWidth <= 0 {
+		return 0, 0
+	}
+	return math.Floor(availableContracts) * spread.MaxRisk, quoteWidth / math.Abs(netMid)
 }
 
 func selectedLegSnapshot(selected map[string]*domain.OptionSnapshot, symbol string) *domain.OptionSnapshot {

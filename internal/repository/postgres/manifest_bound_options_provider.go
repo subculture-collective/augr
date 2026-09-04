@@ -50,7 +50,8 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 		return nil, fmt.Errorf("manifest-bound options evidence: %s", report.Options.Reason)
 	}
 	rows, err := provider.pool.Query(ctx, `SELECT snapshot.id,snapshot.content_sha256,snapshot.canonical_bytes,
-		contract.id,contract.content_sha256,contract.canonical_bytes
+		contract.id,contract.content_sha256,contract.canonical_bytes,
+		quote.id,quote.content_sha256,quote.canonical_bytes
 		FROM (
 		  SELECT DISTINCT ON (payload.instrument_id) payload.*
 		  FROM dataset_manifest_payload_bindings binding
@@ -65,6 +66,14 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 		    AND payload.instrument_id=snapshot.instrument_id AND payload.available_at<=snapshot.available_at
 		  ORDER BY payload.effective_at DESC,payload.available_at DESC,payload.id DESC LIMIT 1
 		) contract ON true
+		JOIN LATERAL (
+		  SELECT payload.* FROM dataset_manifest_payload_bindings binding
+		  JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
+		  WHERE binding.manifest_id=$1 AND payload.payload_kind='option_quote'
+		    AND payload.instrument_id=snapshot.instrument_id AND payload.effective_at<=snapshot.effective_at
+		    AND payload.available_at<=snapshot.available_at
+		  ORDER BY payload.effective_at DESC,payload.available_at DESC,payload.id DESC LIMIT 1
+		) quote ON true
 		ORDER BY snapshot.symbol`, report.ManifestID, underlying)
 	if err != nil {
 		return nil, fmt.Errorf("query manifest-bound option chain: %w", err)
@@ -72,10 +81,10 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 	defer rows.Close()
 	result := make([]domain.OptionSnapshot, 0)
 	for rows.Next() {
-		var snapshotID, contractID uuid.UUID
-		var snapshotDigest, contractDigest string
-		var snapshotRaw, contractRaw []byte
-		if err := rows.Scan(&snapshotID, &snapshotDigest, &snapshotRaw, &contractID, &contractDigest, &contractRaw); err != nil {
+		var snapshotID, contractID, quoteID uuid.UUID
+		var snapshotDigest, contractDigest, quoteDigest string
+		var snapshotRaw, contractRaw, quoteRaw []byte
+		if err := rows.Scan(&snapshotID, &snapshotDigest, &snapshotRaw, &contractID, &contractDigest, &contractRaw, &quoteID, &quoteDigest, &quoteRaw); err != nil {
 			return nil, fmt.Errorf("scan manifest-bound option chain: %w", err)
 		}
 		snapshotPayload, err := dataset.MarketPayloadFromCanonical(snapshotID, snapshotDigest, snapshotRaw)
@@ -86,9 +95,16 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 		if err != nil {
 			return nil, fmt.Errorf("reconstruct option contract: %w", err)
 		}
-		contractBody, snapshotBody := contractPayload.Contract(), snapshotPayload.Snapshot()
+		quotePayload, err := dataset.MarketPayloadFromCanonical(quoteID, quoteDigest, quoteRaw)
+		if err != nil {
+			return nil, fmt.Errorf("reconstruct option quote: %w", err)
+		}
+		contractBody, snapshotBody, quoteBody := contractPayload.Contract(), snapshotPayload.Snapshot(), quotePayload.Quote()
 		if contractBody == nil || snapshotBody == nil || contractPayload.InstrumentID() != snapshotPayload.InstrumentID() {
 			return nil, fmt.Errorf("manifest-bound option snapshot and contract do not reconstruct")
+		}
+		if quoteBody == nil || quotePayload.InstrumentID() != snapshotPayload.InstrumentID() || *quoteBody != snapshotBody.Quote {
+			return nil, fmt.Errorf("manifest-bound option snapshot and exact quote do not reconstruct")
 		}
 		parsedExpiry, err := time.Parse("2006-01-02", contractBody.Expiry)
 		if err != nil {
@@ -114,7 +130,19 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 		if err != nil {
 			return nil, err
 		}
+		bidSize, err := parseDatasetFloat(snapshotBody.Quote.BidSize)
+		if err != nil {
+			return nil, err
+		}
+		askSize, err := parseDatasetFloat(snapshotBody.Quote.AskSize)
+		if err != nil {
+			return nil, err
+		}
 		last, err := parseDatasetFloat(snapshotBody.LastTradePrice)
+		if err != nil {
+			return nil, err
+		}
+		lastSize, err := parseDatasetFloat(snapshotBody.LastTradeSize)
 		if err != nil {
 			return nil, err
 		}
@@ -127,7 +155,8 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 				InstrumentID: snapshotPayload.InstrumentID(), OCCSymbol: snapshotPayload.Symbol(), Underlying: underlying, OptionType: kind, Strike: strike,
 				Expiry: parsedExpiry, Multiplier: multiplier, Style: contractBody.Style,
 			},
-			Greeks: greeks, Bid: bid, Ask: ask, Mid: (bid + ask) / 2, Last: last, ObservedAt: snapshotPayload.EffectiveAt(),
+			Greeks: greeks, Bid: bid, BidSize: bidSize, Ask: ask, AskSize: askSize, Mid: (bid + ask) / 2, Last: last, LastSize: lastSize,
+			ObservedAt: snapshotPayload.EffectiveAt(), QuoteObservedAt: quotePayload.EffectiveAt(), LastTradeObservedAt: snapshotPayload.EffectiveAt(),
 		})
 	}
 	if err := rows.Err(); err != nil {

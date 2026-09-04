@@ -81,7 +81,9 @@ type SpreadLeg struct {
 	Quantity        float64        `json:"quantity"`
 	ExecutablePrice float64        `json:"executable_price"`
 	Bid             float64        `json:"bid"`
+	BidSize         float64        `json:"bid_size"`
 	Ask             float64        `json:"ask"`
+	AskSize         float64        `json:"ask_size"`
 	QuoteObservedAt time.Time      `json:"quote_observed_at,omitempty"`
 	Greeks          OptionGreeks   `json:"greeks"`
 	ClosePositionID uuid.UUID      `json:"-"`
@@ -116,5 +118,7 @@ type OptionSpread struct {
 	Legs            []SpreadLeg        `json:"legs"`
 	MaxRisk         float64            `json:"max_risk"`
 	MaxReward       float64            `json:"max_reward"`
+	LiquidityUSD    float64            `json:"liquidity_usd"`
+	SpreadPct       float64            `json:"spread_pct"`
 	QuoteObservedAt time.Time          `json:"quote_observed_at,omitempty"`
 }
