@@ -17,10 +17,11 @@ import (
 // HistoricalOptionFrame binds an immutable underlying observation to the
 // complete option chain that was knowable at that observation's decision time.
 type HistoricalOptionFrame struct {
-	DecisionAt time.Time                       `json:"decision_at"`
-	Underlying domain.OHLCV                    `json:"underlying"`
-	Chain      []domain.OptionSnapshot         `json:"chain"`
-	Receipt    data.ManifestOptionChainReceipt `json:"receipt"`
+	DecisionAt        time.Time                       `json:"decision_at"`
+	Underlying        domain.OHLCV                    `json:"underlying"`
+	UnderlyingReceipt data.ManifestPayloadReceipt     `json:"underlying_receipt"`
+	Chain             []domain.OptionSnapshot         `json:"chain"`
+	Receipt           data.ManifestOptionChainReceipt `json:"receipt"`
 }
 
 // LoadManifestBoundOptionFrames constructs a deterministic, no-lookahead
@@ -30,11 +31,12 @@ func LoadManifestBoundOptionFrames(
 	ctx context.Context,
 	reader data.ManifestBoundOptionChainReader,
 	underlying string,
+	timeframe data.Timeframe,
 	bars []domain.OHLCV,
 	start, end time.Time,
 ) ([]HistoricalOptionFrame, error) {
 	underlying = strings.TrimSpace(strings.ToUpper(underlying))
-	if reader == nil || underlying == "" {
+	if reader == nil || underlying == "" || timeframe == "" {
 		return nil, fmt.Errorf("options/historical: manifest-bound reader and underlying are required")
 	}
 	if !canonicalDecisionTime(start) || !canonicalDecisionTime(end) || end.Before(start) {
@@ -61,14 +63,24 @@ func LoadManifestBoundOptionFrames(
 		}
 	}
 
-	evidenceReader, ok := reader.(data.ManifestBoundOptionChainEvidenceReader)
+	evidenceReader, ok := reader.(data.ManifestBoundOptionFrameEvidenceReader)
 	if !ok {
-		return nil, fmt.Errorf("options/historical: manifest-bound reader does not expose immutable observation receipts")
+		return nil, fmt.Errorf("options/historical: manifest-bound reader does not expose complete underlying and chain receipts")
 	}
 	frames := make([]HistoricalOptionFrame, 0, len(selected))
 	for _, bar := range selected {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		boundBar, underlyingReceipt, err := evidenceReader.GetUnderlyingBarAtWithReceipt(ctx, underlying, timeframe, bar.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("options/historical: load underlying at %s: %w", bar.Timestamp.Format(time.RFC3339Nano), err)
+		}
+		if boundBar != bar {
+			return nil, fmt.Errorf("options/historical: underlying observation does not reconstruct at %s", bar.Timestamp.Format(time.RFC3339Nano))
+		}
+		if err := validateUnderlyingReceipt(bar.Timestamp, underlyingReceipt); err != nil {
+			return nil, fmt.Errorf("options/historical: underlying observation does not reconstruct at %s: %w", bar.Timestamp.Format(time.RFC3339Nano), err)
 		}
 		chain, receipt, err := evidenceReader.GetOptionsChainAtWithReceipt(ctx, underlying, bar.Timestamp)
 		if err != nil {
@@ -86,9 +98,20 @@ func LoadManifestBoundOptionFrames(
 		if err := validateHistoricalReceipt(bar.Timestamp, active, receipt); err != nil {
 			return nil, err
 		}
-		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: bar, Chain: active, Receipt: receipt})
+		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: boundBar, UnderlyingReceipt: underlyingReceipt, Chain: active, Receipt: receipt})
 	}
 	return frames, nil
+}
+
+func validateUnderlyingReceipt(decisionAt time.Time, receipt data.ManifestPayloadReceipt) error {
+	if receipt.PayloadID == uuid.Nil || receipt.PayloadKind != "stock_bar" || receipt.PartitionSequence < 0 ||
+		!validHistoricalSHA(receipt.PartitionContentSHA256) || receipt.ObservationSequence < 0 ||
+		strings.TrimSpace(receipt.SourceKey) == "" || !validHistoricalSHA(receipt.ContentSHA256) ||
+		!receipt.EffectiveAt.Equal(decisionAt) || !canonicalDecisionTime(receipt.EffectiveAt) ||
+		!canonicalDecisionTime(receipt.AvailableAt) || receipt.AvailableAt.After(decisionAt) {
+		return fmt.Errorf("underlying receipt is invalid")
+	}
+	return nil
 }
 
 func validateHistoricalReceipt(decisionAt time.Time, chain []domain.OptionSnapshot, receipt data.ManifestOptionChainReceipt) error {

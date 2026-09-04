@@ -214,7 +214,7 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 			result.Errors = append(result.Errors, fmt.Sprintf("insufficient bars for %s: %d", candidate.Ticker, len(bars)))
 			continue
 		}
-		frames, frameErr := LoadManifestBoundOptionFrames(ctx, deps.HistoricalReader, candidate.Ticker, bars, evaluationStart, evaluationEnd)
+		frames, frameErr := LoadManifestBoundOptionFrames(ctx, deps.HistoricalReader, candidate.Ticker, data.Timeframe1d, bars, evaluationStart, evaluationEnd)
 		if frameErr != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("bind historical options %s: %v", candidate.Ticker, frameErr))
 			continue

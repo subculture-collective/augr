@@ -82,6 +82,14 @@ type ManifestBoundOptionChainEvidenceReader interface {
 	GetOptionsChainAtWithReceipt(context.Context, string, time.Time) ([]domain.OptionSnapshot, ManifestOptionChainReceipt, error)
 }
 
+// ManifestBoundOptionFrameEvidenceReader also reconstructs the underlying bar
+// consumed by an options decision. A chain receipt alone is insufficient when
+// signals depend on underlying-price indicators.
+type ManifestBoundOptionFrameEvidenceReader interface {
+	ManifestBoundOptionChainEvidenceReader
+	GetUnderlyingBarAtWithReceipt(context.Context, string, Timeframe, time.Time) (domain.OHLCV, ManifestPayloadReceipt, error)
+}
+
 type ManifestBoundSymbolLoader interface {
 	LoadSymbol(context.Context, uuid.UUID, string, Timeframe, time.Time, time.Time) ([]domain.OHLCV, ManifestBindingReceipt, error)
 }

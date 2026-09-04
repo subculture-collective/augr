@@ -80,6 +80,66 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChainAtWithReceipt(ctx c
 	return provider.loadOptionsChain(ctx, underlying, time.Time{}, "", decisionAt)
 }
 
+func (provider *ManifestBoundOptionsProvider) GetUnderlyingBarAtWithReceipt(ctx context.Context, symbol string, timeframe data.Timeframe, decisionAt time.Time) (domain.OHLCV, data.ManifestPayloadReceipt, error) {
+	var bar domain.OHLCV
+	var empty data.ManifestPayloadReceipt
+	if provider == nil || provider.pool == nil || provider.reports == nil || provider.scopeID == uuid.Nil || provider.accountID == uuid.Nil || symbol == "" || timeframe == "" ||
+		decisionAt.Location() != time.UTC || !decisionAt.Equal(decisionAt.Truncate(time.Microsecond)) {
+		return bar, empty, fmt.Errorf("manifest-bound underlying bar requires scope, account, symbol, timeframe, and canonical decision time")
+	}
+	report, err := provider.reports.DiscoveryDeploymentReadinessForScope(ctx, provider.scopeID, provider.accountID)
+	if err != nil {
+		return bar, empty, err
+	}
+	if !report.Stock.Ready || decisionAt.Before(report.EvaluationStart) || decisionAt.After(report.EvaluationEnd) || decisionAt.After(report.DecisionCutoff) {
+		return bar, empty, fmt.Errorf("manifest-bound underlying evidence is not ready at the requested decision time")
+	}
+	rows, err := provider.pool.Query(ctx, `SELECT payload.id,payload.content_sha256,payload.canonical_bytes,
+		binding.partition_sequence,observation.partition_content_sha256,binding.observation_sequence,observation.source_key,payload.effective_at,payload.available_at
+		FROM dataset_manifest_payload_bindings binding
+		JOIN dataset_market_payloads payload ON payload.id=binding.payload_id AND payload.content_sha256=binding.content_sha256
+		JOIN dataset_manifest_observations observation ON observation.manifest_id=binding.manifest_id
+		  AND observation.partition_sequence=binding.partition_sequence AND observation.sequence=binding.observation_sequence
+		WHERE binding.manifest_id=$1 AND payload.payload_kind='stock_bar' AND payload.symbol=$2 AND payload.timeframe=$3
+		  AND payload.effective_at=$4 AND payload.available_at<=$4
+		ORDER BY payload.available_at DESC,payload.id DESC`, report.ManifestID, symbol, timeframe.String(), decisionAt)
+	if err != nil {
+		return bar, empty, fmt.Errorf("query manifest-bound underlying observation: %w", err)
+	}
+	defer rows.Close()
+	var evidence manifestOptionPayloadEvidence
+	count := 0
+	for rows.Next() {
+		count++
+		if count > 1 {
+			return bar, empty, fmt.Errorf("manifest-bound underlying decision resolves to multiple observations")
+		}
+		if err := rows.Scan(evidence.scanTargets()...); err != nil {
+			return bar, empty, fmt.Errorf("scan manifest-bound underlying observation: %w", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return bar, empty, err
+	}
+	if count != 1 {
+		return bar, empty, fmt.Errorf("manifest-bound underlying decision resolves to %d observations", count)
+	}
+	payload, err := dataset.MarketPayloadFromCanonical(evidence.id, evidence.digest, evidence.raw)
+	if err != nil {
+		return bar, empty, fmt.Errorf("reconstruct manifest-bound underlying observation: %w", err)
+	}
+	metadata := payload.Metadata()
+	if metadata.Kind != dataset.MarketPayloadStockBar || metadata.Symbol != symbol || metadata.Timeframe != timeframe.String() ||
+		metadata.EffectiveAt != decisionAt || metadata.AvailableAt != evidence.availableAt || metadata.AvailableAt.After(decisionAt) {
+		return bar, empty, fmt.Errorf("manifest-bound underlying observation metadata does not reconstruct")
+	}
+	bar, err = marketPayloadBar(metadata.EffectiveAt, payload.Bar())
+	if err != nil {
+		return domain.OHLCV{}, empty, err
+	}
+	return bar, evidence.receipt(dataset.MarketPayloadStockBar), nil
+}
+
 func (provider *ManifestBoundOptionsProvider) loadOptionsChain(ctx context.Context, underlying string, expiry time.Time, optionType domain.OptionType, decisionAt time.Time) ([]domain.OptionSnapshot, data.ManifestOptionChainReceipt, error) {
 	var receipt data.ManifestOptionChainReceipt
 	if provider == nil || provider.pool == nil || provider.reports == nil || provider.scopeID == uuid.Nil || provider.accountID == uuid.Nil || underlying == "" {
@@ -280,3 +340,4 @@ func parseDatasetFloat(value string) (float64, error) {
 var _ data.OptionsDataProvider = (*ManifestBoundOptionsProvider)(nil)
 var _ data.ManifestBoundOptionChainReader = (*ManifestBoundOptionsProvider)(nil)
 var _ data.ManifestBoundOptionChainEvidenceReader = (*ManifestBoundOptionsProvider)(nil)
+var _ data.ManifestBoundOptionFrameEvidenceReader = (*ManifestBoundOptionsProvider)(nil)
