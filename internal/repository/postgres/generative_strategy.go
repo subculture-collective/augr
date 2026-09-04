@@ -17,6 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/economicid"
 	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
+	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
@@ -56,6 +57,31 @@ func (r *GenerativeStrategyRepo) RegisterSimulationPolicy(ctx context.Context, a
 		return nil, fmt.Errorf("postgres: generated simulation policy repository is not configured")
 	}
 	return NewSimulationPolicyRepo(r.pool).RegisterSimulationPolicy(ctx, artifact)
+}
+
+func (r *GenerativeStrategyRepo) RegisterPortfolioRiskPolicy(ctx context.Context, policy *portfolio.PortfolioRiskPolicy) error {
+	if r == nil || r.pool == nil {
+		return fmt.Errorf("postgres: generated portfolio risk policy repository is not configured")
+	}
+	return NewPortfolioRiskRepo(r.pool, uuid.Nil).RegisterPolicy(ctx, policy)
+}
+
+func (r *GenerativeStrategyRepo) BindPortfolioRiskPolicy(ctx context.Context, capitalBindingID uuid.UUID, policy *portfolio.PortfolioRiskPolicy, effectiveAt time.Time) (uuid.UUID, error) {
+	if r == nil || r.pool == nil {
+		return uuid.Nil, fmt.Errorf("postgres: generated portfolio risk binding repository is not configured")
+	}
+	var accountID uuid.UUID
+	if err := r.pool.QueryRow(ctx, `SELECT account_id FROM account_capital_policy_bindings WHERE id=$1`, capitalBindingID).Scan(&accountID); err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: load generated deployment capital account: %w", err)
+	}
+	return NewPortfolioRiskRepo(r.pool, accountID).BindPolicy(ctx, capitalBindingID, policy, effectiveAt)
+}
+
+func (r *GenerativeStrategyRepo) ProposeGeneratedDeployment(ctx context.Context, deployment *strategycatalog.Deployment) (*strategycatalog.Deployment, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("postgres: generated deployment repository is not configured")
+	}
+	return NewStrategyCatalogRepo(r.pool).ProposeStrategyDeployment(ctx, deployment)
 }
 
 func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearch(

@@ -225,6 +225,10 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	if err != nil || len(robustnessItems) != 0 {
 		t.Fatalf("incomplete robustness items=%+v error=%v", robustnessItems, err)
 	}
+	deploymentItems, err := repo.ListEligibleGeneratedDeployments(fixture.ctx, fixture.account.ID, scope.ID, 20)
+	if err != nil || len(deploymentItems) != 0 {
+		t.Fatalf("premature deployment items=%+v error=%v", deploymentItems, err)
+	}
 	outsideReviewedFold := preparations[0].Request
 	outsideReviewedFold.EvaluationStart = start
 	outsideReviewedFold.EvaluationEnd = end
