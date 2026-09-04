@@ -18,6 +18,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
@@ -48,6 +49,13 @@ func (r *GenerativeStrategyRepo) RegisterStrategyVersion(ctx context.Context, ve
 		return nil, fmt.Errorf("postgres: generated strategy version repository is not configured")
 	}
 	return NewStrategyCatalogRepo(r.pool).RegisterStrategyVersion(ctx, version)
+}
+
+func (r *GenerativeStrategyRepo) RegisterSimulationPolicy(ctx context.Context, artifact *simulation.PolicyArtifact) (*simulation.PolicyArtifact, error) {
+	if r == nil || r.pool == nil {
+		return nil, fmt.Errorf("postgres: generated simulation policy repository is not configured")
+	}
+	return NewSimulationPolicyRepo(r.pool).RegisterSimulationPolicy(ctx, artifact)
 }
 
 func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearch(

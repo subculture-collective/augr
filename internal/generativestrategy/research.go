@@ -9,11 +9,13 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
+	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
 type ResearchStore interface {
 	GetCompilation(context.Context, uuid.UUID) (*Spec, *strategycatalog.Version, *Receipt, error)
+	RegisterSimulationPolicy(context.Context, *simulation.PolicyArtifact) (*simulation.PolicyArtifact, error)
 	RegisterScenario(context.Context, *Scenario) (*Scenario, error)
 	DeclareResearchExperiment(context.Context, *strategycatalog.Experiment) (*strategycatalog.Experiment, error)
 }
@@ -28,22 +30,23 @@ func NewResearchPreparer(store ResearchStore) (*ResearchPreparer, error) {
 }
 
 type ResearchRequest struct {
-	SpecID                  uuid.UUID
-	ExpectedVersionID       uuid.UUID
-	Dataset                 *dataset.BoundMarketDataset
-	QualityResultID         uuid.UUID
-	DatasetQuarantined      bool
-	AccountID               uuid.UUID
-	CapitalBindingID        uuid.UUID
-	SimulationPolicyVersion string
-	CapitalPolicyVersion    string
-	Mode                    strategycatalog.ExperimentMode
-	EvaluationStart         time.Time
-	EvaluationEnd           time.Time
-	Seed                    int64
-	ExecutionInput          string
-	VenueContractIDs        map[uuid.UUID]uuid.UUID
-	MaximumFrames           int
+	SpecID                   uuid.UUID
+	ExpectedVersionID        uuid.UUID
+	Dataset                  *dataset.BoundMarketDataset
+	QualityResultID          uuid.UUID
+	DatasetQuarantined       bool
+	AccountID                uuid.UUID
+	CapitalBindingID         uuid.UUID
+	SimulationPolicyVersion  string
+	SimulationPolicyArtifact *simulation.PolicyArtifact
+	CapitalPolicyVersion     string
+	Mode                     strategycatalog.ExperimentMode
+	EvaluationStart          time.Time
+	EvaluationEnd            time.Time
+	Seed                     int64
+	ExecutionInput           string
+	VenueContractIDs         map[uuid.UUID]uuid.UUID
+	MaximumFrames            int
 }
 
 type PreparedResearch struct {
@@ -131,6 +134,18 @@ func (preparer *ResearchPreparer) Prepare(ctx context.Context, request ResearchR
 	}
 	if spec == nil || version == nil || receipt == nil || spec.ID() != request.SpecID || version.ID() != request.ExpectedVersionID || receipt.SpecID() != spec.ID() || receipt.VersionID() != version.ID() {
 		return nil, fmt.Errorf("generated strategy compilation does not match the requested identities")
+	}
+	if request.SimulationPolicyArtifact != nil {
+		if request.SimulationPolicyArtifact.Version != request.SimulationPolicyVersion {
+			return nil, fmt.Errorf("generated strategy simulation policy artifact does not match its requested version")
+		}
+		artifact, registerErr := preparer.store.RegisterSimulationPolicy(ctx, request.SimulationPolicyArtifact)
+		if registerErr != nil {
+			return nil, fmt.Errorf("record generated strategy simulation policy: %w", registerErr)
+		}
+		if artifact == nil || !simulation.SamePolicyArtifactPayload(artifact, request.SimulationPolicyArtifact) {
+			return nil, fmt.Errorf("recorded generated strategy simulation policy diverged")
+		}
 	}
 	scenario, err := BuildScenarioFromDataset(ScenarioBuildRequest{
 		Spec: spec, Dataset: request.Dataset, Mode: request.Mode,

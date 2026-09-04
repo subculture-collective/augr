@@ -13,6 +13,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
+	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
@@ -59,16 +60,8 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearchPreparations(
 		JOIN generated_strategy_specs spec ON spec.spec_key=$3 AND spec.family_id=$4
 		JOIN generated_strategy_compilation_receipts receipt ON receipt.spec_id=spec.id
 		WHERE scope.id=$1 AND scope.account_id=$2
-		  AND NOT EXISTS(
-			SELECT 1 FROM research_experiments experiment
-			WHERE experiment.version_id=receipt.version_id AND experiment.account_id=scope.account_id
-			  AND experiment.capital_binding_id=binding.id AND experiment.manifest_id=manifest.id
-			  AND experiment.quality_result_id=quality.id AND experiment.simulation_policy_version=simulation.policy_version
-			  AND experiment.capital_policy_version=capital.policy_version AND experiment.mode='paper_scored'
-			  AND experiment.evaluation_start=scope.evaluation_start AND experiment.evaluation_end=scope.evaluation_end
-		  )
 		ORDER BY spec.created_at,spec.id
-		LIMIT $5`, scopeID, accountID, expectedSpecKey, family.ID(), limit)
+		LIMIT 1`, scopeID, accountID, expectedSpecKey, family.ID())
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list exact generated research preparations: %w", err)
 	}
@@ -87,7 +80,7 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearchPreparations(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: list exact generated research preparations: %w", err)
 	}
-	items := make([]generativestrategy.EligiblePreparation, 0, len(candidates))
+	items := make([]generativestrategy.EligiblePreparation, 0, limit)
 	datasets := NewDatasetRepo(r.pool)
 	for _, candidate := range candidates {
 		spec, version, _, err := r.GetCompilation(ctx, candidate.specID)
@@ -110,21 +103,83 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearchPreparations(
 		if err != nil {
 			return nil, err
 		}
-		seedBytes := sha256.Sum256([]byte(candidate.specID.String() + "\x00" + scopeID.String()))
-		seed := int64(binary.BigEndian.Uint64(seedBytes[:8]) & math.MaxInt64)
-		items = append(items, generativestrategy.EligiblePreparation{
-			Key: candidate.specID.String(),
-			Request: generativestrategy.ResearchRequest{
-				SpecID: candidate.specID, ExpectedVersionID: candidate.versionID, Dataset: bound,
-				QualityResultID: candidate.qualityResultID, DatasetQuarantined: false,
-				AccountID: accountID, CapitalBindingID: candidate.capitalBindingID,
-				SimulationPolicyVersion: candidate.simulationPolicyVersion, CapitalPolicyVersion: candidate.capitalPolicyVersion,
-				Mode: strategycatalog.ExperimentPaperScored, EvaluationStart: report.EvaluationStart, EvaluationEnd: report.EvaluationEnd,
-				Seed: seed, ExecutionInput: executionInput, VenueContractIDs: contracts, MaximumFrames: generatedResearchMaximumFrames,
-			},
-		})
+		baseArtifact, err := NewSimulationPolicyRepo(r.pool).GetSimulationPolicyByVersion(ctx, candidate.simulationPolicyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: load generated preparation simulation policy: %w", err)
+		}
+		basePolicy, err := simulation.PolicyFromArtifact(*baseArtifact)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: reconstruct generated preparation simulation policy: %w", err)
+		}
+		costPolicy, err := simulation.DoubledFeePolicy(basePolicy)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: derive generated preparation cost-up policy: %w", err)
+		}
+		costArtifact, err := costPolicy.NewArtifact(report.DecisionCutoff)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: bind generated preparation cost-up policy: %w", err)
+		}
+		folds, err := generativestrategy.PlanReviewedResearchFolds(report.EvaluationStart, report.EvaluationEnd)
+		if err != nil {
+			return nil, err
+		}
+		variants := []struct {
+			name     string
+			version  string
+			artifact *simulation.PolicyArtifact
+		}{{name: "baseline", version: candidate.simulationPolicyVersion}, {name: "cost_up", version: costArtifact.Version, artifact: costArtifact}}
+		for _, fold := range folds {
+			for _, variant := range variants {
+				if len(items) == limit {
+					return items, nil
+				}
+				exists, err := r.generatedPreparationExperimentExists(ctx, candidate, accountID, fold.TestStart, fold.TestEnd, variant.version)
+				if err != nil {
+					return nil, err
+				}
+				if exists {
+					continue
+				}
+				key := fmt.Sprintf("%s/fold-%d/%s", candidate.specID, fold.Sequence, variant.name)
+				seedBytes := sha256.Sum256([]byte(key + "\x00" + scopeID.String()))
+				seed := int64(binary.BigEndian.Uint64(seedBytes[:8]) & math.MaxInt64)
+				items = append(items, generativestrategy.EligiblePreparation{
+					Key: key,
+					Request: generativestrategy.ResearchRequest{
+						SpecID: candidate.specID, ExpectedVersionID: candidate.versionID, Dataset: bound,
+						QualityResultID: candidate.qualityResultID, DatasetQuarantined: false,
+						AccountID: accountID, CapitalBindingID: candidate.capitalBindingID,
+						SimulationPolicyVersion: variant.version, SimulationPolicyArtifact: variant.artifact,
+						CapitalPolicyVersion: candidate.capitalPolicyVersion, Mode: strategycatalog.ExperimentPaperScored,
+						EvaluationStart: fold.TestStart, EvaluationEnd: fold.TestEnd,
+						Seed: seed, ExecutionInput: executionInput, VenueContractIDs: contracts, MaximumFrames: generatedResearchMaximumFrames,
+					},
+				})
+			}
+		}
 	}
 	return items, nil
+}
+
+func (r *GenerativeStrategyRepo) generatedPreparationExperimentExists(
+	ctx context.Context,
+	candidate generatedPreparationRow,
+	accountID uuid.UUID,
+	start, end time.Time,
+	simulationPolicyVersion string,
+) (bool, error) {
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM research_experiments experiment
+		WHERE experiment.version_id=$1 AND experiment.account_id=$2 AND experiment.capital_binding_id=$3
+		  AND experiment.manifest_id=$4 AND experiment.quality_result_id=$5 AND experiment.simulation_policy_version=$6
+		  AND experiment.capital_policy_version=$7 AND experiment.mode='paper_scored'
+		  AND experiment.evaluation_start=$8 AND experiment.evaluation_end=$9 AND NOT experiment.dataset_quarantined)`,
+		candidate.versionID, accountID, candidate.capitalBindingID, candidate.manifestID, candidate.qualityResultID,
+		simulationPolicyVersion, candidate.capitalPolicyVersion, start, end).Scan(&exists); err != nil {
+		return false, fmt.Errorf("postgres: check generated preparation experiment: %w", err)
+	}
+	return exists, nil
 }
 
 func (r *GenerativeStrategyRepo) generatedPreparationContracts(

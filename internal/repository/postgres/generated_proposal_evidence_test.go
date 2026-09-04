@@ -150,13 +150,36 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := NewGenerativeStrategyRepo(fixture.pool)
-	preparations, err := repo.ListEligibleGeneratedResearchPreparations(fixture.ctx, fixture.account.ID, scope.ID, 1)
+	preparations, err := repo.ListEligibleGeneratedResearchPreparations(fixture.ctx, fixture.account.ID, scope.ID, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(preparations) != 1 || preparations[0].Request.SpecID != proposal.Spec.ID() || preparations[0].Request.ExpectedVersionID != proposal.Version.ID() ||
+	if len(preparations) != 4 || preparations[0].Request.SpecID != proposal.Spec.ID() || preparations[0].Request.ExpectedVersionID != proposal.Version.ID() ||
 		preparations[0].Request.ExecutionInput != "price" || preparations[0].Request.VenueContractIDs[instrumentID] != contract.ID || preparations[0].Request.Dataset.Manifest().ID() != manifest.ID() {
 		t.Fatalf("preparations=%+v", preparations)
+	}
+	wantKeys := []string{
+		proposal.Spec.ID().String() + "/fold-0/baseline",
+		proposal.Spec.ID().String() + "/fold-0/cost_up",
+		proposal.Spec.ID().String() + "/fold-1/baseline",
+		proposal.Spec.ID().String() + "/fold-1/cost_up",
+	}
+	for index, preparation := range preparations {
+		fold := folds[index/2]
+		if preparation.Key != wantKeys[index] || !preparation.Request.EvaluationStart.Equal(fold.TestStart) || !preparation.Request.EvaluationEnd.Equal(fold.TestEnd) {
+			t.Fatalf("preparation[%d]=%+v", index, preparation)
+		}
+		if index%2 == 0 {
+			if preparation.Request.SimulationPolicyArtifact != nil || preparation.Request.SimulationPolicyVersion != fixture.simulation {
+				t.Fatalf("baseline preparation[%d]=%+v", index, preparation)
+			}
+		} else if preparation.Request.SimulationPolicyArtifact == nil || preparation.Request.SimulationPolicyVersion == fixture.simulation ||
+			preparation.Request.SimulationPolicyVersion != preparation.Request.SimulationPolicyArtifact.Version {
+			t.Fatalf("cost-up preparation[%d]=%+v", index, preparation)
+		}
+	}
+	if preparations[1].Request.SimulationPolicyVersion != preparations[3].Request.SimulationPolicyVersion {
+		t.Fatal("folds derived different cost-up policy identities")
 	}
 	if _, err := repo.ListEligibleGeneratedResearchPreparations(fixture.ctx, uuid.New(), scope.ID, 1); err == nil {
 		t.Fatal("cross-account research preparation was accepted")

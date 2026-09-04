@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
+	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
@@ -17,6 +18,12 @@ type researchStoreFixture struct {
 	receipt    *Receipt
 	scenario   *Scenario
 	experiment *strategycatalog.Experiment
+	policy     *simulation.PolicyArtifact
+}
+
+func (store *researchStoreFixture) RegisterSimulationPolicy(_ context.Context, value *simulation.PolicyArtifact) (*simulation.PolicyArtifact, error) {
+	store.policy = value
+	return value, nil
 }
 
 type preparationSourceFixture struct {

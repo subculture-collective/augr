@@ -50,6 +50,45 @@ func TestPolicyVersionIsCanonicalAndContentAddressed(t *testing.T) {
 	}
 }
 
+func TestDoubledFeePolicyChangesOnlyCostsAndPreservesBaseline(t *testing.T) {
+	baseline, err := NewPolicy(validPolicyInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	perturbed, err := DoubledFeePolicy(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineAssets, perturbedAssets := baseline.AssetPolicies(), perturbed.AssetPolicies()
+	if perturbed.Version() == baseline.Version() || len(perturbedAssets) != len(baselineAssets) {
+		t.Fatalf("baseline=%s perturbed=%s", baseline.Version(), perturbed.Version())
+	}
+	for index := range baselineAssets {
+		want := baselineAssets[index].Fees
+		want.PerOrder = want.PerOrder.Mul(decimal.NewFromInt(2))
+		want.PerUnit = want.PerUnit.Mul(decimal.NewFromInt(2))
+		want.NotionalBPS = want.NotionalBPS.Mul(decimal.NewFromInt(2))
+		got := perturbedAssets[index].Fees
+		if !got.PerOrder.Equal(want.PerOrder) || !got.PerUnit.Equal(want.PerUnit) || !got.NotionalBPS.Equal(want.NotionalBPS) || got.Scale != want.Scale {
+			t.Fatalf("asset %d fees=%+v want=%+v", index, perturbedAssets[index].Fees, want)
+		}
+	}
+	if baseline.AssetPolicies()[0].Fees.PerOrder.Equal(perturbedAssets[0].Fees.PerOrder) && baseline.AssetPolicies()[0].Fees.PerUnit.Equal(perturbedAssets[0].Fees.PerUnit) && baseline.AssetPolicies()[0].Fees.NotionalBPS.Equal(perturbedAssets[0].Fees.NotionalBPS) {
+		t.Fatal("cost-up derivation mutated or failed to change the baseline")
+	}
+	zeroInput := validPolicyInput()
+	for index := range zeroInput.Assets {
+		zeroInput.Assets[index].Fees = FeePolicy{Scale: zeroInput.Assets[index].Fees.Scale}
+	}
+	zero, err := NewPolicy(zeroInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DoubledFeePolicy(zero); err == nil {
+		t.Fatal("all-zero cost policy produced a false cost-up perturbation")
+	}
+}
+
 func TestPolicyArtifactIDUsesFullVersion(t *testing.T) {
 	first, err := NewPolicy(validPolicyInput())
 	if err != nil {
