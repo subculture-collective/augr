@@ -550,8 +550,13 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	summary := map[string]int{"candidates": 0, "scored": 0, "generated": 0, "swept": 0, "validated": 0, "deployed": 0, "proposed": 0, "created": 0, "reused": 0, "errors": 0, "winners": 0}
 	defer func() { o.SetLastSummary("options_discovery", summary) }()
 
-	if o.discoveryOptionsProvider() == nil {
+	optionsProvider := o.discoveryOptionsProvider()
+	if optionsProvider == nil {
 		return fmt.Errorf("options_discovery: options provider not configured")
+	}
+	historicalReader, ok := optionsProvider.(data.ManifestBoundOptionChainReader)
+	if !ok {
+		return fmt.Errorf("options_discovery: manifest-bound historical options reader is required")
 	}
 	if o.deps.Universe == nil {
 		return fmt.Errorf("options_discovery: universe not configured")
@@ -564,6 +569,9 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	}
 	if o.deps.DiscoveryRunRepo == nil {
 		return fmt.Errorf("options_discovery: discovery run repository is required")
+	}
+	if o.deps.DiscoveryReadiness == nil {
+		return fmt.Errorf("options_discovery: scoped discovery readiness is required")
 	}
 
 	// Get tradeable watchlist candidates.
@@ -583,17 +591,21 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 		Screener: optdiscovery.OptionsScreenerConfig{
 			Tickers: tickers,
 		},
-		Scoring:     optdiscovery.DefaultOptionsScoringConfig(),
-		Generator:   discovery.GeneratorConfig{Provider: o.deps.LLMProvider, Model: o.deps.LLMQuickModel, Metrics: o.deps.GeneratorMetrics},
-		BacktestCfg: discovery.DefaultScoringConfig(),
-		MaxWinners:  3,
+		Scoring:         optdiscovery.DefaultOptionsScoringConfig(),
+		Generator:       discovery.GeneratorConfig{Provider: o.deps.LLMProvider, Model: o.deps.LLMQuickModel, Metrics: o.deps.GeneratorMetrics},
+		BacktestCfg:     discovery.DefaultScoringConfig(),
+		MaxWinners:      3,
+		EvaluationStart: o.deps.DiscoveryReadiness.EvaluationStart,
+		EvaluationEnd:   o.deps.DiscoveryReadiness.EvaluationEnd,
+		DecisionCutoff:  o.deps.DiscoveryReadiness.DecisionCutoff,
 	}
 
 	deps := optdiscovery.OptionsDiscoveryDeps{
-		DataService:     o.discoveryDataService(),
-		OptionsProvider: o.discoveryOptionsProvider(),
-		Strategies:      o.deps.StrategyRepo,
-		Logger:          o.logger,
+		DataService:      o.discoveryDataService(),
+		OptionsProvider:  optionsProvider,
+		HistoricalReader: historicalReader,
+		Strategies:       o.deps.StrategyRepo,
+		Logger:           o.logger,
 	}
 
 	startedAt := time.Now().UTC()

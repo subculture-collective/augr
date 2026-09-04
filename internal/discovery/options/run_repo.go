@@ -34,14 +34,17 @@ func PersistRun(ctx context.Context, repo discovery.RunRepository, cfg OptionsDi
 			Model      string `json:"model,omitempty"`
 			MaxRetries int    `json:"max_retries"`
 		} `json:"generator"`
-		Scoring      OptionsScoringConfig       `json:"scoring"`
-		Backtest     discovery.ScoringConfig    `json:"backtest"`
-		Validation   discovery.ValidationConfig `json:"validation"`
-		MaxWinners   int                        `json:"max_winners"`
-		DryRun       bool                       `json:"dry_run"`
-		ScheduleCron string                     `json:"schedule_cron"`
+		Scoring         OptionsScoringConfig       `json:"scoring"`
+		Backtest        discovery.ScoringConfig    `json:"backtest"`
+		Validation      discovery.ValidationConfig `json:"validation"`
+		MaxWinners      int                        `json:"max_winners"`
+		DryRun          bool                       `json:"dry_run"`
+		ScheduleCron    string                     `json:"schedule_cron"`
+		EvaluationStart time.Time                  `json:"evaluation_start"`
+		EvaluationEnd   time.Time                  `json:"evaluation_end"`
+		DecisionCutoff  time.Time                  `json:"decision_cutoff"`
 	}{
-		Version: 1,
+		Version: 2,
 		Kind:    "options",
 		Screener: struct {
 			Tickers       []string `json:"tickers"`
@@ -61,6 +64,8 @@ func PersistRun(ctx context.Context, repo discovery.RunRepository, cfg OptionsDi
 		}{Model: cfg.Generator.Model, MaxRetries: cfg.Generator.MaxRetries},
 		Scoring: cfg.Scoring, Backtest: cfg.BacktestCfg, Validation: cfg.Validation,
 		MaxWinners: cfg.MaxWinners, DryRun: cfg.DryRun, ScheduleCron: cfg.ScheduleCron,
+		EvaluationStart: cfg.EvaluationStart, EvaluationEnd: cfg.EvaluationEnd,
+		DecisionCutoff: cfg.DecisionCutoff,
 	})
 	if err != nil {
 		return fmt.Errorf("options/discovery: marshal run config: %w", err)

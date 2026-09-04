@@ -69,15 +69,22 @@ func LoadManifestBoundOptionFrames(
 		if err != nil {
 			return nil, fmt.Errorf("options/historical: load chain at %s: %w", bar.Timestamp.Format(time.RFC3339Nano), err)
 		}
-		if err := validateHistoricalChain(underlying, bar.Timestamp, chain); err != nil {
+		active := make([]domain.OptionSnapshot, 0, len(chain))
+		for _, snapshot := range chain {
+			if !snapshot.Contract.Expiry.Before(bar.Timestamp) {
+				active = append(active, snapshot)
+			}
+		}
+		if err := validateHistoricalChain(underlying, bar.Timestamp, active); err != nil {
 			return nil, err
 		}
-		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: bar, Chain: append([]domain.OptionSnapshot(nil), chain...)})
+		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: bar, Chain: active})
 	}
 	return frames, nil
 }
 
 func validateHistoricalChain(underlying string, decisionAt time.Time, chain []domain.OptionSnapshot) error {
+	underlying = strings.ToUpper(strings.TrimSpace(underlying))
 	if len(chain) == 0 {
 		return fmt.Errorf("options/historical: empty manifest-bound chain at %s", decisionAt.Format(time.RFC3339Nano))
 	}

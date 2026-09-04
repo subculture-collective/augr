@@ -20,21 +20,25 @@ import (
 
 // OptionsDiscoveryConfig controls the full options discovery pipeline.
 type OptionsDiscoveryConfig struct {
-	Screener     OptionsScreenerConfig
-	Scoring      OptionsScoringConfig
-	Generator    discovery.GeneratorConfig
-	BacktestCfg  discovery.ScoringConfig // reuse stock scoring thresholds
-	Validation   discovery.ValidationConfig
-	MaxWinners   int
-	DryRun       bool
-	ScheduleCron string
+	Screener        OptionsScreenerConfig
+	Scoring         OptionsScoringConfig
+	Generator       discovery.GeneratorConfig
+	BacktestCfg     discovery.ScoringConfig // reuse stock scoring thresholds
+	Validation      discovery.ValidationConfig
+	MaxWinners      int
+	DryRun          bool
+	ScheduleCron    string
+	EvaluationStart time.Time
+	EvaluationEnd   time.Time
+	DecisionCutoff  time.Time
 }
 
 // OptionsDiscoveryDeps holds dependencies for the options pipeline.
 type OptionsDiscoveryDeps struct {
-	DataService     *data.DataService
-	OptionsProvider data.OptionsDataProvider
-	LLMProvider     interface {
+	DataService      *data.DataService
+	OptionsProvider  data.OptionsDataProvider
+	HistoricalReader data.ManifestBoundOptionChainReader
+	LLMProvider      interface {
 		Complete(context.Context, interface{}) (interface{}, error)
 	} // unused — use Generator
 	Strategies repository.StrategyRepository
@@ -45,12 +49,17 @@ type OptionsDiscoveryDeps struct {
 // winning research idea. Creation is inert and does not count as deployment;
 // only the authoritative promotion projector can activate a schedule.
 type OptionsDeployedStrategy struct {
-	StrategyID  uuid.UUID                `json:"strategy_id"`
-	Ticker      string                   `json:"ticker"`
-	Config      rules.OptionsRulesConfig `json:"config"`
-	InSample    backtest.Metrics         `json:"in_sample"`
-	OutOfSample backtest.Metrics         `json:"out_of_sample"`
-	Score       float64                  `json:"score"`
+	StrategyID               uuid.UUID                `json:"strategy_id"`
+	Ticker                   string                   `json:"ticker"`
+	Config                   rules.OptionsRulesConfig `json:"config"`
+	InSample                 backtest.Metrics         `json:"in_sample"`
+	OutOfSample              backtest.Metrics         `json:"out_of_sample"`
+	Score                    float64                  `json:"score"`
+	CalibrationPayloadSHA256 []string                 `json:"calibration_payload_sha256"`
+	OOSPayloadSHA256         []string                 `json:"oos_payload_sha256"`
+	EvaluationStart          time.Time                `json:"evaluation_start"`
+	CalibrationEnd           time.Time                `json:"calibration_end"`
+	EvaluationEnd            time.Time                `json:"evaluation_end"`
 }
 
 // OptionsDiscoveryResult summarises the pipeline run.
@@ -68,6 +77,7 @@ type OptionsDiscoveryResult struct {
 	GenerationEvidence []OptionsGenerationEvidence `json:"generation_evidence"`
 	Duration           time.Duration               `json:"duration_ns"`
 	Errors             []string                    `json:"errors"`
+	EvidenceClass      string                      `json:"evidence_class"`
 }
 
 // RunOptionsDiscovery executes the full options discovery pipeline:
@@ -79,7 +89,7 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 		logger = slog.Default()
 	}
 
-	result := &OptionsDiscoveryResult{}
+	result := &OptionsDiscoveryResult{EvidenceClass: "immutable_observed_options_v1"}
 
 	if cfg.MaxWinners <= 0 {
 		cfg.MaxWinners = 3
@@ -87,6 +97,17 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 	if cfg.BacktestCfg.MinSharpe == 0 {
 		cfg.BacktestCfg = discovery.DefaultScoringConfig()
 	}
+	if !canonicalDecisionTime(cfg.EvaluationStart) || !canonicalDecisionTime(cfg.EvaluationEnd) || !canonicalDecisionTime(cfg.DecisionCutoff) || cfg.DecisionCutoff.Before(cfg.EvaluationStart.AddDate(0, 9, 0)) {
+		return nil, fmt.Errorf("options/discovery: immutable evaluation interval must contain at least six calibration months plus three out-of-sample months")
+	}
+	if deps.HistoricalReader == nil {
+		return nil, fmt.Errorf("options/discovery: manifest-bound historical options reader is required")
+	}
+	evaluationCutoff := cfg.EvaluationEnd
+	if cfg.DecisionCutoff.Before(evaluationCutoff) {
+		evaluationCutoff = cfg.DecisionCutoff
+	}
+	cfg.Screener.DecisionAt = evaluationCutoff
 
 	// Stage 1: Screen.
 	logger.Info("options/discovery: screening candidates")
@@ -115,19 +136,36 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 
 	// Stage 3: Generate + Sweep + Validate per candidate.
 	type sweepWinner struct {
-		ticker    string
-		config    rules.OptionsRulesConfig
-		metrics   backtest.Metrics
-		score     float64
-		bars      []domain.OHLCV
-		inSample  backtest.Metrics
-		oosSample backtest.Metrics
-		validated bool
+		ticker                   string
+		config                   rules.OptionsRulesConfig
+		metrics                  backtest.Metrics
+		score                    float64
+		bars                     []domain.OHLCV
+		inSample                 backtest.Metrics
+		oosSample                backtest.Metrics
+		calibrationPayloadSHA256 []string
+		oosPayloadSHA256         []string
+		validated                bool
 	}
 	var winners []sweepWinner
 
-	now := time.Now()
-	histFrom := now.AddDate(-3, 0, 0) // 3 years of history
+	validationMonths := cfg.Validation.TestMonths
+	if validationMonths == 0 {
+		validationMonths = 3
+	}
+	calibrationMonths := cfg.Validation.CalibrationMonths
+	if calibrationMonths == 0 {
+		calibrationMonths = 6
+	}
+	evaluationEnd := evaluationCutoff
+	evaluationStart := evaluationEnd.AddDate(0, -(calibrationMonths + validationMonths), 0)
+	if evaluationStart.Before(cfg.EvaluationStart) {
+		evaluationStart = cfg.EvaluationStart
+	}
+	calibrationEnd := evaluationStart.AddDate(0, calibrationMonths, 0)
+	if calibrationEnd.AddDate(0, validationMonths, 0).After(evaluationEnd) {
+		return nil, fmt.Errorf("options/discovery: canonical scope cannot fit the configured calibration and out-of-sample windows")
+	}
 
 	for _, candidate := range scored {
 		if ctx.Err() != nil {
@@ -149,11 +187,12 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 		}
 		result.Generated++
 
-		// Download history for backtesting.
+		// Load the underlying only from the configured immutable scope. The
+		// matching options chains are reconstructed at each bar's decision time.
 		barsMap, dlErr := deps.DataService.DownloadHistoricalOHLCV(
 			ctx, domain.MarketTypeStock,
 			[]string{candidate.Ticker},
-			data.Timeframe1d, histFrom, now, true,
+			data.Timeframe1d, evaluationStart, evaluationEnd, false,
 		)
 		if dlErr != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("download %s: %v", candidate.Ticker, dlErr))
@@ -164,41 +203,29 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 			result.Errors = append(result.Errors, fmt.Sprintf("insufficient bars for %s: %d", candidate.Ticker, len(bars)))
 			continue
 		}
-
-		// Sweep.
-		sweepStart := now.AddDate(-2, 0, 0)
-		sweepEnd := now.AddDate(0, -3, 0) // leave 3 months for validation
-		sweepCfg := OptionsSweepConfig{
-			Ticker:      candidate.Ticker,
-			Bars:        bars,
-			StartDate:   sweepStart,
-			EndDate:     sweepEnd,
-			InitialCash: 100_000,
-			Variations:  20,
+		frames, frameErr := LoadManifestBoundOptionFrames(ctx, deps.HistoricalReader, candidate.Ticker, bars, evaluationStart, evaluationEnd)
+		if frameErr != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("bind historical options %s: %v", candidate.Ticker, frameErr))
+			continue
 		}
-
-		sweepResults, sweepErr := RunOptionsSweep(ctx, *optConfig, sweepCfg, cfg.BacktestCfg, logger)
+		calibrationFrames := historicalFramesBetween(frames, evaluationStart, calibrationEnd, false)
+		validationFrames := historicalFramesBetween(frames, calibrationEnd, evaluationEnd, true)
+		inSample, sweepErr := EvaluateManifestBoundOptions(ctx, *optConfig, calibrationFrames, 100_000, backtest.DefaultOptionsFillConfig().FeePerContract)
 		if sweepErr != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("sweep %s: %v", candidate.Ticker, sweepErr))
+			result.Errors = append(result.Errors, fmt.Sprintf("observed calibration %s: %v", candidate.Ticker, sweepErr))
 			continue
 		}
 		result.Swept++
-
-		// Take best result.
-		if len(sweepResults) == 0 || math.IsInf(sweepResults[0].Score, -1) {
+		score := discovery.ScoreMetrics(inSample.Metrics, cfg.BacktestCfg)
+		if inSample.OpenedPackages == 0 || math.IsInf(score, -1) {
 			continue
 		}
-		best := sweepResults[0]
-
-		// Validate.
-		valStart := sweepEnd
-		valEnd := now
-		valResult, valErr := ValidateOptionsOutOfSample(ctx, cfg.Validation, bars, best.Config, valStart, valEnd, 100_000, logger)
+		outOfSample, valErr := EvaluateManifestBoundOptions(ctx, *optConfig, validationFrames, 100_000, backtest.DefaultOptionsFillConfig().FeePerContract)
 		if valErr != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("validate %s: %v", candidate.Ticker, valErr))
+			result.Errors = append(result.Errors, fmt.Sprintf("observed out-of-sample %s: %v", candidate.Ticker, valErr))
 			continue
 		}
-
+		valResult := validateObservedOptions(cfg.Validation, inSample, outOfSample)
 		if !valResult.Passed {
 			logger.Info("options/discovery: validation failed",
 				slog.String("ticker", candidate.Ticker),
@@ -209,14 +236,16 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 		result.Validated++
 
 		winners = append(winners, sweepWinner{
-			ticker:    candidate.Ticker,
-			config:    best.Config,
-			metrics:   best.Metrics,
-			score:     best.Score,
-			bars:      bars,
-			inSample:  valResult.InSample,
-			oosSample: valResult.OutOfSample,
-			validated: true,
+			ticker:                   candidate.Ticker,
+			config:                   *optConfig,
+			metrics:                  inSample.Metrics,
+			score:                    score,
+			bars:                     bars,
+			inSample:                 valResult.InSample,
+			oosSample:                valResult.OutOfSample,
+			calibrationPayloadSHA256: append([]string(nil), inSample.PayloadSHA256...),
+			oosPayloadSHA256:         append([]string(nil), outOfSample.PayloadSHA256...),
+			validated:                true,
 		})
 	}
 
@@ -271,12 +300,17 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 		}
 
 		result.Winners = append(result.Winners, OptionsDeployedStrategy{
-			StrategyID:  strategy.ID,
-			Ticker:      w.ticker,
-			Config:      w.config,
-			InSample:    w.inSample,
-			OutOfSample: w.oosSample,
-			Score:       w.score,
+			StrategyID:               strategy.ID,
+			Ticker:                   w.ticker,
+			Config:                   w.config,
+			InSample:                 w.inSample,
+			OutOfSample:              w.oosSample,
+			Score:                    w.score,
+			CalibrationPayloadSHA256: append([]string(nil), w.calibrationPayloadSHA256...),
+			OOSPayloadSHA256:         append([]string(nil), w.oosPayloadSHA256...),
+			EvaluationStart:          evaluationStart,
+			CalibrationEnd:           calibrationEnd,
+			EvaluationEnd:            evaluationEnd,
 		})
 		selected++
 		recordOptionsDeploymentOutcome(result, cfg.DryRun, wasCreated)
@@ -303,6 +337,43 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 	)
 
 	return result, nil
+}
+
+func historicalFramesBetween(frames []HistoricalOptionFrame, start, end time.Time, includeEnd bool) []HistoricalOptionFrame {
+	result := make([]HistoricalOptionFrame, 0, len(frames))
+	for _, frame := range frames {
+		if !frame.DecisionAt.Before(start) && (frame.DecisionAt.Before(end) || includeEnd && frame.DecisionAt.Equal(end)) {
+			result = append(result, frame)
+		}
+	}
+	return result
+}
+
+func validateObservedOptions(cfg discovery.ValidationConfig, inSample, outOfSample *HistoricalOptionsEvaluation) discovery.ValidationResult {
+	result := discovery.ValidationResult{InSample: inSample.Metrics, OutOfSample: outOfSample.Metrics}
+	if inSample.OpenedPackages == 0 || outOfSample.OpenedPackages == 0 {
+		result.Reason = "immutable calibration and out-of-sample windows must both contain executed packages"
+		return result
+	}
+	if outOfSample.Metrics.SharpeRatio < 0 {
+		result.Reason = fmt.Sprintf("OOS Sharpe negative (%.4f)", outOfSample.Metrics.SharpeRatio)
+		return result
+	}
+	minimumRatio := cfg.MinOOSRatio
+	if minimumRatio == 0 {
+		minimumRatio = 0.5
+	}
+	if inSample.Metrics.SharpeRatio > 0 {
+		result.OOSRatio = outOfSample.Metrics.SharpeRatio / inSample.Metrics.SharpeRatio
+		if result.OOSRatio < minimumRatio {
+			result.Reason = fmt.Sprintf("OOS ratio %.4f below minimum %.4f", result.OOSRatio, minimumRatio)
+			return result
+		}
+	} else {
+		result.OOSRatio = 1
+	}
+	result.Passed = true
+	return result
 }
 
 func recordOptionsDeploymentOutcome(result *OptionsDiscoveryResult, dryRun, created bool) {

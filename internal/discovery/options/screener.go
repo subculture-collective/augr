@@ -16,11 +16,12 @@ import (
 // OptionsScreenerConfig controls which tickers pass the options screen.
 type OptionsScreenerConfig struct {
 	Tickers       []string
-	MinPrice      float64 // default 5.0
-	MinADV        float64 // default 500_000
-	MinChainWidth int     // minimum contracts in chain (default 10)
-	MinOI         float64 // minimum ATM open interest (default 100)
-	TargetDTE     int     // DTE centre for chain check (default 30)
+	MinPrice      float64   // default 5.0
+	MinADV        float64   // default 500_000
+	MinChainWidth int       // minimum contracts in chain (default 10)
+	MinOI         float64   // minimum ATM open interest (default 100)
+	TargetDTE     int       // DTE centre for chain check (default 30)
+	DecisionAt    time.Time // immutable evidence cutoff; zero is legacy provider time
 }
 
 func (c *OptionsScreenerConfig) defaults() {
@@ -67,7 +68,10 @@ func ScreenOptions(
 		return nil, nil
 	}
 
-	now := time.Now()
+	now := cfg.DecisionAt
+	if now.IsZero() {
+		now = time.Now()
+	}
 	from := now.AddDate(0, -3, 0) // 3 months for ADV + indicators
 	targetExpiry := now.AddDate(0, 0, cfg.TargetDTE)
 
@@ -116,7 +120,13 @@ func ScreenOptions(
 
 			// Check options chain exists.
 			chainAttempts.Add(1)
-			chain, err := optionsProvider.GetOptionsChain(ctx, ticker, targetExpiry, "")
+			var chain []domain.OptionSnapshot
+			if reader, ok := optionsProvider.(data.ManifestBoundOptionChainReader); ok && !cfg.DecisionAt.IsZero() {
+				chain, err = reader.GetOptionsChainAt(ctx, ticker, now)
+				chain = nearestExpiryChain(chain, targetExpiry)
+			} else {
+				chain, err = optionsProvider.GetOptionsChain(ctx, ticker, targetExpiry, "")
+			}
 			if err != nil {
 				chainErrors.Add(1)
 				logger.Debug("options/screen: chain fetch failed",
@@ -184,6 +194,27 @@ func ScreenOptions(
 	}
 
 	return results, nil
+}
+
+func nearestExpiryChain(chain []domain.OptionSnapshot, target time.Time) []domain.OptionSnapshot {
+	if len(chain) == 0 {
+		return nil
+	}
+	nearest := chain[0].Contract.Expiry
+	nearestDistance := math.Abs(nearest.Sub(target).Hours())
+	for _, snapshot := range chain[1:] {
+		distance := math.Abs(snapshot.Contract.Expiry.Sub(target).Hours())
+		if distance < nearestDistance || distance == nearestDistance && snapshot.Contract.Expiry.Before(nearest) {
+			nearest, nearestDistance = snapshot.Contract.Expiry, distance
+		}
+	}
+	result := make([]domain.OptionSnapshot, 0, len(chain))
+	for _, snapshot := range chain {
+		if snapshot.Contract.Expiry.Equal(nearest) {
+			result = append(result, snapshot)
+		}
+	}
+	return result
 }
 
 func optionsScreenCompletionError(chainAttempts, chainErrors int64) error {

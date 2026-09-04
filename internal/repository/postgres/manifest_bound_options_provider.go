@@ -62,8 +62,8 @@ func (provider *ManifestBoundOptionsProvider) loadOptionsChain(ctx context.Conte
 	}
 	cutoff := report.DecisionCutoff
 	if !decisionAt.IsZero() {
-		if decisionAt.Location() != time.UTC || !decisionAt.Equal(decisionAt.Truncate(time.Microsecond)) || decisionAt.Before(report.EvaluationStart) || decisionAt.After(report.EvaluationEnd) {
-			return nil, fmt.Errorf("manifest-bound option chain decision time escapes the canonical evaluation interval")
+		if decisionAt.Location() != time.UTC || !decisionAt.Equal(decisionAt.Truncate(time.Microsecond)) || decisionAt.Before(report.EvaluationStart) || decisionAt.After(report.EvaluationEnd) || decisionAt.After(report.DecisionCutoff) {
+			return nil, fmt.Errorf("manifest-bound option chain decision time escapes the canonical evaluation interval or availability cutoff")
 		}
 		cutoff = decisionAt
 	}
