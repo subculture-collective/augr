@@ -11,6 +11,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 )
@@ -35,6 +36,9 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	}
 	if _, err := fixture.pool.Exec(fixture.ctx, scenarioMigration[startScenario:endScenario]); err != nil {
 		t.Fatalf("apply migration 111 generated scenario schema: %v", err)
+	}
+	if _, err := fixture.pool.Exec(fixture.ctx, `ALTER TABLE strategies ADD COLUMN execution_strategy_version_id UUID REFERENCES strategy_versions(id) ON DELETE RESTRICT`); err != nil {
+		t.Fatal(err)
 	}
 	instrumentID := datasetManifestInstrumentID(t, fixture.manifest)
 	start := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
@@ -122,7 +126,7 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].Universe.Benchmark != instrumentID || len(items[0].Universe.Instruments) != 1 || len(items[0].AllowedDataFields) != 7 {
+	if len(items) != 1 || items[0].Universe.Benchmark != instrumentID || len(items[0].Universe.Instruments) != 1 || len(items[0].AllowedDataFields) != 5 {
 		t.Fatalf("items=%+v", items)
 	}
 	var summary generatedDailyStockEvidenceSummary
@@ -165,6 +169,32 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	runtimeBinding, err := generativestrategy.NewRuntimeBinding(proposal.Spec, proposal.Version, "0.025", "0.91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		tx, err := fixture.pool.Begin(fixture.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		draft, err := ensureGeneratedRuntimeStrategyTx(fixture.ctx, tx, fixture.account.ID, manifest.ID(), runtimeBinding)
+		if err != nil {
+			_ = tx.Rollback(fixture.ctx)
+			t.Fatal(err)
+		}
+		if draft.Status != domain.StrategyStatusInactive || draft.ScheduleCron != "" || !draft.IsPaper || draft.ExecutionStrategyVersionID == nil || *draft.ExecutionStrategyVersionID != proposal.Version.ID() {
+			_ = tx.Rollback(fixture.ctx)
+			t.Fatalf("draft=%+v", draft)
+		}
+		if _, err := generativestrategy.ParseRuntimeBinding(draft.Config); err != nil {
+			_ = tx.Rollback(fixture.ctx)
+			t.Fatal(err)
+		}
+		if err := tx.Commit(fixture.ctx); err != nil {
+			t.Fatal(err)
+		}
 	}
 	repo := NewGenerativeStrategyRepo(fixture.pool)
 	preparations, err := repo.ListEligibleGeneratedResearchPreparations(fixture.ctx, fixture.account.ID, scope.ID, 20)

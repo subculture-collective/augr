@@ -10,10 +10,13 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/promotion"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/robustness"
 )
 
 var deploymentRiskPolicyPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}@sha256:[0-9a-f]{64}$`)
@@ -123,6 +126,23 @@ func (repo *PromotionRepo) ProjectAuthoritativeActivation(ctx context.Context, d
 	if assessment.ScopeID() != scopeID {
 		return nil, fmt.Errorf("postgres: promotion assessment belongs to a different evaluation scope")
 	}
+	var generatedRuntime *generativestrategy.RuntimeBinding
+	if decision.Outcome() == promotion.OutcomeApproved && state == promotion.StateShadow {
+		var sourceStrategyCount int
+		if err = repo.pool.QueryRow(ctx, `SELECT count(*) FROM strategies WHERE execution_strategy_version_id=$1`, deployment.VersionID()).Scan(&sourceStrategyCount); err != nil {
+			return nil, err
+		}
+		if sourceStrategyCount == 0 {
+			edge, confidence, statisticsErr := generatedPromotionStatistics(assessment, deployment.VersionID())
+			if statisticsErr != nil {
+				return nil, statisticsErr
+			}
+			generatedRuntime, err = NewGenerativeStrategyRepo(repo.pool).generatedRuntimeBinding(ctx, deployment.VersionID(), edge, confidence)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	tx, err := repo.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -163,6 +183,11 @@ func (repo *PromotionRepo) ProjectAuthoritativeActivation(ctx context.Context, d
 		return &PromotionActivationProjection{Reason: "authoritative decision is not activation-eligible"}, nil
 	}
 
+	if action == promotion.ActivationAction && prior == nil && generatedRuntime != nil {
+		if _, err = ensureGeneratedRuntimeStrategyTx(ctx, tx, accountID, readiness.ManifestID, generatedRuntime); err != nil {
+			return nil, err
+		}
+	}
 	strategy, err := loadActivationStrategyTx(ctx, tx, deployment.VersionID(), prior)
 	if err != nil {
 		return nil, err
@@ -250,6 +275,37 @@ func (repo *PromotionRepo) ProjectAuthoritativeActivation(ctx context.Context, d
 		return nil, evaluationWriteError("commit strategy promotion activation", err)
 	}
 	return &PromotionActivationProjection{Activation: activation, Changed: true}, nil
+}
+
+func generatedPromotionStatistics(assessment *robustness.Assessment, versionID uuid.UUID) (string, string, error) {
+	if assessment == nil || versionID == uuid.Nil {
+		return "", "", fmt.Errorf("postgres: generated runtime promotion statistics are missing")
+	}
+	var edge, nonpositive string
+	matched := 0
+	for _, candidate := range assessment.Candidates() {
+		if candidate.VersionID != versionID.String() {
+			continue
+		}
+		matched++
+		for _, statistic := range candidate.Statistics {
+			if statistic.State != "available" {
+				continue
+			}
+			switch statistic.Name {
+			case "baseline_mean_return":
+				edge = statistic.Value
+			case "raw_nonpositive_mean_probability":
+				nonpositive = statistic.Value
+			}
+		}
+	}
+	edgeValue, edgeErr := decimal.NewFromString(edge)
+	nonpositiveValue, probabilityErr := decimal.NewFromString(nonpositive)
+	if matched != 1 || edgeErr != nil || probabilityErr != nil || !edgeValue.IsPositive() || nonpositiveValue.IsNegative() || nonpositiveValue.GreaterThan(decimal.NewFromInt(1)) {
+		return "", "", fmt.Errorf("postgres: generated runtime promotion statistics do not reconstruct")
+	}
+	return edgeValue.String(), decimal.NewFromInt(1).Sub(nonpositiveValue).String(), nil
 }
 
 func loadActivationHeadTx(ctx context.Context, tx pgx.Tx, deploymentID uuid.UUID) (*promotion.Activation, error) {

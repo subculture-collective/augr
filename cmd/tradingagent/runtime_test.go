@@ -1635,7 +1635,11 @@ func (r *stubPipelineRunRepo) Finalize(ctx context.Context, ref domain.PipelineR
 	if r.receipt != nil {
 		return *r.receipt, nil
 	}
-	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: update.Status, CompletedAt: &update.CompletedAt, ErrorMessage: update.ErrorMessage}
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate}
+	if r.created != nil && r.created.ID == ref.ID && r.created.TradeDate.Equal(ref.TradeDate) {
+		run = *r.created
+	}
+	run.Status, run.CompletedAt, run.ErrorMessage = update.Status, &update.CompletedAt, update.ErrorMessage
 	if update.Signal != nil {
 		run.Signal = *update.Signal
 	}

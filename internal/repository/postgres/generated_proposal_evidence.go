@@ -173,7 +173,11 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedProposalEvidence(
 	if benchmarkID == uuid.Nil {
 		return nil, fmt.Errorf("postgres: generated proposal scope requires exactly one immutable SPY benchmark")
 	}
-	allowedNames := []string{"close", "high", "low", "open", "trade_count", "volume", "vwap"}
+	// The scheduled evaluator receives canonical OHLCV bars. Provider-only VWAP
+	// and trade-count fields remain immutable research evidence, but are not
+	// authorable execution inputs until the live runtime can source them with the
+	// same semantics.
+	allowedNames := []string{"close", "high", "low", "open", "volume"}
 	allowed := make([]generativestrategy.AllowedDataField, 0, len(allowedNames))
 	for _, field := range allowedNames {
 		allowed = append(allowed, generativestrategy.AllowedDataField{DatasetKind: dataset.KindBars, Field: field, Type: "decimal"})

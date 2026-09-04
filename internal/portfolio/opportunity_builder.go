@@ -122,6 +122,9 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		CreatedAt:         createdAt,
 		UpdatedAt:         createdAt,
 	}
+	if marketType != domain.MarketTypeOptions {
+		opportunity.ExpectedLossUSD = opportunity.ProposedNotional * opportunity.MaxLossPct
+	}
 	if err := bindPromotedOpportunityLineage(opportunity, input.Strategy, input.Run); err != nil {
 		return nil, NoActionReasonUnknown, err
 	}

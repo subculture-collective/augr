@@ -22,6 +22,8 @@ import (
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
+	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
@@ -65,6 +67,81 @@ func withNativeAuditDeps(runner *realStrategyRunner) *realStrategyRunner {
 	runner.eventRepo = &recordingStrategyPreparationEventRepo{}
 	runner.snapshotRepo = &recordingNativeSnapshotRepo{}
 	return runner
+}
+
+type generatedRuntimePositionRepo struct{ stubPositionRepo }
+
+func (generatedRuntimePositionRepo) GetByExecutionScope(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return nil, nil
+}
+
+func generatedRuntimeStrategy(t *testing.T, runtimeVersionID uuid.UUID) domain.Strategy {
+	t.Helper()
+	family, err := generativestrategy.ReviewedDailyStockFamily()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instrumentID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
+	scopeID := uuid.MustParse("20000000-0000-4000-8000-000000000002")
+	key, _ := generativestrategy.ReviewedDailyStockSpecKey(scopeID, instrumentID)
+	spec, err := generativestrategy.NewSpec(generativestrategy.SpecInput{
+		Family: family, SpecKey: key,
+		Inputs:   []generativestrategy.InputField{{Name: "price", Type: "decimal", DatasetKind: "bars", Field: "close", FreshnessSeconds: 86400, MissingPolicy: "abstain"}},
+		Universe: generativestrategy.Universe{AssetClass: instrument.AssetClassEquity, Instruments: []uuid.UUID{instrumentID}, Benchmark: instrumentID},
+		Entry:    generativestrategy.Expr{Op: "gt", Args: []generativestrategy.Expr{{Op: "ref", Ref: "price"}, {Op: "decimal", Value: "100"}}},
+		Exit:     generativestrategy.Expr{Op: "lt", Args: []generativestrategy.Expr{{Op: "ref", Ref: "price"}, {Op: "decimal", Value: "90"}}},
+		Sizing:   generativestrategy.Sizing{Mode: "fixed_fraction", Value: "0.01", MaxPosition: "0.02"}, MaximumHoldingSeconds: 86400,
+		Costs: generativestrategy.Costs{SpreadBPS: "10", FeeBPS: "1", SlippageBPS: "2"}, Capacity: generativestrategy.Capacity{MaximumDailyTurnover: "100000", MaximumParticipation: "0.05"},
+		ProhibitedBehaviors: []string{"evidence_mutation", "live_order_submission", "lookahead", "network_access", "promotion", "risk_limit_mutation", "secret_access"},
+		PropertyTests:       []string{"cost_hurdle_required", "missing_input_abstains", "no_lookahead", "size_bounded", "stale_input_abstains"},
+		ExampleTests:        []generativestrategy.ExampleTest{{Key: "entry", Values: map[string]string{"price": "101"}, ExpectedEntry: true}},
+		Retirement:          generativestrategy.Retirement{MaximumDrawdown: "0.2", MinimumSamples: 10, MaximumFailedChecks: 1},
+		Authoring:           generativestrategy.Authoring{Provider: "openai", Model: "test", PromptSHA256: strings.Repeat("a", 64), Currency: "USD", Cost: "0"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, _, err := generativestrategy.Compile(spec, strings.Repeat("b", 40), strings.Repeat("c", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := generativestrategy.NewRuntimeBinding(spec, version, "0.025", "0.91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(promotedStrategyConfig(testExecutionAccountBinding.AccountID()), &config); err != nil {
+		t.Fatal(err)
+	}
+	var generated any
+	_ = json.Unmarshal(binding.CanonicalBytes(), &generated)
+	config["generated_strategy"] = generated
+	raw, _ := json.Marshal(config)
+	return domain.Strategy{ID: uuid.New(), Name: "generated", Ticker: "SPY", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true, Config: raw, ExecutionStrategyVersionID: &runtimeVersionID}
+}
+
+func TestRunStrategyGeneratedRuntimeCreatesScopedOpportunityWithoutBrokerExecution(t *testing.T) {
+	runtimeVersionID := uuid.New()
+	strategy := generatedRuntimeStrategy(t, runtimeVersionID)
+	opportunities := &recordingOpportunityRepo{}
+	snapshots := &recordingNativeSnapshotRepo{}
+	runner := &realStrategyRunner{
+		executionAccount: testExecutionAccountBinding, dataService: &stubMarketDataService{ohlcv: []domain.OHLCV{{Timestamp: time.Now().UTC().Add(-time.Hour), Open: 100, High: 103, Low: 99, Close: 101, Volume: 10000}}},
+		runRepo: &stubPipelineRunRepo{}, eventRepo: &recordingStrategyPreparationEventRepo{}, snapshotRepo: snapshots,
+		positionRepo: generatedRuntimePositionRepo{}, opportunityRepo: opportunities, portfolioAllocatorMode: portfolio.AllocatorModeShadow,
+	}
+	result, err := runner.RunStrategy(context.Background(), strategy, runtimeVersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Signal != domain.PipelineSignalBuy || len(opportunities.queued) != 1 || len(snapshots.snapshots) != 1 {
+		t.Fatalf("result=%+v opportunities=%+v snapshots=%+v", result, opportunities.queued, snapshots.snapshots)
+	}
+	opportunity := opportunities.queued[0]
+	if opportunity.ExecutionVersionID != runtimeVersionID || opportunity.EdgePct != .025 || opportunity.Confidence != .91 ||
+		opportunity.ProposedNotional != 1250 || opportunity.LiquidityUSD != 1010000 || opportunity.SpreadPct != .001 || opportunity.ExpectedLossUSD != 1237.5 {
+		t.Fatalf("opportunity=%+v", opportunity)
+	}
 }
 
 func TestNormalizePolymarketStrategySide(t *testing.T) {

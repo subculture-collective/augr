@@ -31,6 +31,7 @@ import (
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	polymarketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
@@ -255,6 +256,9 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		}
 		return r.runPolymarketNative(ctx, strategy, executionVersionID)
 	}
+	if generativestrategy.HasRuntimeBinding(strategy.Config) {
+		return r.runGeneratedStrategyNative(ctx, strategy, executionVersionID)
+	}
 
 	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy, executionVersionID)
 	if err != nil {
@@ -421,6 +425,132 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		Orders:    orders,
 		Positions: positions,
 	}, nil
+}
+
+func (r *realStrategyRunner) runGeneratedStrategyNative(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
+	binding, err := generativestrategy.ParseRuntimeBinding(strategy.Config)
+	if err != nil {
+		return nil, recognizedRunControlError(ctx, err)
+	}
+	lineage, err := domain.ParseActivePromotionExecutionLineage(strategy.Config, r.executionAccount.AccountID())
+	if err != nil {
+		return nil, recognizedRunControlError(ctx, err)
+	}
+	if strategy.MarketType.Normalize() != domain.MarketTypeStock || !strategy.IsPaper || strategy.Status != domain.StrategyStatusActive {
+		return nil, errors.New("generated runtime requires an active paper stock strategy")
+	}
+	now := time.Now().UTC()
+	run := domain.PipelineRun{
+		ID: uuid.New(), StrategyID: strategy.ID, Ticker: strategy.Ticker, TradeDate: now.Truncate(24 * time.Hour),
+		Status: domain.PipelineStatusRunning, StartedAt: now, ConfigSnapshot: strategy.Config,
+	}
+	if err := bindStrategyRunScope(&run, r.executionAccount, executionVersionID); err != nil {
+		return nil, err
+	}
+	bindPromotionRunLineage(&run, executionVersionID, lineage)
+	if err := r.startNativeRun(ctx, "generated_strategy", &run); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	completeRun := func(status domain.PipelineStatus, signal domain.PipelineSignal, message string) error {
+		return r.completeNativeRun(ctx, "generated_strategy", &run, status, signal, message)
+	}
+	failRun := func(runErr error) (*api.StrategyRunResult, error) {
+		status, message := nativeFailure(ctx, runErr)
+		if updateErr := completeRun(status, domain.PipelineSignalHold, message); updateErr != nil {
+			runErr = errors.Join(runErr, updateErr)
+		}
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, recognizedRunControlError(ctx, runErr)
+	}
+	if r.dataService == nil {
+		return failRun(errors.New("generated runtime market data service is required"))
+	}
+	bars, err := r.dataService.GetOHLCV(ctx, domain.MarketTypeStock, strategy.Ticker, data.Timeframe1d, now.Add(-strategyMarketLookback), now)
+	if err != nil || len(bars) == 0 {
+		if err == nil {
+			err = errors.New("no bars returned")
+		}
+		return failRun(fmt.Errorf("generated runtime load ohlcv for %s: %w", strategy.Ticker, err))
+	}
+	latest := bars[len(bars)-1]
+	holding, err := r.generatedStrategyHolding(ctx, strategy, executionVersionID)
+	if err != nil {
+		return failRun(err)
+	}
+	decision, err := binding.EvaluateBar(now, generativestrategy.RuntimeBar{
+		Timestamp: latest.Timestamp, Open: latest.Open, High: latest.High, Low: latest.Low, Close: latest.Close, Volume: latest.Volume,
+	}, holding, lineage.DeploymentBudgetUSD)
+	if err != nil {
+		return failRun(err)
+	}
+	signal := domain.PipelineSignalHold
+	switch decision.Action {
+	case "buy":
+		signal = domain.PipelineSignalBuy
+	case "sell":
+		signal = domain.PipelineSignalSell
+	}
+	scope, err := executionScopeFromPersistedRun(&run, strategy)
+	if err != nil {
+		return failRun(err)
+	}
+	snapshotPayload, err := json.Marshal(map[string]any{
+		"schema": "typed-generative-runtime-decision-v1", "source_version_id": binding.SourceVersionID(), "source_version_sha256": binding.SourceVersionDigest(),
+		"spec_id": binding.Spec().ID(), "spec_sha256": binding.Spec().Digest(), "ticker": strategy.Ticker, "bar": latest,
+		"holding": holding, "action": decision.Action, "execution_price": decision.ExecutionPrice, "proposed_notional": decision.ProposedNotional,
+	})
+	if err != nil {
+		return failRun(err)
+	}
+	snapshot, err := pipelineSnapshotFromScope(scope, "generated_strategy_decision", snapshotPayload)
+	if err != nil {
+		return failRun(err)
+	}
+	if r.snapshotRepo == nil {
+		return failRun(errors.New("generated runtime snapshot repository is required"))
+	}
+	if err := r.snapshotRepo.Create(ctx, snapshot); err != nil {
+		return failRun(fmt.Errorf("generated runtime persist decision snapshot: %w", err))
+	}
+	if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	plan := execution.TradingPlan{
+		Action: signal, MarketType: domain.MarketTypeStock, Ticker: strategy.Ticker, EntryType: "market", EntryPrice: decision.ExecutionPrice,
+		PositionSize: decision.ProposedNotional / decision.ExecutionPrice, StopLoss: decision.ExecutionPrice * 0.01,
+		Confidence: binding.Confidence(), Rationale: "Approved typed strategy evaluated against the latest complete canonical OHLCV bar.",
+		NetEV: binding.ExpectedEdge(), Depth: decision.LiquidityUSD, Spread: decision.SpreadPct,
+	}
+	finalSignal := execution.FinalSignal{Signal: signal, Confidence: binding.Confidence()}
+	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, plan, nil); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	return &api.StrategyRunResult{Run: run, Signal: run.Signal}, nil
+}
+
+func (r *realStrategyRunner) generatedStrategyHolding(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (bool, error) {
+	repo, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
+	if !ok || repo == nil {
+		return false, errors.New("generated runtime requires execution-scoped position reads")
+	}
+	positions, err := repo.GetByExecutionScope(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(),
+		string(ledger.ExecutionOriginStrategyVersion), executionVersionID.String(), repository.PositionFilter{Ticker: strategy.Ticker}, 100, 0)
+	if err != nil {
+		return false, fmt.Errorf("generated runtime load positions: %w", err)
+	}
+	holding := false
+	for _, position := range positions {
+		if position.ClosedAt != nil || position.Quantity <= 0 {
+			continue
+		}
+		if position.StrategyID == nil || *position.StrategyID != strategy.ID || position.Ticker != strategy.Ticker || position.Side != domain.PositionSideLong {
+			return false, errors.New("generated runtime position ownership is ambiguous")
+		}
+		if holding {
+			return false, errors.New("generated runtime has multiple open target positions")
+		}
+		holding = true
+	}
+	return holding, nil
 }
 
 func (r *realStrategyRunner) buildAllocatorOptionsOpportunity(ctx context.Context, strategy domain.Strategy, signal execution.FinalSignal) (*domain.OptionSpread, error) {
@@ -2513,10 +2643,12 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 		Signal:            finalSignal.Signal,
 		PredictionSide:    plan.Side,
 		Confidence:        firstPositive(finalSignal.Confidence, plan.Confidence),
-		EdgePct:           positiveEdgeFromRiskReward(plan.RiskReward),
-		ExpectedReturnPct: positiveEdgeFromRiskReward(plan.RiskReward),
+		EdgePct:           firstPositive(plan.NetEV, positiveEdgeFromRiskReward(plan.RiskReward)),
+		ExpectedReturnPct: firstPositive(plan.NetEV, positiveEdgeFromRiskReward(plan.RiskReward)),
 		MaxLossPct:        maxLossPct,
 		EntryPrice:        plan.EntryPrice,
+		LiquidityUSD:      plan.Depth,
+		SpreadPct:         plan.Spread,
 		ProposedNotional:  proposedNotional,
 		Reason:            plan.Rationale,
 		Evidence:          opportunityEvidence(plan),
@@ -2542,7 +2674,13 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 }
 
 func (r *realStrategyRunner) portfolioAllocatorOwnsPaperExecution(strategy domain.Strategy, signal domain.PipelineSignal) bool {
-	if r == nil || r.portfolioAllocatorMode != portfolio.AllocatorModePaper || !strategy.IsPaper {
+	if r == nil || !strategy.IsPaper || r.portfolioAllocatorMode != portfolio.AllocatorModePaper && r.portfolioAllocatorMode != portfolio.AllocatorModeShadow {
+		return false
+	}
+	// Promoted paper strategies always route through the allocator. In shadow
+	// mode that authority records replayable decisions and makes no broker call;
+	// in paper mode it owns the one approved submission path.
+	if _, err := domain.ParseActivePromotionExecutionLineage(strategy.Config, r.executionAccount.AccountID()); err != nil {
 		return false
 	}
 	if strategy.MarketType.Normalize() == domain.MarketTypeOptions {
