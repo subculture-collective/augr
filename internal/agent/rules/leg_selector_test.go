@@ -265,3 +265,44 @@ func TestBuildSpread_NoLegs(t *testing.T) {
 		t.Fatal("expected error on empty legs")
 	}
 }
+
+func TestSelectSpreadLegsChoosesDistinctSameExpiryPairDeterministically(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	near, far := now.AddDate(0, 0, 30), now.AddDate(0, 0, 40)
+	chain := []domain.OptionSnapshot{
+		{Contract: domain.OptionContract{OCCSymbol: "FAR-LONG", OptionType: domain.OptionTypeCall, Expiry: far}, Greeks: domain.OptionGreeks{Delta: .50}},
+		{Contract: domain.OptionContract{OCCSymbol: "NEAR-LONG", OptionType: domain.OptionTypeCall, Expiry: near}, Greeks: domain.OptionGreeks{Delta: .49}},
+		{Contract: domain.OptionContract{OCCSymbol: "FAR-SHORT", OptionType: domain.OptionTypeCall, Expiry: far}, Greeks: domain.OptionGreeks{Delta: .30}},
+		{Contract: domain.OptionContract{OCCSymbol: "NEAR-SHORT", OptionType: domain.OptionTypeCall, Expiry: near}, Greeks: domain.OptionGreeks{Delta: .31}},
+	}
+	selectors := map[string]LegSelector{
+		"long":  {OptionType: domain.OptionTypeCall, DeltaTarget: .50, DTEMin: 20, DTEMax: 45},
+		"short": {OptionType: domain.OptionTypeCall, DeltaTarget: .30, DTEMin: 20, DTEMax: 45},
+	}
+	for range 20 {
+		legs, err := SelectSpreadLegs(chain, selectors, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if legs["long"].Contract.OCCSymbol != "FAR-LONG" || legs["short"].Contract.OCCSymbol != "FAR-SHORT" || !legs["long"].Contract.Expiry.Equal(legs["short"].Contract.Expiry) {
+			t.Fatalf("selected legs = %+v", legs)
+		}
+	}
+}
+
+func TestSelectSpreadLegsRejectsPairWithoutCommonExpiry(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	chain := []domain.OptionSnapshot{
+		{Contract: domain.OptionContract{OCCSymbol: "LONG", OptionType: domain.OptionTypeCall, Expiry: now.AddDate(0, 0, 30)}, Greeks: domain.OptionGreeks{Delta: .5}},
+		{Contract: domain.OptionContract{OCCSymbol: "SHORT", OptionType: domain.OptionTypePut, Expiry: now.AddDate(0, 0, 31)}, Greeks: domain.OptionGreeks{Delta: -.3}},
+	}
+	selectors := map[string]LegSelector{
+		"long":  {OptionType: domain.OptionTypeCall, DeltaTarget: .5, DTEMin: 20, DTEMax: 45},
+		"short": {OptionType: domain.OptionTypePut, DeltaTarget: .3, DTEMin: 20, DTEMax: 45},
+	}
+	if _, err := SelectSpreadLegs(chain, selectors, now); err == nil {
+		t.Fatal("mixed-expiry pair accepted")
+	}
+}
