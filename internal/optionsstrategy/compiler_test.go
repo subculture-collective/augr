@@ -27,6 +27,13 @@ func TestCompileIsStableAcrossLegMapOrderAndDecodes(t *testing.T) {
 	if err != nil || decoded.StrategyType != first.StrategyType || len(decoded.LegSelection) != 2 {
 		t.Fatalf("decoded = %+v, %v", decoded, err)
 	}
+	runtimeConfig, err := RuntimeConfig(*decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeConfig(runtimeConfig, familyA, versionA); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCompileRejectsNonCanonicalOrUndefinedRiskRules(t *testing.T) {

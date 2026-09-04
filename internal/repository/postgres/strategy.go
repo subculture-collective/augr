@@ -17,6 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/eventmarkets"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
+	"github.com/PatrickFanella/get-rich-quick/internal/optionsstrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
@@ -123,7 +124,7 @@ func (r *StrategyRepo) ResolveExecutionVersionID(ctx context.Context, strategyID
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("postgres: resolve execution version for strategy %s: %w", strategyID, err)
 	}
-	if bindingID != versionID || familyID != strategycatalog.LegacyFamilyID(strategyID) {
+	if bindingID != versionID {
 		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version family mismatch", strategyID)
 	}
 	stored, err := strategycatalog.VersionFromCanonical(versionID, versionDigest, versionCanonical)
@@ -131,6 +132,22 @@ func (r *StrategyRepo) ResolveExecutionVersionID(ctx context.Context, strategyID
 		return uuid.Nil, fmt.Errorf("postgres: validate strategy %s execution version: %w", strategyID, err)
 	}
 	if stored.FamilyID() != familyID {
+		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version family mismatch", strategyID)
+	}
+	if stored.CompilerKind() == optionsstrategy.CompilerKindV1 {
+		if marketType.Normalize() != domain.MarketTypeOptions {
+			return uuid.Nil, fmt.Errorf("postgres: strategy %s native options market mismatch", strategyID)
+		}
+		family, err := getStrategyFamilyQuery(ctx, r.pool, familyID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if err := optionsstrategy.ValidateRuntimeConfig(canonicalConfig, family, stored); err != nil {
+			return uuid.Nil, fmt.Errorf("postgres: strategy %s native options binding is stale: %w", strategyID, err)
+		}
+		return versionID, nil
+	}
+	if familyID != strategycatalog.LegacyFamilyID(strategyID) {
 		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version family mismatch", strategyID)
 	}
 	_, kinds, err := legacyExecutionRequirements(marketType)

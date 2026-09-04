@@ -28,6 +28,15 @@ type compiledConfig struct {
 	OptionsRules rules.OptionsRulesConfig `json:"options_rules"`
 }
 
+type runtimeConfig struct {
+	OptionsRules      rules.OptionsRulesConfig `json:"options_rules"`
+	ResearchLifecycle struct {
+		Stage                 string `json:"stage"`
+		Activation            string `json:"activation"`
+		AutoActivationBlocked bool   `json:"auto_activation_blocked"`
+	} `json:"research_lifecycle"`
+}
+
 // Compile returns deterministic family and version identities for an eligible
 // vertical. Source identities must identify the exact executable build.
 func Compile(config rules.OptionsRulesConfig, sourceCommit, sourceTreeSHA256 string) (*strategycatalog.Family, *strategycatalog.Version, error) {
@@ -69,6 +78,49 @@ func Compile(config rules.OptionsRulesConfig, sourceCommit, sourceTreeSHA256 str
 		return nil, nil, fmt.Errorf("options strategy compiler: compile version: %w", err)
 	}
 	return family, version, nil
+}
+
+// RuntimeConfig returns the exact inert legacy-runtime envelope understood by
+// the options handler while retaining promotion as the sole activation authority.
+func RuntimeConfig(config rules.OptionsRulesConfig) (json.RawMessage, error) {
+	if err := rules.ValidateDefinedRiskVertical(&config); err != nil || !canonicalUnderlyingPattern.MatchString(config.Underlying) {
+		return nil, fmt.Errorf("options strategy compiler: runtime rules are invalid")
+	}
+	value := runtimeConfig{OptionsRules: config}
+	value.ResearchLifecycle.Stage = "idea"
+	value.ResearchLifecycle.Activation = "promotion_evaluator_v1"
+	value.ResearchLifecycle.AutoActivationBlocked = true
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, err
+	}
+	return json.Marshal(object)
+}
+
+// ValidateRuntimeConfig proves that a runtime draft is the inert execution
+// envelope for the exact native version.
+func ValidateRuntimeConfig(raw json.RawMessage, family *strategycatalog.Family, version *strategycatalog.Version) error {
+	config, err := Decode(family, version)
+	if err != nil {
+		return err
+	}
+	expected, err := RuntimeConfig(*config)
+	if err != nil {
+		return err
+	}
+	var suppliedObject any
+	if err := json.Unmarshal(raw, &suppliedObject); err != nil {
+		return fmt.Errorf("options strategy compiler: runtime configuration is invalid")
+	}
+	supplied, err := json.Marshal(suppliedObject)
+	if err != nil || string(supplied) != string(expected) {
+		return fmt.Errorf("options strategy compiler: runtime configuration diverges from native version")
+	}
+	return nil
 }
 
 // Decode reconstructs and validates executable rules from an exact catalog
