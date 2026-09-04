@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -48,7 +47,6 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearchPreparations(
 	if err != nil {
 		return nil, fmt.Errorf("postgres: generated preparation family: %w", err)
 	}
-	expectedSpecKey := "daily_stock_" + strings.ReplaceAll(scopeID.String(), "-", "")
 	rows, err := r.pool.Query(ctx, `
 		SELECT spec.id,receipt.version_id,manifest.id,quality.id,binding.id,simulation.policy_version,capital.policy_version
 		FROM paper_evaluation_scopes scope
@@ -57,11 +55,11 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearchPreparations(
 		JOIN simulation_policy_artifacts simulation ON simulation.sha256=scope.simulation_policy_sha256
 		JOIN account_capital_policy_bindings binding ON binding.id=scope.capital_binding_id AND binding.account_id=scope.account_id
 		JOIN capital_margin_policy_artifacts capital ON capital.id=binding.policy_artifact_id AND capital.sha256=scope.capital_policy_sha256
-		JOIN generated_strategy_specs spec ON spec.spec_key=$3 AND spec.family_id=$4
+		JOIN generated_strategy_specs spec ON spec.family_id=$3
 		JOIN generated_strategy_compilation_receipts receipt ON receipt.spec_id=spec.id
 		WHERE scope.id=$1 AND scope.account_id=$2
 		ORDER BY spec.created_at,spec.id
-		LIMIT 1`, scopeID, accountID, expectedSpecKey, family.ID())
+		LIMIT $4`, scopeID, accountID, family.ID(), limit+1)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list exact generated research preparations: %w", err)
 	}
@@ -80,6 +78,9 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearchPreparations(
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: list exact generated research preparations: %w", err)
 	}
+	if len(candidates) > limit {
+		return nil, fmt.Errorf("postgres: generated preparation candidate set exceeded limit")
+	}
 	items := make([]generativestrategy.EligiblePreparation, 0, limit)
 	datasets := NewDatasetRepo(r.pool)
 	for _, candidate := range candidates {
@@ -87,7 +88,7 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearchPreparations(
 		if err != nil {
 			return nil, fmt.Errorf("postgres: load generated preparation compilation: %w", err)
 		}
-		if spec.SpecKey() != expectedSpecKey || spec.FamilyID() != family.ID() || version.ID() != candidate.versionID || candidate.manifestID != report.ManifestID ||
+		if generativestrategy.ValidateReviewedDailyStockSpec(spec, scopeID) != nil || spec.FamilyID() != family.ID() || version.ID() != candidate.versionID || candidate.manifestID != report.ManifestID ||
 			candidate.qualityResultID != report.QualityResultID || candidate.capitalBindingID == uuid.Nil {
 			return nil, fmt.Errorf("postgres: generated preparation graph does not match the exact scope")
 		}
@@ -202,9 +203,8 @@ func (r *GenerativeStrategyRepo) validateReviewedPreparedResearch(
 	if err != nil {
 		return err
 	}
-	expectedSpecKey := "daily_stock_" + strings.ReplaceAll(scopeID.String(), "-", "")
 	experiment := prepared.Experiment
-	if prepared.Spec.SpecKey() != expectedSpecKey || prepared.Spec.FamilyID() != family.ID() || experiment.VersionID() != prepared.Version.ID() ||
+	if generativestrategy.ValidateReviewedDailyStockSpec(prepared.Spec, scopeID) != nil || prepared.Spec.FamilyID() != family.ID() || experiment.VersionID() != prepared.Version.ID() ||
 		experiment.AccountID() != report.AccountID || experiment.ManifestID() != report.ManifestID || experiment.QualityResultID() != report.QualityResultID ||
 		experiment.Mode() != strategycatalog.ExperimentPaperScored || experiment.DatasetQuarantined() {
 		return fmt.Errorf("postgres: generated research identity graph is outside the reviewed scope")

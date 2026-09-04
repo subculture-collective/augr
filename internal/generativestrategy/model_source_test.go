@@ -86,3 +86,19 @@ func TestReviewedDailyStockFamilyIsStable(t *testing.T) {
 		t.Fatalf("first=%+v second=%+v", first, second)
 	}
 }
+
+func TestReviewedDailyStockSpecKeyBindsOneInstrument(t *testing.T) {
+	scopeID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
+	instrumentID := uuid.MustParse("20000000-0000-4000-8000-000000000002")
+	first, err := ReviewedDailyStockSpecKey(scopeID, instrumentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _ := ReviewedDailyStockSpecKey(scopeID, instrumentID)
+	if first != second || len(first) != len("daily_stock_")+32 {
+		t.Fatalf("ReviewedDailyStockSpecKey() = %q, %q", first, second)
+	}
+	if other, _ := ReviewedDailyStockSpecKey(scopeID, uuid.New()); other == first {
+		t.Fatal("instrument identity did not affect reviewed key")
+	}
+}

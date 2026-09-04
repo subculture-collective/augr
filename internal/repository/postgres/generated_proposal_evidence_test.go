@@ -137,7 +137,10 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 		t.Fatal("cross-account proposal evidence was accepted")
 	}
 
-	key := "daily_stock_" + strings.ReplaceAll(scope.ID.String(), "-", "")
+	key, err := generativestrategy.ReviewedDailyStockSpecKey(scope.ID, instrumentID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	proposalService, err := generativestrategy.NewProposalService(NewGenerativeStrategyRepo(fixture.pool))
 	if err != nil {
 		t.Fatal(err)

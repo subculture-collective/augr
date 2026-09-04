@@ -86,14 +86,6 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedProposalEvidence(
 		return nil, fmt.Errorf("postgres: generated proposal fold plan: %w", err)
 	}
 	proposalCutoff := folds[0].TrainEnd
-	key := "daily_stock_" + strings.ReplaceAll(scopeID.String(), "-", "")
-	var exists bool
-	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generated_strategy_specs WHERE family_id=$1 AND spec_key=$2)`, familyID, key).Scan(&exists); err != nil {
-		return nil, fmt.Errorf("postgres: check existing generated proposal: %w", err)
-	}
-	if exists {
-		return []generativestrategy.ProposalEvidence{}, nil
-	}
 	payloads, err := NewDatasetRepo(r.pool).ListBoundMarketPayloads(ctx, report.ManifestID, dataset.MarketPayloadStockBar)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: load generated proposal payloads: %w", err)
@@ -186,21 +178,39 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedProposalEvidence(
 	for _, field := range allowedNames {
 		allowed = append(allowed, generativestrategy.AllowedDataField{DatasetKind: dataset.KindBars, Field: field, Type: "decimal"})
 	}
-	summary := generatedDailyStockEvidenceSummary{
-		Schema: generatedDailyStockEvidenceSchemaV2, TrustedSpecKey: key, AccountID: accountID.String(), ScopeID: scopeID.String(),
-		ManifestID: report.ManifestID.String(), ManifestSHA256: report.ManifestSHA256, QualityResultID: report.QualityResultID.String(),
-		QualitySHA256: report.QualitySHA256, DecisionCutoff: formatProposalEvidenceTime(proposalCutoff), ManifestCutoff: formatProposalEvidenceTime(report.DecisionCutoff),
-		EvaluationStart: formatProposalEvidenceTime(report.EvaluationStart), EvaluationEnd: formatProposalEvidenceTime(proposalCutoff),
-		BenchmarkID: benchmarkID.String(), AllowedBarFields: allowedNames, Instruments: summaries,
+	items := make([]generativestrategy.ProposalEvidence, 0, min(limit, len(ids)))
+	for index, instrumentID := range ids {
+		key, err := generativestrategy.ReviewedDailyStockSpecKey(scopeID, instrumentID)
+		if err != nil {
+			return nil, err
+		}
+		var exists bool
+		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM generated_strategy_specs WHERE family_id=$1 AND spec_key=$2)`, familyID, key).Scan(&exists); err != nil {
+			return nil, fmt.Errorf("postgres: check existing generated proposal: %w", err)
+		}
+		if exists {
+			continue
+		}
+		summary := generatedDailyStockEvidenceSummary{
+			Schema: generatedDailyStockEvidenceSchemaV2, TrustedSpecKey: key, AccountID: accountID.String(), ScopeID: scopeID.String(),
+			ManifestID: report.ManifestID.String(), ManifestSHA256: report.ManifestSHA256, QualityResultID: report.QualityResultID.String(),
+			QualitySHA256: report.QualitySHA256, DecisionCutoff: formatProposalEvidenceTime(proposalCutoff), ManifestCutoff: formatProposalEvidenceTime(report.DecisionCutoff),
+			EvaluationStart: formatProposalEvidenceTime(report.EvaluationStart), EvaluationEnd: formatProposalEvidenceTime(proposalCutoff),
+			BenchmarkID: benchmarkID.String(), AllowedBarFields: allowedNames, Instruments: []generatedDailyStockInstrumentSummary{summaries[index]},
+		}
+		raw, err := json.Marshal(summary)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: encode generated proposal evidence: %w", err)
+		}
+		items = append(items, generativestrategy.ProposalEvidence{
+			Key: key, Universe: generativestrategy.Universe{AssetClass: instrument.AssetClassEquity, Instruments: []uuid.UUID{instrumentID}, Benchmark: benchmarkID},
+			AllowedDataFields: allowed, ImmutableSummary: string(raw),
+		})
+		if len(items) == limit {
+			break
+		}
 	}
-	raw, err := json.Marshal(summary)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: encode generated proposal evidence: %w", err)
-	}
-	return []generativestrategy.ProposalEvidence{{
-		Key: key, Universe: generativestrategy.Universe{AssetClass: instrument.AssetClassEquity, Instruments: ids, Benchmark: benchmarkID},
-		AllowedDataFields: allowed, ImmutableSummary: string(raw),
-	}}, nil
+	return items, nil
 }
 
 func formatProposalEvidenceTime(value time.Time) string {

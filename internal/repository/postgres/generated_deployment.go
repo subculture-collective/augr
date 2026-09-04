@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,19 +40,18 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedDeployments(
 	if err != nil {
 		return nil, err
 	}
-	expectedSpecKey := "daily_stock_" + strings.ReplaceAll(scopeID.String(), "-", "")
 	rows, err := r.pool.Query(ctx, `SELECT assessment.id,spec.id,receipt.version_id,scope.capital_binding_id,
 		trim_scale(binding.starting_capital)::text,scope.created_at
 		FROM paper_evaluation_scopes scope
 		JOIN account_capital_policy_bindings binding ON binding.id=scope.capital_binding_id AND binding.account_id=scope.account_id
-		JOIN generated_strategy_specs spec ON spec.spec_key=$3 AND spec.family_id=$4
+		JOIN generated_strategy_specs spec ON spec.family_id=$3
 		JOIN generated_strategy_compilation_receipts receipt ON receipt.spec_id=spec.id
 		JOIN robustness_assessment_candidates candidate ON candidate.version_id=receipt.version_id
 		JOIN statistical_robustness_assessments assessment ON assessment.id=candidate.assessment_id
 		  AND assessment.scope_id=scope.id AND assessment.mode='paper_scored' AND assessment.state='completed'
 		WHERE scope.id=$1 AND scope.account_id=$2
 		ORDER BY assessment.created_at,assessment.id
-		LIMIT $5`, scopeID, accountID, expectedSpecKey, reviewedStrategyFamily.ID(), limit+1)
+		LIMIT $4`, scopeID, accountID, reviewedStrategyFamily.ID(), limit+1)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list generated deployment assessments: %w", err)
 	}
@@ -91,11 +89,11 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedDeployments(
 		if err != nil {
 			return nil, fmt.Errorf("postgres: load generated deployment compilation: %w", err)
 		}
-		if spec.SpecKey() != expectedSpecKey || spec.FamilyID() != reviewedStrategyFamily.ID() || version.ID() != candidate.versionID {
+		if generativestrategy.ValidateReviewedDailyStockSpec(spec, scopeID) != nil || spec.FamilyID() != reviewedStrategyFamily.ID() || version.ID() != candidate.versionID {
 			return nil, fmt.Errorf("postgres: generated deployment compilation is outside the reviewed scope")
 		}
 		expectedRobustnessFamily, err := robustness.NewFamily(robustness.FamilyInput{
-			Name: "generated/" + expectedSpecKey, HypothesisSHA256: spec.Digest(), CandidateVersionIDs: []uuid.UUID{candidate.versionID},
+			Name: "generated/" + spec.SpecKey(), HypothesisSHA256: spec.Digest(), CandidateVersionIDs: []uuid.UUID{candidate.versionID},
 		})
 		if err != nil {
 			return nil, err

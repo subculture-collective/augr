@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,7 +39,6 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedRobustness(
 	if err != nil {
 		return nil, err
 	}
-	expectedSpecKey := "daily_stock_" + strings.ReplaceAll(scopeID.String(), "-", "")
 	var specID, versionID uuid.UUID
 	var baselineSimulationPolicyVersion string
 	err = r.pool.QueryRow(ctx, `SELECT spec.id,receipt.version_id,simulation.policy_version
@@ -50,12 +48,14 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedRobustness(
 		JOIN simulation_policy_artifacts simulation ON simulation.sha256=scope.simulation_policy_sha256
 		JOIN account_capital_policy_bindings binding ON binding.id=scope.capital_binding_id AND binding.account_id=scope.account_id
 		JOIN capital_margin_policy_artifacts capital ON capital.id=binding.policy_artifact_id AND capital.sha256=scope.capital_policy_sha256
-		JOIN generated_strategy_specs spec ON spec.spec_key=$3 AND spec.family_id=$4
+		JOIN generated_strategy_specs spec ON spec.family_id=$3
 		JOIN generated_strategy_compilation_receipts receipt ON receipt.spec_id=spec.id
 		WHERE scope.id=$1 AND scope.account_id=$2
 		  AND NOT EXISTS(SELECT 1 FROM statistical_robustness_assessments assessment
 		    JOIN robustness_assessment_candidates candidate ON candidate.assessment_id=assessment.id AND candidate.version_id=receipt.version_id
-		    WHERE assessment.scope_id=scope.id)`, scopeID, accountID, expectedSpecKey, reviewedFamily.ID()).Scan(
+		    WHERE assessment.scope_id=scope.id)
+		ORDER BY spec.created_at,spec.id
+		LIMIT 1`, scopeID, accountID, reviewedFamily.ID()).Scan(
 		&specID, &versionID, &baselineSimulationPolicyVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -68,7 +68,7 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedRobustness(
 	if err != nil {
 		return nil, fmt.Errorf("postgres: load generated robustness compilation: %w", err)
 	}
-	if compiledVersion.ID() != versionID || spec.SpecKey() != expectedSpecKey || spec.FamilyID() != reviewedFamily.ID() {
+	if compiledVersion.ID() != versionID || generativestrategy.ValidateReviewedDailyStockSpec(spec, scopeID) != nil || spec.FamilyID() != reviewedFamily.ID() {
 		return nil, fmt.Errorf("postgres: generated robustness compilation is outside the reviewed scope")
 	}
 	folds, err := generativestrategy.PlanReviewedResearchFolds(report.EvaluationStart, report.EvaluationEnd)
@@ -144,7 +144,7 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedRobustness(
 		return nil, err
 	}
 	family, err := robustness.NewFamily(robustness.FamilyInput{
-		Name: "generated/" + expectedSpecKey, HypothesisSHA256: spec.Digest(), CandidateVersionIDs: []uuid.UUID{versionID},
+		Name: "generated/" + spec.SpecKey(), HypothesisSHA256: spec.Digest(), CandidateVersionIDs: []uuid.UUID{versionID},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("postgres: build generated robustness family: %w", err)

@@ -2,6 +2,8 @@ package generativestrategy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -98,6 +100,38 @@ func ReviewedDailyStockFamily() (*strategycatalog.Family, error) {
 		Thesis:       "Typed, bounded daily equity hypotheses derived only from a configured immutable evaluation scope.",
 		AssetClasses: []instrument.AssetClass{instrument.AssetClassEquity},
 	})
+}
+
+// ReviewedDailyStockSpecKey binds one generated strategy to one immutable
+// evaluation scope and one executable instrument. Keeping the target singular
+// is required by the scheduled runtime, whose durable strategy identity and
+// opportunity lineage are ticker-scoped.
+func ReviewedDailyStockSpecKey(scopeID, instrumentID uuid.UUID) (string, error) {
+	if scopeID == uuid.Nil || instrumentID == uuid.Nil {
+		return "", fmt.Errorf("reviewed daily stock key requires scope and instrument")
+	}
+	digest := sha256.Sum256([]byte(scopeID.String() + "\x00" + instrumentID.String()))
+	return "daily_stock_" + hex.EncodeToString(digest[:16]), nil
+}
+
+// ValidateReviewedDailyStockSpec proves that a proposal has exactly one
+// executable target and that its trusted key names that target and scope.
+func ValidateReviewedDailyStockSpec(spec *Spec, scopeID uuid.UUID) error {
+	if spec == nil || scopeID == uuid.Nil {
+		return fmt.Errorf("reviewed daily stock spec and scope are required")
+	}
+	universe := spec.Universe()
+	if len(universe.Instruments) != 1 {
+		return fmt.Errorf("reviewed daily stock spec requires exactly one executable instrument")
+	}
+	expected, err := ReviewedDailyStockSpecKey(scopeID, universe.Instruments[0])
+	if err != nil {
+		return err
+	}
+	if spec.SpecKey() != expected {
+		return fmt.Errorf("reviewed daily stock spec key does not bind its scope and instrument")
+	}
+	return nil
 }
 
 var _ EligibleProposalSource = (*ModelProposalSource)(nil)
