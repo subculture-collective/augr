@@ -7,7 +7,7 @@ func TestRecordOptionsDeploymentOutcomeSeparatesCreateReuseAndDryRun(t *testing.
 	recordOptionsDeploymentOutcome(result, false, true)
 	recordOptionsDeploymentOutcome(result, false, false)
 	recordOptionsDeploymentOutcome(result, true, false)
-	if result.Proposed != 3 || result.Created != 1 || result.Reused != 1 || result.Deployed != 1 {
+	if result.Proposed != 3 || result.Created != 1 || result.Reused != 1 || result.Deployed != 0 {
 		t.Fatalf("deployment outcome = %+v", result)
 	}
 }

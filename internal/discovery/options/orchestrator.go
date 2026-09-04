@@ -41,7 +41,9 @@ type OptionsDiscoveryDeps struct {
 	Logger     *slog.Logger
 }
 
-// OptionsDeployedStrategy is a winner that was deployed.
+// OptionsDeployedStrategy is the backward-compatible result envelope for a
+// winning research idea. Creation is inert and does not count as deployment;
+// only the authoritative promotion projector can activate a schedule.
 type OptionsDeployedStrategy struct {
 	StrategyID  uuid.UUID                `json:"strategy_id"`
 	Ticker      string                   `json:"ticker"`
@@ -218,7 +220,7 @@ func RunOptionsDiscovery(ctx context.Context, cfg OptionsDiscoveryConfig, deps O
 		})
 	}
 
-	// Stage 6: Deploy top winners.
+	// Stage 6: Persist top winners as inactive, unscheduled research ideas.
 	selected := 0
 	for _, w := range winners {
 		if selected >= cfg.MaxWinners {
@@ -313,7 +315,6 @@ func recordOptionsDeploymentOutcome(result *OptionsDiscoveryResult, dryRun, crea
 	}
 	if created {
 		result.Created++
-		result.Deployed++
 		return
 	}
 	result.Reused++
