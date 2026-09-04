@@ -21,6 +21,43 @@ type OptionsBroker struct {
 	expectedExternalAccountID string
 }
 
+// PaperOptionsPreflightError exposes a stable, non-sensitive reason code to
+// the allocator while retaining the underlying provider error for diagnosis.
+// Account payloads and credentials are deliberately never included.
+type PaperOptionsPreflightError struct {
+	code string
+	err  error
+}
+
+func (e *PaperOptionsPreflightError) Error() string {
+	if e == nil || e.err == nil {
+		return "alpaca: paper options preflight failed"
+	}
+	return e.err.Error()
+}
+
+func (e *PaperOptionsPreflightError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *PaperOptionsPreflightError) PaperOptionsPreflightReason() string {
+	if e == nil {
+		return "unknown"
+	}
+	return e.code
+}
+
+func paperOptionsPreflightError(code, message string, cause error) error {
+	err := errors.New(message)
+	if cause != nil {
+		err = fmt.Errorf("%s: %w", message, cause)
+	}
+	return &PaperOptionsPreflightError{code: code, err: err}
+}
+
 // NewOptionsBroker constructs an Alpaca options broker adapter.
 func NewOptionsBroker(client *Client) *OptionsBroker {
 	return &OptionsBroker{client: client}
@@ -46,34 +83,37 @@ func (b *OptionsBroker) GetAccountBalance(ctx context.Context) (execution.Balanc
 // the order boundary. Multi-leg opening orders require level 3 eligibility.
 func (b *OptionsBroker) PreflightPaperOptions(ctx context.Context, requiredCapital float64) error {
 	if b == nil || b.client == nil || !b.client.IsPaper() {
-		return errors.New("alpaca: options allocator requires the paper endpoint")
+		return paperOptionsPreflightError("paper_endpoint_required", "alpaca: options allocator requires the paper endpoint", nil)
 	}
 	if b.expectedExternalAccountID == "" {
-		return errors.New("alpaca: expected paper account id is required")
+		return paperOptionsPreflightError("expected_account_required", "alpaca: expected paper account id is required", nil)
+	}
+	if requiredCapital <= 0 || math.IsNaN(requiredCapital) || math.IsInf(requiredCapital, 0) {
+		return paperOptionsPreflightError("invalid_required_capital", "alpaca: required options capital must be finite and positive", nil)
 	}
 	body, err := b.client.Get(ctx, "/v2/account", nil)
 	if err != nil {
-		return fmt.Errorf("alpaca: paper options account preflight: %w", err)
+		return paperOptionsPreflightError("account_read_failed", "alpaca: paper options account preflight", err)
 	}
 	var account accountResponse
 	if err := json.Unmarshal(body, &account); err != nil {
-		return fmt.Errorf("alpaca: decode paper options account preflight: %w", err)
+		return paperOptionsPreflightError("account_decode_failed", "alpaca: decode paper options account preflight", err)
 	}
 	if strings.TrimSpace(account.AccountNumber) != b.expectedExternalAccountID {
-		return errors.New("alpaca: paper options account identity mismatch")
+		return paperOptionsPreflightError("account_identity_mismatch", "alpaca: paper options account identity mismatch", nil)
 	}
 	if !strings.EqualFold(strings.TrimSpace(account.Status), "ACTIVE") || account.TradingBlocked {
-		return errors.New("alpaca: paper options account is not active for trading")
+		return paperOptionsPreflightError("account_not_active", "alpaca: paper options account is not active for trading", nil)
 	}
 	if account.OptionsTradingLevel < 3 || account.OptionsApprovedLevel < 3 {
-		return errors.New("alpaca: paper options account lacks multi-leg level 3 eligibility")
+		return paperOptionsPreflightError("multileg_level_3_required", "alpaca: paper options account lacks multi-leg level 3 eligibility", nil)
 	}
 	optionsBuyingPower, err := parseRequiredFloat("options_buying_power", account.OptionsBuyingPower)
 	if err != nil {
-		return err
+		return paperOptionsPreflightError("options_buying_power_invalid", "alpaca: options buying power is invalid", err)
 	}
-	if requiredCapital <= 0 || optionsBuyingPower < requiredCapital {
-		return errors.New("alpaca: insufficient verified options buying power")
+	if optionsBuyingPower < requiredCapital {
+		return paperOptionsPreflightError("insufficient_options_buying_power", "alpaca: insufficient verified options buying power", nil)
 	}
 	return nil
 }

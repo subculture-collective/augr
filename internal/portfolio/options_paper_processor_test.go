@@ -70,3 +70,19 @@ func TestOptionsPackageResultDistinguishesDefinitiveAndAmbiguousFailures(t *test
 		t.Fatalf("ambiguous result=%+v err=%v", result, err)
 	}
 }
+
+type testPaperOptionsPreflightError struct{ code string }
+
+func (e testPaperOptionsPreflightError) Error() string                       { return "provider detail" }
+func (e testPaperOptionsPreflightError) PaperOptionsPreflightReason() string { return e.code }
+
+func TestPaperOptionsPreflightReasonPreservesStableConstraint(t *testing.T) {
+	t.Parallel()
+	wrapped := errors.Join(errors.New("outer"), testPaperOptionsPreflightError{code: "account_identity_mismatch"})
+	if got := paperOptionsPreflightReason(wrapped); got != "paper_options_preflight_account_identity_mismatch" {
+		t.Fatalf("reason = %q", got)
+	}
+	if got := paperOptionsPreflightReason(errors.New("untyped")); got != "paper_options_preflight_rejected" {
+		t.Fatalf("fallback reason = %q", got)
+	}
+}

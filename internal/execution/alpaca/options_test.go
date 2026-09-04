@@ -3,6 +3,7 @@ package alpaca
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -59,15 +60,24 @@ func TestPreflightPaperOptionsVerifiesIdentityLevelAndBuyingPower(t *testing.T) 
 	if err := broker.PreflightPaperOptions(context.Background(), 4500); err != nil {
 		t.Fatal(err)
 	}
-	if err := broker.PreflightPaperOptions(context.Background(), 5500); err == nil {
-		t.Fatal("insufficient options buying power accepted")
+	if err := broker.PreflightPaperOptions(context.Background(), 5500); paperOptionsPreflightReason(t, err) != "insufficient_options_buying_power" {
+		t.Fatalf("insufficient options buying power reason = %v", err)
 	}
-	if err := NewOptionsBroker(client).WithExpectedPaperAccount("wrong").PreflightPaperOptions(context.Background(), 1); err == nil {
-		t.Fatal("wrong paper account accepted")
+	if err := NewOptionsBroker(client).WithExpectedPaperAccount("wrong").PreflightPaperOptions(context.Background(), 1); paperOptionsPreflightReason(t, err) != "account_identity_mismatch" {
+		t.Fatalf("wrong paper account reason = %v", err)
 	}
 	liveClient := NewClient("test-key", "test-secret", false, discardLogger())
 	liveClient.SetBaseURL(server.URL)
-	if err := NewOptionsBroker(liveClient).WithExpectedPaperAccount("paper-123").PreflightPaperOptions(context.Background(), 1); err == nil {
-		t.Fatal("live endpoint accepted for allocator paper execution")
+	if err := NewOptionsBroker(liveClient).WithExpectedPaperAccount("paper-123").PreflightPaperOptions(context.Background(), 1); paperOptionsPreflightReason(t, err) != "paper_endpoint_required" {
+		t.Fatalf("live endpoint reason = %v", err)
 	}
+}
+
+func paperOptionsPreflightReason(t *testing.T, err error) string {
+	t.Helper()
+	var typed *PaperOptionsPreflightError
+	if !errors.As(err, &typed) {
+		t.Fatalf("preflight error %v is not typed", err)
+	}
+	return typed.PaperOptionsPreflightReason()
 }

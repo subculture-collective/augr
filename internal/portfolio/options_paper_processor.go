@@ -20,6 +20,10 @@ type paperOptionsAccountPreflight interface {
 	PreflightPaperOptions(context.Context, float64) error
 }
 
+type paperOptionsPreflightReasoner interface {
+	PaperOptionsPreflightReason() string
+}
+
 type OptionsPaperOrderProcessorDeps struct {
 	Broker          execution.OptionsBroker
 	OrderRepo       repository.OrderRepository
@@ -55,7 +59,7 @@ func (processor *OptionsPaperOrderProcessor) ProcessPaperOptionsOrder(ctx contex
 		return PaperOrderResult{Skipped: true, Reason: "missing_paper_options_preflight"}, nil
 	}
 	if err := preflight.PreflightPaperOptions(ctx, decision.ReservedCapitalUSD); err != nil {
-		return PaperOrderResult{Skipped: true, Reason: "paper_options_preflight_rejected"}, nil
+		return PaperOrderResult{Skipped: true, Reason: paperOptionsPreflightReason(err)}, nil
 	}
 	spread, err := DefinedRiskSpreadFromOpportunity(opportunity)
 	if err != nil {
@@ -82,6 +86,20 @@ func (processor *OptionsPaperOrderProcessor) ProcessPaperOptionsOrder(ctx contex
 		return PaperOrderResult{Skipped: true, Reason: "option_package_order_not_created"}, nil
 	}
 	return classifyOptionsPackageResult(order, err)
+}
+
+func paperOptionsPreflightReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var reasoner paperOptionsPreflightReasoner
+	if errors.As(err, &reasoner) {
+		code := strings.TrimSpace(reasoner.PaperOptionsPreflightReason())
+		if code != "" {
+			return "paper_options_preflight_" + code
+		}
+	}
+	return "paper_options_preflight_rejected"
 }
 
 func classifyOptionsPackageResult(order *domain.Order, submitErr error) (PaperOrderResult, error) {
