@@ -114,18 +114,26 @@ BEGIN
   SELECT * INTO scenario FROM generated_strategy_scenarios WHERE id=target;
   IF NOT FOUND THEN RAISE EXCEPTION 'generated strategy scenario parent is missing'; END IF;
   IF scenario.spec_sha256<>(SELECT sha256 FROM generated_strategy_specs WHERE id=scenario.spec_id)
-    OR scenario.manifest_sha256<>(SELECT sha256 FROM dataset_manifests WHERE id=scenario.manifest_id)
-    OR scenario.frame_count<>(SELECT count(*) FROM generated_strategy_scenario_frames WHERE scenario_id=target)
-    OR scenario.canonical_json->'frames'<>COALESCE((SELECT jsonb_agg(frame.canonical_frame ORDER BY frame.sequence) FROM generated_strategy_scenario_frames frame WHERE frame.scenario_id=target),'[]'::JSONB)
-    OR EXISTS(SELECT 1 FROM generated_strategy_scenario_frames frame WHERE frame.scenario_id=target AND
+    OR scenario.manifest_sha256<>(SELECT sha256 FROM dataset_manifests WHERE id=scenario.manifest_id) THEN
+    RAISE EXCEPTION 'generated strategy scenario parent graph does not reconstruct';
+  END IF;
+  IF scenario.frame_count<>(SELECT count(*) FROM generated_strategy_scenario_frames WHERE scenario_id=target) THEN
+    RAISE EXCEPTION 'generated strategy scenario frame count does not reconstruct';
+  END IF;
+  IF scenario.canonical_json->'frames'<>COALESCE((SELECT jsonb_agg(frame.canonical_frame ORDER BY frame.sequence) FROM generated_strategy_scenario_frames frame WHERE frame.scenario_id=target),'[]'::JSONB) THEN
+    RAISE EXCEPTION 'generated strategy scenario canonical frames do not reconstruct';
+  END IF;
+  IF EXISTS(SELECT 1 FROM generated_strategy_scenario_frames frame WHERE frame.scenario_id=target AND
       (frame.sequence<>((frame.canonical_frame->>'sequence')::INTEGER)
        OR frame.instrument_id<>((frame.canonical_frame->>'instrument_id')::UUID)
        OR frame.venue_contract_id<>((frame.canonical_frame->>'venue_contract_id')::UUID)
        OR frame.action<>(frame.canonical_frame->>'action')
        OR frame.input_count<>(SELECT count(*) FROM generated_strategy_scenario_bindings binding WHERE binding.scenario_id=target AND binding.frame_sequence=frame.sequence)
-       OR frame.canonical_frame->'bindings'<>COALESCE((SELECT jsonb_agg(binding.canonical_binding ORDER BY binding.input_sequence) FROM generated_strategy_scenario_bindings binding WHERE binding.scenario_id=target AND binding.frame_sequence=frame.sequence),'[]'::JSONB)))
-    OR EXISTS(SELECT 1 FROM generated_strategy_scenario_bindings binding
-      LEFT JOIN dataset_market_payloads payload ON payload.id=binding.payload_id AND payload.sha256=binding.payload_sha256
+       OR frame.canonical_frame->'bindings'<>COALESCE((SELECT jsonb_agg(binding.canonical_binding ORDER BY binding.input_sequence) FROM generated_strategy_scenario_bindings binding WHERE binding.scenario_id=target AND binding.frame_sequence=frame.sequence),'[]'::JSONB))) THEN
+    RAISE EXCEPTION 'generated strategy scenario frame graph does not reconstruct';
+  END IF;
+  IF EXISTS(SELECT 1 FROM generated_strategy_scenario_bindings binding
+      LEFT JOIN dataset_market_payloads payload ON payload.id=binding.payload_id AND payload.content_sha256=binding.payload_sha256
       WHERE binding.scenario_id=target AND (payload.id IS NULL
         OR binding.input_name<>binding.canonical_binding->>'name'
         OR binding.dataset_kind<>binding.canonical_binding->>'dataset_kind'
@@ -135,12 +143,13 @@ BEGIN
         OR binding.partition_content_sha256<>binding.canonical_binding->>'partition_content_sha256'
         OR binding.source_key<>binding.canonical_binding->>'source_key'
         OR binding.canonical_value<>binding.canonical_binding->>'value'
-        OR binding.available_at<>payload.available_at
+        OR binding.available_at<>COALESCE(payload.published_at,payload.available_at)
         OR NOT EXISTS(SELECT 1 FROM dataset_manifest_partitions partition
           JOIN dataset_manifest_observations observation ON observation.manifest_id=partition.manifest_id AND observation.partition_sequence=partition.sequence
           WHERE partition.manifest_id=scenario.manifest_id AND partition.content_sha256=binding.partition_content_sha256
-            AND observation.source_key=binding.source_key AND observation.content_sha256=binding.payload_sha256 AND observation.available_at=binding.available_at))) THEN
-    RAISE EXCEPTION 'generated strategy scenario graph does not reconstruct';
+            AND observation.source_key=binding.source_key AND observation.content_sha256=binding.payload_sha256
+            AND COALESCE(observation.published_at,observation.available_at)=binding.available_at))) THEN
+    RAISE EXCEPTION 'generated strategy scenario binding graph does not reconstruct';
   END IF;
   RETURN NULL;
 END; $$ LANGUAGE plpgsql;

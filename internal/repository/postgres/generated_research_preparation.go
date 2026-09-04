@@ -182,6 +182,65 @@ func (r *GenerativeStrategyRepo) generatedPreparationExperimentExists(
 	return exists, nil
 }
 
+// validateReviewedPreparedResearch admits only the four experiment variants
+// derived from the reviewed scope: two exact purged folds, each with either
+// the scope's baseline simulation policy or its deterministic doubled-fee
+// perturbation. Database membership alone is not sufficient because all of
+// these tables are append-only and may contain unrelated research.
+func (r *GenerativeStrategyRepo) validateReviewedPreparedResearch(
+	ctx context.Context,
+	report *DiscoveryDeploymentReadinessReport,
+	scopeID uuid.UUID,
+	baselineSimulationPolicyVersion string,
+	prepared *generativestrategy.PreparedResearch,
+) error {
+	if report == nil || prepared == nil || prepared.Spec == nil || prepared.Version == nil || prepared.Experiment == nil ||
+		report.ScopeID != scopeID || !report.Stock.Ready {
+		return fmt.Errorf("postgres: generated research does not have a reviewed ready scope")
+	}
+	family, err := generativestrategy.ReviewedDailyStockFamily()
+	if err != nil {
+		return err
+	}
+	expectedSpecKey := "daily_stock_" + strings.ReplaceAll(scopeID.String(), "-", "")
+	experiment := prepared.Experiment
+	if prepared.Spec.SpecKey() != expectedSpecKey || prepared.Spec.FamilyID() != family.ID() || experiment.VersionID() != prepared.Version.ID() ||
+		experiment.AccountID() != report.AccountID || experiment.ManifestID() != report.ManifestID || experiment.QualityResultID() != report.QualityResultID ||
+		experiment.Mode() != strategycatalog.ExperimentPaperScored || experiment.DatasetQuarantined() {
+		return fmt.Errorf("postgres: generated research identity graph is outside the reviewed scope")
+	}
+	folds, err := generativestrategy.PlanReviewedResearchFolds(report.EvaluationStart, report.EvaluationEnd)
+	if err != nil {
+		return err
+	}
+	matchedFold := false
+	for _, fold := range folds {
+		if experiment.EvaluationStart().Equal(fold.TestStart) && experiment.EvaluationEnd().Equal(fold.TestEnd) {
+			matchedFold = true
+			break
+		}
+	}
+	if !matchedFold {
+		return fmt.Errorf("postgres: generated research window is not an exact reviewed purged fold")
+	}
+	baseArtifact, err := NewSimulationPolicyRepo(r.pool).GetSimulationPolicyByVersion(ctx, baselineSimulationPolicyVersion)
+	if err != nil {
+		return fmt.Errorf("postgres: load generated research baseline simulation policy: %w", err)
+	}
+	basePolicy, err := simulation.PolicyFromArtifact(*baseArtifact)
+	if err != nil {
+		return fmt.Errorf("postgres: reconstruct generated research baseline simulation policy: %w", err)
+	}
+	costPolicy, err := simulation.DoubledFeePolicy(basePolicy)
+	if err != nil {
+		return fmt.Errorf("postgres: derive generated research cost-up policy: %w", err)
+	}
+	if experiment.SimulationPolicyVersion() != baselineSimulationPolicyVersion && experiment.SimulationPolicyVersion() != costPolicy.Version() {
+		return fmt.Errorf("postgres: generated research simulation policy is not baseline or reviewed cost-up")
+	}
+	return nil
+}
+
 func (r *GenerativeStrategyRepo) generatedPreparationContracts(
 	ctx context.Context,
 	spec *generativestrategy.Spec,

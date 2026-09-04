@@ -68,8 +68,15 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearch(
 		limit > generativestrategy.MaximumResearchBatchSize || now.IsZero() || now.Location() != time.UTC || !now.Equal(now.Truncate(time.Microsecond)) {
 		return nil, fmt.Errorf("postgres: exact generated research account, scope, limit, and time are required")
 	}
+	report, err := NewReportArtifactRepo(r.pool).DiscoveryDeploymentReadinessForScope(ctx, scopeID, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: generated research scope: %w", err)
+	}
+	if !report.Stock.Ready {
+		return nil, fmt.Errorf("postgres: generated research stock evidence: %s", report.Stock.Reason)
+	}
 	rows, err := r.pool.Query(ctx, `
-		SELECT experiment.id,scenario.id
+		SELECT experiment.id,scenario.id,simulation.policy_version
 		FROM paper_evaluation_scopes scope
 		JOIN dataset_manifests manifest ON manifest.sha256=scope.manifest_sha256
 		JOIN dataset_quality_results quality ON quality.manifest_id=manifest.id AND quality.sha256=scope.quality_sha256 AND NOT quality.quarantined
@@ -78,8 +85,8 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearch(
 		JOIN capital_margin_policy_artifacts capital ON capital.id=binding.policy_artifact_id AND capital.sha256=scope.capital_policy_sha256
 		JOIN research_experiments experiment ON experiment.account_id=scope.account_id AND experiment.capital_binding_id=binding.id
 			AND experiment.manifest_id=manifest.id AND experiment.quality_result_id=quality.id
-			AND experiment.simulation_policy_version=simulation.policy_version AND experiment.capital_policy_version=capital.policy_version
-			AND experiment.evaluation_start=scope.evaluation_start AND experiment.evaluation_end=scope.evaluation_end AND NOT experiment.dataset_quarantined
+			AND experiment.capital_policy_version=capital.policy_version AND experiment.mode='paper_scored' AND NOT experiment.dataset_quarantined
+		JOIN simulation_policy_artifacts experiment_simulation ON experiment_simulation.policy_version=experiment.simulation_policy_version
 		JOIN generated_strategy_compilation_receipts receipt ON receipt.version_id=experiment.version_id
 		JOIN generated_strategy_scenarios scenario ON scenario.spec_id=receipt.spec_id AND scenario.manifest_id=manifest.id
 			AND scenario.mode=experiment.mode AND scenario.evaluation_start=experiment.evaluation_start AND scenario.evaluation_end=experiment.evaluation_end
@@ -94,11 +101,15 @@ func (r *GenerativeStrategyRepo) ListEligibleGeneratedResearch(
 	items := make([]generativestrategy.EligibleResearch, 0, limit)
 	for rows.Next() {
 		var experimentID, scenarioID uuid.UUID
-		if err := rows.Scan(&experimentID, &scenarioID); err != nil {
+		var baselineSimulationPolicyVersion string
+		if err := rows.Scan(&experimentID, &scenarioID, &baselineSimulationPolicyVersion); err != nil {
 			return nil, fmt.Errorf("postgres: scan exact generated research: %w", err)
 		}
 		prepared, err := r.restorePreparedResearch(ctx, experimentID, scenarioID)
 		if err != nil {
+			return nil, err
+		}
+		if err := r.validateReviewedPreparedResearch(ctx, report, scopeID, baselineSimulationPolicyVersion, prepared); err != nil {
 			return nil, err
 		}
 		attemptID := economicid.DeterministicUUID("generated-research-attempt", experimentID.String(), now.Format("2006-01-02T15:04:05.000000Z"))
@@ -205,8 +216,12 @@ type generatedScenarioFrameEnvelope struct {
 	VenueContractID string                             `json:"venue_contract_id"`
 	DecisionAt      string                             `json:"decision_at"`
 	RouteAt         string                             `json:"route_at"`
-	Action          string                             `json:"action"`
+	ExecutionInput  string                             `json:"execution_input"`
 	Bindings        []generatedScenarioBindingEnvelope `json:"bindings"`
+	Entry           bool                               `json:"entry"`
+	Exit            bool                               `json:"exit"`
+	Action          string                             `json:"action"`
+	ExecutionPrice  string                             `json:"execution_price"`
 }
 
 type generatedScenarioBindingEnvelope struct {
@@ -513,7 +528,7 @@ func (r *GenerativeStrategyRepo) stage(value string) error {
 
 func generatedStrategyWriteError(action string, err error) error {
 	if err != nil && (strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "does not reconstruct") || strings.Contains(err.Error(), "foreign key")) {
-		return fmt.Errorf("postgres: generated strategy %s conflict: %w", action, repository.ErrIdempotencyConflict)
+		return fmt.Errorf("postgres: generated strategy %s conflict: %v: %w", action, err, repository.ErrIdempotencyConflict)
 	}
 	return fmt.Errorf("postgres: generated strategy %s: %w", action, err)
 }

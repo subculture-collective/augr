@@ -17,10 +17,22 @@ import (
 
 func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	fixture := newStrategyCatalogFixture(t)
-	for _, migration := range []string{"000095_typed_generative_strategy_compiler.up.sql", "000106_paper_evaluation_scopes.up.sql", "000110_immutable_market_payloads.up.sql"} {
+	for _, migration := range []string{
+		"000078_reproducible_experiment_runs.up.sql", "000095_typed_generative_strategy_compiler.up.sql",
+		"000106_paper_evaluation_scopes.up.sql", "000110_immutable_market_payloads.up.sql",
+	} {
 		if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, migration)); err != nil {
 			t.Fatalf("apply %s: %v", migration, err)
 		}
+	}
+	scenarioMigration := repositoryMigrationSQL(t, "000111_portfolio_risk_and_activation.up.sql")
+	startScenario := strings.Index(scenarioMigration, "CREATE TABLE generated_strategy_scenarios (")
+	endScenario := strings.Index(scenarioMigration, "CREATE FUNCTION validate_portfolio_risk_binding()")
+	if startScenario < 0 || endScenario <= startScenario {
+		t.Fatal("migration 111 generated scenario boundary is missing")
+	}
+	if _, err := fixture.pool.Exec(fixture.ctx, scenarioMigration[startScenario:endScenario]); err != nil {
+		t.Fatalf("apply migration 111 generated scenario schema: %v", err)
 	}
 	instrumentID := datasetManifestInstrumentID(t, fixture.manifest)
 	start := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
@@ -41,14 +53,14 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	if _, err := NewInstrumentRepo(fixture.pool).RegisterVenueContract(fixture.ctx, contract); err != nil {
 		t.Fatal(err)
 	}
-	payloads := make([]*dataset.MarketPayload, 0, 2)
-	observations := make([]dataset.ObservationInput, 0, 2)
-	for index, at := range []time.Time{start, folds[0].TrainEnd, end} {
+	payloads := make([]*dataset.MarketPayload, 0, 5)
+	observations := make([]dataset.ObservationInput, 0, 5)
+	for index, at := range []time.Time{start, folds[0].TrainEnd, folds[0].TestStart, folds[1].TestStart, end} {
 		publishedAt := at
 		payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
 			Kind: dataset.MarketPayloadStockBar, InstrumentID: instrumentID, Provider: "alpaca", Feed: "sip", Symbol: "SPY",
 			Timeframe: "1d", AdjustmentPolicy: "raw", EffectiveAt: at, PublishedAt: &publishedAt, ObservedAt: cutoff, AvailableAt: cutoff,
-			Revision: "original", Bar: &dataset.BarPayload{Open: "500", High: "503", Low: "498", Close: fmt.Sprintf("%d", 501+index), Volume: "1000", TradeCount: "100", VWAP: "500.5"},
+			Revision: "original", Bar: &dataset.BarPayload{Open: "500", High: "510", Low: "498", Close: fmt.Sprintf("%d", 501+index), Volume: "1000", TradeCount: "100", VWAP: "500.5"},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -180,6 +192,42 @@ func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	}
 	if preparations[1].Request.SimulationPolicyVersion != preparations[3].Request.SimulationPolicyVersion {
 		t.Fatal("folds derived different cost-up policy identities")
+	}
+	preparer, err := generativestrategy.NewResearchPreparer(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range preparations {
+		if _, err := preparer.Prepare(fixture.ctx, preparations[index].Request); err != nil {
+			t.Fatalf("prepare research[%d]: %v", index, err)
+		}
+	}
+	remaining, err := repo.ListEligibleGeneratedResearchPreparations(fixture.ctx, fixture.account.ID, scope.ID, 20)
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("remaining preparations=%+v error=%v", remaining, err)
+	}
+	research, err := repo.ListEligibleGeneratedResearch(fixture.ctx, fixture.account.ID, scope.ID, 20, cutoff.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(research) != 4 {
+		t.Fatalf("eligible research=%+v", research)
+	}
+	for index, item := range research {
+		fold := folds[index/2]
+		if item.Prepared == nil || !item.Prepared.Experiment.EvaluationStart().Equal(fold.TestStart) || !item.Prepared.Experiment.EvaluationEnd().Equal(fold.TestEnd) {
+			t.Fatalf("eligible research[%d]=%+v", index, item)
+		}
+	}
+	outsideReviewedFold := preparations[0].Request
+	outsideReviewedFold.EvaluationStart = start
+	outsideReviewedFold.EvaluationEnd = end
+	outsideReviewedFold.Seed++
+	if _, err := preparer.Prepare(fixture.ctx, outsideReviewedFold); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.ListEligibleGeneratedResearch(fixture.ctx, fixture.account.ID, scope.ID, 20, cutoff.Add(time.Hour)); err == nil {
+		t.Fatal("non-fold generated research was admitted")
 	}
 	if _, err := repo.ListEligibleGeneratedResearchPreparations(fixture.ctx, uuid.New(), scope.ID, 1); err == nil {
 		t.Fatal("cross-account research preparation was accepted")

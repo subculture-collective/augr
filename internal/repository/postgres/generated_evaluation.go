@@ -31,8 +31,15 @@ func (source *GeneratedEvaluationSource) ListEligibleGeneratedEvaluations(ctx co
 	if source == nil || source.pool == nil || source.evidence == nil || accountID == uuid.Nil || scopeID == uuid.Nil || limit <= 0 || limit > generativestrategy.MaximumResearchBatchSize {
 		return nil, fmt.Errorf("postgres: exact generated evaluation account, scope, and limit are required")
 	}
+	report, err := NewReportArtifactRepo(source.pool).DiscoveryDeploymentReadinessForScope(ctx, scopeID, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: generated evaluation scope: %w", err)
+	}
+	if !report.Stock.Ready {
+		return nil, fmt.Errorf("postgres: generated evaluation stock evidence: %s", report.Stock.Reason)
+	}
 	rows, err := source.pool.Query(ctx, `
-		SELECT result.id,experiment.id,scenario.id
+		SELECT result.id,experiment.id,scenario.id,simulation.policy_version
 		FROM paper_evaluation_scopes scope
 		JOIN dataset_manifests manifest ON manifest.sha256=scope.manifest_sha256
 		JOIN dataset_quality_results quality ON quality.manifest_id=manifest.id AND quality.sha256=scope.quality_sha256 AND NOT quality.quarantined
@@ -41,8 +48,8 @@ func (source *GeneratedEvaluationSource) ListEligibleGeneratedEvaluations(ctx co
 		JOIN capital_margin_policy_artifacts capital ON capital.id=binding.policy_artifact_id AND capital.sha256=scope.capital_policy_sha256
 		JOIN research_experiments experiment ON experiment.account_id=scope.account_id AND experiment.capital_binding_id=binding.id
 			AND experiment.manifest_id=manifest.id AND experiment.quality_result_id=quality.id
-			AND experiment.simulation_policy_version=simulation.policy_version AND experiment.capital_policy_version=capital.policy_version
-			AND experiment.evaluation_start=scope.evaluation_start AND experiment.evaluation_end=scope.evaluation_end AND NOT experiment.dataset_quarantined
+			AND experiment.capital_policy_version=capital.policy_version AND experiment.mode='paper_scored' AND NOT experiment.dataset_quarantined
+		JOIN simulation_policy_artifacts experiment_simulation ON experiment_simulation.policy_version=experiment.simulation_policy_version
 		JOIN generated_strategy_compilation_receipts receipt ON receipt.version_id=experiment.version_id
 		JOIN generated_strategy_scenarios scenario ON scenario.spec_id=receipt.spec_id AND scenario.manifest_id=manifest.id
 			AND scenario.mode=experiment.mode AND scenario.evaluation_start=experiment.evaluation_start AND scenario.evaluation_end=experiment.evaluation_end
@@ -56,12 +63,15 @@ func (source *GeneratedEvaluationSource) ListEligibleGeneratedEvaluations(ctx co
 		return nil, fmt.Errorf("postgres: list exact generated evaluations: %w", err)
 	}
 	defer rows.Close()
-	type candidate struct{ resultID, experimentID, scenarioID uuid.UUID }
+	type candidate struct {
+		resultID, experimentID, scenarioID uuid.UUID
+		baselineSimulationPolicyVersion    string
+	}
 	candidates := make([]candidate, 0, limit)
 	seen := make(map[uuid.UUID]uuid.UUID, limit)
 	for rows.Next() {
 		var value candidate
-		if err := rows.Scan(&value.resultID, &value.experimentID, &value.scenarioID); err != nil {
+		if err := rows.Scan(&value.resultID, &value.experimentID, &value.scenarioID, &value.baselineSimulationPolicyVersion); err != nil {
 			return nil, fmt.Errorf("postgres: scan exact generated evaluation: %w", err)
 		}
 		if prior, duplicate := seen[value.resultID]; duplicate {
@@ -90,6 +100,9 @@ func (source *GeneratedEvaluationSource) ListEligibleGeneratedEvaluations(ctx co
 	for _, candidate := range candidates {
 		prepared, err := generatedRepo.restorePreparedResearch(ctx, candidate.experimentID, candidate.scenarioID)
 		if err != nil {
+			return nil, err
+		}
+		if err := generatedRepo.validateReviewedPreparedResearch(ctx, report, scopeID, candidate.baselineSimulationPolicyVersion, prepared); err != nil {
 			return nil, err
 		}
 		for _, frame := range prepared.Scenario.ExecutionEvidence() {
