@@ -48,6 +48,12 @@ func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRules
 		if err := validateHistoricalChain(config.Underlying, frames[index].DecisionAt, frames[index].Chain); err != nil {
 			return nil, err
 		}
+		if err := validateUnderlyingReceipt(frames[index].DecisionAt, frames[index].UnderlyingReceipt); err != nil {
+			return nil, fmt.Errorf("options/historical: frame %d underlying evidence: %w", index, err)
+		}
+		if err := validateHistoricalReceipt(frames[index].DecisionAt, frames[index].Chain, frames[index].Receipt); err != nil {
+			return nil, fmt.Errorf("options/historical: frame %d chain evidence: %w", index, err)
+		}
 	}
 
 	bars := make([]domain.OHLCV, len(frames))
