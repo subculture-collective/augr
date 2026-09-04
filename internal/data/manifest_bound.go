@@ -37,6 +37,12 @@ type ManifestBoundOptionsReader interface {
 	LoadOptions(context.Context, uuid.UUID, uuid.UUID, Timeframe, time.Time, time.Time) ([]domain.OHLCV, ManifestBindingReceipt, error)
 }
 
+// ManifestBoundOptionChainReader returns only immutable option observations
+// that were both effective and available by an explicit decision time.
+type ManifestBoundOptionChainReader interface {
+	GetOptionsChainAt(context.Context, string, time.Time) ([]domain.OptionSnapshot, error)
+}
+
 type ManifestBoundSymbolLoader interface {
 	LoadSymbol(context.Context, uuid.UUID, string, Timeframe, time.Time, time.Time) ([]domain.OHLCV, ManifestBindingReceipt, error)
 }

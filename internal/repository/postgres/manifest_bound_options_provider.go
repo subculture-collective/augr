@@ -39,6 +39,17 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsOHLCV(ctx context.Contex
 }
 
 func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Context, underlying string, expiry time.Time, optionType domain.OptionType) ([]domain.OptionSnapshot, error) {
+	return provider.loadOptionsChain(ctx, underlying, expiry, optionType, time.Time{})
+}
+
+// GetOptionsChainAt reconstructs the latest complete point-in-time chain that
+// was knowable at decisionAt. It never selects a payload effective or available
+// after that timestamp.
+func (provider *ManifestBoundOptionsProvider) GetOptionsChainAt(ctx context.Context, underlying string, decisionAt time.Time) ([]domain.OptionSnapshot, error) {
+	return provider.loadOptionsChain(ctx, underlying, time.Time{}, "", decisionAt)
+}
+
+func (provider *ManifestBoundOptionsProvider) loadOptionsChain(ctx context.Context, underlying string, expiry time.Time, optionType domain.OptionType, decisionAt time.Time) ([]domain.OptionSnapshot, error) {
 	if provider == nil || provider.pool == nil || provider.reports == nil || provider.scopeID == uuid.Nil || provider.accountID == uuid.Nil || underlying == "" {
 		return nil, fmt.Errorf("manifest-bound options provider requires scope, account, and underlying")
 	}
@@ -49,6 +60,13 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 	if !report.Options.Ready {
 		return nil, fmt.Errorf("manifest-bound options evidence: %s", report.Options.Reason)
 	}
+	cutoff := report.DecisionCutoff
+	if !decisionAt.IsZero() {
+		if decisionAt.Location() != time.UTC || !decisionAt.Equal(decisionAt.Truncate(time.Microsecond)) || decisionAt.Before(report.EvaluationStart) || decisionAt.After(report.EvaluationEnd) {
+			return nil, fmt.Errorf("manifest-bound option chain decision time escapes the canonical evaluation interval")
+		}
+		cutoff = decisionAt
+	}
 	rows, err := provider.pool.Query(ctx, `SELECT snapshot.id,snapshot.content_sha256,snapshot.canonical_bytes,
 		contract.id,contract.content_sha256,contract.canonical_bytes,
 		quote.id,quote.content_sha256,quote.canonical_bytes
@@ -57,13 +75,15 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 		  FROM dataset_manifest_payload_bindings binding
 		  JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
 		  WHERE binding.manifest_id=$1 AND payload.payload_kind='option_snapshot' AND payload.underlying_symbol=$2
+		    AND payload.effective_at<=$3 AND payload.available_at<=$3
 		  ORDER BY payload.instrument_id,payload.effective_at DESC,payload.available_at DESC,payload.id DESC
 		) snapshot
 		JOIN LATERAL (
 		  SELECT payload.* FROM dataset_manifest_payload_bindings binding
 		  JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
 		  WHERE binding.manifest_id=$1 AND payload.payload_kind='option_contract'
-		    AND payload.instrument_id=snapshot.instrument_id AND payload.available_at<=snapshot.available_at
+		    AND payload.instrument_id=snapshot.instrument_id AND payload.effective_at<=$3 AND payload.available_at<=$3
+		    AND payload.available_at<=snapshot.available_at
 		  ORDER BY payload.effective_at DESC,payload.available_at DESC,payload.id DESC LIMIT 1
 		) contract ON true
 		JOIN LATERAL (
@@ -71,10 +91,10 @@ func (provider *ManifestBoundOptionsProvider) GetOptionsChain(ctx context.Contex
 		  JOIN dataset_market_payloads payload ON payload.id=binding.payload_id
 		  WHERE binding.manifest_id=$1 AND payload.payload_kind='option_quote'
 		    AND payload.instrument_id=snapshot.instrument_id AND payload.effective_at<=snapshot.effective_at
-		    AND payload.available_at<=snapshot.available_at
+		    AND payload.effective_at<=$3 AND payload.available_at<=$3 AND payload.available_at<=snapshot.available_at
 		  ORDER BY payload.effective_at DESC,payload.available_at DESC,payload.id DESC LIMIT 1
 		) quote ON true
-		ORDER BY snapshot.symbol`, report.ManifestID, underlying)
+		ORDER BY snapshot.symbol`, report.ManifestID, underlying, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query manifest-bound option chain: %w", err)
 	}
@@ -191,3 +211,4 @@ func parseDatasetFloat(value string) (float64, error) {
 }
 
 var _ data.OptionsDataProvider = (*ManifestBoundOptionsProvider)(nil)
+var _ data.ManifestBoundOptionChainReader = (*ManifestBoundOptionsProvider)(nil)
