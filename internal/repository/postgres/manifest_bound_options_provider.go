@@ -41,8 +41,10 @@ func (value *manifestOptionPayloadEvidence) scanTargets() []any {
 		&value.observationSequence, &value.sourceKey, &value.effectiveAt, &value.availableAt}
 }
 
-func (value manifestOptionPayloadEvidence) receipt(kind dataset.MarketPayloadKind) data.ManifestPayloadReceipt {
+func (value manifestOptionPayloadEvidence) receipt(kind dataset.MarketPayloadKind, parent data.ManifestOptionChainReceipt) data.ManifestPayloadReceipt {
 	return data.ManifestPayloadReceipt{
+		ScopeID: parent.ScopeID, AccountID: parent.AccountID, ManifestID: parent.ManifestID, ManifestSHA256: parent.ManifestSHA256,
+		QualityResultID: parent.QualityResultID, QualitySHA256: parent.QualitySHA256,
 		PayloadID: value.id, PayloadKind: string(kind), PartitionSequence: value.partitionSequence,
 		PartitionContentSHA256: value.partitionSHA256, ObservationSequence: value.observationSequence,
 		SourceKey: value.sourceKey, ContentSHA256: value.digest, EffectiveAt: value.effectiveAt, AvailableAt: value.availableAt,
@@ -137,7 +139,11 @@ func (provider *ManifestBoundOptionsProvider) GetUnderlyingBarAtWithReceipt(ctx 
 	if err != nil {
 		return domain.OHLCV{}, empty, err
 	}
-	return bar, evidence.receipt(dataset.MarketPayloadStockBar), nil
+	parent := data.ManifestOptionChainReceipt{
+		ScopeID: provider.scopeID, AccountID: provider.accountID, ManifestID: report.ManifestID, ManifestSHA256: report.ManifestSHA256,
+		QualityResultID: report.QualityResultID, QualitySHA256: report.QualitySHA256,
+	}
+	return bar, evidence.receipt(dataset.MarketPayloadStockBar, parent), nil
 }
 
 func (provider *ManifestBoundOptionsProvider) loadOptionsChain(ctx context.Context, underlying string, expiry time.Time, optionType domain.OptionType, decisionAt time.Time) ([]domain.OptionSnapshot, data.ManifestOptionChainReceipt, error) {
@@ -303,9 +309,9 @@ func (provider *ManifestBoundOptionsProvider) loadOptionsChain(ctx context.Conte
 			ObservedAt: snapshotPayload.EffectiveAt(), QuoteObservedAt: quotePayload.EffectiveAt(), LastTradeObservedAt: snapshotPayload.EffectiveAt(),
 		})
 		receipt.Observations = append(receipt.Observations,
-			contractEvidence.receipt(dataset.MarketPayloadOptionContract),
-			quoteEvidence.receipt(dataset.MarketPayloadOptionQuote),
-			snapshotEvidence.receipt(dataset.MarketPayloadOptionSnapshot),
+			contractEvidence.receipt(dataset.MarketPayloadOptionContract, receipt),
+			quoteEvidence.receipt(dataset.MarketPayloadOptionQuote, receipt),
+			snapshotEvidence.receipt(dataset.MarketPayloadOptionSnapshot, receipt),
 		)
 	}
 	if err := rows.Err(); err != nil {

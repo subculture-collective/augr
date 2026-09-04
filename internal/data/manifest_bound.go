@@ -47,6 +47,12 @@ type ManifestBoundOptionChainReader interface {
 // exact payload. Research code uses these fields to reconstruct experiment
 // steps without guessing a partition or selecting "latest" evidence.
 type ManifestPayloadReceipt struct {
+	ScopeID                uuid.UUID `json:"scope_id"`
+	AccountID              uuid.UUID `json:"account_id"`
+	ManifestID             uuid.UUID `json:"manifest_id"`
+	ManifestSHA256         string    `json:"manifest_sha256"`
+	QualityResultID        uuid.UUID `json:"quality_result_id"`
+	QualitySHA256          string    `json:"quality_sha256"`
 	PayloadID              uuid.UUID `json:"payload_id"`
 	PayloadKind            string    `json:"payload_kind"`
 	PartitionSequence      int       `json:"partition_sequence"`

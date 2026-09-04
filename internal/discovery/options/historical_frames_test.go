@@ -51,6 +51,8 @@ func (stub *historicalChainReaderStub) GetOptionsChainAtWithReceipt(ctx context.
 			{"option_snapshot", snapshot.SnapshotPayloadID, snapshot.SnapshotSHA256},
 		} {
 			receipt.Observations = append(receipt.Observations, data.ManifestPayloadReceipt{
+				ScopeID: receipt.ScopeID, AccountID: receipt.AccountID, ManifestID: receipt.ManifestID, ManifestSHA256: receipt.ManifestSHA256,
+				QualityResultID: receipt.QualityResultID, QualitySHA256: receipt.QualitySHA256,
 				PayloadID: value.id, PayloadKind: value.kind, PartitionSequence: offset,
 				PartitionContentSHA256: strings.Repeat(string(rune('f'-offset)), 64), ObservationSequence: index,
 				SourceKey: fmt.Sprintf("%s/%d", snapshot.Contract.OCCSymbol, offset), ContentSHA256: value.digest,
@@ -67,6 +69,9 @@ func (stub *historicalChainReaderStub) GetUnderlyingBarAtWithReceipt(_ context.C
 		bar = *stub.boundOverride
 	}
 	return bar, data.ManifestPayloadReceipt{
+		ScopeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("scope")), AccountID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("account")),
+		ManifestID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("manifest")), ManifestSHA256: strings.Repeat("d", 64),
+		QualityResultID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("quality")), QualitySHA256: strings.Repeat("e", 64),
 		PayloadID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("bar/"+at.String())), PayloadKind: "stock_bar", PartitionSequence: 3,
 		PartitionContentSHA256: strings.Repeat("9", 64), ObservationSequence: 0, SourceKey: "bar/" + at.Format(time.RFC3339Nano),
 		ContentSHA256: strings.Repeat("8", 64), EffectiveAt: at, AvailableAt: at,

@@ -68,6 +68,8 @@ func LoadManifestBoundOptionFrames(
 		return nil, fmt.Errorf("options/historical: manifest-bound reader does not expose complete underlying and chain receipts")
 	}
 	frames := make([]HistoricalOptionFrame, 0, len(selected))
+	var scopeID, accountID, manifestID, qualityResultID uuid.UUID
+	var manifestSHA256, qualitySHA256 string
 	for _, bar := range selected {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -98,13 +100,26 @@ func LoadManifestBoundOptionFrames(
 		if err := validateHistoricalReceipt(bar.Timestamp, active, receipt); err != nil {
 			return nil, err
 		}
+		if len(frames) == 0 {
+			scopeID, accountID, manifestID, qualityResultID = receipt.ScopeID, receipt.AccountID, receipt.ManifestID, receipt.QualityResultID
+			manifestSHA256, qualitySHA256 = receipt.ManifestSHA256, receipt.QualitySHA256
+		} else if receipt.ScopeID != scopeID || receipt.AccountID != accountID || receipt.ManifestID != manifestID || receipt.QualityResultID != qualityResultID ||
+			receipt.ManifestSHA256 != manifestSHA256 || receipt.QualitySHA256 != qualitySHA256 {
+			return nil, fmt.Errorf("options/historical: evidence scope changes within evaluation interval")
+		}
+		if underlyingReceipt.ScopeID != receipt.ScopeID || underlyingReceipt.AccountID != receipt.AccountID || underlyingReceipt.ManifestID != receipt.ManifestID ||
+			underlyingReceipt.ManifestSHA256 != receipt.ManifestSHA256 || underlyingReceipt.QualityResultID != receipt.QualityResultID || underlyingReceipt.QualitySHA256 != receipt.QualitySHA256 {
+			return nil, fmt.Errorf("options/historical: underlying and chain evidence parents differ")
+		}
 		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: boundBar, UnderlyingReceipt: underlyingReceipt, Chain: active, Receipt: receipt})
 	}
 	return frames, nil
 }
 
 func validateUnderlyingReceipt(decisionAt time.Time, receipt data.ManifestPayloadReceipt) error {
-	if receipt.PayloadID == uuid.Nil || receipt.PayloadKind != "stock_bar" || receipt.PartitionSequence < 0 ||
+	if receipt.ScopeID == uuid.Nil || receipt.AccountID == uuid.Nil || receipt.ManifestID == uuid.Nil || receipt.QualityResultID == uuid.Nil ||
+		!validHistoricalSHA(receipt.ManifestSHA256) || !validHistoricalSHA(receipt.QualitySHA256) ||
+		receipt.PayloadID == uuid.Nil || receipt.PayloadKind != "stock_bar" || receipt.PartitionSequence < 0 ||
 		!validHistoricalSHA(receipt.PartitionContentSHA256) || receipt.ObservationSequence < 0 ||
 		strings.TrimSpace(receipt.SourceKey) == "" || !validHistoricalSHA(receipt.ContentSHA256) ||
 		!receipt.EffectiveAt.Equal(decisionAt) || !canonicalDecisionTime(receipt.EffectiveAt) ||
@@ -135,7 +150,9 @@ func validateHistoricalReceipt(decisionAt time.Time, chain []domain.OptionSnapsh
 		}
 		for offset, want := range expected {
 			observation := receipt.Observations[index*3+offset]
-			if observation.PayloadID != want.id || observation.PayloadKind != want.kind || observation.ContentSHA256 != want.digest ||
+			if observation.ScopeID != receipt.ScopeID || observation.AccountID != receipt.AccountID || observation.ManifestID != receipt.ManifestID ||
+				observation.ManifestSHA256 != receipt.ManifestSHA256 || observation.QualityResultID != receipt.QualityResultID || observation.QualitySHA256 != receipt.QualitySHA256 ||
+				observation.PayloadID != want.id || observation.PayloadKind != want.kind || observation.ContentSHA256 != want.digest ||
 				observation.PartitionSequence < 0 || !validHistoricalSHA(observation.PartitionContentSHA256) ||
 				observation.ObservationSequence < 0 || strings.TrimSpace(observation.SourceKey) == "" ||
 				!canonicalDecisionTime(observation.EffectiveAt) || !canonicalDecisionTime(observation.AvailableAt) ||

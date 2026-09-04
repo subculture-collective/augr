@@ -85,6 +85,24 @@ func TestEvaluateManifestBoundOptionsRejectsUnboundFrameEvidence(t *testing.T) {
 	}
 }
 
+func TestEvaluateManifestBoundOptionsRejectsCrossScopeFrames(t *testing.T) {
+	start := time.Date(2025, 1, 2, 21, 0, 0, 0, time.UTC)
+	frames := []HistoricalOptionFrame{
+		historicalEvaluationFrame(start, 100, 2.8, 3.0, 1.0, 1.2, 1),
+		historicalEvaluationFrame(start.Add(24*time.Hour), 101, 4.0, 4.2, 0.8, 1.0, 2),
+	}
+	otherScope := uuid.NewSHA1(uuid.NameSpaceOID, []byte("other-scope"))
+	frames[1].Receipt.ScopeID = otherScope
+	frames[1].UnderlyingReceipt.ScopeID = otherScope
+	for index := range frames[1].Receipt.Observations {
+		frames[1].Receipt.Observations[index].ScopeID = otherScope
+	}
+	_, err := EvaluateManifestBoundOptions(t.Context(), historicalVerticalConfig(), frames, 100_000, 0.65)
+	if err == nil || !strings.Contains(err.Error(), "changes evidence scope") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func historicalVerticalConfig() rules.OptionsRulesConfig {
 	zero, hundred := 0.0, 100.5
 	return rules.OptionsRulesConfig{
@@ -133,6 +151,9 @@ func historicalEvaluationFrame(at time.Time, close, longBid, longAsk, shortBid, 
 
 func historicalPayloadReceipt(at time.Time, kind string, id uuid.UUID, digest string, partition, sequence int) data.ManifestPayloadReceipt {
 	return data.ManifestPayloadReceipt{
+		ScopeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("scope")), AccountID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("account")),
+		ManifestID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("manifest")), ManifestSHA256: strings.Repeat("d", 64),
+		QualityResultID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("quality")), QualitySHA256: strings.Repeat("e", 64),
 		PayloadID: id, PayloadKind: kind, PartitionSequence: partition, PartitionContentSHA256: fmt.Sprintf("%064x", partition+1000),
 		ObservationSequence: sequence, SourceKey: fmt.Sprintf("%s/%d/%d", kind, partition, sequence), ContentSHA256: digest,
 		EffectiveAt: at, AvailableAt: at,

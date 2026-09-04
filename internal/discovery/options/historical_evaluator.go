@@ -9,6 +9,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
 	"github.com/PatrickFanella/get-rich-quick/internal/backtest"
+	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
@@ -41,6 +42,7 @@ func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRules
 	if len(frames) < 2 || initialCash <= 0 || feePerContract < 0 {
 		return nil, fmt.Errorf("options/historical: at least two frames, positive capital, and non-negative fees are required")
 	}
+	firstReceipt := frames[0].Receipt
 	for index := range frames {
 		if index > 0 && !frames[index].DecisionAt.After(frames[index-1].DecisionAt) {
 			return nil, fmt.Errorf("options/historical: frames must be strictly chronological")
@@ -53,6 +55,15 @@ func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRules
 		}
 		if err := validateHistoricalReceipt(frames[index].DecisionAt, frames[index].Chain, frames[index].Receipt); err != nil {
 			return nil, fmt.Errorf("options/historical: frame %d chain evidence: %w", index, err)
+		}
+		if !sameHistoricalReceiptParent(firstReceipt, frames[index].Receipt) {
+			return nil, fmt.Errorf("options/historical: frame %d changes evidence scope", index)
+		}
+		underlying := frames[index].UnderlyingReceipt
+		if underlying.ScopeID != frames[index].Receipt.ScopeID || underlying.AccountID != frames[index].Receipt.AccountID ||
+			underlying.ManifestID != frames[index].Receipt.ManifestID || underlying.ManifestSHA256 != frames[index].Receipt.ManifestSHA256 ||
+			underlying.QualityResultID != frames[index].Receipt.QualityResultID || underlying.QualitySHA256 != frames[index].Receipt.QualitySHA256 {
+			return nil, fmt.Errorf("options/historical: frame %d underlying and chain evidence parents differ", index)
 		}
 	}
 
@@ -166,6 +177,11 @@ func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRules
 	}
 	sort.Strings(result.PayloadSHA256)
 	return result, nil
+}
+
+func sameHistoricalReceiptParent(left, right data.ManifestOptionChainReceipt) bool {
+	return left.ScopeID == right.ScopeID && left.AccountID == right.AccountID && left.ManifestID == right.ManifestID &&
+		left.ManifestSHA256 == right.ManifestSHA256 && left.QualityResultID == right.QualityResultID && left.QualitySHA256 == right.QualitySHA256
 }
 
 func openObservedVertical(config rules.OptionsRulesConfig, frame HistoricalOptionFrame, feePerContract float64) (*historicalObservedPosition, error) {
