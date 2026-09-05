@@ -70,16 +70,33 @@ func tryChain[T any](c *ProviderChain, method, ticker string, fn func(DataProvid
 // result. An empty response is not authoritative while another configured
 // provider may have coverage for the symbol.
 func (c *ProviderChain) GetOHLCV(ctx context.Context, ticker string, timeframe Timeframe, from, to time.Time) ([]domain.OHLCV, error) {
+	return c.GetOHLCVValidated(ctx, ticker, timeframe, from, to, nil)
+}
+
+// ErrOHLCVRejected means available bars failed the caller's acceptance policy.
+var ErrOHLCVRejected = errors.New("OHLCV failed acceptance policy")
+
+// GetOHLCVValidated tries later providers when nonempty bars fail validation.
+// Validation is opt-in so historical readers retain their existing semantics.
+func (c *ProviderChain) GetOHLCVValidated(ctx context.Context, ticker string, timeframe Timeframe, from, to time.Time, accept func([]domain.OHLCV) bool) ([]domain.OHLCV, error) {
 	if len(c.providers) == 0 {
 		return nil, ErrNoProviders
 	}
 
 	var lastErr error
 	var sawEmpty bool
+	var rejected bool
 	for _, provider := range c.providers {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		bars, err := provider.GetOHLCV(ctx, ticker, timeframe, from, to)
 		if err == nil {
 			if len(bars) > 0 {
+				if accept != nil && !accept(bars) {
+					rejected = true
+					continue
+				}
 				return bars, nil
 			}
 			sawEmpty = true
@@ -100,6 +117,9 @@ func (c *ProviderChain) GetOHLCV(ctx context.Context, ticker string, timeframe T
 			)
 			lastErr = err
 		}
+	}
+	if rejected {
+		return nil, errors.Join(ErrOHLCVRejected, lastErr)
 	}
 	if sawEmpty && lastErr != nil {
 		return nil, fmt.Errorf("%w for %s %s: %w", ErrProviderCoverageIncomplete, ticker, timeframe.String(), lastErr)

@@ -98,6 +98,11 @@ func NewDataService(cfg config.Config, reg *ProviderRegistry, cacheRepo reposito
 
 // GetOHLCV returns OHLCV data using the market-type chain and caches results by query.
 func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType, ticker string, timeframe Timeframe, from, to time.Time) ([]domain.OHLCV, error) {
+	return s.GetOHLCVValidated(ctx, marketType, ticker, timeframe, from, to, nil)
+}
+
+// GetOHLCVValidated validates cache and provider results before returning them.
+func (s *DataService) GetOHLCVValidated(ctx context.Context, marketType domain.MarketType, ticker string, timeframe Timeframe, from, to time.Time, accept func([]domain.OHLCV) bool) ([]domain.OHLCV, error) {
 	fromUTC := from.UTC()
 	toUTC := to.UTC()
 
@@ -124,17 +129,27 @@ func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType
 	}
 
 	if cacheSelection.Enabled {
-		if cached, ok := s.loadCachedOHLCV(ctx, key); ok {
+		if cached, ok := s.loadCachedOHLCV(ctx, key); ok && (accept == nil || accept(cached)) {
 			return cached, nil
 		}
 	}
 
-	bars, err := chain.GetOHLCV(ctx, ticker, timeframe, from, to)
+	var bars []domain.OHLCV
+	if validated, ok := chain.(interface {
+		GetOHLCVValidated(context.Context, string, Timeframe, time.Time, time.Time, func([]domain.OHLCV) bool) ([]domain.OHLCV, error)
+	}); ok && accept != nil {
+		bars, err = validated.GetOHLCVValidated(ctx, ticker, timeframe, from, to, accept)
+	} else {
+		bars, err = chain.GetOHLCV(ctx, ticker, timeframe, from, to)
+	}
 	if err != nil {
 		return nil, err
 	}
+	if accept != nil && len(bars) > 0 && !accept(bars) {
+		return nil, ErrOHLCVRejected
+	}
 
-	if cacheSelection.Enabled {
+	if cacheSelection.Enabled && (accept == nil || len(bars) > 0) {
 		s.storeCached(ctx, key, bars, ttlForOHLCV(timeframe))
 	}
 
