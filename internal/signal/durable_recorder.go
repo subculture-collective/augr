@@ -56,7 +56,7 @@ func (r *AgentEventRecorder) RecordTriggerOutcome(ctx context.Context, trigger T
 		},
 		Metadata: metadata,
 	}
-	return r.create(ctx, event)
+	return r.create(ctx, event, trigger.Signal.Raw)
 }
 
 type agentEventWriter interface {
@@ -67,11 +67,12 @@ type agentEventWriter interface {
 // partitioned agent_events ledger. Raw provider bodies and prompts are never
 // persisted; an input hash provides correlation without duplicating content.
 type AgentEventRecorder struct {
-	writer agentEventWriter
+	writer  agentEventWriter
+	account domain.ExecutionAccountBinding
 }
 
-func NewAgentEventRecorder(writer agentEventWriter) *AgentEventRecorder {
-	return &AgentEventRecorder{writer: writer}
+func NewAgentEventRecorder(writer agentEventWriter, account domain.ExecutionAccountBinding) *AgentEventRecorder {
+	return &AgentEventRecorder{writer: writer, account: account}
 }
 
 func (r *AgentEventRecorder) RecordEvaluated(ctx context.Context, signal EvaluatedSignal) error {
@@ -104,7 +105,7 @@ func (r *AgentEventRecorder) RecordEvaluated(ctx context.Context, signal Evaluat
 		},
 		Metadata: metadata,
 	}
-	return r.create(ctx, event)
+	return r.create(ctx, event, signal.Raw)
 }
 
 func (r *AgentEventRecorder) RecordTriggerRequest(ctx context.Context, trigger TriggerEvent) error {
@@ -135,10 +136,20 @@ func (r *AgentEventRecorder) RecordTriggerRequest(ctx context.Context, trigger T
 		},
 		Metadata: metadata,
 	}
-	return r.create(ctx, event)
+	return r.create(ctx, event, trigger.Signal.Raw)
 }
 
-func (r *AgentEventRecorder) create(ctx context.Context, event *domain.AgentEvent) error {
+func (r *AgentEventRecorder) create(ctx context.Context, event *domain.AgentEvent, raw RawSignalEvent) error {
+	if err := r.account.Validate(); err != nil {
+		return fmt.Errorf("signal event recorder: account binding: %w", err)
+	}
+	event.AccountID = r.account.AccountID()
+	event.Environment = r.account.Environment()
+	// Intake precedes a strategy run/version. Attribute it to the account's
+	// operator-owned signal intake, retaining the exact input identity across
+	// evaluation, trigger request and admission outcome.
+	event.OriginType = "operator"
+	event.OriginID = "signal:" + signalInputHash(raw)
 	persistCtx, cancel := context.WithTimeout(ctx, signalEventPersistenceTimeout)
 	defer cancel()
 	if err := r.writer.Create(persistCtx, event); err != nil {

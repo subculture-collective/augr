@@ -30,7 +30,11 @@ func TestAgentEventRecorderPersistsSanitizedSignalLineage(t *testing.T) {
 
 	strategyID := uuid.New()
 	writer := &recordingAgentEventWriter{}
-	recorder := NewAgentEventRecorder(writer)
+	account, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := NewAgentEventRecorder(writer, account)
 	receivedAt := time.Date(2026, time.August, 6, 15, 41, 43, 0, time.UTC)
 	signal := EvaluatedSignal{
 		Raw: RawSignalEvent{
@@ -89,6 +93,12 @@ func TestAgentEventRecorderPersistsSanitizedSignalLineage(t *testing.T) {
 		t.Fatalf("trigger strategy = %v, want %s", writer.events[1].StrategyID, strategyID)
 	}
 	for _, event := range writer.events {
+		if event.AccountID != account.AccountID() || event.Environment != account.Environment() {
+			t.Fatalf("event has wrong account scope: %+v", event)
+		}
+		if event.OriginType != "operator" || event.OriginID != "signal:"+signalInputHash(signal.Raw) {
+			t.Fatalf("event has wrong signal origin: %+v", event)
+		}
 		if string(event.Metadata) == "" || !json.Valid(event.Metadata) {
 			t.Fatalf("invalid metadata: %q", event.Metadata)
 		}
@@ -105,6 +115,24 @@ func TestAgentEventRecorderPersistsSanitizedSignalLineage(t *testing.T) {
 		if metadata["input_hash"] == "" {
 			t.Fatalf("input hash missing: %#v", metadata)
 		}
+	}
+}
+
+func TestAgentEventRecorderRejectsMissingAccountBeforeWrite(t *testing.T) {
+	writer := &recordingAgentEventWriter{}
+	recorder := NewAgentEventRecorder(writer, domain.ExecutionAccountBinding{})
+	ctx := context.Background()
+	if err := recorder.RecordEvaluated(ctx, EvaluatedSignal{}); err == nil {
+		t.Fatal("unbound evaluation accepted")
+	}
+	if err := recorder.RecordTriggerRequest(ctx, TriggerEvent{}); err == nil {
+		t.Fatal("unbound trigger accepted")
+	}
+	if err := recorder.RecordTriggerOutcome(ctx, TriggerEvent{}, domain.StrategyTriggerAdmitted); err == nil {
+		t.Fatal("unbound outcome accepted")
+	}
+	if len(writer.events) != 0 {
+		t.Fatal("unbound events reached persistence")
 	}
 }
 
