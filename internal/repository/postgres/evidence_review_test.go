@@ -93,7 +93,7 @@ func TestEvidenceReviewRetainedQualification(t *testing.T) {
 	if err != nil || cases != 2 || caseRefs < 14 || reviews != 4 || checks != 24 || refs != 24 || summaries != 2 || heads != 4 || summaryChecks != 12 {
 		t.Fatalf("counts=%d/%d/%d/%d/%d/%d/%d/%d err=%v", cases, caseRefs, reviews, checks, refs, summaries, heads, summaryChecks, err)
 	}
-	if _, err = pool.Exec(ctx, repositoryMigrationSQL(t, "000097_evidence_review_workflow.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+	if _, err = execRepositoryMigration(t, ctx, pool, "000097_evidence_review_workflow.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 	t.Logf("case=%s sha=%s reviews=%s/%s summary=%s sha=%s held_case=%s held_sha=%s held_summary=%s held_summary_sha=%s", fixture.Case.ID(), fixture.Case.Digest(), fixture.Reviews[0].ID(), fixture.Reviews[1].ID(), fixture.Summary.ID(), fixture.Summary.Digest(), fixture.HeldCase.ID(), fixture.HeldCase.Digest(), fixture.HeldSummary.ID(), fixture.HeldSummary.Digest())

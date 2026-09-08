@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
@@ -47,7 +48,7 @@ type PositionPersistence interface {
 	CreateAlpacaOwned(ctx context.Context, position *domain.Position) error
 	List(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
 	GetOpen(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error)
-	ListOpenAlpacaOwned(ctx context.Context, limit, offset int) ([]domain.Position, error)
+	ListOpenAlpacaOwnedByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error)
 	Update(ctx context.Context, position *domain.Position) error
 }
 
@@ -59,20 +60,28 @@ type TradePersistence interface {
 
 // BrokerOrderSnapshot captures the broker-facing order state needed to hydrate local orders.
 type BrokerOrderSnapshot struct {
-	ExternalID     string
-	StrategyIDHint *uuid.UUID
-	Ticker         string
-	Side           domain.OrderSide
-	OrderType      domain.OrderType
-	Quantity       float64
-	LimitPrice     *float64
-	StopPrice      *float64
-	FilledQuantity float64
-	FilledAvgPrice *float64
-	Status         domain.OrderStatus
-	SubmittedAt    *time.Time
-	FilledAt       *time.Time
-	Broker         string
+	ExternalID         string
+	ClientOrderID      string
+	StrategyIDHint     *uuid.UUID
+	Ticker             string
+	Side               domain.OrderSide
+	OrderType          domain.OrderType
+	Quantity           float64
+	LimitPrice         *float64
+	StopPrice          *float64
+	FilledQuantity     float64
+	FilledAvgPrice     *float64
+	Status             domain.OrderStatus
+	SubmittedAt        *time.Time
+	FilledAt           *time.Time
+	Broker             string
+	MarketType         domain.MarketType
+	AssetClass         domain.AssetClass
+	UnderlyingTicker   string
+	OptionType         *domain.OptionType
+	Strike             *float64
+	Expiry             *time.Time
+	ContractMultiplier float64
 }
 
 // BrokerFillSnapshot captures a single broker fill activity.
@@ -90,14 +99,17 @@ type BrokerFillSnapshot struct {
 
 // AlpacaReconcilerDeps bundles repository and broker dependencies.
 type AlpacaReconcilerDeps struct {
-	Broker       AlpacaReconciliationBroker
-	PLAggregate  repository.AlpacaPLAggregateRepository
-	StrategyRepo StrategyLookupRepository
-	OrderRepo    OrderPersistence
-	PositionRepo PositionPersistence
-	TradeRepo    TradePersistence
-	AuditLogRepo repository.AuditLogRepository
-	Logger       *slog.Logger
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           AlpacaReconciliationBroker
+	PLAggregate      repository.AlpacaPLAggregateRepository
+	StrategyRepo     StrategyLookupRepository
+	OrderRepo        OrderPersistence
+	PositionRepo     PositionPersistence
+	TradeRepo        TradePersistence
+	OptionFillWriter execution.AcceptedOptionFillWriter
+	AuditLogRepo     repository.AuditLogRepository
+	AccountLocker    repository.ExecutionAccountLocker
+	Logger           *slog.Logger
 }
 
 // AlpacaReconcileSummary reports how many local records changed during a run.
@@ -171,16 +183,17 @@ func (r *AlpacaReconciler) ReconciliationReport(ctx context.Context) (AlpacaPLRe
 		BrokerEquity:      account.Equity,
 		AdjustmentDetails: []string{"no persisted adjustment source discovered"},
 	}
-	if report.LocalClosedPnL, err = r.plAggregate.ClosedRealizedPnL(ctx); err != nil {
+	accountID, environment := r.executionAccount.AccountID(), r.executionAccount.Environment()
+	if report.LocalClosedPnL, err = r.plAggregate.ClosedRealizedPnL(ctx, accountID, environment); err != nil {
 		return AlpacaPLReconciliationReport{}, fmt.Errorf("alpaca_reconcile: closed realized pnl: %w", err)
 	}
-	if report.LocalOpenPnL, err = r.plAggregate.OpenUnrealizedPnL(ctx); err != nil {
+	if report.LocalOpenPnL, err = r.plAggregate.OpenUnrealizedPnL(ctx, accountID, environment); err != nil {
 		return AlpacaPLReconciliationReport{}, fmt.Errorf("alpaca_reconcile: open unrealized pnl: %w", err)
 	}
-	if report.TradeCount, err = r.plAggregate.TradeCount(ctx); err != nil {
+	if report.TradeCount, err = r.plAggregate.TradeCount(ctx, accountID, environment); err != nil {
 		return AlpacaPLReconciliationReport{}, fmt.Errorf("alpaca_reconcile: trade count: %w", err)
 	}
-	if report.FeeTotal, err = r.plAggregate.FeeTotal(ctx); err != nil {
+	if report.FeeTotal, err = r.plAggregate.FeeTotal(ctx, accountID, environment); err != nil {
 		return AlpacaPLReconciliationReport{}, fmt.Errorf("alpaca_reconcile: fee total: %w", err)
 	}
 	report.UnexplainedResidual = report.BrokerEquity - (report.BrokerCash + report.LocalClosedPnL + report.LocalOpenPnL - report.FeeTotal)
@@ -189,14 +202,17 @@ func (r *AlpacaReconciler) ReconciliationReport(ctx context.Context) (AlpacaPLRe
 
 // AlpacaReconciler imports Alpaca broker state into local orders, positions, and trades tables.
 type AlpacaReconciler struct {
-	broker       AlpacaReconciliationBroker
-	plAggregate  repository.AlpacaPLAggregateRepository
-	strategyRepo StrategyLookupRepository
-	orderRepo    OrderPersistence
-	positionRepo PositionPersistence
-	tradeRepo    TradePersistence
-	auditLogRepo repository.AuditLogRepository
-	logger       *slog.Logger
+	executionAccount domain.ExecutionAccountBinding
+	broker           AlpacaReconciliationBroker
+	plAggregate      repository.AlpacaPLAggregateRepository
+	strategyRepo     StrategyLookupRepository
+	orderRepo        OrderPersistence
+	positionRepo     PositionPersistence
+	tradeRepo        TradePersistence
+	optionFillWriter execution.AcceptedOptionFillWriter
+	auditLogRepo     repository.AuditLogRepository
+	accountLocker    repository.ExecutionAccountLocker
+	logger           *slog.Logger
 }
 
 func NewAlpacaReconciler(deps AlpacaReconcilerDeps) *AlpacaReconciler {
@@ -204,19 +220,41 @@ func NewAlpacaReconciler(deps AlpacaReconcilerDeps) *AlpacaReconciler {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	if deps.AccountLocker == nil {
+		deps.AccountLocker, _ = deps.OrderRepo.(repository.ExecutionAccountLocker)
+	}
 	return &AlpacaReconciler{
-		broker:       deps.Broker,
-		plAggregate:  deps.PLAggregate,
-		strategyRepo: deps.StrategyRepo,
-		orderRepo:    deps.OrderRepo,
-		positionRepo: deps.PositionRepo,
-		tradeRepo:    deps.TradeRepo,
-		auditLogRepo: deps.AuditLogRepo,
-		logger:       logger,
+		executionAccount: deps.ExecutionAccount,
+		broker:           deps.Broker,
+		plAggregate:      deps.PLAggregate,
+		strategyRepo:     deps.StrategyRepo,
+		orderRepo:        deps.OrderRepo,
+		positionRepo:     deps.PositionRepo,
+		tradeRepo:        deps.TradeRepo,
+		optionFillWriter: deps.OptionFillWriter,
+		auditLogRepo:     deps.AuditLogRepo,
+		accountLocker:    deps.AccountLocker,
+		logger:           logger,
 	}
 }
 
 func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummary, error) {
+	if r == nil || r.accountLocker == nil {
+		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: execution account locker is required")
+	}
+	if err := r.executionAccount.Validate(); err != nil {
+		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: execution account: %w", err)
+	}
+	var summary AlpacaReconcileSummary
+	err := r.accountLocker.WithExecutionAccountLock(ctx, r.executionAccount.AccountID(), func() error {
+		var reconcileErr error
+		summary, reconcileErr = r.reconcileLocked(ctx)
+		return reconcileErr
+	})
+	return summary, err
+}
+
+func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcileSummary, error) {
 	if r == nil || r.broker == nil {
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: broker is required")
 	}
@@ -249,23 +287,30 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 	}
 
 	existingOrders, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Order, error) {
-		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca"}, limit, offset)
+		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca", Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: list local orders: %w", err)
 	}
 	orderByExternalID := make(map[string]*domain.Order, len(existingOrders))
+	orderByClientID := make(map[string]*domain.Order, len(existingOrders))
 	for i := range existingOrders {
 		order := existingOrders[i]
+		if order.AccountID != r.executionAccount.AccountID() || order.Environment != r.executionAccount.Environment() {
+			return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: order %s belongs to a foreign execution account", order.ID)
+		}
+		cloned := order
+		if clientID := strings.TrimSpace(order.ClientOrderID); clientID != "" {
+			orderByClientID[clientID] = &cloned
+		}
 		if strings.TrimSpace(order.ExternalID) == "" {
 			continue
 		}
-		cloned := order
 		orderByExternalID[order.ExternalID] = &cloned
 	}
 
 	existingPositions, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Position, error) {
-		return r.positionRepo.ListOpenAlpacaOwned(ctx, limit, offset)
+		return r.positionRepo.ListOpenAlpacaOwnedByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), limit, offset)
 	})
 	if err != nil {
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: list local positions: %w", err)
@@ -273,22 +318,37 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 	positionByTicker := make(map[string]*domain.Position, len(existingPositions))
 	for i := range existingPositions {
 		position := existingPositions[i]
+		if position.AccountID != r.executionAccount.AccountID() || position.Environment != r.executionAccount.Environment() {
+			return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: position %s belongs to a foreign execution account", position.ID)
+		}
 		if !isAlpacaManagedPosition(position) {
 			continue
+		}
+		if positionByTicker[position.Ticker] != nil {
+			return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: duplicate scoped Alpaca positions for ticker %s", position.Ticker)
 		}
 		cloned := position
 		positionByTicker[position.Ticker] = &cloned
 	}
 
 	existingTrades, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Trade, error) {
-		return r.tradeRepo.List(ctx, repository.TradeFilter{}, limit, offset)
+		return r.tradeRepo.List(ctx, repository.TradeFilter{Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: list local trades: %w", err)
 	}
 	existingTradeKeys := make(map[string]struct{}, len(existingTrades))
+	optionFeeByOrder := make(map[uuid.UUID]float64)
+	optionPremiumByOrder := make(map[uuid.UUID]float64)
 	for _, trade := range existingTrades {
+		if trade.AccountID != r.executionAccount.AccountID() || trade.Environment != r.executionAccount.Environment() {
+			return AlpacaReconcileSummary{}, fmt.Errorf("alpaca_reconcile: trade %s belongs to a foreign execution account", trade.ID)
+		}
 		existingTradeKeys[tradeDedupeKey(trade)] = struct{}{}
+		if trade.OrderID != nil && trade.AssetClass == domain.AssetClassOption {
+			optionFeeByOrder[*trade.OrderID] += trade.Fee
+			optionPremiumByOrder[*trade.OrderID] += trade.Premium
+		}
 	}
 	fillLegacyKeyCounts := fillLegacyKeyCounts(fills)
 
@@ -303,7 +363,11 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 			strategyID = strategyByTicker[snapshot.Ticker]
 		}
 		if existing, ok := orderByExternalID[snapshot.ExternalID]; ok {
+			priorFilledQuantity, priorFilledAvgPrice, priorFilledAt, priorStatus := existing.FilledQuantity, cloneFloatPtr(existing.FilledAvgPrice), cloneTimePtr(existing.FilledAt), existing.Status
 			changed := applyOrderSnapshot(existing, snapshot, strategyID)
+			if snapshot.MarketType.Normalize() == domain.MarketTypeOptions || snapshot.AssetClass == domain.AssetClassOption {
+				existing.FilledQuantity, existing.FilledAvgPrice, existing.FilledAt, existing.Status = priorFilledQuantity, priorFilledAvgPrice, priorFilledAt, priorStatus
+			}
 			if changed {
 				if err := r.orderRepo.Update(ctx, existing); err != nil {
 					return summary, fmt.Errorf("alpaca_reconcile: update order %s: %w", snapshot.ExternalID, err)
@@ -312,8 +376,26 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 			}
 			continue
 		}
+		if existing, ok := orderByClientID[strings.TrimSpace(snapshot.ClientOrderID)]; ok && strings.TrimSpace(snapshot.ClientOrderID) != "" {
+			if strings.TrimSpace(existing.ExternalID) != "" && existing.ExternalID != snapshot.ExternalID {
+				return summary, fmt.Errorf("alpaca_reconcile: client order %s is already bound to %s", snapshot.ClientOrderID, existing.ExternalID)
+			}
+			existing.ExternalID = snapshot.ExternalID
+			applyOrderSnapshot(existing, snapshot, strategyID)
+			if err := r.orderRepo.Update(ctx, existing); err != nil {
+				return summary, fmt.Errorf("alpaca_reconcile: bind accepted client order %s: %w", snapshot.ClientOrderID, err)
+			}
+			orderByExternalID[snapshot.ExternalID] = existing
+			summary.OrdersUpdated++
+			continue
+		}
 
 		order := snapshotToOrder(snapshot, strategyID)
+		r.bindImportedOwnership(&order.AccountID, &order.Environment, &order.OriginType, &order.OriginID)
+		if order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption {
+			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = 0, nil, nil
+			order.Status = domain.OrderStatusSubmitted
+		}
 		if err := r.orderRepo.Create(ctx, order); err != nil {
 			return summary, fmt.Errorf("alpaca_reconcile: create order %s: %w", snapshot.ExternalID, err)
 		}
@@ -321,9 +403,18 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 		summary.OrdersCreated++
 	}
 
+	optionFillTickers := make(map[string]struct{})
+	for _, fill := range fills {
+		if order := orderByExternalID[fill.ExternalID]; order != nil && (order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption) {
+			optionFillTickers[fill.Ticker] = struct{}{}
+		}
+	}
 	brokerPositionTickers := make(map[string]struct{}, len(positions))
 	for _, snapshot := range positions {
 		brokerPositionTickers[snapshot.Ticker] = struct{}{}
+		if _, persistedAtomically := optionFillTickers[snapshot.Ticker]; persistedAtomically {
+			continue
+		}
 		strategyID := strategyByTicker[snapshot.Ticker]
 		if existing, ok := positionByTicker[snapshot.Ticker]; ok {
 			changed := applyPositionSnapshot(existing, snapshot, strategyID)
@@ -337,6 +428,7 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 		}
 
 		position := snapshotToPosition(snapshot, strategyID)
+		r.bindImportedOwnership(&position.AccountID, &position.Environment, &position.OriginType, &position.OriginID)
 		if err := r.positionRepo.CreateAlpacaOwned(ctx, position); err != nil {
 			return summary, fmt.Errorf("alpaca_reconcile: create position %s: %w", snapshot.Ticker, err)
 		}
@@ -365,6 +457,9 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 	}
 
 	sort.Slice(fills, func(i, j int) bool {
+		if fills[i].ExecutedAt.Equal(fills[j].ExecutedAt) {
+			return strings.TrimSpace(fills[i].ActivityID) < strings.TrimSpace(fills[j].ActivityID)
+		}
 		return fills[i].ExecutedAt.Before(fills[j].ExecutedAt)
 	})
 	for _, fill := range fills {
@@ -385,16 +480,75 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 			continue
 		}
 		position := positionByTicker[fill.Ticker]
+		if order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption {
+			if r.optionFillWriter == nil {
+				return summary, fmt.Errorf("alpaca_reconcile: option fill repository is required for %s", fill.ExternalID)
+			}
+			var positionID *uuid.UUID
+			if order.PositionIntent != nil && (*order.PositionIntent == domain.PositionIntentBuyToClose || *order.PositionIntent == domain.PositionIntentSellToClose) {
+				if position == nil {
+					return summary, fmt.Errorf("alpaca_reconcile: option close fill %s has no scoped position", fill.ExternalID)
+				}
+				positionID = &position.ID
+			}
+			cumulativeQuantity := order.FilledQuantity + fill.Quantity
+			if cumulativeQuantity > order.Quantity && !normalizedQuantityEqual(cumulativeQuantity, order.Quantity) {
+				return summary, fmt.Errorf("alpaca_reconcile: option fill %s exceeds order quantity", fill.ExternalID)
+			}
+			cumulativePrice := fill.Price
+			if order.FilledQuantity > 0 && order.FilledAvgPrice != nil {
+				cumulativePrice = (*order.FilledAvgPrice*order.FilledQuantity + fill.Price*fill.Quantity) / cumulativeQuantity
+			}
+			observedOrder := *order
+			observedOrder.FilledQuantity, observedOrder.FilledAvgPrice, observedOrder.FilledAt = cumulativeQuantity, &cumulativePrice, &fill.ExecutedAt
+			observedOrder.Status = fill.OrderStatus
+			if observedOrder.Status == "" || observedOrder.Status == domain.OrderStatusFilled && !normalizedQuantityEqual(cumulativeQuantity, observedOrder.Quantity) {
+				observedOrder.Status = domain.OrderStatusPartial
+				if normalizedQuantityEqual(cumulativeQuantity, observedOrder.Quantity) {
+					observedOrder.Status = domain.OrderStatusFilled
+				}
+			}
+			activityID := strings.TrimSpace(fill.ActivityID)
+			if activityID == "" {
+				activityID = fmt.Sprintf("%s:%d:%.8f", fill.ExternalID, fill.ExecutedAt.UTC().UnixNano(), cumulativeQuantity)
+			}
+			optionFeeByOrder[order.ID] += fill.Fee
+			optionPremiumByOrder[order.ID] += fill.Price * fill.Quantity * order.ContractMultiplier
+			exitReason := ""
+			if positionID != nil {
+				exitReason = "alpaca_reconciliation"
+			}
+			input := repository.OptionFillInput{IdempotencyKey: "alpaca_option_fill:v1:" + activityID, AccountID: order.AccountID, Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID, Order: &observedOrder, PositionID: positionID, FillPrice: cumulativePrice, FillQuantity: cumulativeQuantity, Fee: optionFeeByOrder[order.ID], Premium: optionPremiumByOrder[order.ID], FilledAt: fill.ExecutedAt, ExitReason: exitReason}
+			scope, scopeErr := execution.ExecutionScopeFromOrder(observedOrder)
+			if scopeErr != nil {
+				return summary, fmt.Errorf("alpaca_reconcile: option fill scope for %s: %w", fill.ExternalID, scopeErr)
+			}
+			if _, err := r.optionFillWriter.ApplyAcceptedOptionFills(ctx, scope, []repository.OptionFillInput{input}); err != nil {
+				return summary, fmt.Errorf("alpaca_reconcile: persist option fill for %s: %w", fill.ExternalID, err)
+			}
+			*order = observedOrder
+			for _, key := range fillKeys {
+				existingTradeKeys[key] = struct{}{}
+			}
+			summary.TradesCreated++
+			continue
+		}
 		trade := &domain.Trade{
-			OrderID:    &order.ID,
-			PositionID: nil,
-			ExternalID: strings.TrimSpace(fill.ActivityID),
-			Ticker:     fill.Ticker,
-			Side:       fill.Side,
-			Quantity:   fill.Quantity,
-			Price:      fill.Price,
-			Fee:        fill.Fee,
-			ExecutedAt: fill.ExecutedAt,
+			AccountID:          order.AccountID,
+			Environment:        order.Environment,
+			OriginType:         order.OriginType,
+			OriginID:           order.OriginID,
+			OrderID:            &order.ID,
+			PositionID:         nil,
+			ExternalID:         strings.TrimSpace(fill.ActivityID),
+			Ticker:             fill.Ticker,
+			Side:               fill.Side,
+			Quantity:           fill.Quantity,
+			Price:              fill.Price,
+			Fee:                fill.Fee,
+			ExecutedAt:         fill.ExecutedAt,
+			AssetClass:         order.AssetClass,
+			ContractMultiplier: order.ContractMultiplier,
 		}
 		if position != nil {
 			trade.PositionID = &position.ID
@@ -413,6 +567,13 @@ func (r *AlpacaReconciler) Reconcile(ctx context.Context) (AlpacaReconcileSummar
 	}
 
 	return summary, nil
+}
+
+func (r *AlpacaReconciler) bindImportedOwnership(accountID *uuid.UUID, environment *domain.AccountEnvironment, originType, originID *string) {
+	*accountID = r.executionAccount.AccountID()
+	*environment = r.executionAccount.Environment()
+	*originType = "reconciliation"
+	*originID = "alpaca"
 }
 
 func isAlpacaManagedPosition(position domain.Position) bool {
@@ -452,19 +613,19 @@ func (r *AlpacaReconciler) Verify(ctx context.Context) (AlpacaVerificationReport
 	}
 
 	localOrders, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Order, error) {
-		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca"}, limit, offset)
+		return r.orderRepo.List(ctx, repository.OrderFilter{Broker: "alpaca", Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaVerificationReport{}, fmt.Errorf("alpaca_reconcile: list local orders: %w", err)
 	}
 	localPositions, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Position, error) {
-		return r.positionRepo.ListOpenAlpacaOwned(ctx, limit, offset)
+		return r.positionRepo.ListOpenAlpacaOwnedByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), limit, offset)
 	})
 	if err != nil {
 		return AlpacaVerificationReport{}, fmt.Errorf("alpaca_reconcile: list local positions: %w", err)
 	}
 	localTrades, err := listAllReconciliationPages(ctx, func(limit, offset int) ([]domain.Trade, error) {
-		return r.tradeRepo.List(ctx, repository.TradeFilter{}, limit, offset)
+		return r.tradeRepo.List(ctx, repository.TradeFilter{Environment: r.executionAccount.Environment()}, limit, offset)
 	})
 	if err != nil {
 		return AlpacaVerificationReport{}, fmt.Errorf("alpaca_reconcile: list local trades: %w", err)
@@ -612,6 +773,7 @@ func snapshotToOrder(snapshot BrokerOrderSnapshot, strategyID *uuid.UUID) *domai
 	return &domain.Order{
 		StrategyID:     strategyID,
 		ExternalID:     snapshot.ExternalID,
+		ClientOrderID:  snapshot.ClientOrderID,
 		Ticker:         snapshot.Ticker,
 		Side:           snapshot.Side,
 		OrderType:      snapshot.OrderType,
@@ -622,8 +784,10 @@ func snapshotToOrder(snapshot BrokerOrderSnapshot, strategyID *uuid.UUID) *domai
 		FilledAvgPrice: cloneFloatPtr(snapshot.FilledAvgPrice),
 		Status:         snapshot.Status,
 		Broker:         fallbackBroker(snapshot.Broker),
-		SubmittedAt:    cloneTimePtr(snapshot.SubmittedAt),
-		FilledAt:       cloneTimePtr(snapshot.FilledAt),
+		MarketType:     snapshot.MarketType, AssetClass: snapshot.AssetClass, UnderlyingTicker: snapshot.UnderlyingTicker,
+		OptionType: cloneOptionTypePtr(snapshot.OptionType), Strike: cloneFloatPtr(snapshot.Strike), Expiry: cloneTimePtr(snapshot.Expiry), ContractMultiplier: snapshot.ContractMultiplier,
+		SubmittedAt: cloneTimePtr(snapshot.SubmittedAt),
+		FilledAt:    cloneTimePtr(snapshot.FilledAt),
 	}
 }
 
@@ -637,6 +801,9 @@ func snapshotToPosition(snapshot domain.Position, strategyID *uuid.UUID) *domain
 		AvgEntry:      snapshot.AvgEntry,
 		CurrentPrice:  cloneFloatPtr(snapshot.CurrentPrice),
 		UnrealizedPnL: cloneFloatPtr(snapshot.UnrealizedPnL),
+		AssetClass:    snapshot.AssetClass, UnderlyingTicker: snapshot.UnderlyingTicker,
+		OptionType: snapshot.OptionType, Strike: cloneFloatPtr(snapshot.Strike), Expiry: cloneTimePtr(snapshot.Expiry),
+		ContractMultiplier: snapshot.ContractMultiplier,
 	}
 }
 
@@ -651,12 +818,8 @@ func marketTypeFromAssetClass(assetClass domain.AssetClass) domain.MarketType {
 	}
 }
 
-func applyOrderSnapshot(order *domain.Order, snapshot BrokerOrderSnapshot, strategyID *uuid.UUID) bool {
+func applyOrderSnapshot(order *domain.Order, snapshot BrokerOrderSnapshot, _ *uuid.UUID) bool {
 	changed := false
-	if !uuidPtrEqual(order.StrategyID, strategyID) {
-		order.StrategyID = cloneUUIDPtr(strategyID)
-		changed = true
-	}
 	if order.Ticker != snapshot.Ticker {
 		order.Ticker = snapshot.Ticker
 		changed = true
@@ -706,15 +869,16 @@ func applyOrderSnapshot(order *domain.Order, snapshot BrokerOrderSnapshot, strat
 		order.FilledAt = cloneTimePtr(snapshot.FilledAt)
 		changed = true
 	}
+	if order.MarketType != snapshot.MarketType || order.AssetClass != snapshot.AssetClass || order.UnderlyingTicker != snapshot.UnderlyingTicker || order.ContractMultiplier != snapshot.ContractMultiplier || !optionTypePtrEqual(order.OptionType, snapshot.OptionType) || !floatPtrEqual(order.Strike, snapshot.Strike) || !timePtrEqual(order.Expiry, snapshot.Expiry) {
+		order.MarketType, order.AssetClass, order.UnderlyingTicker, order.ContractMultiplier = snapshot.MarketType, snapshot.AssetClass, snapshot.UnderlyingTicker, snapshot.ContractMultiplier
+		order.OptionType, order.Strike, order.Expiry = cloneOptionTypePtr(snapshot.OptionType), cloneFloatPtr(snapshot.Strike), cloneTimePtr(snapshot.Expiry)
+		changed = true
+	}
 	return changed
 }
 
-func applyPositionSnapshot(position *domain.Position, snapshot domain.Position, strategyID *uuid.UUID) bool {
+func applyPositionSnapshot(position *domain.Position, snapshot domain.Position, _ *uuid.UUID) bool {
 	changed := false
-	if !uuidPtrEqual(position.StrategyID, strategyID) {
-		position.StrategyID = cloneUUIDPtr(strategyID)
-		changed = true
-	}
 	if position.Side != snapshot.Side {
 		position.Side = snapshot.Side
 		changed = true
@@ -735,7 +899,24 @@ func applyPositionSnapshot(position *domain.Position, snapshot domain.Position, 
 		position.UnrealizedPnL = cloneFloatPtr(snapshot.UnrealizedPnL)
 		changed = true
 	}
+	if position.MarketType != marketTypeFromAssetClass(snapshot.AssetClass) || position.AssetClass != snapshot.AssetClass || position.UnderlyingTicker != snapshot.UnderlyingTicker || position.ContractMultiplier != snapshot.ContractMultiplier || !optionTypePtrEqual(position.OptionType, snapshot.OptionType) || !floatPtrEqual(position.Strike, snapshot.Strike) || !timePtrEqual(position.Expiry, snapshot.Expiry) {
+		position.MarketType, position.AssetClass, position.UnderlyingTicker = marketTypeFromAssetClass(snapshot.AssetClass), snapshot.AssetClass, snapshot.UnderlyingTicker
+		position.OptionType, position.Strike, position.Expiry, position.ContractMultiplier = cloneOptionTypePtr(snapshot.OptionType), cloneFloatPtr(snapshot.Strike), cloneTimePtr(snapshot.Expiry), snapshot.ContractMultiplier
+		changed = true
+	}
 	return changed
+}
+
+func cloneOptionTypePtr(value *domain.OptionType) *domain.OptionType {
+	if value == nil {
+		return nil
+	}
+	v := *value
+	return &v
+}
+
+func optionTypePtrEqual(left, right *domain.OptionType) bool {
+	return (left == nil && right == nil) || (left != nil && right != nil && *left == *right)
 }
 
 func fillDedupeKey(fill BrokerFillSnapshot) string {
@@ -895,14 +1076,6 @@ func cloneTimePtr(value *time.Time) *time.Time {
 	return &v
 }
 
-func cloneUUIDPtr(value *uuid.UUID) *uuid.UUID {
-	if value == nil {
-		return nil
-	}
-	v := *value
-	return &v
-}
-
 func floatPtrEqual(left, right *float64) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
@@ -915,13 +1088,6 @@ func timePtrEqual(left, right *time.Time) bool {
 		return left == nil && right == nil
 	}
 	return left.Equal(*right)
-}
-
-func uuidPtrEqual(left, right *uuid.UUID) bool {
-	if left == nil || right == nil {
-		return left == nil && right == nil
-	}
-	return *left == *right
 }
 
 func formatFloat(v float64) string {

@@ -59,8 +59,8 @@ func (repo *ExecutionLifecycleRepo) ProposeExecutionIntent(
 	err = databaseTransaction.QueryRow(ctx, `INSERT INTO execution_intents (
 		id, account_id, environment, instrument_id, idempotency_key,
 		desired_quantity_delta, decision_quote_snapshot_id, decision_at,
-		origin_type, origin_id, strategy_version_id, metadata, created_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		origin_type, origin_id, copy_origin_rebalance_run_id, strategy_version_id, metadata, created_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 	ON CONFLICT (account_id, idempotency_key) DO NOTHING
 	RETURNING id`,
 		aggregate.Intent.ID,
@@ -73,6 +73,7 @@ func (repo *ExecutionLifecycleRepo) ProposeExecutionIntent(
 		aggregate.Intent.DecisionAt,
 		aggregate.Intent.OriginType,
 		aggregate.Intent.OriginID,
+		nullableUUID(aggregate.Intent.CopyOriginRebalanceRunID),
 		aggregate.Intent.StrategyVersionID,
 		jsonForStorage(aggregate.Intent.Metadata),
 		aggregate.Intent.CreatedAt,
@@ -469,13 +470,13 @@ func insertExecutionOrder(ctx context.Context, tx pgx.Tx, order *lifecycle.Order
 		id, intent_id, account_id, instrument_id, idempotency_key,
 		client_order_id, side, order_type, time_in_force, quantity,
 		limit_price, stop_price, venue, venue_contract_id,
-		route_quote_snapshot_id, routed_at, policy_kind, policy_version, created_at
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+		route_quote_snapshot_id, routed_at, policy_kind, policy_version, copy_origin_rebalance_run_id, created_at
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
 		order.ID, order.IntentID, order.AccountID, order.InstrumentID, order.IdempotencyKey,
 		order.ClientOrderID, order.Side, order.OrderType, order.TimeInForce, order.Quantity.String(),
 		nullableExecutionDecimal(order.LimitPrice), nullableExecutionDecimal(order.StopPrice), order.Venue,
 		order.VenueContractID, order.RouteQuoteSnapshotID, order.RoutedAt, order.PolicyKind,
-		order.PolicyVersion, order.CreatedAt,
+		order.PolicyVersion, nullableUUID(order.CopyOriginRebalanceRunID), order.CreatedAt,
 	)
 	return err
 }
@@ -541,18 +542,19 @@ func insertExecutionLifecycleEvent(ctx context.Context, tx pgx.Tx, event *lifecy
 const executionIntentSelectSQL = `SELECT
 	id, account_id, environment, instrument_id, idempotency_key,
 	desired_quantity_delta::TEXT, decision_quote_snapshot_id, decision_at,
-	origin_type, origin_id, strategy_version_id, metadata, created_at
+	origin_type, origin_id, copy_origin_rebalance_run_id, strategy_version_id, metadata, created_at
 FROM execution_intents `
 
 func scanExecutionIntent(row accountRow) (*lifecycle.Intent, error) {
 	var intent lifecycle.Intent
 	var quantity string
 	var metadata []byte
+	var copyOriginRunID *uuid.UUID
 	if err := row.Scan(
 		&intent.ID, &intent.AccountID, &intent.Environment, &intent.InstrumentID,
 		&intent.IdempotencyKey, &quantity, &intent.DecisionQuoteSnapshotID,
 		&intent.DecisionAt, &intent.OriginType, &intent.OriginID,
-		&intent.StrategyVersionID, &metadata, &intent.CreatedAt,
+		&copyOriginRunID, &intent.StrategyVersionID, &metadata, &intent.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -561,6 +563,9 @@ func scanExecutionIntent(row accountRow) (*lifecycle.Intent, error) {
 		return nil, fmt.Errorf("parse execution intent quantity %q: %w", quantity, err)
 	}
 	intent.DesiredQuantityDelta = parsed
+	if copyOriginRunID != nil {
+		intent.CopyOriginRebalanceRunID = *copyOriginRunID
+	}
 	intent.Metadata = append(json.RawMessage(nil), metadata...)
 	intent.DecisionAt = intent.DecisionAt.UTC().Truncate(time.Microsecond)
 	intent.CreatedAt = intent.CreatedAt.UTC().Truncate(time.Microsecond)
@@ -583,17 +588,18 @@ func loadExecutionOrder(
 	var order lifecycle.Order
 	var quantity string
 	var limitPrice, stopPrice *string
+	var copyOriginRunID *uuid.UUID
 	err := queryer.QueryRow(ctx, `SELECT
 		id, intent_id, account_id, instrument_id, idempotency_key, client_order_id,
 		side, order_type, time_in_force, quantity::TEXT, limit_price::TEXT,
 		stop_price::TEXT, venue, venue_contract_id, route_quote_snapshot_id,
-		routed_at, policy_kind, policy_version, created_at
+		routed_at, policy_kind, policy_version, copy_origin_rebalance_run_id, created_at
 	FROM execution_orders WHERE intent_id = $1`, intentID).Scan(
 		&order.ID, &order.IntentID, &order.AccountID, &order.InstrumentID,
 		&order.IdempotencyKey, &order.ClientOrderID, &order.Side, &order.OrderType,
 		&order.TimeInForce, &quantity, &limitPrice, &stopPrice, &order.Venue,
 		&order.VenueContractID, &order.RouteQuoteSnapshotID, &order.RoutedAt,
-		&order.PolicyKind, &order.PolicyVersion, &order.CreatedAt,
+		&order.PolicyKind, &order.PolicyVersion, &copyOriginRunID, &order.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, repository.ErrNotFound
@@ -609,6 +615,9 @@ func loadExecutionOrder(
 	}
 	if order.StopPrice, err = parseOptionalEconomicDecimal(stopPrice); err != nil {
 		return nil, err
+	}
+	if copyOriginRunID != nil {
+		order.CopyOriginRebalanceRunID = *copyOriginRunID
 	}
 	order.RoutedAt = order.RoutedAt.UTC().Truncate(time.Microsecond)
 	order.CreatedAt = order.CreatedAt.UTC().Truncate(time.Microsecond)

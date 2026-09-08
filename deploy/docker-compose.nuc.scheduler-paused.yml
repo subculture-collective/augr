@@ -1,0 +1,4 @@
+services:
+  app:
+    environment:
+      ENABLE_SCHEDULER: "false"

@@ -14,9 +14,19 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 )
+
+type venueResultScope struct{ intent lifecycle.Intent }
+
+func (s venueResultScope) AccountID() uuid.UUID                   { return s.intent.AccountID }
+func (s venueResultScope) Environment() domain.AccountEnvironment { return s.intent.Environment }
+func (s venueResultScope) Origin() (ledger.ExecutionOriginType, string) {
+	return s.intent.OriginType, s.intent.OriginID
+}
+func (s venueResultScope) CopyOriginRunID() uuid.UUID { return s.intent.CopyOriginRebalanceRunID }
 
 func TestPersistResultRecordsObservationBeforeTransition(t *testing.T) {
 	fixture := newVenueResultFixture(t, OutcomeRejected)
@@ -224,7 +234,7 @@ func newVenueResultFixture(t *testing.T, outcome MappedOutcome) venueResultFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := &Result{Initial: initial, Aggregate: initial, Steps: []ResultStep{{Observation: observation}}}
+	result := &Result{Scope: venueResultScope{intent: initial.Intent}, Initial: initial, Aggregate: initial, Steps: []ResultStep{{Observation: observation}}}
 	var transition *lifecycle.Transition
 	if outcome == OutcomeRejected {
 		transition, err = lifecycle.ObserveOrderTerminal(initial, lifecycle.EventOrderRejected, lifecycle.EventInput{
@@ -350,6 +360,14 @@ func (store *recordingVenueResultStore) ApplyExecutionFill(
 ) (*lifecycle.Aggregate, error) {
 	store.calls = append(store.calls, "fill")
 	return store.apply(ctx, accountID, transition)
+}
+
+func (store *recordingVenueResultStore) ApplyAcceptedFill(ctx context.Context, input execution.AcceptedFillInput) (execution.AcceptedFillResult, error) {
+	if err := input.Validate(); err != nil {
+		return execution.AcceptedFillResult{}, err
+	}
+	persisted, err := store.ApplyExecutionFill(ctx, input.Scope.AccountID(), input.Transition)
+	return execution.AcceptedFillResult{Lifecycle: persisted}, err
 }
 
 func (store *recordingVenueResultStore) ApplyExecutionTransition(

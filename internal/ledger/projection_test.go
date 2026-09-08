@@ -25,7 +25,7 @@ func TestBuildPortfolioProjectionDepositAndMarkedLong(t *testing.T) {
 	mark := projectionMark(t, fixture.primary.ID, "12", fixture.base.EffectiveAt.Add(10*time.Minute), "mark-1")
 
 	projection, err := BuildPortfolioProjection(ProjectionInput{
-		Request:      projectionRequest(fixture.account.ID, fixture.base.EffectiveAt.Add(20*time.Minute)),
+		Request:      projectionRequest(fixture.account.ID, fill.Transaction.ID, fixture.base.EffectiveAt.Add(20*time.Minute)),
 		BaseCurrency: fixture.account.BaseCurrency,
 		Transactions: []*Transaction{fill.Transaction, deposit},
 		Mechanics:    []ProjectionMechanics{mechanics},
@@ -91,7 +91,7 @@ func TestBuildPortfolioProjectionMatchesFIFOAcrossLotsAndCrossesDirection(t *tes
 	mark := projectionMark(t, fixture.primary.ID, "12", base.Add(3*time.Minute), "mark-1")
 
 	projection, err := BuildPortfolioProjection(ProjectionInput{
-		Request:      projectionRequest(fixture.account.ID, base.Add(10*time.Minute)),
+		Request:      projectionRequest(fixture.account.ID, sell.Transaction.ID, base.Add(10*time.Minute)),
 		BaseCurrency: "USD",
 		Transactions: []*Transaction{sell.Transaction, deposit, buyTwo.Transaction, buyOne.Transaction},
 		Mechanics: []ProjectionMechanics{
@@ -139,7 +139,7 @@ func TestBuildPortfolioProjectionIsPointInTimeAndByteDeterministic(t *testing.T)
 	futureFill := projectionFill(t, fixture, "buy-future", base.Add(30*time.Minute), FillSideBuy, "1", "11", nil)
 	oldMark := projectionMark(t, fixture.primary.ID, "12", base.Add(time.Minute), "mark-old")
 	futureMark := projectionMark(t, fixture.primary.ID, "99", base.Add(30*time.Minute), "mark-future")
-	request := projectionRequest(fixture.account.ID, base.Add(10*time.Minute))
+	request := projectionRequest(fixture.account.ID, fill.Transaction.ID, base.Add(10*time.Minute))
 	input := ProjectionInput{
 		Request:      request,
 		BaseCurrency: "USD",
@@ -193,7 +193,7 @@ func TestBuildPortfolioProjectionAllocatesExactResidualAndStandaloneCosts(t *tes
 	mechanics = append(mechanics, projectionMechanics(t, closingFill), projectionMechanics(t, standaloneFee))
 
 	projection, err := BuildPortfolioProjection(ProjectionInput{
-		Request: projectionRequest(fixture.account.ID, base.Add(10*time.Minute)), BaseCurrency: "USD",
+		Request: projectionRequest(fixture.account.ID, standaloneFee.Transaction.ID, base.Add(10*time.Minute)), BaseCurrency: "USD",
 		Transactions: transactions, Mechanics: mechanics,
 	})
 	if err != nil {
@@ -270,7 +270,7 @@ func TestBuildPortfolioProjectionSettlesCashExpirationAndPredictionInventory(t *
 			settlement := projectionCashSettlement(t, settlementFixture, "settlement", base, testCase.settlementKind, testCase.position, testCase.settlement)
 			deposit := projectionCapitalTransaction(t, fixture.account.ID, "USD", "deposit", "1000", base.Add(-2*time.Minute))
 			projection, err := BuildPortfolioProjection(ProjectionInput{
-				Request: projectionRequest(fixture.account.ID, base.Add(10*time.Minute)), BaseCurrency: "USD",
+				Request: projectionRequest(fixture.account.ID, settlement.Transaction.ID, base.Add(10*time.Minute)), BaseCurrency: "USD",
 				Transactions: []*Transaction{settlement.Transaction, opening.Transaction, deposit},
 				Mechanics:    []ProjectionMechanics{projectionMechanics(t, settlement), projectionMechanics(t, opening)},
 			})
@@ -319,7 +319,7 @@ func TestBuildPortfolioProjectionTransfersPhysicalOptionBasisInAllFourCases(t *t
 			deposit := projectionCapitalTransaction(t, fixture.account.ID, "USD", "deposit", "20000", base.Add(-2*time.Minute))
 			mark := projectionMark(t, fixture.secondary.ID, testCase.underlyingMark, base.Add(time.Minute), "underlying-mark")
 			projection, err := BuildPortfolioProjection(ProjectionInput{
-				Request: projectionRequest(fixture.account.ID, base.Add(10*time.Minute)), BaseCurrency: "USD",
+				Request: projectionRequest(fixture.account.ID, physical.Transaction.ID, base.Add(10*time.Minute)), BaseCurrency: "USD",
 				Transactions: []*Transaction{physical.Transaction, opening.Transaction, deposit},
 				Mechanics:    []ProjectionMechanics{projectionMechanics(t, physical), projectionMechanics(t, opening)},
 				Marks:        []*MarkObservation{mark},
@@ -356,7 +356,7 @@ func TestBuildPortfolioProjectionFailsClosedForUnsupportedOrIncompleteEvidence(t
 	fill := projectionFill(t, fixture, "buy", base, FillSideBuy, "1", "10", nil)
 	mechanics := projectionMechanics(t, fill)
 	validMark := projectionMark(t, fixture.primary.ID, "12", base.Add(time.Minute), "mark")
-	request := projectionRequest(fixture.account.ID, base.Add(10*time.Minute))
+	request := projectionRequest(fixture.account.ID, fill.Transaction.ID, base.Add(10*time.Minute))
 
 	tests := map[string]func(*ProjectionInput){
 		"missing mechanics": func(input *ProjectionInput) { input.Mechanics = nil },
@@ -437,9 +437,9 @@ func FuzzAllocateProjectionAmountConservesResidual(f *testing.F) {
 	})
 }
 
-func projectionRequest(accountID uuid.UUID, asOf time.Time) ProjectionRequest {
+func projectionRequest(accountID, throughTransactionID uuid.UUID, asOf time.Time) ProjectionRequest {
 	return ProjectionRequest{
-		AccountID: accountID, AsOf: asOf, MarkSource: "polygon",
+		AccountID: accountID, ThroughTransactionID: throughTransactionID, AsOf: asOf, MarkSource: "polygon",
 		MarkNamespace: "consolidated/mark", MaxMarkAge: time.Hour,
 	}
 }

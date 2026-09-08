@@ -76,11 +76,7 @@ type captureUpdateRunRepo struct {
 
 func (r *captureUpdateRunRepo) Create(_ context.Context, _ *domain.PipelineRun) error { return nil }
 
-func (r *captureUpdateRunRepo) Get(_ context.Context, _ uuid.UUID, _ time.Time) (*domain.PipelineRun, error) {
-	return nil, repository.ErrNotFound
-}
-
-func (r *captureUpdateRunRepo) GetByID(_ context.Context, _ uuid.UUID) (*domain.PipelineRun, error) {
+func (r *captureUpdateRunRepo) Get(_ context.Context, _ domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	return nil, repository.ErrNotFound
 }
 
@@ -92,7 +88,7 @@ func (r *captureUpdateRunRepo) Count(_ context.Context, _ repository.PipelineRun
 	return 0, nil
 }
 
-func (r *captureUpdateRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *captureUpdateRunRepo) Finalize(ctx context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	if ctx.Err() != nil {
 		return repository.PipelineRunFinalizationReceipt{}, ctx.Err()
 	}
@@ -101,10 +97,10 @@ func (r *captureUpdateRunRepo) Finalize(ctx context.Context, id uuid.UUID, trade
 	}
 	r.updateCalled.Store(true)
 	r.lastStatus = finalization.Status
-	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt}}, nil
 }
 
-func (*captureUpdateRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (*captureUpdateRunRepo) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 

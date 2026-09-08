@@ -22,6 +22,13 @@ func (s *Server) handleListMemories(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to search memories", ErrCodeInternal)
 		return
 	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	for _, memory := range memories {
+		if memory.AccountID != accountID {
+			respondError(w, http.StatusNotFound, "memory not found", ErrCodeNotFound)
+			return
+		}
+	}
 	respondList(w, memories, limit, offset)
 }
 
@@ -42,6 +49,13 @@ func (s *Server) handleSearchMemories(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to search memories", ErrCodeInternal)
 		return
+	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	for _, memory := range memories {
+		if memory.AccountID != accountID {
+			respondError(w, http.StatusNotFound, "memory not found", ErrCodeNotFound)
+			return
+		}
 	}
 	respondList(w, memories, limit, offset)
 }

@@ -271,7 +271,7 @@ func newCanonicalInstrumentMigrationPool(t *testing.T) (context.Context, *pgxpoo
 	if err != nil {
 		t.Fatalf("pgxpool.ParseConfig() error = %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

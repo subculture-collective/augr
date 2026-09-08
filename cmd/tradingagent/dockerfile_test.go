@@ -19,7 +19,7 @@ func TestProductionDockerfileContainsRequiredStages(t *testing.T) {
 		"FROM golang:${GO_VERSION}-alpine AS builder",
 		"COPY go.mod go.sum ./",
 		"RUN go mod download",
-		"RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags=\"-s -w -X main.version=${BUILD_VERSION}\" -o /out/tradingagent ./cmd/tradingagent",
+		"RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags=\"-s -w -X main.version=${BUILD_VERSION} -X main.sourceCommit=${BUILD_COMMIT} -X main.sourceTreeSHA256=${BUILD_TREE_SHA256}\" -o /out/tradingagent ./cmd/tradingagent",
 		"FROM alpine:${ALPINE_VERSION} AS production",
 		"COPY --from=builder /out/tradingagent ./tradingagent",
 		"COPY --from=builder /etc/ssl/certs/ca-certificates.crt ./ca-certificates.crt",
@@ -28,6 +28,7 @@ func TestProductionDockerfileContainsRequiredStages(t *testing.T) {
 		"ENV SSL_CERT_FILE=/app/ca-certificates.crt",
 		"org.opencontainers.image.revision=\"${BUILD_COMMIT}\"",
 		"org.opencontainers.image.version=\"${BUILD_VERSION}\"",
+		"tv.subcult.augr.source-tree-sha256=\"${BUILD_TREE_SHA256}\"",
 		"org.opencontainers.image.created=\"${BUILD_TIME}\"",
 		"EXPOSE 8080",
 		"ENTRYPOINT [\"./tradingagent\"]",
@@ -44,7 +45,7 @@ func TestProductionDockerfileContainsRequiredStages(t *testing.T) {
 		t.Fatal("Dockerfile builder and production stages are not ordered")
 	}
 	builderStage := dockerfile[builderStart:productionStart]
-	for _, metadataArg := range []string{"ARG BUILD_COMMIT", "ARG BUILD_TIME"} {
+	for _, metadataArg := range []string{"ARG BUILD_TIME"} {
 		if strings.Contains(builderStage, metadataArg) {
 			t.Fatalf("builder stage unexpectedly contains cache-busting metadata %q", metadataArg)
 		}

@@ -3,9 +3,11 @@ package execution
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
@@ -24,11 +27,6 @@ const (
 	OrderEventCancelled = "order_cancelled"
 	OrderEventRejected  = "order_rejected"
 )
-
-// Kalshi strategies share one paper account. Serialize the complete
-// snapshot-to-fill lifecycle so concurrent strategy runs cannot all approve
-// against the same pre-trade aggregate exposure.
-var kalshiExposureMu sync.Mutex
 
 // FinalSignal stores the extracted pipeline signal and confidence.
 type FinalSignal struct {
@@ -97,7 +95,7 @@ type OrderManager struct {
 	positionRepo     repository.PositionRepository
 	orderRepo        repository.OrderRepository
 	tradeRepo        repository.TradeRepository
-	financialRepo    repository.FinancialLifecycleRepository
+	economicWriter   AcceptedOrderFillWriter
 	auditLogRepo     repository.AuditLogRepository
 	agentEventRepo   repository.AgentEventRepository
 	decisionRecorder DecisionRecorder
@@ -108,6 +106,26 @@ type OrderManager struct {
 	nowMu            sync.RWMutex
 	nowFunc          func() time.Time
 	metrics          OrderMetricsRecorder
+	effectFence      func(context.Context) error
+	accountLocker    repository.ExecutionAccountLocker
+}
+
+// WithEffectFence requires an ownership check immediately before execution effects.
+func (m *OrderManager) WithEffectFence(fence func(context.Context) error) *OrderManager {
+	if m != nil {
+		m.effectFence = fence
+	}
+	return m
+}
+
+func (m *OrderManager) fenceEffect(ctx context.Context) error {
+	if m == nil || m.effectFence == nil {
+		return nil
+	}
+	if err := m.effectFence(ctx); err != nil {
+		return fmt.Errorf("order_manager: execution ownership fence: %w", err)
+	}
+	return nil
 }
 
 // OrderMetricsRecorder records order lifecycle metrics.
@@ -144,6 +162,7 @@ func NewOrderManager(
 		sizingConfig:   sizingConfig,
 		logger:         logger,
 		nowFunc:        time.Now,
+		accountLocker:  executionAccountLocker(orderRepo),
 	}
 }
 
@@ -165,12 +184,12 @@ func (m *OrderManager) WithDecisionRecorder(recorder DecisionRecorder) *OrderMan
 	return m
 }
 
-// WithFinancialLifecycleRepo wires the atomic financial lifecycle repository.
-func (m *OrderManager) WithFinancialLifecycleRepo(repo repository.FinancialLifecycleRepository) *OrderManager {
+// WithAcceptedOrderFillWriter wires the raw-first canonical economic boundary.
+func (m *OrderManager) WithAcceptedOrderFillWriter(writer AcceptedOrderFillWriter) *OrderManager {
 	if m == nil {
 		return nil
 	}
-	m.financialRepo = repo
+	m.economicWriter = writer
 	return m
 }
 
@@ -224,19 +243,44 @@ func (m *OrderManager) currentTime() time.Time {
 // ProcessSignal executes the full order lifecycle for a trading signal.
 func (m *OrderManager) ProcessSignal(
 	ctx context.Context,
+	scope ExecutionScope,
 	signal FinalSignal,
 	plan TradingPlan,
-	strategyID, runID uuid.UUID,
 ) error {
+	if m.accountLocker == nil {
+		return fmt.Errorf("order_manager: PostgreSQL execution account locker is required")
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.processSignal(ctx, scope, signal, plan)
+	})
+}
+
+// ProcessSignalWithAccountLockHeld executes a signal when the caller already
+// owns the execution-account lock. It exists for workflows that must claim and
+// reauthorize work inside the same serialized account operation.
+func (m *OrderManager) ProcessSignalWithAccountLockHeld(ctx context.Context, scope ExecutionScope, signal FinalSignal, plan TradingPlan) error {
+	if m == nil {
+		return fmt.Errorf("order_manager: manager is nil")
+	}
+	return m.processSignal(ctx, scope, signal, plan)
+}
+
+func (m *OrderManager) processSignal(
+	ctx context.Context,
+	scope ExecutionScope,
+	signal FinalSignal,
+	plan TradingPlan,
+) error {
+	strategyID, runID, hasRun, err := scopeOriginIDs(scope)
+	if err != nil {
+		return fmt.Errorf("order_manager: execution scope: %w", err)
+	}
+	originType, originID := scope.Origin()
 	marketType := planMarketType(plan)
 	predictionExitMaxQuantity := 0.0
 	stockExitMaxQuantity := 0.0
+	var exitPositionIDs []uuid.UUID
 	riskReducingExit := false
-
-	if marketType.Normalize() == domain.MarketTypeKalshi {
-		kalshiExposureMu.Lock()
-		defer kalshiExposureMu.Unlock()
-	}
 
 	// Ignore hold signals — nothing to execute.
 	if signal.Signal == domain.PipelineSignalHold {
@@ -249,6 +293,16 @@ func (m *OrderManager) ProcessSignal(
 	}
 	plan.Ticker = normalizedTicker
 	plan.Side = normalizedSide
+	if m.liveTrading {
+		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
+		if !allowed {
+			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_version_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
+			if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(scope, plan, marketType, strings.ToUpper(strings.TrimSpace(plan.Side)), 0, 0, domain.RiskDecisionRejected, []string{denial.Code + ": " + denial.Message}, domain.TradeDecisionStatusRejected)); err != nil {
+				return err
+			}
+			return fmt.Errorf("order_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
+		}
+	}
 
 	// A stock SELL signal only makes sense as an exit for a position this
 	// strategy already owns. Do not turn discovery sell signals for unowned stock
@@ -256,7 +310,7 @@ func (m *OrderManager) ProcessSignal(
 	// actionable trades. Non-stock markets have different SELL semantics and are
 	// intentionally left to their market-specific execution/risk paths.
 	if signal.Signal == domain.PipelineSignalSell && marketType == domain.MarketTypeStock {
-		ownedQuantity, err := m.openLongPositionQuantity(ctx, strategyID, plan.Ticker)
+		ownedQuantity, positionIDs, err := m.openLongPositions(ctx, scope, plan.Ticker)
 		if err != nil {
 			return err
 		}
@@ -264,8 +318,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.InfoContext(ctx, "sell signal has no open long position, skipping order", "ticker", plan.Ticker, "strategy_id", strategyID)
 
 			decision := m.newTradeDecision(
-				strategyID,
-				runID,
+				scope,
 				plan,
 				marketType,
 				string(domain.OrderSideSell),
@@ -283,7 +336,9 @@ func (m *OrderManager) ProcessSignal(
 				"pipeline_run_id": runID.String(),
 				"pipeline_signal": signal.Signal,
 			})
-			m.recordTradeDecision(ctx, decision)
+			if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
+				return err
+			}
 
 			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
 				"ticker":      plan.Ticker,
@@ -297,11 +352,12 @@ func (m *OrderManager) ProcessSignal(
 			return nil
 		}
 		stockExitMaxQuantity = ownedQuantity
+		exitPositionIDs = positionIDs
 		riskReducingExit = true
 	}
 
 	if signal.Signal == domain.PipelineSignalSell && isPredictionMarket(marketType) {
-		ownedQuantity, err := m.openPredictionPositionQuantity(ctx, strategyID, marketType, plan.Ticker, plan.Side)
+		ownedQuantity, positionIDs, err := m.openPredictionPositions(ctx, scope, marketType, plan.Ticker, plan.Side)
 		if err != nil {
 			return err
 		}
@@ -313,8 +369,7 @@ func (m *OrderManager) ProcessSignal(
 				rejectionReason = "unowned_kalshi_exit_no_open_position"
 			}
 			decision := m.newTradeDecision(
-				strategyID,
-				runID,
+				scope,
 				plan,
 				marketType,
 				string(domain.OrderSideSell),
@@ -333,7 +388,9 @@ func (m *OrderManager) ProcessSignal(
 				"pipeline_run_id":   runID.String(),
 				"pipeline_signal":   signal.Signal,
 			})
-			m.recordTradeDecision(ctx, decision)
+			if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
+				return err
+			}
 
 			if auditErr := m.audit(ctx, "sell_without_position_skipped", "order", nil, map[string]any{
 				"ticker":          plan.Ticker,
@@ -349,6 +406,7 @@ func (m *OrderManager) ProcessSignal(
 			return nil
 		}
 		predictionExitMaxQuantity = ownedQuantity
+		exitPositionIDs = positionIDs
 		riskReducingExit = true
 	}
 
@@ -381,29 +439,6 @@ func (m *OrderManager) ProcessSignal(
 			"signal":      signal.Signal,
 		}); auditErr != nil {
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-		}
-	}
-
-	// 1b. Live execution gate (paper/default paths skip this entirely).
-	if m.liveTrading {
-		allowed, denial := m.liveGate.Allows(&strategyID, m.brokerName)
-		if !allowed {
-			m.logger.WarnContext(ctx, "live execution denied", "ticker", plan.Ticker, "strategy_id", strategyID, "broker", m.brokerName, "code", denial.Code, "reason", denial.Message)
-
-			m.recordTradeDecision(ctx, m.newTradeDecision(
-				strategyID,
-				runID,
-				plan,
-				marketType,
-				strings.ToUpper(strings.TrimSpace(plan.Side)),
-				0,
-				0,
-				domain.RiskDecisionRejected,
-				[]string{denial.Code + ": " + denial.Message},
-				domain.TradeDecisionStatusRejected,
-			))
-
-			return fmt.Errorf("order_manager: live execution denied for %s: %s", plan.Ticker, denial.Message)
 		}
 	}
 
@@ -462,7 +497,7 @@ func (m *OrderManager) ProcessSignal(
 
 	additionalExposurePct := (quantity * plan.EntryPrice) / balance.Equity
 
-	portfolio, err := BuildRiskPortfolioSnapshotFromBalance(ctx, balance, m.positionRepo)
+	portfolio, err := m.buildRiskPortfolioSnapshot(ctx, balance, scope)
 	if err != nil {
 		return fmt.Errorf("order_manager: build risk portfolio: %w", err)
 	}
@@ -482,9 +517,8 @@ func (m *OrderManager) ProcessSignal(
 
 	if !approved {
 		m.logger.WarnContext(ctx, "position limits rejected", "ticker", plan.Ticker, "reason", reason)
-		m.recordTradeDecision(ctx, m.newTradeDecision(
-			strategyID,
-			runID,
+		if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(
+			scope,
 			plan,
 			marketType,
 			strings.ToUpper(strings.TrimSpace(plan.Side)),
@@ -493,7 +527,9 @@ func (m *OrderManager) ProcessSignal(
 			domain.RiskDecisionRejected,
 			[]string{reason},
 			domain.TradeDecisionStatusRejected,
-		))
+		)); err != nil {
+			return err
+		}
 
 		if auditErr := m.audit(ctx, "risk_check_rejected", "order", nil, map[string]any{
 			"ticker":      plan.Ticker,
@@ -513,23 +549,44 @@ func (m *OrderManager) ProcessSignal(
 	side := m.signalToSide(signal.Signal)
 	orderType := m.entryTypeToOrderType(plan.EntryType)
 
+	effectIdentity := fmt.Sprintf("order-effect:v1:%s:%s:%s:%s:%s", scope.AccountID(), scope.Environment(), originType, originID, strings.ToUpper(strings.TrimSpace(plan.Ticker))+":"+string(side)+":"+string(orderType))
+	if hasRun {
+		effectIdentity += ":" + runID.String()
+	}
+	if copyRunID := scope.CopyOriginRunID(); copyRunID != uuid.Nil {
+		effectIdentity += ":copy:" + copyRunID.String()
+	}
 	order := &domain.Order{
-		ID:             uuid.New(),
-		StrategyID:     &strategyID,
-		PipelineRunID:  &runID,
-		Ticker:         plan.Ticker,
-		MarketType:     marketType,
-		Side:           side,
-		OrderType:      orderType,
-		Quantity:       quantity,
-		Status:         domain.OrderStatusPending,
-		Broker:         m.brokerName,
-		CreatedAt:      now,
-		PredictionSide: plan.Side,
+		ID:                       uuid.NewSHA1(uuid.NameSpaceURL, []byte(effectIdentity)),
+		AccountID:                scope.AccountID(),
+		Environment:              scope.Environment(),
+		OriginType:               string(originType),
+		OriginID:                 originID,
+		CopyOriginRebalanceRunID: scope.CopyOriginRunID(),
+		Ticker:                   plan.Ticker,
+		MarketType:               marketType,
+		Side:                     side,
+		OrderType:                orderType,
+		Quantity:                 quantity,
+		Status:                   domain.OrderStatusPending,
+		Broker:                   m.brokerName,
+		CreatedAt:                now,
+		PredictionSide:           plan.Side,
+	}
+	order.ClientOrderID = "augr-" + order.ID.String()
+	if originType == ledger.ExecutionOriginStrategyVersion {
+		order.StrategyID = scope.LegacyStrategyID()
+	}
+	if hasRun {
+		run, _ := scope.PipelineRun()
+		order.PipelineRunID = &runID
+		tradeDate := run.TradeDate
+		order.PipelineRunTradeDate = &tradeDate
 	}
 	if riskReducingExit {
 		intent := domain.PositionIntentSellToClose
 		order.PositionIntent = &intent
+		order.ClosePositionIDs = append([]uuid.UUID(nil), exitPositionIDs...)
 	}
 
 	if plan.EntryPrice > 0 {
@@ -543,8 +600,74 @@ func (m *OrderManager) ProcessSignal(
 	if plan.StopLoss > 0 {
 		order.StopPrice = &plan.StopLoss
 	}
+	if hasRun {
+		run, _ := scope.PipelineRun()
+		existing, loadErr := m.orderRepo.GetByRun(ctx, run, repository.OrderFilter{Ticker: order.Ticker, Side: order.Side}, 2, 0)
+		if loadErr != nil {
+			return fmt.Errorf("order_manager: load durable effect: %w", loadErr)
+		}
+		if len(existing) > 0 {
+			intentMismatch := (existing[0].PositionIntent == nil) != (order.PositionIntent == nil) || existing[0].PositionIntent != nil && *existing[0].PositionIntent != *order.PositionIntent
+			if len(existing) != 1 || existing[0].ID != order.ID || existing[0].AccountID != order.AccountID || existing[0].Environment != order.Environment || existing[0].OriginType != order.OriginType || existing[0].OriginID != order.OriginID || existing[0].MarketType.Normalize() != order.MarketType.Normalize() || existing[0].Ticker != order.Ticker || existing[0].Side != order.Side || existing[0].OrderType != order.OrderType || existing[0].Quantity != order.Quantity || existing[0].ClientOrderID != order.ClientOrderID || existing[0].Broker != order.Broker || intentMismatch || !sameOptionalFloat(existing[0].LimitPrice, order.LimitPrice) || !sameOptionalFloat(existing[0].StopPrice, order.StopPrice) || !strings.EqualFold(strings.TrimSpace(existing[0].PredictionSide), strings.TrimSpace(order.PredictionSide)) {
+				return fmt.Errorf("order_manager: durable effect key conflicts with persisted order")
+			}
+			switch existing[0].Status {
+			case domain.OrderStatusFilled:
+				_, resumeErr := m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
+				return resumeErr
+			case domain.OrderStatusRejected, domain.OrderStatusCancelled:
+				return fmt.Errorf("order_manager: durable effect is terminal with status %s", existing[0].Status)
+			default:
+				_, resumeErr := m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
+				return resumeErr
+			}
+		}
+	}
 
-	if err := m.orderRepo.Create(ctx, order); err != nil {
+	// Durable orders must never exist before their pre-trade authorization.
+	approved, reason, err = m.riskEngine.CheckPreTrade(ctx, order, portfolio)
+	if err != nil {
+		return fmt.Errorf("order_manager: pre-trade check: %w", err)
+	}
+	if !approved {
+		if err := m.recordTradeDecision(ctx, scope, m.newTradeDecision(
+			scope,
+			plan,
+			order.MarketType,
+			string(order.Side),
+			quantity,
+			0,
+			domain.RiskDecisionRejected,
+			[]string{reason},
+			domain.TradeDecisionStatusRejected,
+		)); err != nil {
+			return err
+		}
+		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
+	}
+	if checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker); ok {
+		if err := checker.RequireAcceptedOrderPrepared(ctx, scope, order); err != nil {
+			return fmt.Errorf("order_manager: canonical routed order is not prepared: %w", err)
+		}
+	}
+
+	decision := m.newTradeDecision(scope, plan, order.MarketType, string(order.Side), quantity, quantity, domain.RiskDecisionApproved, nil, domain.TradeDecisionStatusCandidate)
+	decision.ID = recoveryTradeDecisionID(order.ID)
+	if decorator, ok := m.orderRepo.(interface{ DecorateOrder(*domain.Order) error }); ok {
+		if err := decorator.DecorateOrder(order); err != nil {
+			return fmt.Errorf("order_manager: decorate authorized order: %w", err)
+		}
+	}
+	if err := m.fenceEffect(ctx); err != nil {
+		return err
+	}
+	atomicCreated := false
+	if atomic, ok := m.decisionRecorder.(AtomicOrderDecisionRecorder); ok {
+		if err := atomic.CreateOrderWithDecision(ctx, scope, order, decision, m.liveTrading); err != nil {
+			return fmt.Errorf("order_manager: create authorized order: %w", err)
+		}
+		atomicCreated = true
+	} else if err := m.orderRepo.Create(ctx, order); err != nil {
 		return fmt.Errorf("order_manager: create order: %w", err)
 	}
 	m.recordOrderMetric(order.Side, order.Status)
@@ -560,73 +683,52 @@ func (m *OrderManager) ProcessSignal(
 		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 	}
 
-	// 5. Pre-trade risk check (circuit breaker + order validation).
-	approved, reason, err = m.riskEngine.CheckPreTrade(ctx, order, portfolio)
-	if err != nil {
-		return fmt.Errorf("order_manager: pre-trade check: %w", err)
-	}
-
-	if !approved {
-		order.Status = domain.OrderStatusRejected
-		if updateErr := m.orderRepo.Update(ctx, order); updateErr != nil {
-			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
+	if !atomicCreated {
+		if err := m.recordTradeDecision(ctx, scope, decision); err != nil {
+			if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
+				return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
+			}
+			return err
 		}
-		m.recordOrderMetric(order.Side, order.Status)
-		m.recordTradeDecision(ctx, m.newTradeDecision(
-			strategyID,
-			runID,
-			plan,
-			order.MarketType,
-			string(order.Side),
-			quantity,
-			0,
-			domain.RiskDecisionRejected,
-			[]string{reason},
-			domain.TradeDecisionStatusRejected,
-		))
-
-		if auditErr := m.audit(ctx, "pre_trade_rejected", "order", &order.ID, map[string]any{
-			"reason": reason,
-		}); auditErr != nil {
-			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
+		if err := m.attachTradeDecisionOrder(ctx, scope, decision.ID, order.ID, m.liveTrading); err != nil {
+			if deleteErr := m.orderRepo.Delete(ctx, order.ID); deleteErr != nil {
+				return fmt.Errorf("%v; remove unattached order: %w", err, deleteErr)
+			}
+			return err
 		}
-
-		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
 	}
-
-	decision := m.newTradeDecision(
-		strategyID,
-		runID,
-		plan,
-		order.MarketType,
-		string(order.Side),
-		quantity,
-		quantity,
-		domain.RiskDecisionApproved,
-		nil,
-		domain.TradeDecisionStatusCandidate,
-	)
-	m.recordTradeDecision(ctx, decision)
 
 	// 6. Submit to broker (status = submitted).
+	if err := m.fenceEffect(ctx); err != nil {
+		return err
+	}
 	externalID, err := m.broker.SubmitOrder(ctx, order)
 	if err != nil {
-		order.Status = domain.OrderStatusRejected
-		if updateErr := m.orderRepo.Update(ctx, order); updateErr != nil {
-			m.logger.ErrorContext(ctx, "failed to update rejected order", "error", updateErr)
+		if IsDefinitiveBrokerRejection(err) {
+			order.ExternalID = strings.TrimSpace(externalID)
+			order.Status = domain.OrderStatusRejected
+			if persistErr := m.orderRepo.Update(ctx, order); persistErr != nil {
+				return fmt.Errorf("order_manager: persist definitive provider rejection: %v; provider: %w", persistErr, err)
+			}
+			return fmt.Errorf("order_manager: provider rejected order %s: %w", order.ID, errors.Join(ErrBrokerOrderRejected, err))
 		}
-		m.recordOrderMetric(order.Side, order.Status)
-		m.attachTradeDecisionOrder(ctx, decision.ID, order.ID, m.liveTrading)
-
-		if auditErr := m.audit(ctx, "order_rejected", "order", &order.ID, map[string]any{
+		if auditErr := m.audit(ctx, "order_submission_ambiguous", "order", &order.ID, map[string]any{
 			"error": err.Error(),
 		}); auditErr != nil {
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
-
-		m.emitOrderEvent(ctx, OrderEventRejected, order, strategyID, runID)
-
-		return fmt.Errorf("order_manager: submit order: %w", err)
+		return fmt.Errorf("order_manager: submit order outcome is ambiguous; pending order %s retained for provider lookup by client id %s: %w", order.ID, order.ClientOrderID, err)
+	}
+	if order.Status == domain.OrderStatusFilled || order.Status == domain.OrderStatusPartial {
+		order.ExternalID = strings.TrimSpace(externalID)
+		if order.SubmittedAt == nil {
+			submittedAt := m.currentTime()
+			order.SubmittedAt = &submittedAt
+		}
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return fmt.Errorf("order_manager: synchronous broker fill: %w", err)
+		}
+		return m.handleFill(ctx, order, plan, scope, decision.ID)
 	}
 
 	submittedAt := m.currentTime()
@@ -637,27 +739,49 @@ func (m *OrderManager) ProcessSignal(
 	order.Status = domain.OrderStatusSubmitted
 	order.SubmittedAt = &submittedAt
 	m.recordOrderMetric(order.Side, order.Status)
-	m.attachTradeDecisionOrder(ctx, decision.ID, order.ID, m.liveTrading)
-
 	if auditErr := m.audit(ctx, "order_submitted", "order", &order.ID, map[string]any{
 		"external_id": externalID,
 	}); auditErr != nil {
 		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 	}
 
-	m.emitOrderEvent(ctx, OrderEventSubmitted, order, strategyID, runID)
+	m.emitOrderEvent(ctx, OrderEventSubmitted, order, scope)
 
 	// 7. Check order status and handle fill.
-	status, err := m.broker.GetOrderStatus(ctx, externalID)
+	brokerResult := BrokerOrderStatus{}
+	if provider, ok := m.broker.(BrokerOrderStatusProvider); ok {
+		brokerResult, err = provider.GetOrderStatusResult(ctx, externalID)
+	} else {
+		brokerResult.Status, err = m.broker.GetOrderStatus(ctx, externalID)
+	}
 	if err != nil {
 		return fmt.Errorf("order_manager: get order status: %w", err)
 	}
-
+	status := brokerResult.Status
+	priorFilledQuantity := order.FilledQuantity
+	if brokerResult.FilledQuantity > priorFilledQuantity {
+		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return err
+		}
+		if status == domain.OrderStatusCancelled || status == domain.OrderStatusRejected {
+			order.Status = status
+			if err := m.handleFill(ctx, order, plan, scope, decision.ID); err != nil {
+				return err
+			}
+		}
+	}
 	order.Status = status
+	if err := m.fenceEffect(ctx); err != nil {
+		return err
+	}
 
 	switch status {
-	case domain.OrderStatusFilled:
-		return m.handleFill(ctx, order, plan, strategyID, runID, decision.ID)
+	case domain.OrderStatusFilled, domain.OrderStatusPartial:
+		if status == domain.OrderStatusPartial && (order.FilledQuantity <= 0 || order.FilledAvgPrice == nil || order.FilledAt == nil) {
+			return fmt.Errorf("order_manager: partial fill lacks observed economics")
+		}
+		return m.handleFill(ctx, order, plan, scope, decision.ID)
 	case domain.OrderStatusCancelled:
 		if err := m.orderRepo.Update(ctx, order); err != nil {
 			return fmt.Errorf("order_manager: update %s order: %w", status, err)
@@ -668,7 +792,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
 
-		m.emitOrderEvent(ctx, OrderEventCancelled, order, strategyID, runID)
+		m.emitOrderEvent(ctx, OrderEventCancelled, order, scope)
 
 		return nil
 	case domain.OrderStatusRejected:
@@ -681,7 +805,7 @@ func (m *OrderManager) ProcessSignal(
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
 
-		m.emitOrderEvent(ctx, OrderEventRejected, order, strategyID, runID)
+		m.emitOrderEvent(ctx, OrderEventRejected, order, scope)
 
 		return nil
 	default:
@@ -695,11 +819,20 @@ func (m *OrderManager) ProcessSignal(
 	}
 }
 
+func sameOptionalFloat(left, right *float64) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
+}
+
+func executionAccountLocker(repo repository.OrderRepository) repository.ExecutionAccountLocker {
+	locker, _ := repo.(repository.ExecutionAccountLocker)
+	return locker
+}
+
 func quantizeKalshiContracts(quantity float64) float64 {
 	if quantity <= 0 {
 		return 0
 	}
-	return math.Floor((quantity+1e-9)*100) / 100
+	return math.Floor(quantity + 1e-9)
 }
 
 func planMarketType(plan TradingPlan) domain.MarketType {
@@ -710,8 +843,25 @@ func planMarketType(plan TradingPlan) domain.MarketType {
 	return marketType
 }
 
+func scopeOriginIDs(scope ExecutionScope) (uuid.UUID, uuid.UUID, bool, error) {
+	if scope.AccountID() == uuid.Nil || !scope.Environment().IsValid() {
+		return uuid.Nil, uuid.Nil, false, fmt.Errorf("account binding is required")
+	}
+	originType, originID := scope.Origin()
+	originUUID := uuid.Nil
+	if originType == ledger.ExecutionOriginStrategyVersion || originType == ledger.ExecutionOriginCopySubscription {
+		var err error
+		originUUID, err = uuid.Parse(originID)
+		if err != nil {
+			return uuid.Nil, uuid.Nil, false, fmt.Errorf("UUID execution origin is required for %s: %w", originType, err)
+		}
+	}
+	run, hasRun := scope.PipelineRun()
+	return originUUID, run.ID, hasRun, nil
+}
+
 func (m *OrderManager) newTradeDecision(
-	strategyID, runID uuid.UUID,
+	scope ExecutionScope,
 	plan TradingPlan,
 	marketType domain.MarketType,
 	side string,
@@ -722,8 +872,8 @@ func (m *OrderManager) newTradeDecision(
 ) *domain.TradeDecision {
 	decision := &domain.TradeDecision{
 		ID:               uuid.New(),
-		StrategyID:       &strategyID,
-		PipelineRunID:    &runID,
+		AccountID:        scope.AccountID(),
+		Environment:      scope.Environment(),
 		MarketType:       marketType.Normalize(),
 		InstrumentKey:    strings.TrimSpace(plan.Ticker),
 		Side:             domain.OrderSide(strings.ToLower(strings.TrimSpace(side))),
@@ -745,6 +895,16 @@ func (m *OrderManager) newTradeDecision(
 		Status:           status,
 		CreatedAt:        m.currentTime(),
 		UpdatedAt:        m.currentTime(),
+	}
+	originType, originID := scope.Origin()
+	decision.OriginType, decision.OriginID = string(originType), originID
+	if originType == ledger.ExecutionOriginStrategyVersion {
+		decision.StrategyID = scope.LegacyStrategyID()
+	}
+	if run, ok := scope.PipelineRun(); ok {
+		decision.PipelineRunID = &run.ID
+		tradeDate := run.TradeDate
+		decision.PipelineRunTradeDate = &tradeDate
 	}
 	if plan.DecisionMetadata != nil {
 		decision.PromptText = plan.DecisionMetadata.PromptText
@@ -774,88 +934,204 @@ func cloneFloatPtr(value *float64) *float64 {
 	return &cloned
 }
 
-func (m *OrderManager) recordTradeDecision(ctx context.Context, decision *domain.TradeDecision) {
-	if m == nil || m.decisionRecorder == nil || decision == nil {
-		return
+func cloneTimePtr(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
 	}
-	if err := m.decisionRecorder.RecordDecision(ctx, decision); err != nil {
-		m.logger.ErrorContext(ctx, "order_manager: record trade decision", "error", err, "decision_id", decision.ID)
-	}
+	cloned := *value
+	return &cloned
 }
 
-func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, decisionID, orderID uuid.UUID, live bool) {
-	if m == nil || m.decisionRecorder == nil || decisionID == uuid.Nil || orderID == uuid.Nil {
-		return
+func (m *OrderManager) recordTradeDecision(ctx context.Context, scope ExecutionScope, decision *domain.TradeDecision) error {
+	if m == nil || m.decisionRecorder == nil || decision == nil {
+		return nil
 	}
 	var err error
-	if live {
+	if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok {
+		err = recorder.RecordDecisionScoped(ctx, scope, decision)
+	} else {
+		err = m.decisionRecorder.RecordDecision(ctx, decision)
+	}
+	if err != nil {
+		return fmt.Errorf("order_manager: record trade decision: %w", err)
+	}
+	return nil
+}
+
+func (m *OrderManager) attachTradeDecisionOrder(ctx context.Context, scope ExecutionScope, decisionID, orderID uuid.UUID, live bool) error {
+	if m == nil || m.decisionRecorder == nil || decisionID == uuid.Nil || orderID == uuid.Nil {
+		return nil
+	}
+	var err error
+	if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok && live {
+		err = recorder.AttachLiveOrderScoped(ctx, scope, decisionID, orderID)
+	} else if recorder, ok := m.decisionRecorder.(ScopedDecisionRecorder); ok {
+		err = recorder.AttachPaperOrderScoped(ctx, scope, decisionID, orderID)
+	} else if live {
 		err = m.decisionRecorder.AttachLiveOrder(ctx, decisionID, orderID)
 	} else {
 		err = m.decisionRecorder.AttachPaperOrder(ctx, decisionID, orderID)
 	}
 	if err != nil {
-		m.logger.ErrorContext(ctx, "order_manager: attach trade decision order", "error", err, "decision_id", decisionID, "order_id", orderID, "live", live)
+		return fmt.Errorf("order_manager: attach trade decision order: %w", err)
 	}
+	return nil
 }
 
-func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, decisionID uuid.UUID, eventType domain.ReplayEventType, payload any) {
+func (m *OrderManager) recordTradeDecisionReplay(ctx context.Context, scope ExecutionScope, decisionID uuid.UUID, eventType domain.ReplayEventType, payload any) error {
 	if m == nil || decisionID == uuid.Nil {
-		return
+		return fmt.Errorf("order_manager: replay event requires attached decision")
 	}
 	recorder, ok := m.decisionRecorder.(ReplayDecisionRecorder)
 	if !ok {
-		return
+		return nil
 	}
-	if err := recorder.RecordReplayEvent(ctx, decisionID, eventType, "order_manager", payload, m.currentTime()); err != nil {
-		m.logger.ErrorContext(ctx, "order_manager: record replay event", "error", err, "decision_id", decisionID, "event_type", eventType)
+	var err error
+	if scoped, ok := recorder.(ScopedDecisionRecorder); ok {
+		err = scoped.RecordReplayEventScoped(ctx, scope, decisionID, eventType, "order_manager", payload, m.currentTime())
+	} else {
+		err = recorder.RecordReplayEvent(ctx, decisionID, eventType, "order_manager", payload, m.currentTime())
 	}
+	if err != nil {
+		return fmt.Errorf("order_manager: record %s replay event: %w", eventType, err)
+	}
+	return nil
 }
 
-func (m *OrderManager) openLongPositionQuantity(ctx context.Context, strategyID uuid.UUID, ticker string) (float64, error) {
+func (m *OrderManager) resolveAttachedOrderDecision(ctx context.Context, scope ExecutionScope, orderID uuid.UUID) (uuid.UUID, error) {
+	resolver, ok := m.decisionRecorder.(AttachedOrderDecisionRecorder)
+	if !ok {
+		return uuid.Nil, fmt.Errorf("order_manager: attached order decision resolver is required for fill recovery")
+	}
+	decisionID, err := resolver.ResolveAttachedOrderDecision(ctx, scope, orderID, m.liveTrading)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("order_manager: resolve recovered fill decision: %w", err)
+	}
+	if decisionID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("order_manager: recovered fill has no attached decision")
+	}
+	return decisionID, nil
+}
+
+func recoveryTradeDecisionID(orderID uuid.UUID) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("augr:order-decision:v1:"+orderID.String()))
+}
+
+func (m *OrderManager) ensureAttachedOrderDecision(ctx context.Context, scope ExecutionScope, order *domain.Order) (uuid.UUID, error) {
+	if order == nil {
+		return uuid.Nil, fmt.Errorf("order_manager: persisted order is required")
+	}
+	decisionID, err := m.resolveAttachedOrderDecision(ctx, scope, order.ID)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("order_manager: durable pretrade approval is required before broker recovery: %w", err)
+	}
+	return decisionID, nil
+}
+
+func (m *OrderManager) openLongPositions(ctx context.Context, scope ExecutionScope, ticker string) (float64, []uuid.UUID, error) {
 	ticker = strings.TrimSpace(ticker)
 	if ticker == "" {
-		return 0, fmt.Errorf("order_manager: open long ownership check requires ticker")
+		return 0, nil, fmt.Errorf("order_manager: open long ownership check requires ticker")
 	}
 
-	positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{
+	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
 		Ticker: ticker,
 		Side:   domain.PositionSideLong,
-	}, riskSnapshotPositionLimit, 0)
+	})
 	if err != nil {
-		return 0, fmt.Errorf("order_manager: get open long position for %s: %w", ticker, err)
+		return 0, nil, fmt.Errorf("order_manager: get open long position for %s: %w", ticker, err)
 	}
 
 	total := 0.0
+	ids := make([]uuid.UUID, 0, len(positions))
 	for _, position := range positions {
 		if position.ClosedAt == nil && position.Quantity > 0 {
 			total += position.Quantity
+			ids = append(ids, position.ID)
 		}
 	}
-	return total, nil
+	return total, ids, nil
 }
 
-func (m *OrderManager) openPredictionPositionQuantity(ctx context.Context, strategyID uuid.UUID, marketType domain.MarketType, slug, side string) (float64, error) {
+func (m *OrderManager) openPredictionPositions(ctx context.Context, scope ExecutionScope, marketType domain.MarketType, slug, side string) (float64, []uuid.UUID, error) {
 	slug = strings.TrimSpace(slug)
 	if slug == "" {
-		return 0, fmt.Errorf("order_manager: prediction exit ownership check requires ticker")
+		return 0, nil, fmt.Errorf("order_manager: prediction exit ownership check requires ticker")
 	}
 
-	positions, err := m.positionRepo.GetByStrategy(ctx, strategyID, repository.PositionFilter{
+	positions, err := m.positionsByScope(ctx, scope, repository.PositionFilter{
 		Ticker: polymarketPositionTicker(slug, side),
 		Side:   domain.PositionSideLong,
-	}, riskSnapshotPositionLimit, 0)
+	})
 	if err != nil {
-		return 0, fmt.Errorf("order_manager: get open %s position for %s:%s: %w", marketType.Normalize(), slug, strings.ToUpper(strings.TrimSpace(side)), err)
+		return 0, nil, fmt.Errorf("order_manager: get open %s position for %s:%s: %w", marketType.Normalize(), slug, strings.ToUpper(strings.TrimSpace(side)), err)
 	}
 
 	total := 0.0
+	ids := make([]uuid.UUID, 0, len(positions))
+	originType, originID := scope.Origin()
+	wantTicker := polymarketPositionTicker(slug, side)
 	for _, position := range positions {
+		wrongScope := position.AccountID != uuid.Nil && position.AccountID != scope.AccountID() || position.Environment != "" && position.Environment != scope.Environment() || position.OriginType != "" && position.OriginType != string(originType) || position.OriginID != "" && position.OriginID != originID
+		wrongMarket := position.MarketType != "" && position.MarketType.Normalize() != marketType.Normalize()
+		if position.ID == uuid.Nil || wrongScope || wrongMarket || position.Ticker != wantTicker || position.Side != domain.PositionSideLong {
+			return 0, nil, fmt.Errorf("order_manager: prediction position escaped immutable execution command")
+		}
 		if position.ClosedAt == nil && position.Quantity > 0 {
 			total += position.Quantity
+			ids = append(ids, position.ID)
 		}
 	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 
-	return total, nil
+	return total, ids, nil
+}
+
+func (m *OrderManager) positionsByScope(ctx context.Context, scope ExecutionScope, filter repository.PositionFilter) ([]domain.Position, error) {
+	repo, ok := m.positionRepo.(repository.ExecutionScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("canonical execution-scoped position repository is required")
+	}
+	originType, originID := scope.Origin()
+	return repo.GetByExecutionScope(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, filter, riskSnapshotPositionLimit, 0)
+}
+
+func (m *OrderManager) buildRiskPortfolioSnapshot(ctx context.Context, balance Balance, scope ExecutionScope) (risk.Portfolio, error) {
+	repo, ok := m.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return risk.Portfolio{}, fmt.Errorf("canonical account-scoped position repository is required")
+	}
+	var positions []domain.Position
+	for offset := 0; ; offset += riskSnapshotPositionLimit {
+		page, err := repo.GetOpenByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, riskSnapshotPositionLimit, offset)
+		if err != nil {
+			return risk.Portfolio{}, err
+		}
+		positions = append(positions, page...)
+		if len(page) < riskSnapshotPositionLimit {
+			break
+		}
+	}
+	portfolio := risk.Portfolio{ConcurrentPositions: len(positions), PositionExposureBySymbol: make(map[string]float64, len(positions)), MarketExposurePct: make(map[domain.MarketType]float64, len(positions))}
+	if len(positions) == 0 {
+		return portfolio, nil
+	}
+	if balance.Equity <= 0 {
+		return risk.Portfolio{}, fmt.Errorf("account equity must be positive")
+	}
+	for _, position := range positions {
+		notional, err := positionNotional(position)
+		if err != nil {
+			return risk.Portfolio{}, err
+		}
+		exposure := notional / balance.Equity
+		portfolio.TotalExposurePct += exposure
+		portfolio.PositionExposureBySymbol[position.Ticker] += exposure
+		if position.MarketType != "" {
+			portfolio.MarketExposurePct[position.MarketType] += exposure
+		}
+	}
+	return portfolio, nil
 }
 
 func isPredictionMarket(marketType domain.MarketType) bool {
@@ -909,13 +1185,6 @@ func NormalizePredictionOrderTicker(marketType domain.MarketType, ticker, predic
 	return trimmedTicker, normalizedSide, nil
 }
 
-func realizedPnL(side domain.PositionSide, avgEntry, fillPrice, quantity float64) float64 {
-	if side == domain.PositionSideLong {
-		return (fillPrice - avgEntry) * quantity
-	}
-	return (avgEntry - fillPrice) * quantity
-}
-
 func SanitizedSubmittedOrder(order *domain.Order, externalID string, submittedAt time.Time) *domain.Order {
 	if order == nil {
 		return nil
@@ -931,186 +1200,358 @@ func SanitizedSubmittedOrder(order *domain.Order, externalID string, submittedAt
 	return &cp
 }
 
+// ReconcilePersistedOrder resolves an allocator-owned paper order without
+// submitting a replacement. Resting paper orders are cancelled so restart
+// recovery always reaches a durable terminal state.
+func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope ExecutionScope, order *domain.Order) (domain.OrderStatus, error) {
+	if order == nil {
+		return "", fmt.Errorf("order_manager: persisted order is required")
+	}
+	if m.accountLocker == nil {
+		return "", fmt.Errorf("order_manager: PostgreSQL execution account locker is required for restart reconciliation")
+	}
+	var status domain.OrderStatus
+	err := m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		var innerErr error
+		status, innerErr = m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
+		return innerErr
+	})
+	return status, err
+}
+
+func (m *OrderManager) ReconcilePersistedOrderWithAccountLockHeld(ctx context.Context, scope ExecutionScope, order *domain.Order) (domain.OrderStatus, error) {
+	if order == nil {
+		return "", fmt.Errorf("order_manager: persisted order is required")
+	}
+	return m.reconcilePersistedOrderLocked(ctx, scope, order.ID)
+}
+
+func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope ExecutionScope, orderID uuid.UUID) (domain.OrderStatus, error) {
+	if _, _, _, err := scopeOriginIDs(scope); err != nil {
+		return "", fmt.Errorf("order_manager: reconcile execution scope: %w", err)
+	}
+	persisted, err := m.orderRepo.Get(ctx, orderID)
+	if err != nil {
+		return "", fmt.Errorf("order_manager: lock persisted order ownership: %w", err)
+	}
+	if err := validateOrderScope(persisted, scope); err != nil {
+		return "", err
+	}
+	order := persisted
+	decisionID, err := m.ensureAttachedOrderDecision(ctx, scope, order)
+	if err != nil {
+		return "", err
+	}
+	if order.Status == domain.OrderStatusFilled || ((order.Status == domain.OrderStatusCancelled || order.Status == domain.OrderStatusRejected) && order.FilledQuantity > 0) {
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return "", err
+		}
+		plan := recoveredOrderPlan(order)
+		if err := m.handleFill(ctx, order, plan, scope, decisionID); err != nil {
+			return "", err
+		}
+		return order.Status, nil
+	}
+	brokerOrderID := strings.TrimSpace(order.ExternalID)
+	lookupByClientID := brokerOrderID == ""
+	if brokerOrderID == "" {
+		brokerOrderID = strings.TrimSpace(order.ClientOrderID)
+	}
+	if brokerOrderID == "" {
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
+		order.Status = domain.OrderStatusRejected
+		if err := m.orderRepo.Update(ctx, order); err != nil {
+			return "", fmt.Errorf("order_manager: reject unsubmitted persisted order: %w", err)
+		}
+		return order.Status, nil
+	}
+	brokerResult := BrokerOrderStatus{}
+	if lookupByClientID {
+		provider, ok := m.broker.(BrokerClientOrderStatusProvider)
+		if !ok {
+			return "", fmt.Errorf("order_manager: broker client-id status provider is required for pending recovery")
+		}
+		var externalID string
+		externalID, brokerResult, err = provider.GetOrderStatusByClientOrderIDResult(ctx, brokerOrderID)
+		if err == nil {
+			brokerOrderID = externalID
+		}
+	} else {
+		brokerResult, err = m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+	}
+	status := brokerResult.Status
+	if err != nil {
+		if order.Status != domain.OrderStatusPending || strings.TrimSpace(order.ExternalID) != "" || !errors.Is(err, ErrBrokerOrderNotFound) {
+			return "", fmt.Errorf("order_manager: reconcile broker status: %w", err)
+		}
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
+		externalID, submitErr := m.broker.SubmitOrder(ctx, order)
+		if submitErr != nil {
+			return "", fmt.Errorf("order_manager: resubmit persisted order: %w", submitErr)
+		}
+		brokerOrderID = strings.TrimSpace(externalID)
+		brokerResult, err = m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+		status = brokerResult.Status
+		if err != nil {
+			return "", fmt.Errorf("order_manager: verify resubmitted order: %w", err)
+		}
+	}
+	if order.Status == domain.OrderStatusPending {
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
+		submittedAt := m.currentTime()
+		if err := m.orderRepo.Update(ctx, SanitizedSubmittedOrder(order, brokerOrderID, submittedAt)); err != nil {
+			return "", fmt.Errorf("order_manager: recover broker submission evidence: %w", err)
+		}
+		order.ExternalID, order.Status, order.SubmittedAt = brokerOrderID, domain.OrderStatusSubmitted, &submittedAt
+	}
+	switch status {
+	case domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial:
+		if m.liveTrading {
+			break
+		}
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
+		if err := m.broker.CancelOrder(ctx, brokerOrderID); err != nil {
+			return "", fmt.Errorf("order_manager: cancel recovered paper order: %w", err)
+		}
+		if err := m.fenceEffect(ctx); err != nil {
+			return "", err
+		}
+		brokerResult, err = m.recoveryBrokerOrderStatus(ctx, brokerOrderID)
+		status = brokerResult.Status
+		if err != nil {
+			return "", fmt.Errorf("order_manager: verify recovered paper cancellation: %w", err)
+		}
+	}
+	order.Status = status
+	if err := m.fenceEffect(ctx); err != nil {
+		return "", err
+	}
+	switch status {
+	case domain.OrderStatusPending, domain.OrderStatusSubmitted:
+		if err := m.orderRepo.Update(ctx, order); err != nil {
+			return "", fmt.Errorf("order_manager: persist reconciled live order: %w", err)
+		}
+	case domain.OrderStatusFilled, domain.OrderStatusPartial:
+		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return "", err
+		}
+		plan := recoveredOrderPlan(order)
+		if err := m.handleFill(ctx, order, plan, scope, decisionID); err != nil {
+			return "", err
+		}
+	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
+		if brokerResult.FilledQuantity > order.FilledQuantity {
+			order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
+			if err := validateRecoveredFillEvidence(order); err != nil {
+				return "", err
+			}
+			if err := m.handleFill(ctx, order, recoveredOrderPlan(order), scope, decisionID); err != nil {
+				return "", err
+			}
+			return status, nil
+		}
+		if err := m.orderRepo.Update(ctx, order); err != nil {
+			return "", fmt.Errorf("order_manager: persist reconciled %s order: %w", status, err)
+		}
+	default:
+		return "", fmt.Errorf("order_manager: recovered paper order remained nonterminal: %s", status)
+	}
+	return status, nil
+}
+
+func validateOrderScope(order *domain.Order, scope ExecutionScope) error {
+	if order == nil {
+		return fmt.Errorf("order_manager: persisted order is required")
+	}
+	originType, originID := scope.Origin()
+	if order.AccountID != scope.AccountID() || order.Environment != scope.Environment() || order.OriginType != string(originType) || order.OriginID != originID {
+		return fmt.Errorf("order_manager: persisted order ownership does not match execution scope")
+	}
+	if run, ok := scope.PipelineRun(); ok {
+		if order.PipelineRunID == nil || order.PipelineRunTradeDate == nil || *order.PipelineRunID != run.ID || !order.PipelineRunTradeDate.Equal(run.TradeDate) {
+			return fmt.Errorf("order_manager: persisted order run ownership does not match execution scope")
+		}
+	} else if order.PipelineRunID != nil || order.PipelineRunTradeDate != nil {
+		return fmt.Errorf("order_manager: persisted order unexpectedly belongs to a pipeline run")
+	}
+	if order.CopyOriginRebalanceRunID != scope.CopyOriginRunID() {
+		return fmt.Errorf("order_manager: persisted order copy run ownership does not match execution scope")
+	}
+	return nil
+}
+
+func (m *OrderManager) recoveryBrokerOrderStatus(ctx context.Context, brokerOrderID string) (BrokerOrderStatus, error) {
+	if provider, ok := m.broker.(BrokerOrderStatusProvider); ok {
+		return provider.GetOrderStatusResult(ctx, brokerOrderID)
+	}
+	status, err := m.broker.GetOrderStatus(ctx, brokerOrderID)
+	if err != nil {
+		return BrokerOrderStatus{}, err
+	}
+	if status == domain.OrderStatusFilled {
+		return BrokerOrderStatus{}, fmt.Errorf("order_manager: broker fill evidence provider is required for recovery")
+	}
+	return BrokerOrderStatus{Status: status}, nil
+}
+
+func validateRecoveredFillEvidence(order *domain.Order) error {
+	if order == nil || order.FilledAvgPrice == nil || *order.FilledAvgPrice <= 0 || order.FilledQuantity <= 0 || order.FilledAt == nil || order.FilledAt.IsZero() {
+		return fmt.Errorf("order_manager: recovered filled order lacks authoritative fill evidence")
+	}
+	return nil
+}
+
+func recoveredOrderPlan(order *domain.Order) TradingPlan {
+	plan := TradingPlan{Ticker: order.Ticker, MarketType: order.MarketType, Side: order.PredictionSide, EntryPrice: *order.FilledAvgPrice}
+	if order.StopPrice != nil {
+		plan.StopLoss = *order.StopPrice
+	}
+	return plan
+}
+
 // handleFill creates a Trade and creates or updates the Position.
 func (m *OrderManager) handleFill(
 	ctx context.Context,
 	order *domain.Order,
 	plan TradingPlan,
-	strategyID, runID, decisionID uuid.UUID,
+	scope ExecutionScope,
+	decisionID uuid.UUID,
 ) error {
+	_, _, _, err := scopeOriginIDs(scope)
+	if err != nil {
+		return fmt.Errorf("order_manager: fill execution scope: %w", err)
+	}
 	now := m.currentTime()
-	order.FilledQuantity = order.Quantity
-	order.FilledAt = &now
+	if order.FilledQuantity <= 0 {
+		order.FilledQuantity = order.Quantity
+	}
+	if order.FilledAt == nil || order.FilledAt.IsZero() {
+		order.FilledAt = &now
+	} else {
+		now = order.FilledAt.UTC()
+	}
 
 	// Determine fill price.
 	fillPrice := plan.EntryPrice
 	if order.FilledAvgPrice != nil {
 		fillPrice = *order.FilledAvgPrice
 	}
+	if fillPrice <= 0 {
+		return fmt.Errorf("order_manager: fill price must be positive")
+	}
 
-	marketType := order.MarketType.Normalize()
-	if m.financialRepo == nil {
-		if err := m.orderRepo.Update(ctx, order); err != nil {
-			return fmt.Errorf("order_manager: update filled order: %w", err)
+	originType, originID := scope.Origin()
+	if m.economicWriter == nil {
+		return fmt.Errorf("order_manager: accepted economic writer is required")
+	}
+	trade := &domain.Trade{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: order.FilledQuantity, Price: fillPrice, ExecutedAt: now}
+	var stopLoss, takeProfit *float64
+	if plan.StopLoss > 0 {
+		stopLoss = &plan.StopLoss
+	}
+	if plan.TakeProfit > 0 {
+		takeProfit = &plan.TakeProfit
+	}
+	fillInput := repository.OrderFillInput{IdempotencyKey: fmt.Sprintf("paper_fill:v1:%s:observed:%.8f", order.ID, order.FilledQuantity), Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade}
+	result, err := m.economicWriter.ApplyAcceptedOrderFill(ctx, scope, fillInput)
+	if err != nil {
+		if errors.Is(err, ErrAcceptedEconomicRollbackConfirmed) {
+			if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok && strings.TrimSpace(order.ExternalID) != "" {
+				if rollbackErr := compensator.RollbackOrderFill(ctx, order.ExternalID); rollbackErr != nil {
+					return fmt.Errorf("order_manager: persist fill: %v; paper rollback: %w", err, rollbackErr)
+				}
+			}
+		} else {
+			return fmt.Errorf("order_manager: persist fill: %w; commit state remains uncertain and venue effect retained for recovery", err)
 		}
+		return fmt.Errorf("order_manager: persist fill: %w", err)
+	}
+	if compensator, ok := m.broker.(BrokerOrderFillCompensator); ok {
+		compensator.CommitOrderFill(order.ExternalID)
+	}
+	if err := validateOrderFillResult(result, order, scope); err != nil {
+		return fmt.Errorf("order_manager: invalid persisted fill result: %w", err)
+	}
+	if !result.Replayed {
 		m.recordOrderMetric(order.Side, order.Status)
 	}
-	var position *domain.Position
-	if m.financialRepo != nil {
-		trade := &domain.Trade{ID: uuid.New(), OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: order.FilledQuantity, Price: fillPrice, ExecutedAt: now}
-		var stopLoss, takeProfit *float64
-		if plan.StopLoss > 0 {
-			stopLoss = &plan.StopLoss
-		}
-		if plan.TakeProfit > 0 {
-			takeProfit = &plan.TakeProfit
-		}
-		result, err := m.financialRepo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: "paper_fill:v1:" + order.ID.String() + ":full", Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: order.FilledQuantity, ExecutionPrice: fillPrice}, Now: now, StopLoss: stopLoss, TakeProfit: takeProfit, Trade: trade})
-		if err != nil {
-			return fmt.Errorf("order_manager: persist fill: %w", err)
-		}
-		if !result.Replayed {
-			m.recordOrderMetric(order.Side, order.Status)
-		}
-		position := result.Position
-		if position == nil && result.PositionID != nil {
-			position = &domain.Position{ID: *result.PositionID}
-		}
-		if !result.Replayed {
-			m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": fillPrice, "quantity": order.FilledQuantity, "prediction_side": order.PredictionSide})
-		}
-		if !result.Replayed && position != nil {
-			m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt})
-		}
-		if !result.Replayed {
-			if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{"fill_price": fillPrice, "quantity": order.FilledQuantity, "trade_id": result.TradeID, "position_id": result.PositionID}); auditErr != nil {
-				m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-			}
-		}
-		if !result.Replayed {
-			m.emitOrderEvent(ctx, OrderEventFilled, order, strategyID, runID)
-		}
-		return nil
+	position := result.Position
+	if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{"order_id": order.ID, "trade_id": result.TradeID, "price": result.Trade.Price, "quantity": result.Trade.Quantity, "cumulative_quantity": order.FilledQuantity, "prediction_side": order.PredictionSide}); err != nil {
+		return err
 	}
-	if isPredictionMarket(marketType) && order.Side == domain.OrderSideSell {
-		positionTicker := polymarketPositionTicker(order.Ticker, order.PredictionSide)
-		positions, err := m.positionRepo.GetByStrategy(ctx, *order.StrategyID, repository.PositionFilter{
-			Ticker: positionTicker,
-			Side:   domain.PositionSideLong,
-		}, riskSnapshotPositionLimit, 0)
-		if err != nil {
-			return fmt.Errorf("order_manager: get prediction exit position for %s: %w", positionTicker, err)
-		}
-
-		for i := range positions {
-			if positions[i].ClosedAt == nil && positions[i].Quantity > 0 {
-				position = &positions[i]
-				break
-			}
-		}
-		if position == nil {
-			return fmt.Errorf("order_manager: prediction sell fill has no open position for %s", positionTicker)
-		}
-
-		closedQuantity := math.Min(position.Quantity, order.FilledQuantity)
-		currentPrice := fillPrice
-		position.CurrentPrice = &currentPrice
-		position.RealizedPnL += realizedPnL(position.Side, position.AvgEntry, fillPrice, closedQuantity)
-		if position.Quantity > order.FilledQuantity {
-			position.Quantity -= order.FilledQuantity
-		} else {
-			position.Quantity = 0
-			closedAt := now
-			position.ClosedAt = &closedAt
-		}
-
-		if err := m.positionRepo.Update(ctx, position); err != nil {
-			return fmt.Errorf("order_manager: update prediction position: %w", err)
-		}
-	} else {
-		positionSide := domain.PositionSideLong
-
-		positionTicker := order.Ticker
-		if marketType == domain.MarketTypePolymarket || marketType == domain.MarketTypeKalshi {
-			positionTicker = polymarketPositionTicker(order.Ticker, order.PredictionSide)
-		}
-
-		position = &domain.Position{
-			ID:         uuid.New(),
-			StrategyID: &strategyID,
-			MarketType: marketType,
-			Ticker:     positionTicker,
-			Side:       positionSide,
-			Quantity:   order.FilledQuantity,
-			AvgEntry:   fillPrice,
-			OpenedAt:   now,
-		}
-
-		if plan.StopLoss > 0 {
-			position.StopLoss = &plan.StopLoss
-		}
-
-		if plan.TakeProfit > 0 {
-			position.TakeProfit = &plan.TakeProfit
-		}
-
-		if err := m.positionRepo.Create(ctx, position); err != nil {
-			return fmt.Errorf("order_manager: create position: %w", err)
+	if position != nil {
+		if err := m.recordTradeDecisionReplay(ctx, scope, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity, "realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt}); err != nil {
+			return err
 		}
 	}
-
-	trade := &domain.Trade{
-		ID:         uuid.New(),
-		OrderID:    &order.ID,
-		PositionID: &position.ID,
-		Ticker:     order.Ticker,
-		Side:       order.Side,
-		Quantity:   order.FilledQuantity,
-		Price:      fillPrice,
-		ExecutedAt: now,
-		CreatedAt:  now,
-	}
-
-	if err := m.tradeRepo.Create(ctx, trade); err != nil {
-		// Audit the incomplete fill so it can be reconciled later.
-		if auditErr := m.audit(ctx, "order_fill_incomplete", "order", &order.ID, map[string]any{
-			"fill_price":  fillPrice,
-			"quantity":    order.FilledQuantity,
-			"position_id": position.ID,
-			"error":       err.Error(),
-		}); auditErr != nil {
+	if !result.Replayed {
+		if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{"fill_price": fillPrice, "quantity": order.FilledQuantity, "trade_id": result.TradeID, "position_id": result.PositionID}); auditErr != nil {
 			m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
 		}
-
-		return fmt.Errorf("order_manager: create trade: %w", err)
+		m.emitOrderEvent(ctx, OrderEventFilled, order, scope)
 	}
-
-	m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypeFillObserved, map[string]any{
-		"order_id": order.ID, "trade_id": trade.ID, "price": fillPrice,
-		"quantity": order.FilledQuantity, "prediction_side": order.PredictionSide,
-	})
-	m.recordTradeDecisionReplay(ctx, decisionID, domain.ReplayEventTypePositionUpdated, map[string]any{
-		"position_id": position.ID, "ticker": position.Ticker, "quantity": position.Quantity,
-		"realized_pnl": position.RealizedPnL, "closed_at": position.ClosedAt,
-	})
-
-	if auditErr := m.audit(ctx, "order_filled", "order", &order.ID, map[string]any{
-		"fill_price":  fillPrice,
-		"quantity":    order.FilledQuantity,
-		"trade_id":    trade.ID,
-		"position_id": position.ID,
-	}); auditErr != nil {
-		m.logger.ErrorContext(ctx, "audit log failed", "error", auditErr)
-	}
-
-	m.emitOrderEvent(ctx, OrderEventFilled, order, strategyID, runID)
-
 	return nil
 }
 
+func validateOrderFillResult(result repository.OrderFillResult, order *domain.Order, scope ExecutionScope) error {
+	if order == nil || result.OrderID != order.ID || result.TradeID == uuid.Nil || result.Trade == nil {
+		return fmt.Errorf("order and trade identities are incomplete or mismatched")
+	}
+	if order.Side == domain.OrderSideBuy && result.PositionID == nil {
+		return fmt.Errorf("opening fill has no position identity")
+	}
+	originType, originID := scope.Origin()
+	trade := result.Trade
+	if trade.ID != result.TradeID || trade.AccountID != scope.AccountID() || trade.Environment != scope.Environment() ||
+		trade.OriginType != string(originType) || trade.OriginID != originID || trade.OrderID == nil || *trade.OrderID != order.ID ||
+		trade.Ticker != order.Ticker || trade.Side != order.Side {
+		return fmt.Errorf("trade identity or canonical scope is inconsistent")
+	}
+	if result.PositionID == nil {
+		if result.Position != nil || trade.PositionID != nil {
+			return fmt.Errorf("position identity is inconsistent")
+		}
+		return nil
+	}
+	if result.Position == nil {
+		return fmt.Errorf("persisted position is required")
+	}
+	position := result.Position
+	if result.PositionID == nil || *result.PositionID != position.ID || position.ID == uuid.Nil ||
+		position.AccountID != scope.AccountID() || position.Environment != scope.Environment() ||
+		position.OriginType != string(originType) || position.OriginID != originID ||
+		position.Ticker != fillPositionTicker(order) || trade.PositionID == nil || *trade.PositionID != position.ID {
+		return fmt.Errorf("position identity or canonical scope is inconsistent")
+	}
+	return nil
+}
+
+func fillPositionTicker(order *domain.Order) string {
+	if isPredictionMarket(order.MarketType) {
+		return polymarketPositionTicker(order.Ticker, order.PredictionSide)
+	}
+	return order.Ticker
+}
+
 // HandleFillForTest exposes handleFill for focused unit coverage.
-func (m *OrderManager) HandleFillForTest(ctx context.Context, order *domain.Order, plan TradingPlan, strategyID, runID, decisionID uuid.UUID) error {
-	return m.handleFill(ctx, order, plan, strategyID, runID, decisionID)
+func (m *OrderManager) HandleFillForTest(ctx context.Context, order *domain.Order, plan TradingPlan, scope ExecutionScope, decisionID uuid.UUID) error {
+	if decisionID == uuid.Nil {
+		resolved, err := m.ensureAttachedOrderDecision(ctx, scope, order)
+		if err != nil {
+			return err
+		}
+		decisionID = resolved
+	}
+	return m.handleFill(ctx, order, plan, scope, decisionID)
 }
 
 // signalToSide maps a pipeline signal to an order side.
@@ -1144,6 +1585,9 @@ func (m *OrderManager) audit(
 	entityID *uuid.UUID,
 	details map[string]any,
 ) error {
+	if m == nil || m.auditLogRepo == nil {
+		return nil
+	}
 	raw, err := json.Marshal(details)
 	if err != nil {
 		return fmt.Errorf("marshal audit details: %w", err)
@@ -1169,7 +1613,7 @@ func (m *OrderManager) emitOrderEvent(
 	ctx context.Context,
 	eventKind string,
 	order *domain.Order,
-	strategyID, runID uuid.UUID,
+	scope ExecutionScope,
 ) {
 	if m.agentEventRepo == nil {
 		return
@@ -1191,15 +1635,26 @@ func (m *OrderManager) emitOrderEvent(
 	title := fmt.Sprintf("Order %s: %s %.4g %s", eventKind, order.Side, order.Quantity, order.Ticker)
 
 	event := &domain.AgentEvent{
-		ID:            uuid.New(),
-		PipelineRunID: &runID,
-		StrategyID:    &strategyID,
-		AgentRole:     domain.AgentRoleTrader,
-		EventKind:     eventKind,
-		Title:         title,
-		Tags:          []string{"order", eventKind},
-		Metadata:      meta,
-		CreatedAt:     m.currentTime(),
+		ID:          uuid.New(),
+		AccountID:   scope.AccountID(),
+		Environment: scope.Environment(),
+		AgentRole:   domain.AgentRoleTrader,
+		EventKind:   eventKind,
+		Title:       title,
+		Tags:        []string{"order", eventKind},
+		Metadata:    meta,
+		CreatedAt:   m.currentTime(),
+	}
+	originType, originID := scope.Origin()
+	event.OriginType = string(originType)
+	event.OriginID = originID
+	if originType == ledger.ExecutionOriginStrategyVersion {
+		event.StrategyID = scope.LegacyStrategyID()
+	}
+	if run, ok := scope.PipelineRun(); ok {
+		event.PipelineRunID = &run.ID
+		tradeDate := run.TradeDate
+		event.PipelineRunTradeDate = &tradeDate
 	}
 
 	if err := m.agentEventRepo.Create(ctx, event); err != nil {

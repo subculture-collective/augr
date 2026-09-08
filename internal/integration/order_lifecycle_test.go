@@ -21,11 +21,11 @@ func TestIntegration_OrderLifecycle_SubmitFillPositionUpdate(t *testing.T) {
 
 	// 1. Create strategy and position.
 	strategy := createStrategy(t, ctx, r.Strategy, "AAPL Momentum", "AAPL")
-	position := createPosition(t, ctx, r.Position, strategy.ID, "AAPL", domain.PositionSideLong, 0, 0)
+	position := createPosition(t, ctx, r.Position, strategy, "AAPL", domain.PositionSideLong, 0, 0)
 
 	// 2. Submit a buy order (pending → submitted).
-	runID := uuid.New()
-	order := createOrder(t, ctx, r.Order, strategy.ID, &runID, "AAPL", domain.OrderSideBuy, domain.OrderTypeLimit, 10)
+	run := createPipelineRun(t, ctx, r.PipelineRun, strategy, "AAPL", time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC))
+	order := createOrder(t, ctx, r.Order, strategy, run, "AAPL", domain.OrderSideBuy, domain.OrderTypeLimit, 10)
 	if order.Status != domain.OrderStatusPending {
 		t.Fatalf("expected initial status pending, got %q", order.Status)
 	}
@@ -59,6 +59,7 @@ func TestIntegration_OrderLifecycle_SubmitFillPositionUpdate(t *testing.T) {
 
 	// Record first partial fill trade.
 	trade1 := &domain.Trade{
+		Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID,
 		OrderID:    &order.ID,
 		PositionID: &position.ID,
 		Ticker:     "AAPL",
@@ -88,6 +89,7 @@ func TestIntegration_OrderLifecycle_SubmitFillPositionUpdate(t *testing.T) {
 
 	// Record second fill trade.
 	trade2 := &domain.Trade{
+		Environment: order.Environment, OriginType: order.OriginType, OriginID: order.OriginID,
 		OrderID:    &order.ID,
 		PositionID: &position.ID,
 		Ticker:     "AAPL",
@@ -199,7 +201,7 @@ func TestIntegration_OrderLifecycle_CancelledOrder(t *testing.T) {
 	ctx := context.Background()
 
 	strategy := createStrategy(t, ctx, r.Strategy, "Cancel Test", "MSFT")
-	order := createOrder(t, ctx, r.Order, strategy.ID, nil, "MSFT", domain.OrderSideBuy, domain.OrderTypeMarket, 5)
+	order := createOrder(t, ctx, r.Order, strategy, nil, "MSFT", domain.OrderSideBuy, domain.OrderTypeMarket, 5)
 
 	// Submit.
 	submittedAt := time.Now().UTC().Truncate(time.Microsecond)
@@ -234,12 +236,12 @@ func TestIntegration_OrderLifecycle_MultipleStrategies(t *testing.T) {
 	stratA := createStrategy(t, ctx, r.Strategy, "Strategy A", "AAPL")
 	stratB := createStrategy(t, ctx, r.Strategy, "Strategy B", "MSFT")
 
-	runA := uuid.New()
-	runB := uuid.New()
+	runA := createPipelineRun(t, ctx, r.PipelineRun, stratA, "AAPL", time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC))
+	runB := createPipelineRun(t, ctx, r.PipelineRun, stratB, "MSFT", runA.TradeDate)
 
-	createOrder(t, ctx, r.Order, stratA.ID, &runA, "AAPL", domain.OrderSideBuy, domain.OrderTypeMarket, 10)
-	createOrder(t, ctx, r.Order, stratA.ID, &runA, "AAPL", domain.OrderSideSell, domain.OrderTypeLimit, 5)
-	createOrder(t, ctx, r.Order, stratB.ID, &runB, "MSFT", domain.OrderSideBuy, domain.OrderTypeMarket, 20)
+	createOrder(t, ctx, r.Order, stratA, runA, "AAPL", domain.OrderSideBuy, domain.OrderTypeMarket, 10)
+	createOrder(t, ctx, r.Order, stratA, runA, "AAPL", domain.OrderSideSell, domain.OrderTypeLimit, 5)
+	createOrder(t, ctx, r.Order, stratB, runB, "MSFT", domain.OrderSideBuy, domain.OrderTypeMarket, 20)
 
 	// Verify strategy scoping.
 	ordersA, err := r.Order.GetByStrategy(ctx, stratA.ID, repository.OrderFilter{}, 10, 0)
@@ -259,7 +261,7 @@ func TestIntegration_OrderLifecycle_MultipleStrategies(t *testing.T) {
 	}
 
 	// Verify run scoping.
-	runOrders, err := r.Order.GetByRun(ctx, runA, repository.OrderFilter{}, 10, 0)
+	runOrders, err := r.Order.GetByRun(ctx, domain.PipelineRunRef{ID: runA.ID, TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)}, repository.OrderFilter{}, 10, 0)
 	if err != nil {
 		t.Fatalf("GetByRun(A): %v", err)
 	}

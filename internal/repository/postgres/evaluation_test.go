@@ -31,7 +31,7 @@ func newEvaluationFixture(t *testing.T) evaluationFixture {
 	t.Helper()
 	fixture := newExperimentRunMigrationFixture(t)
 	ctx := fixture.strategy.ctx
-	if _, err := fixture.strategy.pool.Exec(ctx, repositoryMigrationSQL(t, "000079_trade_portfolio_evaluations.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, fixture.strategy.pool, "000079_trade_portfolio_evaluations.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	if err := insertExperimentProgramPlan(ctx, fixture.strategy.pool, fixture.program, fixture.plan, fixture.start); err != nil {
@@ -156,7 +156,7 @@ func TestEvaluationMigrationRejectsMutationIncompleteGraphAndNonemptyRollback(t 
 	if _, err := fixture.experiment.strategy.pool.Exec(ctx, `UPDATE evaluation_metrics SET value=value WHERE evaluation_id=$1`, fixture.report.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("metric mutation error=%v", err)
 	}
-	if _, err := fixture.experiment.strategy.pool.Exec(ctx, repositoryMigrationSQL(t, "000079_trade_portfolio_evaluations.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 79") {
+	if _, err := execRepositoryMigration(t, ctx, fixture.experiment.strategy.pool, "000079_trade_portfolio_evaluations.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 79") {
 		t.Fatalf("nonempty rollback error=%v", err)
 	}
 
@@ -220,7 +220,7 @@ func TestEvaluationRepositoryRejectsForgedNormalizedMetricOnReload(t *testing.T)
 
 func TestEvaluationGoldenTradeEvidencePersistsRelationally(t *testing.T) {
 	pool := newExperimentRunnerGoldenPool(t)
-	if _, err := pool.Exec(context.Background(), repositoryMigrationSQL(t, "000079_trade_portfolio_evaluations.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, context.Background(), pool, "000079_trade_portfolio_evaluations.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	fixture := persistExperimentRunnerGolden(t, pool, strategycatalog.ExperimentPaperScored)
@@ -277,7 +277,7 @@ func TestEvaluationGoldenTradeEvidencePersistsRelationally(t *testing.T) {
 
 func TestEvaluationGoldenScoredStressAndTradeOutcomeIsolation(t *testing.T) {
 	pool := newExperimentRunnerGoldenPool(t)
-	if _, err := pool.Exec(context.Background(), repositoryMigrationSQL(t, "000079_trade_portfolio_evaluations.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, context.Background(), pool, "000079_trade_portfolio_evaluations.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	scoredFixture := persistExperimentRunnerGolden(t, pool, strategycatalog.ExperimentPaperScored)
@@ -340,7 +340,7 @@ func TestEvaluationGoldenTradeAndFillStageRollback(t *testing.T) {
 	for _, stage := range []string{"evaluation_trade", "evaluation_fill"} {
 		t.Run(stage, func(t *testing.T) {
 			pool := newExperimentRunnerGoldenPool(t)
-			if _, err := pool.Exec(context.Background(), repositoryMigrationSQL(t, "000079_trade_portfolio_evaluations.up.sql")); err != nil {
+			if _, err := execRepositoryMigration(t, context.Background(), pool, "000079_trade_portfolio_evaluations.up.sql"); err != nil {
 				t.Fatal(err)
 			}
 			fixture := persistExperimentRunnerGolden(t, pool, strategycatalog.ExperimentPaperScored)
@@ -462,7 +462,7 @@ func TestEvaluationRetainedQualification(t *testing.T) {
 	if err != nil || first.ID() != second.ID() || first.Digest() != second.Digest() {
 		t.Fatalf("retained replay=%v err=%v", second, err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000079_trade_portfolio_evaluations.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 79") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000079_trade_portfolio_evaluations.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 79") {
 		t.Fatalf("retained nonempty rollback error=%v", err)
 	}
 	t.Logf("VERIFIED_LOCAL evaluation=%s sha256=%s result=%s policy=%s trade_win_rate=%s bar_positive_rate=%s",
@@ -474,7 +474,7 @@ func TestEvaluationCleanDatabaseReproduction(t *testing.T) {
 	var reports [2]*evaluation.Report
 	for index := range reports {
 		pool := newExperimentRunnerGoldenPool(t)
-		if _, err := pool.Exec(context.Background(), repositoryMigrationSQL(t, "000079_trade_portfolio_evaluations.up.sql")); err != nil {
+		if _, err := execRepositoryMigration(t, context.Background(), pool, "000079_trade_portfolio_evaluations.up.sql"); err != nil {
 			t.Fatal(err)
 		}
 		fixture := persistExperimentRunnerGolden(t, pool, strategycatalog.ExperimentPaperScored)

@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -58,21 +59,22 @@ const (
 
 // PipelineState carries the mutable state shared across all pipeline phases.
 type PipelineState struct {
-	PipelineRunID    uuid.UUID             `json:"pipeline_run_id"`
-	StrategyID       uuid.UUID             `json:"strategy_id"`
-	Ticker           string                `json:"ticker"`
-	Market           *MarketData           `json:"market,omitempty"`
-	News             []data.NewsArticle    `json:"news,omitempty"`
-	Fundamentals     *data.Fundamentals    `json:"fundamentals,omitempty"`
-	Social           *data.SocialSentiment `json:"social,omitempty"`
-	PredictionMarket *PredictionMarketData `json:"prediction_market,omitempty"`
-	AnalystReports   map[AgentRole]string  `json:"analyst_reports,omitempty"`
-	ResearchDebate   ResearchDebateState   `json:"research_debate"`
-	TradingPlan      TradingPlan           `json:"trading_plan"`
-	ActiveThesis     *Thesis               `json:"active_thesis,omitempty"`
-	RiskDebate       RiskDebateState       `json:"risk_debate"`
-	FinalSignal      FinalSignal           `json:"final_signal"`
-	LLMCacheStats    llm.CacheStats        `json:"llm_cache_stats"`
+	PipelineRunID        uuid.UUID             `json:"pipeline_run_id"`
+	PipelineRunTradeDate time.Time             `json:"pipeline_run_trade_date"`
+	StrategyID           uuid.UUID             `json:"strategy_id"`
+	Ticker               string                `json:"ticker"`
+	Market               *MarketData           `json:"market,omitempty"`
+	News                 []data.NewsArticle    `json:"news,omitempty"`
+	Fundamentals         *data.Fundamentals    `json:"fundamentals,omitempty"`
+	Social               *data.SocialSentiment `json:"social,omitempty"`
+	PredictionMarket     *PredictionMarketData `json:"prediction_market,omitempty"`
+	AnalystReports       map[AgentRole]string  `json:"analyst_reports,omitempty"`
+	ResearchDebate       ResearchDebateState   `json:"research_debate"`
+	TradingPlan          TradingPlan           `json:"trading_plan"`
+	ActiveThesis         *Thesis               `json:"active_thesis,omitempty"`
+	RiskDebate           RiskDebateState       `json:"risk_debate"`
+	FinalSignal          FinalSignal           `json:"final_signal"`
+	LLMCacheStats        llm.CacheStats        `json:"llm_cache_stats"`
 	// UsedFallback is set to true when any LLM call during the run used the
 	// fallback provider instead of the primary.
 	UsedFallback bool `json:"used_fallback,omitempty"`
@@ -86,6 +88,10 @@ type PipelineState struct {
 	// decisions stores per-node outputs and optional LLM metadata for persistence.
 	// It is intentionally excluded from JSON output.
 	decisions map[decisionKey]NodeDecision
+}
+
+func (s *PipelineState) RunRef() domain.PipelineRunRef {
+	return domain.PipelineRunRef{ID: s.PipelineRunID, TradeDate: s.PipelineRunTradeDate}
 }
 
 // SetAnalystReport stores the analyst report for the given role in a thread-safe manner.

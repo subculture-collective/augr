@@ -21,6 +21,7 @@ func TestConnectWebSocketSubscribesAndStreamsEvents(t *testing.T) {
 
 	upgrader := websocket.Upgrader{}
 	runID := uuid.New()
+	accountID := uuid.New()
 	var handlerErrs []error
 	var handlerErrsMu sync.Mutex
 	recordHandlerError := func(err error) {
@@ -55,6 +56,8 @@ func TestConnectWebSocketSubscribesAndStreamsEvents(t *testing.T) {
 		}
 		if err := conn.WriteJSON(internalapi.WSMessage{
 			Type:      internalapi.EventSignal,
+			Scope:     "account",
+			AccountID: accountID,
 			RunID:     runID,
 			Timestamp: time.Now().UTC(),
 			Data:      map[string]string{"ticker": "AAPL", "signal": "buy"},
@@ -72,7 +75,7 @@ func TestConnectWebSocketSubscribesAndStreamsEvents(t *testing.T) {
 		t.Fatalf("mock websocket handler errors: %v", handlerErrs)
 	})
 
-	source, err := ConnectWebSocket(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	source, err := ConnectWebSocket(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http")+"?account_id="+accountID.String(), nil)
 	if err != nil {
 		t.Fatalf("ConnectWebSocket() error = %v", err)
 	}
@@ -89,10 +92,20 @@ func TestConnectWebSocketSubscribesAndStreamsEvents(t *testing.T) {
 		if msg.RunID != runID {
 			t.Fatalf("RunID = %s, want %s", msg.RunID, runID)
 		}
+		if msg.Scope != "account" || msg.AccountID != accountID {
+			t.Fatalf("scope=%q account=%s", msg.Scope, msg.AccountID)
+		}
 		if !strings.Contains(string(raw), "AAPL") {
 			t.Fatalf("event data = %s, want ticker payload", raw)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for websocket event")
+	}
+}
+
+func TestConnectWebSocketRequiresAccountID(t *testing.T) {
+	t.Parallel()
+	if _, err := ConnectWebSocket(context.Background(), "ws://127.0.0.1:1/ws", nil); err == nil || !strings.Contains(err.Error(), "account_id") {
+		t.Fatalf("error=%v", err)
 	}
 }

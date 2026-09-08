@@ -10,7 +10,11 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 )
 
-var version = "dev"
+var (
+	version          = "dev"
+	sourceCommit     = "unknown"
+	sourceTreeSHA256 = "unknown"
+)
 
 func main() {
 	if err := cli.Execute(context.Background(), cli.Dependencies{

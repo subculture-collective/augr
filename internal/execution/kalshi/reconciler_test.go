@@ -44,6 +44,14 @@ type reconcilerPositionRepoStub struct {
 	err       error
 }
 
+var reconcilerTestBinding = func() domain.ExecutionAccountBinding {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		panic(err)
+	}
+	return binding
+}()
+
 func (r *reconcilerPositionRepoStub) Create(context.Context, *domain.Position) error {
 	panic("unexpected Create call")
 }
@@ -84,6 +92,14 @@ func (r *reconcilerPositionRepoStub) GetOpen(_ context.Context, _ repository.Pos
 		end = len(r.positions)
 	}
 	return append([]domain.Position(nil), r.positions[offset:end]...), nil
+}
+
+func (r *reconcilerPositionRepoStub) GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	positions, err := r.GetOpen(ctx, filter, limit, offset)
+	for i := range positions {
+		positions[i].AccountID, positions[i].Environment = accountID, environment
+	}
+	return positions, err
 }
 
 func (r *reconcilerPositionRepoStub) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {
@@ -178,6 +194,20 @@ func TestReconcilerReportsQuantityMismatch(t *testing.T) {
 	}
 }
 
+func TestReconcilerRejectsForeignScopedRows(t *testing.T) {
+	repo := &reconcilerPositionRepoStub{positions: []domain.Position{{AccountID: uuid.New(), Environment: domain.AccountEnvironmentLive, MarketType: domain.MarketTypeKalshi, Ticker: "KX-FOREIGN", Side: domain.PositionSideLong, Quantity: 1}}}
+	reconciler := NewReconciler(ReconcilerDeps{ExecutionAccount: reconcilerTestBinding, Broker: &reconcilerBrokerStub{}, PositionRepo: &foreignPreservingKalshiRepo{reconcilerPositionRepoStub: repo}})
+	if _, err := reconciler.Check(context.Background()); err == nil {
+		t.Fatal("foreign account row was accepted")
+	}
+}
+
+type foreignPreservingKalshiRepo struct{ *reconcilerPositionRepoStub }
+
+func (r *foreignPreservingKalshiRepo) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	return r.GetOpen(ctx, filter, limit, offset)
+}
+
 func TestReconcilerPropagatesBrokerAndRepoErrors(t *testing.T) {
 	t.Parallel()
 
@@ -188,7 +218,7 @@ func TestReconcilerPropagatesBrokerAndRepoErrors(t *testing.T) {
 	}
 
 	repoErr := errors.New("repo boom")
-	reconciler = &Reconciler{broker: &reconcilerBrokerStub{}, positionRepo: &reconcilerPositionRepoStub{err: repoErr}}
+	reconciler = &Reconciler{executionAccount: reconcilerTestBinding, broker: &reconcilerBrokerStub{}, positionRepo: &reconcilerPositionRepoStub{err: repoErr}}
 	if _, err := reconciler.Check(context.Background()); !errors.Is(err, repoErr) {
 		t.Fatalf("Check() repo error = %v, want %v", err, repoErr)
 	}
@@ -196,7 +226,19 @@ func TestReconcilerPropagatesBrokerAndRepoErrors(t *testing.T) {
 
 func newReconcilerTestHarness(brokerPositions, localPositions []domain.Position) *Reconciler {
 	return NewReconciler(ReconcilerDeps{
-		Broker:       &reconcilerBrokerStub{positions: brokerPositions},
-		PositionRepo: &reconcilerPositionRepoStub{positions: localPositions},
+		ExecutionAccount: reconcilerTestBinding,
+		Broker:           &reconcilerBrokerStub{positions: brokerPositions},
+		PositionRepo:     &reconcilerPositionRepoStub{positions: localPositions},
 	})
+}
+
+func TestNewReconcilerRetainsExecutionAccount(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := NewReconciler(ReconcilerDeps{ExecutionAccount: binding})
+	if reconciler.executionAccount != binding {
+		t.Fatal("reconciler did not retain execution account")
+	}
 }

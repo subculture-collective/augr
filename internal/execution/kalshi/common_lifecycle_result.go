@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/venue"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
@@ -27,6 +28,7 @@ const (
 // CommonLifecycleContext pins every canonical fact needed to interpret
 // Kalshi evidence. Route coordinates remain immutable throughout recovery.
 type CommonLifecycleContext struct {
+	Scope         execution.ExecutionScope
 	Policy        *venue.Policy
 	Aggregate     *lifecycle.Aggregate
 	Account       *domain.Account
@@ -101,7 +103,7 @@ func PlanSubmitResult(context CommonLifecycleContext, fact *CommonSubmitFact) (*
 	if err != nil {
 		return nil, fmt.Errorf("kalshi common lifecycle: construct submit observation: %w", err)
 	}
-	result := &venue.Result{Initial: context.Aggregate, Aggregate: context.Aggregate, Steps: []venue.ResultStep{{Observation: observation}}}
+	result := &venue.Result{Scope: context.Scope, Initial: context.Aggregate, Aggregate: context.Aggregate, Steps: []venue.ResultStep{{Observation: observation}}}
 	if mapped == venue.OutcomeFillNotice {
 		return result, nil
 	}
@@ -184,7 +186,7 @@ func PlanCancelResult(context CommonLifecycleContext, fact *CommonCancelFact) (*
 	if err != nil {
 		return nil, fmt.Errorf("kalshi common lifecycle: construct cancel observation: %w", err)
 	}
-	result := &venue.Result{Initial: context.Aggregate, Aggregate: context.Aggregate, Steps: []venue.ResultStep{{Observation: observation}}}
+	result := &venue.Result{Scope: context.Scope, Initial: context.Aggregate, Aggregate: context.Aggregate, Steps: []venue.ResultStep{{Observation: observation}}}
 	if mapped == venue.OutcomeNoChange {
 		return result, nil
 	}
@@ -346,7 +348,7 @@ func PlanOrderResult(context CommonLifecycleContext, kind venue.ObservationKind,
 	if err != nil {
 		return nil, fmt.Errorf("kalshi common lifecycle: apply order result: %w", err)
 	}
-	return &venue.Result{Initial: current, Aggregate: next, Steps: []venue.ResultStep{step}}, nil
+	return &venue.Result{Scope: context.Scope, Initial: current, Aggregate: next, Steps: []venue.ResultStep{step}}, nil
 }
 
 // PlanFillResults validates authoritative Kalshi fill records in provider
@@ -361,7 +363,7 @@ func PlanFillResults(context CommonLifecycleContext, facts []CommonFillFact) (*v
 	if len(facts) == 0 {
 		return nil, fmt.Errorf("kalshi common lifecycle: at least one fill is required")
 	}
-	result := &venue.Result{Initial: context.Aggregate, Aggregate: context.Aggregate}
+	result := &venue.Result{Scope: context.Scope, Initial: context.Aggregate, Aggregate: context.Aggregate}
 	current := context.Aggregate
 	for index := range facts {
 		step, next, err := planFill(context, current, facts[index])

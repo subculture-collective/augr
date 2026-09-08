@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
@@ -28,10 +29,11 @@ type submitOrderRequest struct {
 	TimeInForce   string `json:"time_in_force"`
 	ExtendedHours bool   `json:"extended_hours,omitempty"`
 
-	LimitPrice   string `json:"limit_price,omitempty"`
-	StopPrice    string `json:"stop_price,omitempty"`
-	TrailPrice   string `json:"trail_price,omitempty"`
-	TrailPercent string `json:"trail_percent,omitempty"`
+	LimitPrice    string `json:"limit_price,omitempty"`
+	StopPrice     string `json:"stop_price,omitempty"`
+	TrailPrice    string `json:"trail_price,omitempty"`
+	TrailPercent  string `json:"trail_percent,omitempty"`
+	ClientOrderID string `json:"client_order_id,omitempty"`
 }
 
 type submitOrderResponse struct {
@@ -39,11 +41,19 @@ type submitOrderResponse struct {
 }
 
 type orderStatusResponse struct {
-	Status string `json:"status"`
+	ID             string                `json:"id"`
+	Symbol         string                `json:"symbol"`
+	Status         string                `json:"status"`
+	FilledQty      string                `json:"filled_qty"`
+	FilledAvgPrice *string               `json:"filled_avg_price"`
+	FilledAt       *string               `json:"filled_at"`
+	UpdatedAt      string                `json:"updated_at"`
+	Legs           []orderStatusResponse `json:"legs"`
 }
 
 type positionResponse struct {
 	Symbol        string `json:"symbol"`
+	AssetClass    string `json:"asset_class"`
 	Side          string `json:"side"`
 	Qty           string `json:"qty"`
 	AvgEntryPrice string `json:"avg_entry_price"`
@@ -52,10 +62,16 @@ type positionResponse struct {
 }
 
 type accountResponse struct {
-	Currency    string `json:"currency"`
-	Cash        string `json:"cash"`
-	BuyingPower string `json:"buying_power"`
-	Equity      string `json:"equity"`
+	AccountNumber        string `json:"account_number"`
+	Status               string `json:"status"`
+	TradingBlocked       bool   `json:"trading_blocked"`
+	OptionsTradingLevel  int    `json:"options_trading_level"`
+	OptionsApprovedLevel int    `json:"options_approved_level"`
+	Currency             string `json:"currency"`
+	Cash                 string `json:"cash"`
+	BuyingPower          string `json:"buying_power"`
+	OptionsBuyingPower   string `json:"options_buying_power"`
+	Equity               string `json:"equity"`
 }
 
 // NewBroker constructs an Alpaca broker adapter.
@@ -113,31 +129,93 @@ func (b *Broker) CancelOrder(ctx context.Context, externalID string) error {
 
 // GetOrderStatus fetches an Alpaca order by external ID and maps its status.
 func (b *Broker) GetOrderStatus(ctx context.Context, externalID string) (domain.OrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, externalID)
+	return result.Status, err
+}
+
+func (b *Broker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
 	if b == nil || b.client == nil {
-		return "", errors.New("alpaca: broker client is required")
+		return execution.BrokerOrderStatus{}, errors.New("alpaca: broker client is required")
 	}
 
 	orderID := strings.TrimSpace(externalID)
 	if orderID == "" {
-		return "", errors.New("alpaca: external order id is required")
+		return execution.BrokerOrderStatus{}, errors.New("alpaca: external order id is required")
 	}
 
 	responseBody, err := b.client.Get(ctx, "/v2/orders/"+url.PathEscape(orderID), nil)
 	if err != nil {
-		return "", fmt.Errorf("alpaca: get order status: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: get order status: %w", err)
 	}
 
 	var response orderStatusResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return "", fmt.Errorf("alpaca: decode order status response: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: decode order status response: %w", err)
 	}
+	return mapBrokerOrderStatus(response)
+}
 
+func (b *Broker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	if b == nil || b.client == nil {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: broker client is required")
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: client order id is required")
+	}
+	body, err := b.client.Get(ctx, "/v2/orders:by_client_order_id", url.Values{"client_order_id": []string{clientOrderID}})
+	if err != nil {
+		var providerErr *ErrorResponse
+		if errors.As(err, &providerErr) && providerErr.StatusCode() == 404 {
+			return "", execution.BrokerOrderStatus{}, execution.ErrBrokerOrderNotFound
+		}
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: lookup client order id: %w", err)
+	}
+	var response orderStatusResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: decode client order lookup: %w", err)
+	}
+	if strings.TrimSpace(response.ID) == "" {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: client order lookup missing provider id")
+	}
+	result, err := mapBrokerOrderStatus(response)
+	return strings.TrimSpace(response.ID), result, err
+}
+
+func mapBrokerOrderStatus(response orderStatusResponse) (execution.BrokerOrderStatus, error) {
 	status, err := mapOrderStatus(response.Status)
 	if err != nil {
-		return "", err
+		return execution.BrokerOrderStatus{}, err
 	}
-
-	return status, nil
+	result := execution.BrokerOrderStatus{Status: status}
+	if strings.TrimSpace(response.FilledQty) != "" {
+		result.FilledQuantity, err = strconv.ParseFloat(response.FilledQty, 64)
+		if err != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid filled quantity: %w", err)
+		}
+	}
+	if response.FilledAvgPrice != nil && strings.TrimSpace(*response.FilledAvgPrice) != "" {
+		price, parseErr := strconv.ParseFloat(*response.FilledAvgPrice, 64)
+		if parseErr != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid filled average price: %w", parseErr)
+		}
+		result.FilledAvgPrice = &price
+	}
+	if response.FilledAt != nil && strings.TrimSpace(*response.FilledAt) != "" {
+		filledAt, parseErr := time.Parse(time.RFC3339Nano, *response.FilledAt)
+		if parseErr != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid filled at: %w", parseErr)
+		}
+		result.FilledAt = &filledAt
+	}
+	if result.FilledQuantity > 0 && result.FilledAt == nil && strings.TrimSpace(response.UpdatedAt) != "" {
+		observedAt, parseErr := time.Parse(time.RFC3339Nano, response.UpdatedAt)
+		if parseErr != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("alpaca: invalid updated at: %w", parseErr)
+		}
+		result.FilledAt = &observedAt
+	}
+	return result, nil
 }
 
 // GetPositions returns current Alpaca positions mapped to domain positions.
@@ -201,11 +279,19 @@ func (b *Broker) GetAccountBalance(ctx context.Context) (execution.Balance, erro
 		return execution.Balance{}, err
 	}
 
+	optionsBuyingPower := 0.0
+	if strings.TrimSpace(response.OptionsBuyingPower) != "" {
+		optionsBuyingPower, err = parseRequiredFloat("options_buying_power", response.OptionsBuyingPower)
+		if err != nil {
+			return execution.Balance{}, err
+		}
+	}
 	return execution.Balance{
-		Currency:    currency,
-		Cash:        cash,
-		BuyingPower: buyingPower,
-		Equity:      equity,
+		Currency:           currency,
+		Cash:               cash,
+		BuyingPower:        buyingPower,
+		OptionsBuyingPower: optionsBuyingPower,
+		Equity:             equity,
 	}, nil
 }
 
@@ -233,11 +319,12 @@ func mapSubmitOrderRequest(order *domain.Order) (submitOrderRequest, error) {
 	}
 
 	request := submitOrderRequest{
-		Symbol:      symbol,
-		Qty:         formatFloat(order.Quantity),
-		Side:        side,
-		Type:        orderType,
-		TimeInForce: defaultTimeInForce,
+		Symbol:        symbol,
+		Qty:           formatFloat(order.Quantity),
+		Side:          side,
+		Type:          orderType,
+		TimeInForce:   defaultTimeInForce,
+		ClientOrderID: strings.TrimSpace(order.ClientOrderID),
 	}
 
 	switch order.OrderType {
@@ -347,14 +434,28 @@ func mapPosition(response positionResponse) (domain.Position, error) {
 		return domain.Position{}, err
 	}
 
-	return domain.Position{
+	position := domain.Position{
 		Ticker:        ticker,
 		Side:          side,
 		Quantity:      quantity,
 		AvgEntry:      avgEntry,
 		CurrentPrice:  currentPrice,
 		UnrealizedPnL: unrealizedPnL,
-	}, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(response.AssetClass), "us_option") {
+		contract, err := domain.ParseOCC(ticker)
+		if err != nil {
+			return domain.Position{}, fmt.Errorf("alpaca: parse option position symbol: %w", err)
+		}
+		position.MarketType = domain.MarketTypeOptions
+		position.AssetClass = domain.AssetClassOption
+		position.UnderlyingTicker = contract.Underlying
+		position.OptionType = &contract.OptionType
+		position.Strike = &contract.Strike
+		position.Expiry = &contract.Expiry
+		position.ContractMultiplier = contract.Multiplier
+	}
+	return position, nil
 }
 
 func mapPositionSide(rawSide string) (domain.PositionSide, error) {

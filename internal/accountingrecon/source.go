@@ -21,12 +21,13 @@ import (
 )
 
 type SourceRequest struct {
-	AccountID         uuid.UUID
-	AsOf              time.Time
-	ProjectionVersion string
-	MarkSource        string
-	MarkNamespace     string
-	MaxMarkAge        time.Duration
+	AccountID            uuid.UUID
+	ThroughTransactionID uuid.UUID
+	AsOf                 time.Time
+	ProjectionVersion    string
+	MarkSource           string
+	MarkNamespace        string
+	MaxMarkAge           time.Duration
 }
 
 // LegacyBalance is the compatibility balance envelope captured from the
@@ -139,7 +140,7 @@ func (source *LegacyPaperSource) Capture(ctx context.Context, request SourceRequ
 	}
 	evidenceHash := sha256.Sum256(evidenceBytes)
 	return NewSnapshot(SnapshotInput{
-		Source: SourceLegacy, AccountID: request.AccountID, AsOf: request.AsOf,
+		Source: SourceLegacy, AccountID: request.AccountID, ThroughTransactionID: request.ThroughTransactionID, AsOf: request.AsOf,
 		ObservedAt: capture.CapturedAt, Currency: strings.ToUpper(strings.TrimSpace(capture.Balance.Currency)),
 		ProjectionVersion: request.ProjectionVersion, MarkSource: request.MarkSource,
 		MarkNamespace: request.MarkNamespace, MaxMarkAge: request.MaxMarkAge,
@@ -179,7 +180,8 @@ func (source *LedgerProjectionSource) Capture(ctx context.Context, request Sourc
 		return nil, err
 	}
 	projection, err := source.repository.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-		AccountID: request.AccountID, AsOf: request.AsOf, MarkSource: request.MarkSource,
+		AccountID: request.AccountID, ThroughTransactionID: request.ThroughTransactionID,
+		AsOf: request.AsOf, MarkSource: request.MarkSource,
 		MarkNamespace: request.MarkNamespace, MaxMarkAge: request.MaxMarkAge,
 	})
 	if err != nil {
@@ -214,7 +216,7 @@ func (source *LedgerProjectionSource) Capture(ctx context.Context, request Sourc
 		positions = append(positions, PositionInput{InstrumentID: position.InstrumentID, Quantity: position.Quantity, Provenance: ProvenanceExactDecimal})
 	}
 	return NewSnapshot(SnapshotInput{
-		Source: SourceLedger, AccountID: projection.AccountID, AsOf: projection.AsOf,
+		Source: SourceLedger, AccountID: projection.AccountID, ThroughTransactionID: request.ThroughTransactionID, AsOf: projection.AsOf,
 		ObservedAt: checkpoint.CreatedAt.UTC().Truncate(time.Microsecond), Currency: projection.BaseCurrency,
 		ProjectionVersion: projection.Version, MarkSource: projection.MarkSource,
 		MarkNamespace: projection.MarkNamespace, MaxMarkAge: projection.MaxMarkAge,
@@ -235,7 +237,7 @@ func (source *LedgerProjectionSource) Capture(ctx context.Context, request Sourc
 }
 
 func validateSourceLease(request SourceRequest, lease CaptureLease) error {
-	if request.AccountID == uuid.Nil || request.AsOf.IsZero() {
+	if request.AccountID == uuid.Nil || request.ThroughTransactionID == uuid.Nil || request.AsOf.IsZero() {
 		return fmt.Errorf("accounting source request and capture lease are required")
 	}
 	if err := validateCaptureLease(request.AccountID, request.AsOf, lease); err != nil {

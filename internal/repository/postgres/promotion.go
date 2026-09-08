@@ -26,6 +26,78 @@ type PromotionRepo struct {
 	afterStage func(string) error
 }
 
+type PromotionEvaluationBatch struct {
+	Eligible int
+	Approved int
+	Held     int
+}
+
+// EvaluateEligiblePromotions appends the first authoritative decision for
+// every proposed paper deployment whose completed assessment is bound to the
+// exact configured scope. It never activates a runtime strategy.
+func (repo *PromotionRepo) EvaluateEligiblePromotions(ctx context.Context, accountID, scopeID uuid.UUID, readiness promotion.Readiness) (PromotionEvaluationBatch, error) {
+	var summary PromotionEvaluationBatch
+	if repo == nil || repo.pool == nil || accountID == uuid.Nil || scopeID == uuid.Nil || readiness.AccountID() != accountID || readiness.ScopeID() != scopeID || !readiness.Ready() {
+		return summary, fmt.Errorf("postgres: promotion evaluation requires ready exact account scope")
+	}
+	policy, err := promotion.ReviewedPolicyV1()
+	if err != nil {
+		return summary, err
+	}
+	rows, err := repo.pool.Query(ctx, `SELECT deployment.id,assessment.id
+		FROM strategy_deployments deployment
+		JOIN robustness_assessment_candidates candidate ON candidate.version_id=deployment.version_id
+		JOIN statistical_robustness_assessments assessment ON assessment.id=candidate.assessment_id
+			AND assessment.scope_id=$2 AND assessment.mode='paper_scored' AND assessment.state='completed'
+		JOIN paper_evaluation_scopes scope ON scope.id=assessment.scope_id AND scope.account_id=$1
+			AND scope.capital_binding_id=deployment.capital_binding_id
+		WHERE deployment.account_id=$1 AND deployment.mode='paper_scored' AND deployment.state='proposed'
+		AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions decision WHERE decision.deployment_id=deployment.id)
+		ORDER BY deployment.id,assessment.id`, accountID, scopeID)
+	if err != nil {
+		return summary, err
+	}
+	type candidate struct{ deploymentID, assessmentID uuid.UUID }
+	candidates := make([]candidate, 0)
+	for rows.Next() {
+		var value candidate
+		if err = rows.Scan(&value.deploymentID, &value.assessmentID); err != nil {
+			rows.Close()
+			return summary, err
+		}
+		candidates = append(candidates, value)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return summary, err
+	}
+	seenDeployments := make(map[uuid.UUID]uuid.UUID, len(candidates))
+	for _, candidate := range candidates {
+		if prior, exists := seenDeployments[candidate.deploymentID]; exists && prior != candidate.assessmentID {
+			return summary, fmt.Errorf("postgres: deployment %s has conflicting completed assessments in configured scope", candidate.deploymentID)
+		}
+		seenDeployments[candidate.deploymentID] = candidate.assessmentID
+	}
+	service, err := promotion.NewService(repo)
+	if err != nil {
+		return summary, err
+	}
+	for _, candidate := range candidates {
+		decision, evaluateErr := service.Evaluate(ctx, promotion.Request{DeploymentID: candidate.deploymentID, AssessmentID: candidate.assessmentID, Policy: policy, Readiness: readiness})
+		if evaluateErr != nil {
+			return summary, evaluateErr
+		}
+		summary.Eligible++
+		if decision.Outcome() == promotion.OutcomeApproved {
+			summary.Approved++
+		} else {
+			summary.Held++
+		}
+	}
+	return summary, nil
+}
+
 func NewPromotionRepo(pool *pgxpool.Pool) *PromotionRepo { return &PromotionRepo{pool: pool} }
 
 var _ promotion.Store = (*PromotionRepo)(nil)
@@ -109,6 +181,9 @@ func (repo *PromotionRepo) RecordDecision(ctx context.Context, value *promotion.
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, value.DeploymentID().String()); err != nil {
+		return nil, err
+	}
 	created := databaseNow()
 	var prior any
 	if value.PriorDecisionID() != uuid.Nil {

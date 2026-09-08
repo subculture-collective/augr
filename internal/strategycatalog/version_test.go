@@ -59,6 +59,21 @@ func TestVersionDatasetKindsReorderWithoutIdentityChange(t *testing.T) {
 	}
 }
 
+func TestNewLegacyVersionBindsSnapshotAndConfig(t *testing.T) {
+	familyID := uuid.New()
+	snapshot := strings.Repeat("a", 64)
+	version, err := NewLegacyVersion(familyID, snapshot, json.RawMessage(`{"lookback":20}`), []dataset.Kind{dataset.KindBars})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version.FamilyID() != familyID || version.SourceCommit() != snapshot || version.SourceTreeSHA256() != snapshot {
+		t.Fatalf("version identity = family %s commit %q tree %q", version.FamilyID(), version.SourceCommit(), version.SourceTreeSHA256())
+	}
+	if version.CompilerKind() != "legacy-runtime-v1" || version.CompilerVersion() != "legacy-runtime-v1" || version.ConfigSchema() != "legacy-strategy-config-v1" || version.DecisionContract() != "agent-pipeline-v1" {
+		t.Fatalf("legacy metadata = %+v", version)
+	}
+}
+
 func TestVersionRejectsNoncanonicalOrInvalidIdentity(t *testing.T) {
 	valid := validVersionInput()
 	for name, mutate := range map[string]func(*VersionInput){

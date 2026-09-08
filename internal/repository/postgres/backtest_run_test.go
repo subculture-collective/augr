@@ -162,7 +162,7 @@ func TestBacktestRunRepoIntegration_CreateGetList(t *testing.T) {
 func ensureBacktestRunTable(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 
-	_, err := pool.Exec(ctx, `CREATE TABLE backtest_runs (
+	_, err := pool.Exec(ctx, `CREATE TABLE backtest_runs (scope_id UUID,
 		id                 UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
 		backtest_config_id UUID        NOT NULL REFERENCES backtest_configs (id) ON DELETE CASCADE,
 		metrics            JSONB       NOT NULL,

@@ -173,7 +173,7 @@ The project uses [Task](https://taskfile.dev) as its task runner. Install Task, 
 task build                   # Compile binary to ./bin/tradingagent
 task test                    # Unit tests (short mode)
 task test:race               # Unit tests with race detector
-task test:integration        # Integration tests (requires PostgreSQL)
+task test:integration        # Full Go contracts; migrated disposable TEST_DATABASE_URL required
 task lint                    # golangci-lint
 task fmt                     # Format with gofumpt
 task check                   # Pre-push: build + test + lint

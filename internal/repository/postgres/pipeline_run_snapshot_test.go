@@ -47,13 +47,15 @@ func TestPipelineRunSnapshotRepoIntegration_CreatePersistsSnapshot(t *testing.T)
 	pool, cleanup := newPipelineRunSnapshotIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunSnapshotRepo(pool)
+	repo := NewPipelineRunSnapshotRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	snapshot := &domain.PipelineRunSnapshot{
-		PipelineRunID: runID,
-		DataType:      "market",
-		Payload:       json.RawMessage(`{"ticker":"AAPL","bars":[{"close":189.12}]}`),
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: "00000000-0000-4000-8000-000000000108",
+		PipelineRunID: runID, PipelineRunTradeDate: canonicalRepositoryTestTradeDate,
+		DataType: "market", Payload: json.RawMessage(`{"ticker":"AAPL","bars":[{"close":189.12}]}`),
 	}
+	seedSnapshotTestRun(t, ctx, pool, runID)
 
 	if err := repo.Create(ctx, snapshot); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -99,7 +101,7 @@ func TestPipelineRunSnapshotRepoIntegration_GetByRun(t *testing.T) {
 	pool, cleanup := newPipelineRunSnapshotIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunSnapshotRepo(pool)
+	repo := NewPipelineRunSnapshotRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	otherRunID := uuid.New()
 	createdAt := time.Date(2026, time.March, 31, 12, 0, 0, 0, time.UTC)
@@ -136,15 +138,16 @@ func TestPipelineRunSnapshotRepoIntegration_GetByRun(t *testing.T) {
 			createdAt:     createdAt.Add(time.Minute),
 		},
 	} {
+		seedSnapshotTestRun(t, ctx, pool, row.pipelineRunID)
 		if _, err := pool.Exec(ctx, `
-			INSERT INTO pipeline_run_snapshots (id, pipeline_run_id, data_type, payload, created_at)
-			VALUES ($1, $2, $3, $4, $5)
-		`, row.id, row.pipelineRunID, row.dataType, json.RawMessage(row.payload), row.createdAt); err != nil {
+			INSERT INTO pipeline_run_snapshots (id, account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, data_type, payload, created_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+		`, row.id, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, "strategy_version", "00000000-0000-4000-8000-000000000108", row.pipelineRunID, canonicalRepositoryTestTradeDate, row.dataType, json.RawMessage(row.payload), row.createdAt); err != nil {
 			t.Fatalf("failed to seed snapshot %s: %v", row.id, err)
 		}
 	}
 
-	got, err := repo.GetByRun(ctx, runID)
+	got, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate})
 	if err != nil {
 		t.Fatalf("GetByRun() error = %v", err)
 	}
@@ -162,6 +165,23 @@ func TestPipelineRunSnapshotRepoIntegration_GetByRun(t *testing.T) {
 	}
 	if got[1].DataType != "news" || !jsonBytesEqual(got[1].Payload, json.RawMessage(`{"headline":"Later by id"}`)) {
 		t.Fatalf("unexpected second snapshot: %+v", got[1])
+	}
+}
+
+func TestPipelineRunSnapshotRepoIntegration_RequiresExactParentRunRef(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunSnapshotIntegrationPool(t, ctx)
+	defer cleanup()
+	runID := uuid.New()
+	seedSnapshotTestRun(t, ctx, pool, runID)
+	snapshot := &domain.PipelineRunSnapshot{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: "00000000-0000-4000-8000-000000000108",
+		PipelineRunID: runID, PipelineRunTradeDate: canonicalRepositoryTestTradeDate.AddDate(0, 0, 1),
+		DataType: "market", Payload: json.RawMessage(`{}`),
+	}
+	if err := NewPipelineRunSnapshotRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, snapshot); err == nil {
+		t.Fatal("Create() accepted a snapshot without an exact parent run ref")
 	}
 }
 
@@ -185,7 +205,7 @@ func newPipelineRunSnapshotIntegrationPool(t *testing.T, ctx context.Context) (*
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -213,9 +233,17 @@ func newPipelineRunSnapshotIntegrationPool(t *testing.T, ctx context.Context) (*
 	}
 
 	ddl := []string{
+		`CREATE TABLE accounts (id UUID PRIMARY KEY)`,
+		`INSERT INTO accounts (id) VALUES ('00000000-0000-4000-8000-000000000064')`,
+		`CREATE TABLE pipeline_runs (id UUID NOT NULL, trade_date DATE NOT NULL, account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT, environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')), origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')), origin_id TEXT, PRIMARY KEY(id,trade_date))`,
 		`CREATE TABLE pipeline_run_snapshots (
 			id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id      UUID        REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment     TEXT        CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type     TEXT        CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+			origin_id       TEXT,
 			pipeline_run_id UUID        NOT NULL,
+			pipeline_run_trade_date DATE,
 			data_type       TEXT        NOT NULL CHECK (data_type IN ('market', 'news', 'fundamentals', 'social')),
 			payload         JSONB       NOT NULL,
 			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -239,4 +267,11 @@ func newPipelineRunSnapshotIntegrationPool(t *testing.T, ctx context.Context) (*
 	}
 
 	return pool, cleanup
+}
+
+func seedSnapshotTestRun(t *testing.T, ctx context.Context, pool *pgxpool.Pool, runID uuid.UUID) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `INSERT INTO pipeline_runs (id,trade_date,account_id,environment,origin_type,origin_id) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, runID, canonicalRepositoryTestTradeDate, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, "strategy_version", "00000000-0000-4000-8000-000000000108"); err != nil {
+		t.Fatalf("seed exact pipeline run parent: %v", err)
+	}
 }

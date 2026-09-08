@@ -281,6 +281,7 @@ func newAlpacaVenueAdapterFixtureWithPool(
 
 func (fixture alpacaVenueAdapterFixture) adapterContext(aggregate *lifecycle.Aggregate) alpaca.CommonLifecycleContext {
 	return alpaca.CommonLifecycleContext{
+		Scope:  venueAdapterExecutionScope{aggregate.Intent},
 		Policy: fixture.policy, Aggregate: aggregate, Account: fixture.account,
 		Instrument: fixture.instrument, VenueContract: fixture.contract,
 		ReceivedAt: fixture.baseTime.Add(10 * time.Second),

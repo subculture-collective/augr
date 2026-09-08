@@ -9,6 +9,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
@@ -28,15 +29,15 @@ func (o *JobOrchestrator) registerOptionsLifecycleJobs() {
 }
 
 func (o *JobOrchestrator) optionsLifecycleReconcile(ctx context.Context) error {
-	orders, err := listAllOrders(ctx, o.deps.OrderRepo)
+	orders, err := listAllOptionsLifecycleOrders(ctx, o.deps.OrderRepo, o.deps.ExecutionAccount)
 	if err != nil {
 		return fmt.Errorf("options_lifecycle_reconcile: list orders: %w", err)
 	}
-	positions, err := listAllPositions(ctx, o.deps.PositionRepo)
+	positions, err := listAllOptionsLifecyclePositions(ctx, o.deps.PositionRepo, o.deps.ExecutionAccount)
 	if err != nil {
 		return fmt.Errorf("options_lifecycle_reconcile: list positions: %w", err)
 	}
-	trades, err := listAllOptionTrades(ctx, o.deps.TradeRepo)
+	trades, err := listAllOptionsLifecycleTrades(ctx, o.deps.TradeRepo, o.deps.ExecutionAccount)
 	if err != nil {
 		return fmt.Errorf("options_lifecycle_reconcile: list trades: %w", err)
 	}
@@ -50,36 +51,51 @@ func (o *JobOrchestrator) optionsLifecycleReconcile(ctx context.Context) error {
 
 func (o *JobOrchestrator) optionsExpirySettlement(ctx context.Context) error {
 	now := time.Now().UTC()
-	positions, err := listAllOpenPositions(ctx, o.deps.PositionRepo)
+	scope, err := execution.NewScheduledNonRunExecutionScope(o.deps.ExecutionAccount.AccountID(), o.deps.ExecutionAccount.Environment(), ledger.ExecutionOriginSettlement, "options-expiry/"+now.Format("2006-01-02"))
+	if err != nil {
+		return fmt.Errorf("options_expiry_settlement: execution scope: %w", err)
+	}
+	positions, err := listAllOpenPositionsByAccount(ctx, o.deps.PositionRepo, o.deps.ExecutionAccount)
 	if err != nil {
 		return fmt.Errorf("options_expiry_settlement: list positions: %w", err)
 	}
-	underlyings := make(map[string]struct{})
+	contracts := make(map[execution.OptionExpiryPriceKey]struct{})
 	for _, position := range positions {
 		if position.AssetClass == domain.AssetClassOption && position.Expiry != nil && !position.Expiry.After(now) && position.UnderlyingTicker != "" {
-			underlyings[position.UnderlyingTicker] = struct{}{}
+			contracts[execution.NewOptionExpiryPriceKey(position.UnderlyingTicker, *position.Expiry)] = struct{}{}
 		}
 	}
-	prices := make(map[string]float64, len(underlyings))
-	for underlying := range underlyings {
-		bars, err := o.deps.DataService.GetOHLCV(ctx, domain.MarketTypeStock, underlying, data.Timeframe1d, now.Add(-7*24*time.Hour), now)
+	prices := make(map[execution.OptionExpiryPriceKey]float64, len(contracts))
+	for contract := range contracts {
+		end := contract.ExpiryDate.Add(24 * time.Hour)
+		bars, err := o.deps.DataService.GetOHLCV(ctx, domain.MarketTypeStock, contract.Underlying, data.Timeframe1d, contract.ExpiryDate.Add(-7*24*time.Hour), end)
 		if err != nil {
-			return fmt.Errorf("options_expiry_settlement: closing price lookup for %s: %w", underlying, err)
+			return fmt.Errorf("options_expiry_settlement: closing price lookup for %s at %s: %w", contract.Underlying, contract.ExpiryDate.Format("2006-01-02"), err)
 		}
-		if len(bars) == 0 || bars[len(bars)-1].Close <= 0 {
-			return fmt.Errorf("options_expiry_settlement: closing price unavailable for %s", underlying)
+		closePrice, ok := optionExpirySessionClose(bars, contract.ExpiryDate)
+		if !ok {
+			return fmt.Errorf("options_expiry_settlement: closing price unavailable for %s at contract expiry %s", contract.Underlying, contract.ExpiryDate.Format("2006-01-02"))
 		}
-		if !dailyBarFresh(now, bars[len(bars)-1].Timestamp) {
-			return fmt.Errorf("options_expiry_settlement: stale closing price for %s at %s", underlying, bars[len(bars)-1].Timestamp.UTC().Format(time.RFC3339))
-		}
-		prices[underlying] = bars[len(bars)-1].Close
+		prices[contract] = closePrice
 	}
-	summary, err := execution.SettleExpiredOptionPositions(ctx, positions, prices, now, o.deps.OptionSettlementRepo)
+	summary, err := execution.SettleExpiredOptionPositions(ctx, scope, positions, prices, now, o.deps.OptionSettlementRepo, o.deps.OptionSettlementState)
 	if err != nil {
 		return err
 	}
 	o.SetLastSummary("options_expiry_settlement", map[string]int{"expired_worthless": summary.ExpiredWorthless, "cash_settled": summary.CashSettled})
 	return nil
+}
+
+func optionExpirySessionClose(bars []domain.OHLCV, expiry time.Time) (float64, bool) {
+	want := expiry.UTC().Format("2006-01-02")
+	var closePrice float64
+	found := false
+	for _, bar := range bars {
+		if bar.Timestamp.UTC().Format("2006-01-02") == want && bar.Close > 0 {
+			closePrice, found = bar.Close, true
+		}
+	}
+	return closePrice, found
 }
 
 func listAllOpenPositions(ctx context.Context, repo repository.PositionRepository) ([]domain.Position, error) {
@@ -97,13 +113,25 @@ func listAllOpenPositions(ctx context.Context, repo repository.PositionRepositor
 	}
 }
 
-func listAllPositions(ctx context.Context, repo repository.PositionRepository) ([]domain.Position, error) {
+func listAllOpenPositionsByAccount(ctx context.Context, repo repository.PositionRepository, account domain.ExecutionAccountBinding) ([]domain.Position, error) {
+	if err := account.Validate(); err != nil {
+		return nil, fmt.Errorf("options lifecycle account: %w", err)
+	}
+	scoped, ok := repo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("options lifecycle requires account-scoped position repository")
+	}
 	const pageSize = 250
 	var all []domain.Position
 	for offset := 0; ; offset += pageSize {
-		page, err := repo.List(ctx, repository.PositionFilter{}, pageSize, offset)
+		page, err := scoped.GetOpenByAccount(ctx, account.AccountID(), account.Environment(), repository.PositionFilter{}, pageSize, offset)
 		if err != nil {
 			return nil, err
+		}
+		for _, position := range page {
+			if position.AccountID != account.AccountID() || position.Environment != account.Environment() {
+				return nil, fmt.Errorf("options lifecycle position %s escaped account scope", position.ID)
+			}
 		}
 		all = append(all, page...)
 		if len(page) < pageSize {
@@ -112,13 +140,52 @@ func listAllPositions(ctx context.Context, repo repository.PositionRepository) (
 	}
 }
 
-func listAllOrders(ctx context.Context, repo repository.OrderRepository) ([]domain.Order, error) {
+func listAllOptionsLifecyclePositions(ctx context.Context, repo repository.PositionRepository, account domain.ExecutionAccountBinding) ([]domain.Position, error) {
+	if err := account.Validate(); err != nil {
+		return nil, fmt.Errorf("options lifecycle account: %w", err)
+	}
+	scoped, ok := repo.(repository.OptionsLifecyclePositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("options lifecycle requires account and environment scoped positions")
+	}
+	const pageSize = 250
+	var all []domain.Position
+	for offset := 0; ; offset += pageSize {
+		page, err := scoped.ListOptionsLifecyclePositions(ctx, account.AccountID(), account.Environment(), pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		for _, position := range page {
+			if position.AccountID != account.AccountID() || position.Environment != account.Environment() {
+				return nil, fmt.Errorf("options lifecycle position %s escaped account scope", position.ID)
+			}
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			return all, nil
+		}
+	}
+}
+
+func listAllOptionsLifecycleOrders(ctx context.Context, repo repository.OrderRepository, account domain.ExecutionAccountBinding) ([]domain.Order, error) {
+	if err := account.Validate(); err != nil {
+		return nil, fmt.Errorf("options lifecycle account: %w", err)
+	}
+	scoped, ok := repo.(repository.OptionsLifecycleOrderRepository)
+	if !ok {
+		return nil, fmt.Errorf("options lifecycle requires account and environment scoped orders")
+	}
 	const pageSize = 250
 	var all []domain.Order
 	for offset := 0; ; offset += pageSize {
-		page, err := repo.List(ctx, repository.OrderFilter{}, pageSize, offset)
+		page, err := scoped.ListOptionsLifecycleOrders(ctx, account.AccountID(), account.Environment(), pageSize, offset)
 		if err != nil {
 			return nil, err
+		}
+		for _, order := range page {
+			if order.AccountID != account.AccountID() || order.Environment != account.Environment() {
+				return nil, fmt.Errorf("options lifecycle order %s escaped account scope", order.ID)
+			}
 		}
 		all = append(all, page...)
 		if len(page) < pageSize {
@@ -127,13 +194,25 @@ func listAllOrders(ctx context.Context, repo repository.OrderRepository) ([]doma
 	}
 }
 
-func listAllOptionTrades(ctx context.Context, repo repository.TradeRepository) ([]domain.Trade, error) {
+func listAllOptionsLifecycleTrades(ctx context.Context, repo repository.TradeRepository, account domain.ExecutionAccountBinding) ([]domain.Trade, error) {
+	if err := account.Validate(); err != nil {
+		return nil, fmt.Errorf("options lifecycle account: %w", err)
+	}
+	scoped, ok := repo.(repository.OptionsLifecycleTradeRepository)
+	if !ok {
+		return nil, fmt.Errorf("options lifecycle requires account and environment scoped trades")
+	}
 	const pageSize = 250
 	var all []domain.Trade
 	for offset := 0; ; offset += pageSize {
-		page, err := repo.List(ctx, repository.TradeFilter{}, pageSize, offset)
+		page, err := scoped.ListOptionsLifecycleTrades(ctx, account.AccountID(), account.Environment(), pageSize, offset)
 		if err != nil {
 			return nil, err
+		}
+		for _, trade := range page {
+			if trade.AccountID != account.AccountID() || trade.Environment != account.Environment() {
+				return nil, fmt.Errorf("options lifecycle trade %s escaped account scope", trade.ID)
+			}
 		}
 		all = append(all, page...)
 		if len(page) < pageSize {

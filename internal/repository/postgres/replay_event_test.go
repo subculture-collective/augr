@@ -20,7 +20,7 @@ func TestReplayEventRepoIntegration_CreateAndList(t *testing.T) {
 	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewReplayEventRepo(pool)
+	repo := NewReplayEventRepo(pool, canonicalRepositoryTestAccountID)
 	decisionID := insertReplayDecisionRow(t, ctx, pool)
 
 	event := &domain.ReplayEvent{
@@ -64,7 +64,7 @@ func TestReplayEventRepoIntegration_ListOrdersDeterministically(t *testing.T) {
 	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewReplayEventRepo(pool)
+	repo := NewReplayEventRepo(pool, canonicalRepositoryTestAccountID)
 	decisionID := insertReplayDecisionRow(t, ctx, pool)
 	occurred := time.Date(2026, time.June, 9, 12, 0, 0, 0, time.UTC)
 	created := time.Date(2026, time.June, 9, 12, 5, 0, 0, time.UTC)
@@ -116,7 +116,7 @@ func TestReplayEventRepoIntegration_ListReturnsEmptySlice(t *testing.T) {
 	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewReplayEventRepo(pool)
+	repo := NewReplayEventRepo(pool, canonicalRepositoryTestAccountID)
 	decisionID := insertReplayDecisionRow(t, ctx, pool)
 
 	got, err := repo.ListReplayEvents(ctx, decisionID)
@@ -188,7 +188,7 @@ func newReplayEventIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -220,6 +220,7 @@ func newReplayEventIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid()
 		)`,
 		`CREATE TABLE replay_events (
+ account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'operator', origin_id TEXT NOT NULL DEFAULT 'fixture',
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			trade_decision_id UUID NOT NULL REFERENCES trade_decisions(id) ON DELETE CASCADE,
 			event_type TEXT NOT NULL CHECK (event_type IN (

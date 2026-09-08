@@ -224,7 +224,7 @@ func TestFinancialSchedulerRetainedQualification(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE financial_job_effect_claims SET payload_sha256=payload_sha256 WHERE id=$1`, settlement.ID); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("append-only=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000098_idempotent_financial_scheduler.down.sql")); err == nil || !strings.Contains(err.Error(), "rollback refused") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000098_idempotent_financial_scheduler.down.sql"); err == nil || !strings.Contains(err.Error(), "rollback refused") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 

@@ -28,10 +28,14 @@ jobs:
               - 'cmd/**'
               - 'internal/**'
               - 'migrations/**'
+              - 'monitoring/**'
               - '*.go'
               - 'go.mod'
               - 'go.sum'
               - 'Taskfile.yml'
+              - 'scripts/**'
+              - '.golangci.yml'
+              - '.github/workflows/ci.yml'
               - 'Dockerfile'
               - 'docker-compose.yml'
               - 'docker-compose.prod.yml'
@@ -70,6 +74,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Verify integration gate failure cases
+        run: python3 scripts/test-integration_test.py
 
       - name: Run unit tests
         run: go test -short -race -count=1 -coverprofile=coverage-unit.out ./...
@@ -127,7 +134,7 @@ jobs:
           database_host=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$database_container")
           test -n "$database_host"
           echo "DATABASE_CONTAINER=$database_container" >> "$GITHUB_ENV"
-          echo "DATABASE_URL=postgres://tradingagent:tradingagent@${database_host}:5432/tradingagent_test?sslmode=disable" >> "$GITHUB_ENV"
+          echo "TEST_DATABASE_URL=postgres://tradingagent:tradingagent@${database_host}:5432/tradingagent_test?sslmode=disable" >> "$GITHUB_ENV"
 
       - name: Run migrations
         run: |
@@ -137,7 +144,7 @@ jobs:
           done
 
       - name: Run integration tests
-        run: go test -race -count=1 -run Integration -coverprofile=coverage-integration.out ./...
+        run: python3 scripts/test-integration.py --coverage coverage-integration.out
 
       - name: Merge coverage profiles
         run: |

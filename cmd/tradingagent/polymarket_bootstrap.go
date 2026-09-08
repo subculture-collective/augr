@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -25,8 +26,19 @@ func bootstrapPolymarketStopGuards(ctx context.Context, runner *realStrategyRunn
 		firstErr        error
 	)
 
+	scoped, ok := positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return fmt.Errorf("bootstrap polymarket stop guards: account-scoped position repository is required")
+	}
+	binding := runner.executionAccount
+	if err := binding.Validate(); err != nil {
+		return fmt.Errorf("bootstrap polymarket stop guards: execution account: %w", err)
+	}
+	if err := runner.polymarketStopGuard.Reconcile(ctx); err != nil {
+		return fmt.Errorf("bootstrap polymarket stop guards: reconcile durable exits: %w", err)
+	}
 	for offset := 0; ; offset += polymarketBootstrapPageSize {
-		positions, err := positionRepo.GetOpen(ctx, repository.PositionFilter{}, polymarketBootstrapPageSize, offset)
+		positions, err := scoped.GetOpenByAccount(ctx, binding.AccountID(), binding.Environment(), repository.PositionFilter{}, polymarketBootstrapPageSize, offset)
 		if err != nil {
 			return fmt.Errorf("bootstrap polymarket stop guards: fetch open positions: %w", err)
 		}
@@ -42,13 +54,26 @@ func bootstrapPolymarketStopGuards(ctx context.Context, runner *realStrategyRunn
 			filtered = append(filtered, position)
 		}
 		if len(filtered) > 0 {
-			if err := runner.registerPolymarketPositions(filtered); err != nil {
+			var registerErr error
+			for i := range filtered {
+				if filtered[i].StopLoss == nil && filtered[i].TakeProfit == nil {
+					continue
+				}
+				if err := runner.polymarketStopGuard.RegisterPositionContext(ctx, filtered[i]); err != nil {
+					registerErr = errors.Join(registerErr, err)
+					continue
+				}
+				if slug, err := polymarketPositionSlugFromTicker(filtered[i].Ticker); err == nil {
+					runner.ensurePolymarketTickWorker(slug)
+				}
+			}
+			if registerErr != nil {
 				if firstErr == nil {
-					firstErr = fmt.Errorf("bootstrap polymarket stop guards: register positions: %w", err)
+					firstErr = fmt.Errorf("bootstrap polymarket stop guards: register positions: %w", registerErr)
 				}
 				logger.Warn("polymarket stop guard bootstrap encountered registration error",
 					slog.Int("page_offset", offset),
-					slog.Any("error", err),
+					slog.Any("error", registerErr),
 				)
 			}
 			totalRegistered += len(filtered)

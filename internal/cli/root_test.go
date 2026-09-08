@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +21,52 @@ import (
 )
 
 type rootCommandTestContextKey struct{}
+
+func TestSignalContextCapturesSIGTERMForGracefulShutdown(t *testing.T) {
+	ctx, stop, currentSignal := newSignalContext(context.Background(), syscall.SIGTERM)
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("SIGTERM did not cancel the graceful-shutdown context")
+	}
+	if currentSignal() != syscall.SIGTERM {
+		t.Fatalf("captured signal = %v, want SIGTERM", currentSignal())
+	}
+}
+
+func TestServerLifecycleWaitsForShutdownBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan struct{})
+	terminalWrite := make(chan struct{})
+	shutdownStarted := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runServerLifecycleWithHook(ctx, func() error {
+			<-serveDone
+			return http.ErrServerClosed
+		}, func(context.Context) error {
+			close(shutdownStarted)
+			<-terminalWrite
+			close(serveDone)
+			return nil
+		}, nil)
+	}()
+	cancel()
+	<-shutdownStarted
+	select {
+	case err := <-done:
+		t.Fatalf("server lifecycle returned before terminal write: %v", err)
+	default:
+	}
+	close(terminalWrite)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestCommandHelp(t *testing.T) {
 	t.Parallel()
@@ -37,6 +85,9 @@ func TestCommandHelp(t *testing.T) {
 		{"risk", "kill", "--help"},
 		{"memories", "--help"},
 		{"memories", "search", "--help"},
+		{"capital-ladder", "--help"},
+		{"capital-ladder", "promote", "--help"},
+		{"capital-ladder", "status", "--help"},
 	}
 
 	for _, args := range cases {
@@ -56,9 +107,21 @@ func TestCommandHelp(t *testing.T) {
 	}
 }
 
-func TestCLICommands(t *testing.T) {
-	t.Parallel()
+func TestCapitalLadderSchemaCompatibility(t *testing.T) {
+	for _, test := range []struct {
+		version int
+		wantErr bool
+	}{{version: 109, wantErr: true}, {version: 110, wantErr: true}, {version: 111}, {version: 112, wantErr: true}} {
+		err := validateCapitalLadderSchemaVersion(test.version)
+		if (err != nil) != test.wantErr {
+			t.Errorf("validateCapitalLadderSchemaVersion(%d) error=%v, wantErr=%t", test.version, err, test.wantErr)
+		}
+	}
+}
 
+func TestCLICommands(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	accountBase := "/api/v1/accounts/" + accountID.String()
 	strategyID := uuid.New()
 	runID := uuid.New()
 	positionID := uuid.New()
@@ -112,6 +175,8 @@ func TestCLICommands(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/me/accounts":
+			_ = json.NewEncoder(w).Encode([]domain.Account{{ID: accountID, Name: "canonical"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/strategies":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.Strategy]{
 				Data:  []domain.Strategy{strategy},
@@ -128,19 +193,19 @@ func TestCLICommands(t *testing.T) {
 			created.UpdatedAt = now
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(created)
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/strategies/"+strategyID.String()+"/run":
+		case r.Method == http.MethodPost && r.URL.Path == accountBase+"/strategies/"+strategyID.String()+"/run":
 			_ = json.NewEncoder(w).Encode(runResult)
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/portfolio/summary":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/portfolio/summary":
 			_ = json.NewEncoder(w).Encode(portfolioSummary{
 				OpenPositions: 1,
 				UnrealizedPnL: 12.5,
 				RealizedPnL:   2.5,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/portfolio/positions/open":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/portfolio/positions/open":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.Position]{
 				Data: runResult.Positions,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/risk/status":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/risk/status":
 			_ = json.NewEncoder(w).Encode(risk.EngineStatus{
 				RiskStatus: domain.RiskStatusNormal,
 				CircuitBreaker: risk.CircuitBreakerStatus{
@@ -157,7 +222,7 @@ func TestCLICommands(t *testing.T) {
 				},
 				UpdatedAt: now,
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runs":
+		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/runs":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.PipelineRun]{
 				Data: []domain.PipelineRun{{
 					ID:         runID,
@@ -188,7 +253,7 @@ func TestCLICommands(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]bool{"active": true})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/memories/search":
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/accounts/00000000-0000-4000-8000-000000000064/memories/search":
 			_ = json.NewEncoder(w).Encode(listResponse[domain.AgentMemory]{
 				Data: []domain.AgentMemory{{
 					ID:             uuid.New(),
@@ -320,6 +385,7 @@ func TestCLICommands(t *testing.T) {
 	})
 
 	t.Run("memories search prints results", func(t *testing.T) {
+		t.Setenv("PROJECTION_ACCOUNT_ID", "00000000-0000-4000-8000-000000000064")
 		stdout, _, err := executeCLI(t, nil, "--api-url", server.URL, "memories", "search", "AAPL breakout")
 		if err != nil {
 			t.Fatalf("Execute() error = %v", err)

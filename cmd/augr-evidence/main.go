@@ -112,7 +112,7 @@ func openPostgresBackend(ctx context.Context, databaseURL string) (shadowBackend
 		db.Close()
 		return nil, err
 	}
-	if version != postgresrepo.RequiredSchemaVersion {
+	if !postgresrepo.IsSchemaVersionCompatible(version) {
 		db.Close()
 		return nil, fmt.Errorf("augr-evidence: schema version %d does not match required version %d", version, postgresrepo.RequiredSchemaVersion)
 	}
@@ -181,7 +181,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-103 PostgreSQL connection URL")
+	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-110 PostgreSQL connection URL")
 	inputPath := flags.String("input", "-", "JSON input path, or - for stdin")
 	campaignID := flags.String("campaign-id", "", "shadow campaign UUID")
 	assessmentID := flags.String("assessment-id", "", "milestone assessment UUID")

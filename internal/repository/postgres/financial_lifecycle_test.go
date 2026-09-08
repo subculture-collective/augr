@@ -14,6 +14,41 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+func TestValidateOrderFillInputAcceptsCanonicalStrategyFreeCopyFill(t *testing.T) {
+	now := time.Now().UTC()
+	order := &domain.Order{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "copy_subscription", OriginID: uuid.NewString(), Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusSubmitted, Quantity: 1}
+	input := repository.OrderFillInput{IdempotencyKey: "copy-fill", Order: order, FillIntent: repository.OrderFillIntent{Side: domain.OrderSideBuy, Quantity: 1, ExecutionPrice: 100}, Now: now, Trade: &domain.Trade{ID: uuid.New()}}
+	if err := validateOrderFillInput(input); err != nil {
+		t.Fatalf("strategy-free canonical fill rejected: %v", err)
+	}
+	order.AccountID = uuid.Nil
+	if err := validateOrderFillInput(input); err == nil {
+		t.Fatal("account-free fill accepted")
+	}
+}
+
+func TestOptionStatusIdempotencyIncludesSubmittedAt(t *testing.T) {
+	now := time.Date(2026, 8, 28, 12, 0, 0, 123456000, time.UTC)
+	accountID := uuid.New()
+	order := &domain.Order{ID: uuid.New(), SubmittedAt: &now}
+	input := repository.OptionFillInput{IdempotencyKey: "status-key", AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: "origin", Order: order, FillQuantity: 0, StatusOnly: true}
+	existing := optionStatusIdempotencyEvidence{key: input.IdempotencyKey, orderID: order.ID, accountID: accountID, environment: input.Environment, originType: input.OriginType, originID: input.OriginID, status: domain.OrderStatusCancelled, externalID: "external", submittedAt: &now}
+	order.Status, order.ExternalID = domain.OrderStatusCancelled, "external"
+	if !optionStatusIdempotencyMatches(existing, input) {
+		t.Fatal("matching status evidence rejected")
+	}
+	other := now.Add(time.Nanosecond)
+	existing.submittedAt = &other
+	if !optionStatusIdempotencyMatches(existing, input) {
+		t.Fatal("database microsecond normalization rejected")
+	}
+	other = now.Add(time.Microsecond)
+	existing.submittedAt = &other
+	if optionStatusIdempotencyMatches(existing, input) {
+		t.Fatal("distinct submitted_at microsecond accepted")
+	}
+}
+
 func TestFinancialLifecycle_FirstDeliveryReplayRollbackAndPositions(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)
@@ -118,6 +153,32 @@ func TestFinancialLifecycle_FirstDeliveryReplayRollbackAndPositions(t *testing.T
 	}
 }
 
+func TestFinancialLifecycleLockedOrderOwnsCommandAndCapsCumulativeQuantity(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := &DB{Pool: pool}
+	strategyID := createFinancialLifecycleStrategy(t, ctx, pool)
+	now := time.Now().UTC()
+	persisted := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Status: domain.OrderStatusSubmitted, Quantity: 2}
+	createFinancialLifecycleOrder(t, ctx, pool, persisted)
+	tampered := *persisted
+	tampered.Ticker, tampered.MarketType = "MSFT", domain.MarketTypePolymarket
+	result, err := repo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: "locked-command", Order: &tampered, FillIntent: repository.OrderFillIntent{Side: domain.OrderSideBuy, Quantity: 1, ExecutionPrice: 100}, Now: now, Trade: &domain.Trade{ID: uuid.New()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Position == nil || result.Position.Ticker != "AAPL" || result.Trade == nil || result.Trade.Ticker != "AAPL" {
+		t.Fatalf("persisted command was not authoritative: %+v", result)
+	}
+	overfill := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, Ticker: "NVDA", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Status: domain.OrderStatusSubmitted, Quantity: 2}
+	createFinancialLifecycleOrder(t, ctx, pool, overfill)
+	_, err = repo.ApplyOrderFill(ctx, repository.OrderFillInput{IdempotencyKey: "overfill", Order: overfill, FillIntent: repository.OrderFillIntent{Side: domain.OrderSideBuy, Quantity: 3, ExecutionPrice: 100}, Now: now, Trade: &domain.Trade{ID: uuid.New()}})
+	if err == nil || !strings.Contains(err.Error(), "exceeds persisted order size") {
+		t.Fatalf("overfill error=%v", err)
+	}
+}
+
 func TestFinancialLifecycle_OptionSettlementCommitsPositionAndTradeAtomically(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)
@@ -136,7 +197,8 @@ func TestFinancialLifecycle_OptionSettlementCommitsPositionAndTradeAtomically(t 
 		t.Fatalf("create option position: %v", err)
 	}
 	result, err := repo.SettleOptionPosition(ctx, repository.OptionPositionSettlementInput{
-		PositionID: positionID, SettlementPrice: 5, SettledAt: settledAt, ExitReason: "exercise_cash_settled",
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
+		IdempotencyKey: positionID.String(), PositionID: positionID, SettlementPrice: 5, SettledAt: settledAt, ExitReason: "exercise_cash_settled",
 	})
 	if err != nil {
 		t.Fatalf("SettleOptionPosition() error = %v", err)
@@ -171,7 +233,8 @@ func TestFinancialLifecycle_OptionSettlementCommitsPositionAndTradeAtomically(t 
 		t.Fatalf("install trade failure constraint: %v", err)
 	}
 	if _, err := repo.SettleOptionPosition(ctx, repository.OptionPositionSettlementInput{
-		PositionID: rollbackPositionID, SettlementPrice: 0, SettledAt: settledAt, ExitReason: "expired_worthless",
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
+		IdempotencyKey: rollbackPositionID.String(), PositionID: rollbackPositionID, SettlementPrice: 0, SettledAt: settledAt, ExitReason: "expired_worthless",
 	}); err == nil {
 		t.Fatal("expected settlement trade failure")
 	}
@@ -205,8 +268,8 @@ func TestFinancialLifecycle_OptionFillBatchIsAtomicAndReplaySafe(t *testing.T) {
 	}
 	orders[0].FilledAvgPrice, orders[1].FilledAvgPrice = floatPtr(2.5), floatPtr(1)
 	inputs := []repository.OptionFillInput{
-		{Order: orders[0], FillPrice: 2.5, FillQuantity: 1, Fee: .65, Premium: 250, FilledAt: filledAt},
-		{Order: orders[1], FillPrice: 1, FillQuantity: 1, Fee: .65, Premium: 100, FilledAt: filledAt},
+		{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: orders[0].ID.String(), Order: orders[0], FillPrice: 2.5, FillQuantity: 1, Fee: .65, Premium: 250, FilledAt: filledAt},
+		{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: orders[1].ID.String(), Order: orders[1], FillPrice: 1, FillQuantity: 1, Fee: .65, Premium: 100, FilledAt: filledAt},
 	}
 	results, err := repo.ApplyOptionFills(ctx, inputs)
 	if err != nil {
@@ -239,7 +302,7 @@ func TestFinancialLifecycle_OptionFillBatchIsAtomicAndReplaySafe(t *testing.T) {
 	createFinancialLifecycleOrder(t, ctx, pool, tamperedOrder)
 	tamperedOrder.Status, tamperedOrder.FilledQuantity, tamperedOrder.FilledAt, tamperedOrder.SubmittedAt = domain.OrderStatusFilled, 1, &filledAt, &filledAt
 	tamperedOrder.FilledAvgPrice, tamperedOrder.ExternalID, tamperedOrder.UnderlyingTicker = floatPtr(2.5), "paper-"+tamperedOrder.ID.String(), "MSFT"
-	if _, err := repo.ApplyOptionFills(ctx, []repository.OptionFillInput{{Order: tamperedOrder, FillPrice: 2.5, FillQuantity: 1, Fee: .65, Premium: 250, FilledAt: filledAt}}); err == nil {
+	if _, err := repo.ApplyOptionFills(ctx, []repository.OptionFillInput{{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: tamperedOrder.ID.String(), Order: tamperedOrder, FillPrice: 2.5, FillQuantity: 1, Fee: .65, Premium: 250, FilledAt: filledAt}}); err == nil {
 		t.Fatal("expected persisted order metadata mismatch to fail")
 	}
 	var tamperedStatus domain.OrderStatus
@@ -253,7 +316,7 @@ func TestFinancialLifecycle_OptionFillBatchIsAtomicAndReplaySafe(t *testing.T) {
 	createFinancialLifecycleOrder(t, ctx, pool, mismatchedClose)
 	mismatchedClose.Status, mismatchedClose.FilledQuantity, mismatchedClose.FilledAt, mismatchedClose.SubmittedAt = domain.OrderStatusFilled, mismatchedClose.Quantity, &filledAt, &filledAt
 	mismatchedClose.FilledAvgPrice, mismatchedClose.ExternalID = floatPtr(3), "paper-"+mismatchedClose.ID.String()
-	if _, err := repo.ApplyOptionFills(ctx, []repository.OptionFillInput{{Order: mismatchedClose, PositionID: &results[0].PositionID, FillPrice: 3, FillQuantity: 1, Fee: .65, Premium: 300, FilledAt: filledAt, ExitReason: "spread close"}}); err == nil {
+	if _, err := repo.ApplyOptionFills(ctx, []repository.OptionFillInput{{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: mismatchedClose.ID.String(), Order: mismatchedClose, PositionID: &results[0].PositionID, FillPrice: 3, FillQuantity: 1, Fee: .65, Premium: 300, FilledAt: filledAt, ExitReason: "spread close"}}); err == nil {
 		t.Fatal("expected mismatched contract close to fail")
 	}
 	var mismatchedStatus domain.OrderStatus
@@ -265,15 +328,18 @@ func TestFinancialLifecycle_OptionFillBatchIsAtomicAndReplaySafe(t *testing.T) {
 		{ID: uuid.New(), StrategyID: &strategyID, Ticker: orders[0].Ticker, MarketType: domain.MarketTypeOptions, Side: domain.OrderSideSell, Status: domain.OrderStatusPending, Quantity: 1, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &longStrike, Expiry: &expiry, ContractMultiplier: 100, PositionIntent: &sellClose, LegGroupID: &groupID, Broker: "paper"},
 		{ID: uuid.New(), StrategyID: &strategyID, Ticker: orders[1].Ticker, MarketType: domain.MarketTypeOptions, Side: domain.OrderSideBuy, Status: domain.OrderStatusPending, Quantity: 1, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &shortStrike, Expiry: &expiry, ContractMultiplier: 100, PositionIntent: &buyClose, LegGroupID: &groupID, Broker: "paper"},
 	}
-	for _, order := range closeOrders {
+	for index, order := range closeOrders {
+		if _, err := pool.Exec(ctx, `UPDATE positions SET close_reservation_order_id=$1 WHERE id=$2`, order.ID, results[index].PositionID); err != nil {
+			t.Fatal(err)
+		}
 		createFinancialLifecycleOrder(t, ctx, pool, order)
 		order.Status, order.FilledQuantity, order.FilledAt, order.SubmittedAt = domain.OrderStatusFilled, order.Quantity, &filledAt, &filledAt
 		order.ExternalID = "paper-" + order.ID.String()
 	}
 	closeOrders[0].FilledAvgPrice, closeOrders[1].FilledAvgPrice = floatPtr(3), floatPtr(.5)
 	if _, err := repo.ApplyOptionFills(ctx, []repository.OptionFillInput{
-		{Order: closeOrders[0], PositionID: &results[0].PositionID, FillPrice: 3, FillQuantity: 1, Fee: .65, Premium: 300, FilledAt: filledAt, ExitReason: "spread close"},
-		{Order: closeOrders[1], PositionID: &results[1].PositionID, FillPrice: .5, FillQuantity: 1, Fee: .65, Premium: 50, FilledAt: filledAt, ExitReason: "spread close"},
+		{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: closeOrders[0].ID.String(), Order: closeOrders[0], PositionID: &results[0].PositionID, FillPrice: 3, FillQuantity: 1, Fee: .65, Premium: 300, FilledAt: filledAt, ExitReason: "spread close"},
+		{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: closeOrders[1].ID.String(), Order: closeOrders[1], PositionID: &results[1].PositionID, FillPrice: .5, FillQuantity: 1, Fee: .65, Premium: 50, FilledAt: filledAt, ExitReason: "spread close"},
 	}); err != nil {
 		t.Fatalf("close option batch: %v", err)
 	}
@@ -306,8 +372,8 @@ func TestFinancialLifecycle_OptionFillBatchIsAtomicAndReplaySafe(t *testing.T) {
 		t.Fatalf("install batch failure constraint: %v", err)
 	}
 	if _, err := repo.ApplyOptionFills(ctx, []repository.OptionFillInput{
-		{Order: failOrders[0], FillPrice: 2, FillQuantity: 1, Fee: .65, Premium: 200, FilledAt: filledAt},
-		{Order: failOrders[1], FillPrice: 1, FillQuantity: 1, Fee: .65, Premium: 100, FilledAt: filledAt},
+		{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: failOrders[0].ID.String(), Order: failOrders[0], FillPrice: 2, FillQuantity: 1, Fee: .65, Premium: 200, FilledAt: filledAt},
+		{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", IdempotencyKey: failOrders[1].ID.String(), Order: failOrders[1], FillPrice: 1, FillQuantity: 1, Fee: .65, Premium: 100, FilledAt: filledAt},
 	}); err == nil {
 		t.Fatal("expected second-leg persistence failure")
 	}
@@ -341,7 +407,7 @@ func TestFinancialLifecycle_SettlePredictionDecisionSingleLotKeepsLinkage(t *tes
 	if _, err := pool.Exec(ctx, `INSERT INTO trades (id, order_id, position_id, ticker, side, quantity, price, executed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.New(), orderID, positionID, "KX-TEST:YES", domain.OrderSideBuy, 4, .40, resolvedAt.Add(-time.Minute)); err != nil {
 		t.Fatalf("failed to insert opening trade: %v", err)
 	}
-	decision := &domain.TradeDecision{ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}
+	decision := &domain.TradeDecision{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}
 	res, err := repo.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + decisionID.String(), Decision: decision, PositionTicker: "KX-TEST:YES", Payout: 1, ResolvedAt: resolvedAt})
 	if err != nil {
 		t.Fatalf("SettlePredictionDecision() error = %v", err)
@@ -422,7 +488,7 @@ func TestFinancialLifecycle_SettlePredictionDecisionReplayAndRollback(t *testing
 	if _, err := pool.Exec(ctx, `INSERT INTO trades (id, order_id, position_id, ticker, side, quantity, price, executed_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.New(), orderID, positionID, "KX-TEST:YES", domain.OrderSideBuy, 4, .40, resolvedAt.Add(-time.Minute)); err != nil {
 		t.Fatalf("failed to insert opening trade: %v", err)
 	}
-	decision := &domain.TradeDecision{ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}
+	decision := &domain.TradeDecision{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}
 	res, err := repo.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + decisionID.String(), Decision: decision, PositionTicker: "KX-TEST:YES", Payout: 1, ResolvedAt: resolvedAt})
 	if err != nil {
 		t.Fatalf("SettlePredictionDecision() error = %v", err)
@@ -434,9 +500,13 @@ func TestFinancialLifecycle_SettlePredictionDecisionReplayAndRollback(t *testing
 	if err != nil || again.TradeID != res.TradeID || again.ReplayEventID == nil || *again.ReplayEventID != *res.ReplayEventID {
 		t.Fatalf("expected exact replay, got %+v err=%v", again, err)
 	}
+	_, err = repo.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + decisionID.String(), Decision: decision, PositionTicker: "KX-TEST:YES", Payout: 1, ResolvedAt: resolvedAt.Add(time.Hour)})
+	if err == nil {
+		t.Fatal("expected replay with changed resolution time to reject conflicting payload")
+	}
 	invalidDecisionID := uuid.New()
 	insertFinancialLifecycleSettlementDecision(t, ctx, pool, invalidDecisionID, strategyID, uuid.New())
-	_, err = repo.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "bad-settlement", Decision: &domain.TradeDecision{ID: invalidDecisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusClosed}, PositionTicker: "KX-TEST:YES", Payout: 1, ResolvedAt: resolvedAt})
+	_, err = repo.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "bad-settlement", Decision: &domain.TradeDecision{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", ID: invalidDecisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusClosed}, PositionTicker: "KX-TEST:YES", Payout: 1, ResolvedAt: resolvedAt})
 	if err == nil {
 		t.Fatal("expected invalid transition failure")
 	}
@@ -504,7 +574,7 @@ func newFinancialLifecycleIntegrationPool(t *testing.T, ctx context.Context) (*p
 	if err != nil {
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -530,10 +600,10 @@ func newFinancialLifecycleIntegrationPool(t *testing.T, ctx context.Context) (*p
 		`CREATE TYPE trade_side AS ENUM ('buy','sell')`,
 		`CREATE TYPE position_side AS ENUM ('long','short')`,
 		`CREATE TABLE strategies (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), market_type TEXT NOT NULL DEFAULT 'stock')`,
-		`CREATE TABLE orders (id UUID PRIMARY KEY, strategy_id UUID REFERENCES strategies(id), external_id TEXT, ticker TEXT NOT NULL, market_type TEXT NOT NULL, side trade_side NOT NULL, status TEXT NOT NULL, quantity NUMERIC(20,8) NOT NULL, filled_quantity NUMERIC(20,8) NOT NULL DEFAULT 0, filled_avg_price NUMERIC(20,8), submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ, broker TEXT, prediction_side TEXT, asset_class TEXT NOT NULL DEFAULT 'stock', underlying_ticker TEXT, option_type TEXT, strike NUMERIC(20,8), expiry TIMESTAMPTZ, contract_multiplier NUMERIC(20,8) NOT NULL DEFAULT 1, position_intent TEXT, leg_group_id UUID)`,
-		`CREATE TABLE positions (id UUID PRIMARY KEY, strategy_id UUID REFERENCES strategies(id), ticker TEXT NOT NULL, side position_side NOT NULL, quantity NUMERIC(20,8) NOT NULL, avg_entry NUMERIC(20,8) NOT NULL, current_price NUMERIC(20,8), unrealized_pnl NUMERIC(20,8), realized_pnl NUMERIC(20,8) NOT NULL DEFAULT 0, stop_loss NUMERIC(20,8), take_profit NUMERIC(20,8), opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), closed_at TIMESTAMPTZ, market_type TEXT, asset_class TEXT NOT NULL DEFAULT 'stock', underlying_ticker TEXT, option_type TEXT, strike NUMERIC(20,8), expiry TIMESTAMPTZ, contract_multiplier NUMERIC(20,8) NOT NULL DEFAULT 1, leg_group_id UUID, delta NUMERIC(20,8), gamma NUMERIC(20,8), theta NUMERIC(20,8), vega NUMERIC(20,8))`,
-		`CREATE TABLE trades (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), external_id TEXT, order_id UUID REFERENCES orders(id), position_id UUID REFERENCES positions(id), ticker TEXT NOT NULL, side trade_side NOT NULL, quantity NUMERIC(20,8) NOT NULL CHECK (quantity > 0), price NUMERIC(20,8) NOT NULL, fee NUMERIC(20,8) NOT NULL DEFAULT 0, executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'stock', open_close TEXT, contract_multiplier NUMERIC(20,8) NOT NULL DEFAULT 1, premium NUMERIC(20,8), exit_reason TEXT)`,
-		`CREATE TABLE financial_fill_idempotency (idempotency_key TEXT PRIMARY KEY, order_id UUID NOT NULL, position_id UUID, trade_id UUID NOT NULL, fill_quantity NUMERIC(20,8) NOT NULL, fill_price NUMERIC(20,8) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE orders (pipeline_run_id UUID, pipeline_run_trade_date DATE, copy_origin_rebalance_run_id UUID, account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', id UUID PRIMARY KEY, strategy_id UUID REFERENCES strategies(id), external_id TEXT, ticker TEXT NOT NULL, market_type TEXT NOT NULL, side trade_side NOT NULL, status TEXT NOT NULL, quantity NUMERIC(20,8) NOT NULL, filled_quantity NUMERIC(20,8) NOT NULL DEFAULT 0, filled_avg_price NUMERIC(20,8), submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ, broker TEXT, prediction_side TEXT, asset_class TEXT NOT NULL DEFAULT 'stock', underlying_ticker TEXT, option_type TEXT, strike NUMERIC(20,8), expiry TIMESTAMPTZ, contract_multiplier NUMERIC(20,8) NOT NULL DEFAULT 1, position_intent TEXT, leg_group_id UUID)`,
+		`CREATE TABLE positions (close_reservation_order_id UUID, account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', id UUID PRIMARY KEY, strategy_id UUID REFERENCES strategies(id), ticker TEXT NOT NULL, side position_side NOT NULL, quantity NUMERIC(20,8) NOT NULL, avg_entry NUMERIC(20,8) NOT NULL, current_price NUMERIC(20,8), unrealized_pnl NUMERIC(20,8), realized_pnl NUMERIC(20,8) NOT NULL DEFAULT 0, stop_loss NUMERIC(20,8), take_profit NUMERIC(20,8), opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), closed_at TIMESTAMPTZ, market_type TEXT, asset_class TEXT NOT NULL DEFAULT 'stock', underlying_ticker TEXT, option_type TEXT, strike NUMERIC(20,8), expiry TIMESTAMPTZ, contract_multiplier NUMERIC(20,8) NOT NULL DEFAULT 1, leg_group_id UUID, delta NUMERIC(20,8), gamma NUMERIC(20,8), theta NUMERIC(20,8), vega NUMERIC(20,8))`,
+		`CREATE TABLE trades (strategy_id UUID, pipeline_run_id UUID, pipeline_run_trade_date DATE, account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', id UUID PRIMARY KEY DEFAULT gen_random_uuid(), external_id TEXT, order_id UUID REFERENCES orders(id), position_id UUID REFERENCES positions(id), ticker TEXT NOT NULL, side trade_side NOT NULL, quantity NUMERIC(20,8) NOT NULL CHECK (quantity > 0), price NUMERIC(20,8) NOT NULL, fee NUMERIC(20,8) NOT NULL DEFAULT 0, executed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'stock', open_close TEXT, contract_multiplier NUMERIC(20,8) NOT NULL DEFAULT 1, premium NUMERIC(20,8), exit_reason TEXT)`,
+		`CREATE TABLE financial_fill_idempotency (cumulative_fee NUMERIC, cumulative_premium NUMERIC, cumulative_filled_at TIMESTAMPTZ, cumulative_status TEXT, cumulative_exit_reason TEXT, account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', idempotency_key TEXT PRIMARY KEY, order_id UUID NOT NULL, position_id UUID, trade_id UUID NOT NULL, fill_quantity NUMERIC(20,8) NOT NULL, fill_price NUMERIC(20,8) NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	}
 	for _, stmt := range ddl {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
@@ -541,6 +611,14 @@ func newFinancialLifecycleIntegrationPool(t *testing.T, ctx context.Context) (*p
 			_, _ = adminPool.Exec(ctx, `DROP SCHEMA "`+schemaName+`" CASCADE`)
 			adminPool.Close()
 			t.Fatalf("failed to apply test schema DDL: %v", err)
+		}
+	}
+	for _, name := range []string{"option_settlement_idempotency", "option_status_idempotency"} {
+		migration := repositoryMigrationSQL(t, "000108_canonical_account_expansion.up.sql")
+		start := strings.Index(migration, "CREATE TABLE "+name+" (")
+		end := strings.Index(migration[start:], ");") + start + 2
+		if _, err := pool.Exec(ctx, migration[start:end]); err != nil {
+			t.Fatal(err)
 		}
 	}
 	return pool, func() {
@@ -554,9 +632,9 @@ func newFinancialLifecycleSettlementIntegrationPool(t *testing.T, ctx context.Co
 	t.Helper()
 	pool, cleanup := newFinancialLifecycleIntegrationPool(t, ctx)
 	for _, stmt := range []string{
-		`CREATE TABLE trade_decisions (id UUID PRIMARY KEY, strategy_id UUID REFERENCES strategies(id), paper_order_id UUID, market_type TEXT NOT NULL DEFAULT 'kalshi', instrument_key TEXT NOT NULL, outcome TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'paper_ordered', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE TABLE replay_events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), trade_decision_id UUID REFERENCES trade_decisions(id), event_type TEXT NOT NULL, source TEXT NOT NULL, payload JSONB NOT NULL, occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
-		`CREATE TABLE prediction_settlement_idempotency (idempotency_key TEXT PRIMARY KEY, decision_id UUID NOT NULL UNIQUE, position_id UUID, trade_id UUID NOT NULL, replay_event_id UUID, payout NUMERIC(20,8) NOT NULL, resolved_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE trade_decisions (account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', id UUID PRIMARY KEY, strategy_id UUID REFERENCES strategies(id), paper_order_id UUID, market_type TEXT NOT NULL DEFAULT 'kalshi', instrument_key TEXT NOT NULL, outcome TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'paper_ordered', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE replay_events (account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', id UUID PRIMARY KEY DEFAULT gen_random_uuid(), trade_decision_id UUID REFERENCES trade_decisions(id), event_type TEXT NOT NULL, source TEXT NOT NULL, payload JSONB NOT NULL, occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE prediction_settlement_idempotency (account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', idempotency_key TEXT PRIMARY KEY, decision_id UUID NOT NULL UNIQUE, position_id UUID, trade_id UUID NOT NULL, replay_event_id UUID, payout NUMERIC(20,8) NOT NULL, resolved_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	} {
 		if _, err := pool.Exec(ctx, stmt); err != nil {
 			cleanup()
@@ -591,10 +669,13 @@ func createFinancialLifecycleStrategy(t *testing.T, ctx context.Context, pool *p
 
 func createFinancialLifecycleOrder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, order *domain.Order) {
 	t.Helper()
+	order.AccountID = canonicalRepositoryTestAccountID
+	order.Environment = domain.AccountEnvironmentPaperScored
+	order.OriginType, order.OriginID = "operator", "fixture"
 	if _, err := pool.Exec(ctx, `INSERT INTO orders
 		(id,strategy_id,external_id,ticker,market_type,side,status,quantity,filled_quantity,filled_avg_price,submitted_at,filled_at,broker,prediction_side,asset_class,underlying_ticker,option_type,strike,expiry,contract_multiplier,position_intent,leg_group_id)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
-		order.ID, order.StrategyID, nullString(order.ExternalID), order.Ticker, order.MarketType, order.Side, order.Status, order.Quantity, order.FilledQuantity, order.FilledAvgPrice, order.SubmittedAt, order.FilledAt, nullString(order.Broker), order.PredictionSide, order.AssetClass, nullString(order.UnderlyingTicker), order.OptionType, order.Strike, order.Expiry, order.ContractMultiplier, order.PositionIntent, order.LegGroupID); err != nil {
+		order.ID, order.StrategyID, nullString(order.ExternalID), order.Ticker, order.MarketType, order.Side, order.Status, order.Quantity, 0, nil, order.SubmittedAt, nil, nullString(order.Broker), order.PredictionSide, order.AssetClass, nullString(order.UnderlyingTicker), order.OptionType, order.Strike, order.Expiry, order.ContractMultiplier, order.PositionIntent, order.LegGroupID); err != nil {
 		t.Fatalf("failed to create order: %v", err)
 	}
 }

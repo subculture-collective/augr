@@ -230,6 +230,23 @@ func applyDefaultAuthConfig(cfg AuthConfig) AuthConfig {
 	return cfg
 }
 
+func (s *Server) handleGetCurrentUserAccounts(w http.ResponseWriter, r *http.Request) {
+	if s.projectionAccountID == nil || s.economicAccounts == nil {
+		respondError(w, http.StatusServiceUnavailable, "execution account is not configured", ErrCodeInternal)
+		return
+	}
+	account, err := s.economicAccounts.GetByID(r.Context(), *s.projectionAccountID)
+	if err != nil {
+		respondEconomicReadError(w, err, "account not found", "failed to load execution account")
+		return
+	}
+	if account == nil || account.ID != *s.projectionAccountID {
+		respondError(w, http.StatusNotFound, "account not found", ErrCodeNotFound)
+		return
+	}
+	respondJSON(w, http.StatusOK, []domain.Account{*account})
+}
+
 // GenerateTokenPair creates a short-lived access token and a refresh token.
 func (a *AuthManager) GenerateTokenPair(subject string) (TokenPair, error) {
 	accessToken, expiresAt, err := a.generateJWT(subject, accessTokenType, a.accessTokenTTL)

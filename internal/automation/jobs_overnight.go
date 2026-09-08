@@ -21,13 +21,13 @@ func (o *JobOrchestrator) registerOvernightJobs() {
 	if !o.discoveryDeploymentReady() {
 		return
 	}
-	if o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.OvernightBacktestRuns != nil {
+	if o.deps.Universe != nil && o.discoveryDataService() != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.OvernightBacktestRuns != nil {
 		o.Register("overnight_backtest", "Heavy 5-year backtests on promising candidates", overnightBacktestSpec, o.overnightBacktest, "history_refresh", "overnight_sweep")
 	}
-	if o.jobs["overnight_backtest"] != nil && o.deps.Universe != nil && o.deps.DataService != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil {
+	if o.jobs["overnight_backtest"] != nil && o.deps.Universe != nil && o.discoveryDataService() != nil && o.deps.LLMProvider != nil && o.deps.StrategyRepo != nil && o.deps.BacktestConfigRepo != nil {
 		o.Register("overnight_generate", "LLM generates new strategy ideas per index group", overnightGenerateSpec, o.overnightGenerate, "overnight_sweep", "overnight_backtest")
 	}
-	if o.jobs["overnight_generate"] != nil && o.deps.OptionsProvider != nil && o.deps.Universe != nil && o.deps.LLMProvider != nil && o.deps.DataService != nil && o.deps.StrategyRepo != nil && o.deps.DiscoveryRunRepo != nil && o.deps.BacktestConfigRepo != nil {
+	if o.optionsDiscoveryReady() && o.jobs["overnight_generate"] != nil && o.discoveryOptionsProvider() != nil && o.deps.Universe != nil && o.deps.LLMProvider != nil && o.discoveryDataService() != nil && o.deps.ObservedOptionsCandidates != nil && len(o.deps.OptionsSourceCommit) == 40 && len(o.deps.OptionsSourceTreeSHA256) == 64 && o.deps.DiscoveryRunRepo != nil && o.deps.BacktestConfigRepo != nil {
 		o.Register("options_discovery", "Full options strategy discovery pipeline", optionsDiscoverySpec, o.optionsDiscovery, "overnight_generate")
 	}
 }
@@ -47,7 +47,9 @@ var overnightIndexGroups = []string{"nasdaq", "nyse", "other"}
 
 func (o *JobOrchestrator) overnightBacktest(ctx context.Context) error {
 	o.logger.Info("overnight_backtest: chunk starting")
-	chunker := newOvernightBacktestChunker(o.deps, o.logger)
+	deps := o.deps
+	deps.DataService = o.discoveryDataService()
+	chunker := newOvernightBacktestChunker(deps, o.logger)
 	if err := chunker.RunChunk(ctx); err != nil {
 		return fmt.Errorf("overnight_backtest: chunk failed: %w", err)
 	}
@@ -287,7 +289,7 @@ func (o *JobOrchestrator) overnightGenerate(ctx context.Context) error {
 	defer func() { o.SetLastSummary("overnight_generate", summary) }()
 
 	deps := discovery.DiscoveryDeps{
-		DataService:     o.deps.DataService,
+		DataService:     o.discoveryDataService(),
 		LLMProvider:     o.deps.LLMProvider,
 		Strategies:      o.deps.StrategyRepo,
 		BacktestConfigs: o.deps.BacktestConfigRepo,
@@ -548,8 +550,13 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	summary := map[string]int{"candidates": 0, "scored": 0, "generated": 0, "swept": 0, "validated": 0, "deployed": 0, "proposed": 0, "created": 0, "reused": 0, "errors": 0, "winners": 0}
 	defer func() { o.SetLastSummary("options_discovery", summary) }()
 
-	if o.deps.OptionsProvider == nil {
+	optionsProvider := o.discoveryOptionsProvider()
+	if optionsProvider == nil {
 		return fmt.Errorf("options_discovery: options provider not configured")
+	}
+	historicalReader, ok := optionsProvider.(data.ManifestBoundOptionChainReader)
+	if !ok {
+		return fmt.Errorf("options_discovery: manifest-bound historical options reader is required")
 	}
 	if o.deps.Universe == nil {
 		return fmt.Errorf("options_discovery: universe not configured")
@@ -557,15 +564,18 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 	if o.deps.LLMProvider == nil {
 		return fmt.Errorf("options_discovery: LLM provider not configured")
 	}
-	if o.deps.DataService == nil || o.deps.StrategyRepo == nil {
-		return fmt.Errorf("options_discovery: data service and strategy repository are required")
+	if o.discoveryDataService() == nil || o.deps.ObservedOptionsCandidates == nil {
+		return fmt.Errorf("options_discovery: data service and native candidate registrar are required")
 	}
 	if o.deps.DiscoveryRunRepo == nil {
 		return fmt.Errorf("options_discovery: discovery run repository is required")
 	}
+	if o.deps.DiscoveryReadiness == nil {
+		return fmt.Errorf("options_discovery: scoped discovery readiness is required")
+	}
 
 	// Get tradeable watchlist candidates.
-	watchlist, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.deps.DataService, 500, 100)
+	watchlist, err := tradeableWatchlistTickers(ctx, o.logger, o.deps.Universe, o.discoveryDataService(), 500, 100)
 	if err != nil {
 		return fmt.Errorf("options_discovery: get watchlist: %w", err)
 	}
@@ -581,17 +591,25 @@ func (o *JobOrchestrator) optionsDiscovery(ctx context.Context) error {
 		Screener: optdiscovery.OptionsScreenerConfig{
 			Tickers: tickers,
 		},
-		Scoring:     optdiscovery.DefaultOptionsScoringConfig(),
-		Generator:   discovery.GeneratorConfig{Provider: o.deps.LLMProvider, Model: o.deps.LLMQuickModel, Metrics: o.deps.GeneratorMetrics},
-		BacktestCfg: discovery.DefaultScoringConfig(),
-		MaxWinners:  3,
+		Scoring:          optdiscovery.DefaultOptionsScoringConfig(),
+		Generator:        discovery.GeneratorConfig{Provider: o.deps.LLMProvider, Model: o.deps.LLMQuickModel, Metrics: o.deps.GeneratorMetrics},
+		BacktestCfg:      discovery.DefaultScoringConfig(),
+		MaxWinners:       3,
+		EvaluationStart:  o.deps.DiscoveryReadiness.EvaluationStart,
+		EvaluationEnd:    o.deps.DiscoveryReadiness.EvaluationEnd,
+		DecisionCutoff:   o.deps.DiscoveryReadiness.DecisionCutoff,
+		AccountID:        o.deps.CanonicalAccountID,
+		ScopeID:          o.deps.DiscoveryScopeID,
+		SourceCommit:     o.deps.OptionsSourceCommit,
+		SourceTreeSHA256: o.deps.OptionsSourceTreeSHA256,
 	}
 
 	deps := optdiscovery.OptionsDiscoveryDeps{
-		DataService:     o.deps.DataService,
-		OptionsProvider: o.deps.OptionsProvider,
-		Strategies:      o.deps.StrategyRepo,
-		Logger:          o.logger,
+		DataService:        o.discoveryDataService(),
+		OptionsProvider:    optionsProvider,
+		HistoricalReader:   historicalReader,
+		CandidateRegistrar: o.deps.ObservedOptionsCandidates,
+		Logger:             o.logger,
 	}
 
 	startedAt := time.Now().UTC()

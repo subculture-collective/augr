@@ -57,7 +57,7 @@ func TestRobustnessRepositoryRoundTripAndConcurrentConvergence(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE robustness_gates SET state=state WHERE assessment_id=$1`, fixture.assessment.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("gate mutation error=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000080_statistical_robustness_assessments.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 80") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000080_statistical_robustness_assessments.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 80") {
 		t.Fatalf("nonempty rollback error=%v", err)
 	}
 }
@@ -118,7 +118,7 @@ func newRobustnessRepositoryFixture(t *testing.T) robustnessRepositoryFixture {
 	t.Helper()
 	fixture := newEvaluationFixture(t)
 	ctx := context.Background()
-	if _, err := fixture.experiment.strategy.pool.Exec(ctx, repositoryMigrationSQL(t, "000080_statistical_robustness_assessments.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, fixture.experiment.strategy.pool, "000080_statistical_robustness_assessments.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	evalRepo := fixture.repo

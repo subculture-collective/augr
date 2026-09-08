@@ -23,7 +23,7 @@ type PolymarketMarketDataFetcher interface {
 // PublishPolymarketEvent sends a polymarket event over the websocket hub.
 func (s *Server) PublishPolymarketEvent(eventType EventType, data any) {
 	if s.hub != nil {
-		s.hub.BroadcastPolymarket(WSMessage{Type: eventType, Data: data, Timestamp: time.Now().UTC()})
+		s.hub.BroadcastPolymarket(WSMessage{Type: eventType, Scope: "system", Data: data, Timestamp: time.Now().UTC()})
 	}
 }
 

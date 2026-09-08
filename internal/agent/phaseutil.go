@@ -64,15 +64,16 @@ func (h *PhaseHelper) persistStructuredEvent(ctx context.Context, event *domain.
 	}
 }
 
-func (h *PhaseHelper) newStructuredEvent(runID, strategyID uuid.UUID, kind AgentEventKind, agentRole AgentRole, title, summary string, metadata map[string]any, tags []string) *domain.AgentEvent {
+func (h *PhaseHelper) newStructuredEvent(ref domain.PipelineRunRef, strategyID uuid.UUID, kind AgentEventKind, agentRole AgentRole, title, summary string, metadata map[string]any, tags []string) *domain.AgentEvent {
 	event := &domain.AgentEvent{
-		PipelineRunID: &runID,
-		StrategyID:    &strategyID,
-		EventKind:     kind.String(),
-		Title:         title,
-		Summary:       summary,
-		Tags:          append([]string(nil), tags...),
-		Metadata:      h.marshalStructuredEventMetadata(metadata),
+		PipelineRunID:        &ref.ID,
+		PipelineRunTradeDate: &ref.TradeDate,
+		StrategyID:           &strategyID,
+		EventKind:            kind.String(),
+		Title:                title,
+		Summary:              summary,
+		Tags:                 append([]string(nil), tags...),
+		Metadata:             h.marshalStructuredEventMetadata(metadata),
 	}
 	if agentRole != "" {
 		event.AgentRole = agentRole
@@ -134,9 +135,10 @@ func (h *PhaseHelper) persistAnalysisSnapshots(ctx context.Context, state *Pipel
 		// analysis context is nearly exhausted from data fetching.
 		persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotPersistTimeout)
 		err = h.persister.PersistSnapshot(persistCtx, &domain.PipelineRunSnapshot{
-			PipelineRunID: state.PipelineRunID,
-			DataType:      snapshotData.dataType,
-			Payload:       payload,
+			PipelineRunID:        state.PipelineRunID,
+			PipelineRunTradeDate: state.PipelineRunTradeDate,
+			DataType:             snapshotData.dataType,
+			Payload:              payload,
 		})
 		persistCancel()
 		if err != nil {

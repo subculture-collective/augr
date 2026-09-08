@@ -27,11 +27,7 @@ type staleRunRepoStub struct {
 }
 
 func (s *staleRunRepoStub) Create(context.Context, *domain.PipelineRun) error { return nil }
-func (s *staleRunRepoStub) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
-	return nil, repository.ErrNotFound
-}
-
-func (s *staleRunRepoStub) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
+func (s *staleRunRepoStub) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	return nil, repository.ErrNotFound
 }
 
@@ -71,8 +67,8 @@ func (s *staleRunRepoStub) Count(context.Context, repository.PipelineRunFilter) 
 	return len(s.runs), nil
 }
 
-func (s *staleRunRepoStub) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, update repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
-	s.ids = append(s.ids, id)
+func (s *staleRunRepoStub) Finalize(ctx context.Context, ref domain.PipelineRunRef, update repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	s.ids = append(s.ids, ref.ID)
 	s.updates = append(s.updates, update)
 	if s.finalizeStarted != nil {
 		close(s.finalizeStarted)
@@ -84,7 +80,7 @@ func (s *staleRunRepoStub) Finalize(ctx context.Context, id uuid.UUID, tradeDate
 	if s.finalize != nil {
 		s.finalize()
 	}
-	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: update.Status, CompletedAt: &update.CompletedAt, ErrorMessage: update.ErrorMessage}
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: update.Status, CompletedAt: &update.CompletedAt, ErrorMessage: update.ErrorMessage}
 	applied := true
 	if s.applied != nil {
 		applied = *s.applied
@@ -157,7 +153,7 @@ func TestStaleRunReconcilerLoserHasNoEffects(t *testing.T) {
 	}
 }
 
-func (*staleRunRepoStub) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (*staleRunRepoStub) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 

@@ -58,11 +58,7 @@ type mockPipelineRunRepo struct {
 
 func (m *mockPipelineRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (m *mockPipelineRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
-	return nil, nil
-}
-
-func (m *mockPipelineRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
+func (m *mockPipelineRunRepo) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	return nil, nil
 }
 
@@ -74,11 +70,11 @@ func (m *mockPipelineRunRepo) Count(_ context.Context, _ repository.PipelineRunF
 	return 0, nil
 }
 
-func (m *mockPipelineRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
-	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
+func (m *mockPipelineRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
 }
 
-func (m *mockPipelineRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (m *mockPipelineRunRepo) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
@@ -89,11 +85,11 @@ type mockDecisionRepo struct {
 
 func (m *mockDecisionRepo) Create(context.Context, *domain.AgentDecision) error { return nil }
 
-func (m *mockDecisionRepo) GetByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
+func (m *mockDecisionRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter, _, _ int) ([]domain.AgentDecision, error) {
 	return m.decisions, m.err
 }
 
-func (m *mockDecisionRepo) CountByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter) (int, error) {
+func (m *mockDecisionRepo) CountByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter) (int, error) {
 	return 0, nil
 }
 
@@ -185,13 +181,14 @@ func TestReflect_GeneratesFiveMemories(t *testing.T) {
 	pos := newTestPosition()
 	runID := uuid.New()
 	run := domain.PipelineRun{
-		ID:         runID,
-		StrategyID: *pos.StrategyID,
-		Ticker:     pos.Ticker,
-		TradeDate:  time.Now(),
-		Status:     domain.PipelineStatusCompleted,
-		Signal:     domain.PipelineSignalBuy,
-		StartedAt:  time.Now().Add(-1 * time.Hour),
+		ID:          runID,
+		Environment: domain.AccountEnvironmentPaperScored,
+		StrategyID:  *pos.StrategyID,
+		Ticker:      pos.Ticker,
+		TradeDate:   time.Now(),
+		Status:      domain.PipelineStatusCompleted,
+		Signal:      domain.PipelineSignalBuy,
+		StartedAt:   time.Now().Add(-1 * time.Hour),
 	}
 
 	memRepo := &mockMemoryRepo{}
@@ -228,6 +225,12 @@ func TestReflect_GeneratesFiveMemories(t *testing.T) {
 		}
 		if m.PipelineRunID == nil || *m.PipelineRunID != runID {
 			t.Errorf("memory pipeline_run_id = %v, want %s", m.PipelineRunID, runID)
+		}
+		if m.PipelineRunTradeDate == nil || !m.PipelineRunTradeDate.Equal(run.TradeDate) {
+			t.Errorf("memory pipeline_run_trade_date = %v, want %s", m.PipelineRunTradeDate, run.TradeDate)
+		}
+		if m.Environment != run.Environment {
+			t.Errorf("memory environment = %q, want %q", m.Environment, run.Environment)
 		}
 		if m.Situation == "" {
 			t.Error("memory situation is empty")

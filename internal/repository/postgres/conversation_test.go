@@ -15,38 +15,39 @@ import (
 )
 
 func TestBuildConversationListQuery_NoFilters(t *testing.T) {
-	query, args := buildConversationListQuery(repository.ConversationFilter{}, 10, 5)
+	query, args := buildConversationListQuery(canonicalRepositoryTestAccountID, repository.ConversationFilter{}, 10, 5)
 
-	if len(args) != 2 {
-		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
+	if len(args) != 3 {
+		t.Fatalf("expected account, limit, offset args; got %d", len(args))
 	}
-	if args[0] != 10 {
-		t.Errorf("expected limit=10, got %v", args[0])
+	if args[1] != 10 {
+		t.Errorf("expected limit=10, got %v", args[1])
 	}
-	if args[1] != 5 {
-		t.Errorf("expected offset=5, got %v", args[1])
+	if args[2] != 5 {
+		t.Errorf("expected offset=5, got %v", args[2])
 	}
 
 	assertContains(t, query, "FROM conversations")
 	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertContains(t, query, "account_id = $1")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 }
 
 func TestBuildConversationListQuery_WithFilters(t *testing.T) {
 	runID := uuid.New()
-	query, args := buildConversationListQuery(repository.ConversationFilter{
-		PipelineRunID: &runID,
-		AgentRole:     domain.AgentRoleTrader,
+	query, args := buildConversationListQuery(canonicalRepositoryTestAccountID, repository.ConversationFilter{
+		PipelineRunRef: &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
+		AgentRole:      domain.AgentRoleTrader,
 	}, 20, 0)
 
-	if len(args) != 4 {
-		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
+	if len(args) != 6 {
+		t.Fatalf("expected 6 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "pipeline_run_id = $1")
-	assertContains(t, query, "agent_role = $2")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "pipeline_run_id = $2")
+	assertContains(t, query, "pipeline_run_trade_date = $3")
+	assertContains(t, query, "agent_role = $4")
+	assertContains(t, query, "LIMIT $5 OFFSET $6")
 }
 
 func TestConversationRepoIntegration_CreateAndGetConversation(t *testing.T) {
@@ -54,11 +55,13 @@ func TestConversationRepoIntegration_CreateAndGetConversation(t *testing.T) {
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := &domain.Conversation{
-		PipelineRunID: uuid.New(),
-		AgentRole:     domain.AgentRoleTrader,
-		Title:         "Trader thread",
+		Environment:          domain.AccountEnvironmentPaperScored,
+		PipelineRunID:        uuid.New(),
+		PipelineRunTradeDate: canonicalRepositoryTestTradeDate,
+		AgentRole:            domain.AgentRoleTrader,
+		Title:                "Trader thread",
 	}
 
 	if err := repo.CreateConversation(ctx, conv); err != nil {
@@ -99,7 +102,7 @@ func TestConversationRepoIntegration_GetConversationNotFound(t *testing.T) {
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 
 	_, err := repo.GetConversation(ctx, uuid.New())
 	if err == nil {
@@ -115,7 +118,7 @@ func TestConversationRepoIntegration_AddMessagesAndGetMessagesChronological(t *t
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := createTestConversation(t, ctx, repo, uuid.New(), domain.AgentRoleMarketAnalyst, "Analysis thread")
 
 	first := &domain.ConversationMessage{
@@ -157,7 +160,7 @@ func TestConversationRepoIntegration_ListConversationsFiltersAndPagination(t *te
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
 	otherRunID := uuid.New()
 
@@ -166,7 +169,7 @@ func TestConversationRepoIntegration_ListConversationsFiltersAndPagination(t *te
 	conv3 := createTestConversationWithID(t, ctx, repo, mustParseConversationUUID(t, "00000000-0000-0000-0000-000000000003"), otherRunID, domain.AgentRoleMarketAnalyst, "Third")
 
 	byRun, err := repo.ListConversations(ctx, repository.ConversationFilter{
-		PipelineRunID: &runID,
+		PipelineRunRef: &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
 	}, 10, 0)
 	if err != nil {
 		t.Fatalf("ListConversations() by pipeline_run_id error = %v", err)
@@ -205,12 +208,33 @@ func TestConversationRepoIntegration_ListConversationsFiltersAndPagination(t *te
 	}
 }
 
+func TestConversationRepoIntegration_ListExcludesForeignAndLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newConversationIntegrationPool(t, ctx)
+	defer cleanup()
+
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
+	canonical := createTestConversation(t, ctx, repo, uuid.New(), domain.AgentRoleTrader, "canonical")
+	for _, accountID := range []any{uuid.New(), nil} {
+		if _, err := pool.Exec(ctx, `INSERT INTO conversations (account_id, environment, pipeline_run_id, pipeline_run_trade_date, agent_role, title) VALUES ($1,$2,$3,$4,$5,$6)`, accountID, domain.AccountEnvironmentPaperScored, uuid.New(), canonicalRepositoryTestTradeDate, domain.AgentRoleTrader, "not canonical"); err != nil {
+			t.Fatalf("insert non-canonical conversation: %v", err)
+		}
+	}
+	got, err := repo.ListConversations(ctx, repository.ConversationFilter{}, 10, 0)
+	if err != nil {
+		t.Fatalf("ListConversations() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != canonical.ID {
+		t.Fatalf("ListConversations() = %#v, want canonical row only", got)
+	}
+}
+
 func TestConversationRepoIntegration_MessagePagination(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newConversationIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewConversationRepo(pool)
+	repo := NewConversationRepo(pool, canonicalRepositoryTestAccountID)
 	conv := createTestConversation(t, ctx, repo, uuid.New(), domain.AgentRoleTrader, "Paginated messages")
 
 	first := &domain.ConversationMessage{
@@ -260,10 +284,12 @@ func createTestConversationWithID(t *testing.T, ctx context.Context, repo *Conve
 	t.Helper()
 
 	conv := &domain.Conversation{
-		ID:            id,
-		PipelineRunID: runID,
-		AgentRole:     role,
-		Title:         title,
+		ID:                   id,
+		Environment:          domain.AccountEnvironmentPaperScored,
+		PipelineRunID:        runID,
+		PipelineRunTradeDate: canonicalRepositoryTestTradeDate,
+		AgentRole:            role,
+		Title:                title,
 	}
 	if err := repo.CreateConversation(ctx, conv); err != nil {
 		t.Fatalf("CreateConversation() error = %v", err)
@@ -303,7 +329,7 @@ func newConversationIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -332,7 +358,10 @@ func newConversationIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 	ddl := []string{
 		`CREATE TABLE conversations (
 			id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id      UUID,
+			environment     TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
 			pipeline_run_id UUID        NOT NULL,
+			pipeline_run_trade_date DATE,
 			agent_role      TEXT        NOT NULL,
 			title           TEXT,
 			created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -340,6 +369,7 @@ func newConversationIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 		)`,
 		`CREATE TABLE conversation_messages (
 			id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id      UUID,
 			conversation_id UUID        NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
 			role            TEXT        NOT NULL CHECK (role IN ('user', 'assistant')),
 			content         TEXT        NOT NULL,

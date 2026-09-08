@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -40,20 +41,24 @@ func TestProviderRateLimitCooldownsMigrationAppliesAgainstExistingSchema(t *test
 	if err != nil {
 		t.Fatalf("failed to parse db config: %v", err)
 	}
-	schemaName := "migr_" + strings.ReplaceAll(strings.ReplaceAll(t.Name(), "/", "_"), " ", "_")
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgx.Identifier{schemaName}.Sanitize()); err != nil {
+	schemaName := "migr_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schemaName}.Sanitize()); err != nil {
 		t.Fatalf("failed to create schema: %v", err)
 	}
 	t.Cleanup(func() {
 		_, _ = adminPool.Exec(ctx, `DROP SCHEMA IF EXISTS `+pgx.Identifier{schemaName}.Sanitize()+` CASCADE`)
 	})
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatalf("failed to create schema pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	var actualSchema string
+	if err := pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&actualSchema); err != nil || actualSchema != schemaName {
+		t.Fatalf("isolated schema = %q, want %q: %v", actualSchema, schemaName, err)
+	}
 	for _, filename := range sortedUpMigrationsThrough(t, "000057_provider_rate_limit_cooldowns.up.sql") {
 		if _, err := pool.Exec(ctx, readMigrationFile(t, filename)); err != nil {
 			t.Fatalf("failed to apply %s: %v", filename, err)

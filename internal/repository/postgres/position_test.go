@@ -32,7 +32,18 @@ func TestBuildPositionListQuery_NoFilters(t *testing.T) {
 	assertContains(t, query, "FROM positions")
 	assertContains(t, query, "ORDER BY p.opened_at DESC, p.id DESC")
 	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertNotContains(t, query, " WHERE p.closed_at")
+}
+
+func TestPositionReloadGetsMarketTypeFromOriginatingOrder(t *testing.T) {
+	if !strings.Contains(positionSelectSQL, "SELECT o.market_type FROM trades t JOIN orders o") {
+		t.Fatal("position reload lacks originating-order market type fallback")
+	}
+	for _, required := range []string{"t.environment=p.environment", "o.environment=p.environment"} {
+		if !strings.Contains(positionSelectSQL, required) {
+			t.Fatalf("position reload child linkage lacks %q", required)
+		}
+	}
 }
 
 func TestBuildPositionListQuery_AllFilters(t *testing.T) {
@@ -100,6 +111,17 @@ func TestBuildPositionScopedQuery_StrategyScope(t *testing.T) {
 	assertNotContains(t, query, "closed_at IS NULL")
 }
 
+func TestBuildPositionExecutionScopeQueryRequiresCompleteOwnership(t *testing.T) {
+	accountID := uuid.New()
+	query, args := buildPositionExecutionScopeQuery(accountID, domain.AccountEnvironmentPaperScored, "copy_subscription", "subscription-1", repository.PositionFilter{Ticker: "AAPL", Side: domain.PositionSideLong}, 10, 0)
+	for _, clause := range []string{"p.account_id = $1", "p.environment = $2", "p.origin_type = $3", "p.origin_id = $4", "p.ticker = $5", "p.side = $6"} {
+		assertContains(t, query, clause)
+	}
+	if len(args) != 8 || args[0] != accountID || args[3] != "subscription-1" {
+		t.Fatalf("args=%v", args)
+	}
+}
+
 func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	t.Helper()
 
@@ -107,7 +129,7 @@ func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 
 	currentPrice := 185.50
@@ -116,6 +138,7 @@ func TestPositionRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	takeProfit := 200.0
 
 	position := &domain.Position{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID:    &strategyID,
 		MarketType:    domain.MarketTypeStock,
 		Ticker:        "AAPL",
@@ -236,7 +259,7 @@ func TestPositionRepoIntegration_GetNotFound(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 
 	_, err := repo.Get(ctx, uuid.New())
 	if err == nil {
@@ -254,9 +277,10 @@ func TestPositionRepoIntegration_UpdateNotFound(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 
 	err := repo.Update(ctx, &domain.Position{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		ID:       uuid.New(),
 		Ticker:   "AAPL",
 		Side:     domain.PositionSideLong,
@@ -271,6 +295,30 @@ func TestPositionRepoIntegration_UpdateNotFound(t *testing.T) {
 	}
 }
 
+func TestPositionRepoIntegration_UpdatePreservesImmutableStrategy(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPositionIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
+	originalStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
+	otherStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeCrypto)
+	position := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", StrategyID: &originalStrategy, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100}
+	if err := repo.Create(ctx, position); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	position.StrategyID = &otherStrategy
+	if err := repo.Update(ctx, position); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Update() error = %v, want ErrNotFound", err)
+	}
+	got, err := repo.Get(ctx, position.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.StrategyID == nil || *got.StrategyID != originalStrategy {
+		t.Fatalf("stored strategy = %v, want %s", got.StrategyID, originalStrategy)
+	}
+}
+
 func TestPositionRepoIntegration_DeleteNotFound(t *testing.T) {
 	t.Helper()
 
@@ -278,7 +326,7 @@ func TestPositionRepoIntegration_DeleteNotFound(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 
 	err := repo.Delete(ctx, uuid.New())
 	if err == nil {
@@ -296,13 +344,14 @@ func TestPositionRepoIntegration_ListGetOpenGetByStrategy(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyA := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	strategyB := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	closedAt := time.Now().UTC()
 
 	// posA: open, long, AAPL, strategyA
 	posA := &domain.Position{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID: &strategyA,
 		Ticker:     "AAPL",
 		Side:       domain.PositionSideLong,
@@ -311,6 +360,7 @@ func TestPositionRepoIntegration_ListGetOpenGetByStrategy(t *testing.T) {
 	}
 	// posB: open, short, MSFT, strategyA
 	posB := &domain.Position{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID: &strategyA,
 		Ticker:     "MSFT",
 		Side:       domain.PositionSideShort,
@@ -319,6 +369,7 @@ func TestPositionRepoIntegration_ListGetOpenGetByStrategy(t *testing.T) {
 	}
 	// posC: closed, long, AAPL, strategyB
 	posC := &domain.Position{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID:  &strategyB,
 		Ticker:      "AAPL",
 		Side:        domain.PositionSideLong,
@@ -406,7 +457,7 @@ func TestPositionRepoIntegration_CountOpenByMarketAndGrossExposureParity(t *test
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	stockStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	cryptoStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeCrypto)
 	closedAt := time.Now().UTC()
@@ -450,6 +501,27 @@ func TestPositionRepoIntegration_CountOpenByMarketAndGrossExposureParity(t *test
 	}
 }
 
+func TestPositionRepoIntegration_Migration108StrategyHasNoAccountColumn(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPositionIntegrationPool(t, ctx)
+	defer cleanup()
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='strategies' AND column_name='account_id'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("position test schema invented strategies.account_id")
+	}
+	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
+	position := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", StrategyID: &strategyID, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 1}
+	if err := NewPositionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, position); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewPositionRepo(pool, canonicalRepositoryTestAccountID).CountOpenByMarket(ctx, repository.PositionFilter{}); err != nil {
+		t.Fatalf("CountOpenByMarket() required nonexistent strategies.account_id: %v", err)
+	}
+}
+
 func TestPositionRepoIntegration_CountOpenByMarketHandlesNullAndEnumMarketTypes(t *testing.T) {
 	t.Helper()
 
@@ -457,7 +529,7 @@ func TestPositionRepoIntegration_CountOpenByMarketHandlesNullAndEnumMarketTypes(
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	stockStrategy := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	current := 12.5
 	positions := []*domain.Position{
@@ -514,7 +586,7 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -541,6 +613,8 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 	}
 
 	ddl := []string{
+		`CREATE TABLE accounts (id UUID PRIMARY KEY)`,
+		`INSERT INTO accounts (id) VALUES ('00000000-0000-4000-8000-000000000064')`,
 		`CREATE TYPE market_type AS ENUM ('stock', 'crypto', 'polymarket', 'kalshi', 'options')`,
 		`CREATE TYPE position_side AS ENUM (
 			'long',
@@ -555,7 +629,10 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 			market_type market_type NOT NULL
 		)`,
 		`CREATE TABLE orders (
+			environment TEXT,
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064',
+			market_type market_type NOT NULL DEFAULT 'stock',
 			broker TEXT,
 			external_id TEXT,
 			ticker TEXT NOT NULL,
@@ -567,6 +644,10 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		)`,
 		`CREATE TABLE positions (
 			id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id      UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment     TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type     TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+			origin_id       TEXT,
 			strategy_id     UUID           REFERENCES strategies (id),
 			ticker          TEXT           NOT NULL,
 			side            position_side  NOT NULL,
@@ -592,7 +673,9 @@ func newPositionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 			vega                NUMERIC(10, 6)
 		)`,
 		`CREATE TABLE trades (
+			environment TEXT,
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064',
 			order_id UUID REFERENCES orders (id),
 			position_id UUID REFERENCES positions (id),
 			ticker TEXT NOT NULL,
@@ -645,21 +728,21 @@ func TestPositionRepoIntegration_ListOpenAlpacaOwned(t *testing.T) {
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
 	openAt := time.Now().UTC()
-	proven := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100, OpenedAt: openAt}
-	local := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "PAPER", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 50, OpenedAt: openAt}
+	proven := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100, OpenedAt: openAt}
+	local := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "PAPER", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 50, OpenedAt: openAt}
 	for _, pos := range []*domain.Position{proven, local} {
 		if err := repo.Create(ctx, pos); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
 	}
 	orderID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO orders (id, broker, external_id, ticker, side, quantity, status) VALUES ($1,$2,$3,$4,$5,$6,$7)`, orderID, "alpaca", "alp-1", "AAPL", domain.OrderSideBuy, 1, "filled"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO orders (account_id, environment, id, broker, external_id, ticker, side, quantity, status) VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$7)`, orderID, "alpaca", "alp-1", "AAPL", domain.OrderSideBuy, 1, "filled"); err != nil {
 		t.Fatalf("insert order: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO trades (order_id, position_id, ticker, side, quantity, price) VALUES ($1,$2,$3,$4,$5,$6)`, orderID, proven.ID, "AAPL", domain.OrderSideBuy, 1, 100); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO trades (account_id, environment, order_id, position_id, ticker, side, quantity, price) VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6)`, orderID, proven.ID, "AAPL", domain.OrderSideBuy, 1, 100); err != nil {
 		t.Fatalf("insert trade: %v", err)
 	}
 	open, err := repo.ListOpenAlpacaOwned(ctx, 10, 0)
@@ -671,39 +754,94 @@ func TestPositionRepoIntegration_ListOpenAlpacaOwned(t *testing.T) {
 	}
 }
 
+func TestPositionRepoIntegration_ForeignAndLegacyTradesCannotClassifyCanonicalPosition(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPositionIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
+
+	for _, accountID := range []any{uuid.New(), nil} {
+		position := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100}
+		if err := repo.Create(ctx, position); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		var orderID uuid.UUID
+		if err := pool.QueryRow(ctx, `INSERT INTO orders (account_id, broker, ticker, market_type, side, quantity, status) VALUES ($1,'alpaca','AAPL','crypto','buy',1,'filled') RETURNING id`, accountID).Scan(&orderID); err != nil {
+			t.Fatalf("insert order: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO trades (account_id, order_id, position_id, ticker, side, quantity, price) VALUES ($1,$2,$3,'AAPL','buy',1,100)`, accountID, orderID, position.ID); err != nil {
+			t.Fatalf("insert trade: %v", err)
+		}
+		got, err := repo.Get(ctx, position.ID)
+		if err != nil {
+			t.Fatalf("Get() error = %v", err)
+		}
+		if got.MarketType != "" {
+			t.Fatalf("MarketType = %q, want unclassified", got.MarketType)
+		}
+	}
+	owned, err := repo.ListOpenAlpacaOwned(ctx, 10, 0)
+	if err != nil {
+		t.Fatalf("ListOpenAlpacaOwned() error = %v", err)
+	}
+	if len(owned) != 0 {
+		t.Fatalf("ListOpenAlpacaOwned() = %#v, want no foreign/legacy evidence", owned)
+	}
+}
+
 func TestPositionRepoIntegration_CreateAlpacaOwnedDedupesAndRollsBack(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
-	position := &domain.Position{MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
+	position := &domain.Position{OriginType: "operator", OriginID: "fixture", Environment: domain.AccountEnvironmentPaperScored, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
 	if err := repo.CreateAlpacaOwned(ctx, position); err != nil {
 		t.Fatalf("CreateAlpacaOwned() error = %v", err)
+	}
+	if position.AccountID != canonicalRepositoryTestAccountID {
+		t.Fatalf("AccountID = %s, want %s", position.AccountID, canonicalRepositoryTestAccountID)
 	}
 	firstID := position.ID
 	if position.MarketType != domain.MarketTypeStock {
 		t.Fatalf("expected truthful market type stock, got %q", position.MarketType)
 	}
-	if err := repo.CreateAlpacaOwned(ctx, &domain.Position{MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}); err != nil {
+	reused := &domain.Position{OriginType: "operator", OriginID: "fixture", Environment: domain.AccountEnvironmentPaperScored, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
+	if err := repo.CreateAlpacaOwned(ctx, reused); err != nil {
 		t.Fatalf("CreateAlpacaOwned() dedupe error = %v", err)
 	}
-	if position.ID != firstID {
-		t.Fatalf("expected first call to preserve ID, got %s vs %s", position.ID, firstID)
+	if reused.ID != firstID {
+		t.Fatalf("expected same environment to reuse ID, got %s vs %s", reused.ID, firstID)
+	}
+	differentEnvironment := &domain.Position{OriginType: "operator", OriginID: "fixture", Environment: domain.AccountEnvironmentPaperStress, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 2, AvgEntry: 101}
+	if err := repo.CreateAlpacaOwned(ctx, differentEnvironment); err != nil {
+		t.Fatalf("CreateAlpacaOwned() different environment error = %v", err)
+	}
+	if differentEnvironment.ID == firstID {
+		t.Fatal("different environment reused Alpaca-owned position")
 	}
 	var count int
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM positions`).Scan(&count); err != nil {
 		t.Fatalf("count positions: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("expected 1 position, got %d", count)
+	if count != 2 {
+		t.Fatalf("expected 2 environment-scoped positions, got %d", count)
 	}
 	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM position_provenance`).Scan(&count); err != nil {
 		t.Fatalf("count provenance: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("expected 1 provenance row, got %d", count)
+	if count != 2 {
+		t.Fatalf("expected 2 provenance rows, got %d", count)
+	}
+}
+
+func TestCreateAlpacaOwnedRejectsConflictingAccountBeforeWrite(t *testing.T) {
+	accountID := uuid.New()
+	repo := NewPositionRepo(nil, accountID)
+	foreign := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", AccountID: uuid.New()}
+	if err := repo.CreateAlpacaOwned(context.Background(), foreign); err == nil {
+		t.Fatal("expected conflicting account ownership to be rejected")
 	}
 }
 
@@ -713,11 +851,11 @@ func TestPositionRepoIntegration_ListOpenAlpacaOwnedIncludesProvenanceAndLegacy(
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestPositionStrategy(t, ctx, pool, domain.MarketTypeStock)
-	proven := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100}
-	legacy := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "MSFT", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 200}
-	ignored := &domain.Position{StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "PAPER", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 50}
+	proven := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100}
+	legacy := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "MSFT", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 200}
+	ignored := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", StrategyID: &strategyID, MarketType: domain.MarketTypeStock, Ticker: "PAPER", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 50}
 	for _, pos := range []*domain.Position{proven, legacy, ignored} {
 		if err := repo.Create(ctx, pos); err != nil {
 			t.Fatalf("Create() error = %v", err)
@@ -727,10 +865,10 @@ func TestPositionRepoIntegration_ListOpenAlpacaOwnedIncludesProvenanceAndLegacy(
 		t.Fatalf("insert provenance: %v", err)
 	}
 	orderID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO orders (id, broker, external_id, ticker, side, quantity, status) VALUES ($1,$2,$3,$4,$5,$6,$7)`, orderID, "alpaca", "alp-1", "MSFT", domain.OrderSideBuy, 1, "filled"); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO orders (account_id, environment, id, broker, external_id, ticker, side, quantity, status) VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$7)`, orderID, "alpaca", "alp-1", "MSFT", domain.OrderSideBuy, 1, "filled"); err != nil {
 		t.Fatalf("insert order: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO trades (order_id, position_id, ticker, side, quantity, price) VALUES ($1,$2,$3,$4,$5,$6)`, orderID, legacy.ID, "MSFT", domain.OrderSideBuy, 1, 200); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO trades (account_id, environment, order_id, position_id, ticker, side, quantity, price) VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6)`, orderID, legacy.ID, "MSFT", domain.OrderSideBuy, 1, 200); err != nil {
 		t.Fatalf("insert trade: %v", err)
 	}
 	open, err := repo.ListOpenAlpacaOwned(ctx, 10, 0)
@@ -748,13 +886,13 @@ func TestPositionRepoIntegration_CreateAlpacaOwnedUsesTransactionalRollback(t *t
 	pool, cleanup := newPositionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPositionRepo(pool)
+	repo := NewPositionRepo(pool, canonicalRepositoryTestAccountID)
 	_, _ = pool.Exec(ctx, `CREATE OR REPLACE FUNCTION fail_position_provenance() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'boom'; END; $$ LANGUAGE plpgsql`)
 	_, _ = pool.Exec(ctx, `CREATE TRIGGER position_provenance_fail BEFORE INSERT ON position_provenance FOR EACH ROW EXECUTE FUNCTION fail_position_provenance()`)
 	defer func() {
 		_, _ = pool.Exec(ctx, `DROP TRIGGER IF EXISTS position_provenance_fail ON position_provenance`)
 	}()
-	pos := &domain.Position{MarketType: domain.MarketTypeStock, Ticker: "TSLA", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 300}
+	pos := &domain.Position{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", MarketType: domain.MarketTypeStock, Ticker: "TSLA", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 300}
 	if err := repo.CreateAlpacaOwned(ctx, pos); err == nil {
 		t.Fatal("expected error")
 	}

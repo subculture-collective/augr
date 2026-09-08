@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,18 +19,24 @@ import (
 
 // TradeDecisionJournalRepo implements repository.TradeDecisionJournalRepository using PostgreSQL.
 type TradeDecisionJournalRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that TradeDecisionJournalRepo satisfies the repository interface.
-var _ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
+var (
+	_ repository.TradeDecisionJournalRepository = (*TradeDecisionJournalRepo)(nil)
+	_ repository.AtomicOrderReplayRepository    = (*TradeDecisionJournalRepo)(nil)
+	_ repository.AtomicDecisionReplayRepository = (*TradeDecisionJournalRepo)(nil)
+	_ repository.AtomicOrderDecisionRepository  = (*TradeDecisionJournalRepo)(nil)
+)
 
 // NewTradeDecisionJournalRepo returns a repository backed by the given pool.
-func NewTradeDecisionJournalRepo(pool *pgxpool.Pool) *TradeDecisionJournalRepo {
-	return &TradeDecisionJournalRepo{pool: pool}
+func NewTradeDecisionJournalRepo(pool *pgxpool.Pool, accountID uuid.UUID) *TradeDecisionJournalRepo {
+	return &TradeDecisionJournalRepo{pool: pool, accountID: accountID}
 }
 
-const tradeDecisionSelectSQL = `SELECT id, strategy_id, pipeline_run_id, market_type, instrument_key,
+const tradeDecisionSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, pipeline_run_trade_date, strategy_id, pipeline_run_id, market_type, instrument_key,
 		external_market_id, side, outcome, fair_value::double precision,
 		executable_price::double precision, spread::double precision,
 		depth::double precision, gross_ev::double precision, net_ev::double precision,
@@ -42,6 +50,24 @@ const tradeDecisionSelectSQL = `SELECT id, strategy_id, pipeline_run_id, market_
 
 // Create inserts a new trade decision and populates the generated ID and timestamps.
 func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.TradeDecision) error {
+	return r.create(ctx, r.pool, decision, false)
+}
+
+type tradeDecisionQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (r *TradeDecisionJournalRepo) create(ctx context.Context, db tradeDecisionQueryRower, decision *domain.TradeDecision, idempotent bool) error {
+	if err := validateOptionalPipelineRunRef(decision.PipelineRunID, decision.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create trade decision: %w", err)
+	}
+	if decision.AccountID != uuid.Nil && decision.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create trade decision: account mismatch")
+	}
+	decision.AccountID = r.accountID
+	if decision.ID == uuid.Nil {
+		decision.ID = uuid.New()
+	}
 	evidence, err := marshalTradeDecisionJSON(decision.Evidence)
 	if err != nil {
 		return err
@@ -51,20 +77,46 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 		return err
 	}
 
-	row := r.pool.QueryRow(ctx,
-		`INSERT INTO trade_decisions (
-			strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
+	query := `INSERT INTO trade_decisions (
+			id, account_id, environment, origin_type, origin_id, pipeline_run_trade_date, strategy_id, pipeline_run_id, market_type, instrument_key, external_market_id,
 			side, outcome, fair_value, executable_price, spread, depth, gross_ev,
 			net_ev, kelly_fraction, proposed_size, approved_size, risk_status,
 			risk_reasons, evidence, features, regime_tags, prompt_text, llm_provider,
 			llm_model, prompt_tokens, completion_tokens, latency_ms, cost_usd,
 			paper_order_id, live_order_id, status
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-		         $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-		         $28, $29, $30, $31)
-		 RETURNING id, created_at, updated_at`,
-		decision.StrategyID,
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37)`
+	if idempotent {
+		query += ` ON CONFLICT (id) DO UPDATE SET id=EXCLUDED.id WHERE
+			trade_decisions.account_id=EXCLUDED.account_id AND
+			trade_decisions.environment=EXCLUDED.environment AND
+			trade_decisions.origin_type=EXCLUDED.origin_type AND
+			trade_decisions.origin_id=EXCLUDED.origin_id AND
+			trade_decisions.pipeline_run_trade_date IS NOT DISTINCT FROM EXCLUDED.pipeline_run_trade_date AND
+			trade_decisions.strategy_id IS NOT DISTINCT FROM EXCLUDED.strategy_id AND
+			trade_decisions.pipeline_run_id IS NOT DISTINCT FROM EXCLUDED.pipeline_run_id AND
+			trade_decisions.market_type=EXCLUDED.market_type AND
+			trade_decisions.instrument_key=EXCLUDED.instrument_key AND
+			trade_decisions.external_market_id IS NOT DISTINCT FROM EXCLUDED.external_market_id AND
+			trade_decisions.side=EXCLUDED.side AND trade_decisions.outcome IS NOT DISTINCT FROM EXCLUDED.outcome AND
+			trade_decisions.fair_value=EXCLUDED.fair_value AND trade_decisions.executable_price=EXCLUDED.executable_price AND
+			trade_decisions.spread=EXCLUDED.spread AND trade_decisions.depth=EXCLUDED.depth AND
+			trade_decisions.gross_ev=EXCLUDED.gross_ev AND trade_decisions.net_ev=EXCLUDED.net_ev AND
+			trade_decisions.kelly_fraction=EXCLUDED.kelly_fraction AND trade_decisions.proposed_size=EXCLUDED.proposed_size AND
+			trade_decisions.approved_size=EXCLUDED.approved_size AND trade_decisions.risk_status=EXCLUDED.risk_status AND
+			trade_decisions.risk_reasons=EXCLUDED.risk_reasons AND trade_decisions.evidence=EXCLUDED.evidence AND
+			trade_decisions.features=EXCLUDED.features AND trade_decisions.regime_tags=EXCLUDED.regime_tags AND
+			trade_decisions.prompt_text IS NOT DISTINCT FROM EXCLUDED.prompt_text AND
+			trade_decisions.llm_provider IS NOT DISTINCT FROM EXCLUDED.llm_provider AND
+			trade_decisions.llm_model IS NOT DISTINCT FROM EXCLUDED.llm_model AND
+			trade_decisions.prompt_tokens IS NOT DISTINCT FROM EXCLUDED.prompt_tokens AND
+			trade_decisions.completion_tokens IS NOT DISTINCT FROM EXCLUDED.completion_tokens AND
+			trade_decisions.latency_ms IS NOT DISTINCT FROM EXCLUDED.latency_ms AND
+			trade_decisions.cost_usd IS NOT DISTINCT FROM EXCLUDED.cost_usd`
+	}
+	query += ` RETURNING id, created_at, updated_at`
+	row := db.QueryRow(ctx, query,
+		decision.ID, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.PipelineRunTradeDate, decision.StrategyID,
 		decision.PipelineRunID,
 		decision.MarketType,
 		decision.InstrumentKey,
@@ -98,15 +150,159 @@ func (r *TradeDecisionJournalRepo) Create(ctx context.Context, decision *domain.
 	)
 
 	if err := row.Scan(&decision.ID, &decision.CreatedAt, &decision.UpdatedAt); err != nil {
+		if idempotent && errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: create trade decision: immutable payload changed: %w", repository.ErrIdempotencyConflict)
+		}
 		return fmt.Errorf("postgres: create trade decision: %w", err)
 	}
 
 	return nil
 }
 
+// CreateWithInitialReplay commits the decision and mandatory pre-execution
+// replay evidence together. A same-ID retry repairs missing initial events.
+func (r *TradeDecisionJournalRepo) CreateWithInitialReplay(ctx context.Context, decision *domain.TradeDecision) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin decision replay: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := r.create(ctx, tx, decision, true); err != nil {
+		return err
+	}
+	decisionPayload, err := json.Marshal(decision)
+	if err != nil {
+		return fmt.Errorf("postgres: marshal decision replay: %w", err)
+	}
+	riskPayload, err := json.Marshal(map[string]any{"status": decision.RiskStatus, "reasons": decision.RiskReasons, "proposed_size": decision.ProposedSize, "approved_size": decision.ApprovedSize})
+	if err != nil {
+		return fmt.Errorf("postgres: marshal risk replay: %w", err)
+	}
+	for _, event := range []struct {
+		eventType domain.ReplayEventType
+		source    string
+		payload   []byte
+		at        time.Time
+	}{{domain.ReplayEventTypeDecisionCreated, "decision_journal", decisionPayload, decision.CreatedAt}, {domain.ReplayEventTypeRiskReviewed, "risk_engine", riskPayload, decision.UpdatedAt}} {
+		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.eventType, event.source, event.payload, event.at); err != nil {
+			return fmt.Errorf("postgres: insert initial decision replay: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit decision replay: %w", err)
+	}
+	return nil
+}
+
+// CreateOrderWithDecision atomically persists the pending order, authorization,
+// mandatory replay evidence, and scoped attachment.
+func (r *TradeDecisionJournalRepo) CreateOrderWithDecision(ctx context.Context, order *domain.Order, decision *domain.TradeDecision, live bool, scope repository.DecisionOrderAttachmentScope) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin atomic order decision: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := (&OrderRepo{pool: r.pool, accountID: r.accountID}).create(ctx, tx, order); err != nil {
+		return err
+	}
+	if err := reserveGenericExitPositions(ctx, tx, order); err != nil {
+		return err
+	}
+	if err := r.create(ctx, tx, decision, true); err != nil {
+		return err
+	}
+	decisionPayload, err := json.Marshal(decision)
+	if err != nil {
+		return err
+	}
+	riskPayload, err := json.Marshal(map[string]any{"status": decision.RiskStatus, "reasons": decision.RiskReasons, "proposed_size": decision.ProposedSize, "approved_size": decision.ApprovedSize})
+	if err != nil {
+		return err
+	}
+	for _, event := range []struct {
+		kind    domain.ReplayEventType
+		source  string
+		payload []byte
+		at      time.Time
+	}{{domain.ReplayEventTypeDecisionCreated, "decision_journal", decisionPayload, decision.CreatedAt}, {domain.ReplayEventTypeRiskReviewed, "risk_engine", riskPayload, decision.UpdatedAt}} {
+		if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL DO NOTHING`, r.accountID, decision.Environment, decision.OriginType, decision.OriginID, decision.ID, event.kind, event.source, event.payload, event.at); err != nil {
+			return err
+		}
+	}
+	column, status, eventType := "paper_order_id", domain.TradeDecisionStatusPaper, domain.ReplayEventTypePaperOrdered
+	if live {
+		column, status, eventType = "live_order_id", domain.TradeDecisionStatusLive, domain.ReplayEventTypeLiveOrdered
+	}
+	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decision.ID, order.ID, status, live, &scope)
+	var updated uuid.UUID
+	if err := tx.QueryRow(ctx, query, args...).Scan(&updated); err != nil {
+		return fmt.Errorf("postgres: atomically attach order decision: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at) SELECT account_id,environment,origin_type,origin_id,id,$3,'order_manager',jsonb_build_object('order_id',$2::text),$4 FROM trade_decisions WHERE id=$1 AND account_id=$5`, decision.ID, order.ID, eventType, time.Now().UTC(), r.accountID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit atomic order decision: %w", err)
+	}
+	return nil
+}
+
+func reserveGenericExitPositions(ctx context.Context, tx pgx.Tx, order *domain.Order) error {
+	if order == nil || order.PositionIntent == nil || (*order.PositionIntent != domain.PositionIntentSellToClose && *order.PositionIntent != domain.PositionIntentBuyToClose) {
+		return nil
+	}
+	if len(order.ClosePositionIDs) == 0 {
+		return fmt.Errorf("postgres: generic exit requires exact position reservation")
+	}
+	ids := append([]uuid.UUID(nil), order.ClosePositionIDs...)
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+	rows, err := tx.Query(ctx, `SELECT id,ticker,side,quantity::double precision FROM positions WHERE id=ANY($1::uuid[]) AND account_id=$2 AND environment=$3 AND origin_type=$4 AND origin_id=$5 AND closed_at IS NULL AND quantity>0 AND close_reservation_order_id IS NULL ORDER BY id FOR UPDATE`, ids, order.AccountID, order.Environment, order.OriginType, order.OriginID)
+	if err != nil {
+		return fmt.Errorf("postgres: lock generic exit positions: %w", err)
+	}
+	defer rows.Close()
+	wantTicker := order.Ticker
+	if order.MarketType.Normalize() == domain.MarketTypePolymarket || order.MarketType.Normalize() == domain.MarketTypeKalshi {
+		wantTicker = normalizedPositionTicker(order.MarketType, order.Ticker, order.PredictionSide)
+	}
+	wantSide := domain.PositionSideLong
+	if *order.PositionIntent == domain.PositionIntentBuyToClose {
+		wantSide = domain.PositionSideShort
+	}
+	total, count := 0.0, 0
+	for rows.Next() {
+		var id uuid.UUID
+		var ticker string
+		var side domain.PositionSide
+		var quantity float64
+		if err := rows.Scan(&id, &ticker, &side, &quantity); err != nil {
+			return err
+		}
+		if ticker != wantTicker || side != wantSide {
+			return fmt.Errorf("postgres: generic exit position does not match order")
+		}
+		total += quantity
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if count != len(ids) || total+1e-8 < order.Quantity {
+		return fmt.Errorf("postgres: generic exit position ownership changed")
+	}
+	tag, err := tx.Exec(ctx, `UPDATE positions SET close_reservation_order_id=$1 WHERE id=ANY($2::uuid[]) AND account_id=$3 AND close_reservation_order_id IS NULL`, order.ID, ids, order.AccountID)
+	if err != nil {
+		return fmt.Errorf("postgres: reserve generic exit positions: %w", err)
+	}
+	if int(tag.RowsAffected()) != len(ids) {
+		return fmt.Errorf("postgres: generic exit reservation changed concurrently")
+	}
+	return nil
+}
+
 // Get retrieves a trade decision by ID.
 func (r *TradeDecisionJournalRepo) Get(ctx context.Context, id uuid.UUID) (*domain.TradeDecision, error) {
-	row := r.pool.QueryRow(ctx, tradeDecisionSelectSQL+` WHERE id = $1`, id)
+	row := r.pool.QueryRow(ctx, tradeDecisionSelectSQL+` WHERE id = $1 AND account_id = $2`, id, r.accountID)
 	decision, err := scanTradeDecision(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -119,13 +315,13 @@ func (r *TradeDecisionJournalRepo) Get(ctx context.Context, id uuid.UUID) (*doma
 
 // List returns trade decisions matching the provided filter with pagination.
 func (r *TradeDecisionJournalRepo) List(ctx context.Context, filter repository.TradeDecisionFilter, limit, offset int) ([]domain.TradeDecision, error) {
-	query, args := buildTradeDecisionListQuery(filter, limit, offset)
+	query, args := buildTradeDecisionListQuery(r.accountID, filter, limit, offset)
 	return r.list(ctx, query, args, "list trade decisions")
 }
 
 // Count returns the number of trade decisions matching the filter.
 func (r *TradeDecisionJournalRepo) Count(ctx context.Context, filter repository.TradeDecisionFilter) (int, error) {
-	query, args := buildTradeDecisionCountQuery(filter)
+	query, args := buildTradeDecisionCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count trade decisions: %w", err)
@@ -134,7 +330,7 @@ func (r *TradeDecisionJournalRepo) Count(ctx context.Context, filter repository.
 }
 
 func (r *TradeDecisionJournalRepo) CountByStatus(ctx context.Context, filter repository.TradeDecisionFilter) (map[domain.TradeDecisionStatus]int, error) {
-	query, args := buildTradeDecisionFilteredQuery("SELECT status, COUNT(*) FROM trade_decisions", filter, 0, 0, false)
+	query, args := buildTradeDecisionFilteredQuery(r.accountID, "SELECT status, COUNT(*) FROM trade_decisions", filter, 0, 0, false)
 	query += " GROUP BY status ORDER BY status"
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -154,7 +350,7 @@ func (r *TradeDecisionJournalRepo) CountByStatus(ctx context.Context, filter rep
 }
 
 func (r *TradeDecisionJournalRepo) CountByNoActionReason(ctx context.Context, filter repository.TradeDecisionFilter) (map[string]int, error) {
-	filtered, args := buildTradeDecisionFilteredQuery(`SELECT
+	filtered, args := buildTradeDecisionFilteredQuery(r.accountID, `SELECT
 			id, risk_reasons, status, evidence
 			FROM trade_decisions`, filter, 0, 0, false)
 	query := `SELECT
@@ -191,13 +387,107 @@ func (r *TradeDecisionJournalRepo) CountByNoActionReason(ctx context.Context, fi
 }
 
 // AttachPaperOrder links a paper order to the trade decision.
-func (r *TradeDecisionJournalRepo) AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
-	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper)
+func (r *TradeDecisionJournalRepo) AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper, false, nil)
+}
+
+func (r *TradeDecisionJournalRepo) AttachPaperOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope repository.DecisionOrderAttachmentScope) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "paper_order_id", domain.TradeDecisionStatusPaper, false, &scope)
 }
 
 // AttachLiveOrder links a live order to the trade decision.
-func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error {
-	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive)
+func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true, nil)
+}
+
+func (r *TradeDecisionJournalRepo) AttachLiveOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope repository.DecisionOrderAttachmentScope) (bool, error) {
+	return r.attachOrder(ctx, decisionID, orderID, "live_order_id", domain.TradeDecisionStatusLive, true, &scope)
+}
+
+func (r *TradeDecisionJournalRepo) GetByOrderScoped(ctx context.Context, orderID uuid.UUID, live bool, scope repository.DecisionOrderAttachmentScope) (*domain.TradeDecision, error) {
+	column := "paper_order_id"
+	if live {
+		column = "live_order_id"
+	}
+	query := fmt.Sprintf(`%s WHERE account_id=$1 AND %s=$2 AND EXISTS (
+		SELECT 1 FROM orders o WHERE o.id=$2 AND o.account_id=trade_decisions.account_id
+		AND o.environment=trade_decisions.environment AND o.origin_type=trade_decisions.origin_type AND o.origin_id=trade_decisions.origin_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM trade_decisions.pipeline_run_id
+		AND o.pipeline_run_trade_date IS NOT DISTINCT FROM trade_decisions.pipeline_run_trade_date
+		AND o.strategy_id IS NOT DISTINCT FROM trade_decisions.strategy_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM $3 AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $4
+		AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $5 AND o.strategy_id IS NOT DISTINCT FROM $6)`, tradeDecisionSelectSQL, column)
+	decision, err := scanTradeDecision(r.pool.QueryRow(ctx, query, r.accountID, orderID, scope.PipelineRunID, scope.PipelineRunTradeDate, scope.CopyOriginRebalanceRunID, scope.StrategyID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("postgres: get decision by scoped order: %w", ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: get decision by scoped order: %w", err)
+	}
+	return decision, nil
+}
+
+// AttachOrderWithReplay atomically links an order and persists the matching
+// ordered replay event. The decision row lock serializes same-decision retries.
+func (r *TradeDecisionJournalRepo) AttachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error {
+	return r.attachOrderWithReplay(ctx, decisionID, orderID, live, source, occurredAt, nil)
+}
+
+func (r *TradeDecisionJournalRepo) AttachOrderWithReplayScoped(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time, scope repository.DecisionOrderAttachmentScope) error {
+	return r.attachOrderWithReplay(ctx, decisionID, orderID, live, source, occurredAt, &scope)
+}
+
+func (r *TradeDecisionJournalRepo) attachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time, scope *repository.DecisionOrderAttachmentScope) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin order replay attachment: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	column, status, eventType := "paper_order_id", domain.TradeDecisionStatusPaper, domain.ReplayEventTypePaperOrdered
+	if live {
+		column, status, eventType = "live_order_id", domain.TradeDecisionStatusLive, domain.ReplayEventTypeLiveOrdered
+	}
+	var accountID uuid.UUID
+	var attached *uuid.UUID
+	if err := tx.QueryRow(ctx, fmt.Sprintf(`SELECT account_id,%s FROM trade_decisions WHERE id=$1 AND account_id=$2 FOR UPDATE`, column), decisionID, r.accountID).Scan(&accountID, &attached); err != nil {
+		return fmt.Errorf("postgres: lock trade decision for order replay: %w", err)
+	}
+	if attached != nil && *attached != orderID {
+		return fmt.Errorf("postgres: attach %s: different order already attached", column)
+	}
+	if attached != nil && scope != nil {
+		query, args := buildTradeDecisionAttachmentValidationQuery(column, r.accountID, decisionID, orderID, live, *scope)
+		var validatedID uuid.UUID
+		if err := tx.QueryRow(ctx, query, args...).Scan(&validatedID); err != nil {
+			return fmt.Errorf("postgres: validate idempotent %s attachment scope: %w", column, err)
+		}
+	}
+	if attached == nil {
+		query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live, scope)
+		var updatedID uuid.UUID
+		if err := tx.QueryRow(ctx, query, args...).Scan(&updatedID); err != nil {
+			return fmt.Errorf("postgres: attach order with replay: %w", err)
+		}
+	}
+	if source == "" {
+		source = "order_manager"
+	}
+	if occurredAt.IsZero() {
+		occurredAt = time.Now().UTC()
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO replay_events (account_id,environment,origin_type,origin_id,trade_decision_id,event_type,source,payload,occurred_at)
+		SELECT account_id,environment,origin_type,origin_id,id,$3,$4,jsonb_build_object('order_id',$2::text),$5
+		FROM trade_decisions td WHERE td.id=$1 AND td.account_id=$6
+		AND NOT EXISTS (SELECT 1 FROM replay_events re WHERE re.trade_decision_id=td.id AND re.account_id=td.account_id AND re.event_type=$3 AND re.payload->>'order_id'=$2::text)`,
+		decisionID, orderID, eventType, source, occurredAt, r.accountID)
+	if err != nil {
+		return fmt.Errorf("postgres: insert attached order replay: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit order replay attachment: %w", err)
+	}
+	return nil
 }
 
 // ResolvePredictionOutcome marks a paper event-market decision closed after
@@ -205,7 +495,7 @@ func (r *TradeDecisionJournalRepo) AttachLiveOrder(ctx context.Context, decision
 func (r *TradeDecisionJournalRepo) ResolvePredictionOutcome(ctx context.Context, decisionID uuid.UUID) error {
 	var updatedID uuid.UUID
 	err := r.pool.QueryRow(ctx, `UPDATE trade_decisions SET status = $2, updated_at = NOW()
-		WHERE id = $1 AND status = $3 RETURNING id`, decisionID, domain.TradeDecisionStatusClosed, domain.TradeDecisionStatusPaper).Scan(&updatedID)
+		WHERE id = $1 AND status = $3 AND account_id=$4 RETURNING id`, decisionID, domain.TradeDecisionStatusClosed, domain.TradeDecisionStatusPaper, r.accountID).Scan(&updatedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("postgres: resolve prediction decision %s: %w", decisionID, ErrNotFound)
@@ -215,16 +505,37 @@ func (r *TradeDecisionJournalRepo) ResolvePredictionOutcome(ctx context.Context,
 	return nil
 }
 
-func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, orderID uuid.UUID, column string, status domain.TradeDecisionStatus) error {
-	query, args := buildTradeDecisionAttachQuery(column, decisionID, orderID, status)
+func (r *TradeDecisionJournalRepo) attachOrder(ctx context.Context, decisionID, orderID uuid.UUID, column string, status domain.TradeDecisionStatus, live bool, scope *repository.DecisionOrderAttachmentScope) (bool, error) {
+	query, args := buildTradeDecisionAttachQuery(column, r.accountID, decisionID, orderID, status, live, scope)
 	var updatedID uuid.UUID
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&updatedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("postgres: attach %s order to trade decision %s: %w", column, decisionID, ErrNotFound)
+			decision, getErr := r.Get(ctx, decisionID)
+			if getErr != nil {
+				return false, fmt.Errorf("postgres: attach %s order to trade decision %s: %w", column, decisionID, getErr)
+			}
+			attached := decision.PaperOrderID
+			if live {
+				attached = decision.LiveOrderID
+			}
+			if attached != nil && *attached == orderID {
+				if scope != nil {
+					query, args := buildTradeDecisionAttachmentValidationQuery(column, r.accountID, decisionID, orderID, live, *scope)
+					var validatedID uuid.UUID
+					if validateErr := r.pool.QueryRow(ctx, query, args...).Scan(&validatedID); validateErr != nil {
+						return false, fmt.Errorf("postgres: validate idempotent %s attachment scope: %w", column, validateErr)
+					}
+				}
+				return false, nil
+			}
+			if attached != nil {
+				return false, fmt.Errorf("postgres: attach %s order to trade decision %s: different order already attached", column, decisionID)
+			}
+			return false, fmt.Errorf("postgres: attach %s order to trade decision %s: order ownership or environment mismatch", column, decisionID)
 		}
-		return fmt.Errorf("postgres: attach %s order to trade decision: %w", column, err)
+		return false, fmt.Errorf("postgres: attach %s order to trade decision: %w", column, err)
 	}
-	return nil
+	return true, nil
 }
 
 func (r *TradeDecisionJournalRepo) list(ctx context.Context, query string, args []any, op string) ([]domain.TradeDecision, error) {
@@ -274,6 +585,7 @@ func scanTradeDecision(sc scanner) (*domain.TradeDecision, error) {
 
 	if err := sc.Scan(
 		&decision.ID,
+		&decision.AccountID, &decision.Environment, &decision.OriginType, &decision.OriginID, &decision.PipelineRunTradeDate,
 		&strategyID,
 		&pipelineRunID,
 		&decision.MarketType,
@@ -342,22 +654,50 @@ func scanTradeDecision(sc scanner) (*domain.TradeDecision, error) {
 	return &decision, nil
 }
 
-func buildTradeDecisionCountQuery(filter repository.TradeDecisionFilter) (string, []any) {
-	query, args := buildTradeDecisionFilteredQuery("SELECT COUNT(*) FROM trade_decisions", filter, 0, 0, false)
+func buildTradeDecisionCountQuery(accountID uuid.UUID, filter repository.TradeDecisionFilter) (string, []any) {
+	query, args := buildTradeDecisionFilteredQuery(accountID, "SELECT COUNT(*) FROM trade_decisions", filter, 0, 0, false)
 	return query, args
 }
 
-func buildTradeDecisionListQuery(filter repository.TradeDecisionFilter, limit, offset int) (string, []any) {
-	query, args := buildTradeDecisionFilteredQuery(tradeDecisionSelectSQL, filter, limit, offset, true)
+func buildTradeDecisionListQuery(accountID uuid.UUID, filter repository.TradeDecisionFilter, limit, offset int) (string, []any) {
+	query, args := buildTradeDecisionFilteredQuery(accountID, tradeDecisionSelectSQL, filter, limit, offset, true)
 	return query, args
 }
 
-func buildTradeDecisionAttachQuery(column string, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus) (string, []any) {
-	query := fmt.Sprintf(`UPDATE trade_decisions SET %s = $2, status = $3, updated_at = NOW() WHERE id = $1 RETURNING id`, column)
-	return query, []any{decisionID, orderID, status}
+func buildTradeDecisionAttachQuery(column string, accountID, decisionID, orderID uuid.UUID, status domain.TradeDecisionStatus, live bool, scope *repository.DecisionOrderAttachmentScope) (string, []any) {
+	lineage := ""
+	args := []any{decisionID, accountID, orderID, status, live}
+	if scope != nil {
+		lineage = `
+			AND o.pipeline_run_id IS NOT DISTINCT FROM $6 AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $7
+			AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $8 AND o.strategy_id IS NOT DISTINCT FROM $9`
+		args = append(args, scope.PipelineRunID, scope.PipelineRunTradeDate, scope.CopyOriginRebalanceRunID, scope.StrategyID)
+	}
+	query := fmt.Sprintf(`UPDATE trade_decisions td SET %s = $3, status = $4, updated_at = NOW()
+		WHERE td.id = $1 AND td.account_id=$2 AND td.%s IS NULL
+		AND EXISTS (SELECT 1 FROM orders o WHERE o.id=$3 AND o.account_id=td.account_id
+			AND o.environment=td.environment AND o.origin_type=td.origin_type AND o.origin_id=td.origin_id
+			AND o.pipeline_run_id IS NOT DISTINCT FROM td.pipeline_run_id AND o.pipeline_run_trade_date IS NOT DISTINCT FROM td.pipeline_run_trade_date
+			AND o.strategy_id IS NOT DISTINCT FROM td.strategy_id
+			%s
+			AND (($5 AND o.environment='live') OR (NOT $5 AND o.environment IN ('paper_scored','paper_stress'))))
+		RETURNING td.id`, column, column, lineage)
+	return query, args
 }
 
-func buildTradeDecisionFilteredQuery(base string, filter repository.TradeDecisionFilter, limit, offset int, includePagination bool) (string, []any) {
+func buildTradeDecisionAttachmentValidationQuery(column string, accountID, decisionID, orderID uuid.UUID, live bool, scope repository.DecisionOrderAttachmentScope) (string, []any) {
+	query := fmt.Sprintf(`SELECT td.id FROM trade_decisions td JOIN orders o ON o.id=$3
+		WHERE td.id=$1 AND td.account_id=$2 AND td.%s=$3
+		AND o.account_id=td.account_id AND o.environment=td.environment AND o.origin_type=td.origin_type AND o.origin_id=td.origin_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM td.pipeline_run_id AND o.pipeline_run_trade_date IS NOT DISTINCT FROM td.pipeline_run_trade_date
+		AND o.strategy_id IS NOT DISTINCT FROM td.strategy_id
+		AND o.pipeline_run_id IS NOT DISTINCT FROM $5 AND o.pipeline_run_trade_date IS NOT DISTINCT FROM $6
+		AND o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $7 AND o.strategy_id IS NOT DISTINCT FROM $8
+		AND (($4 AND o.environment='live') OR (NOT $4 AND o.environment IN ('paper_scored','paper_stress')))`, column)
+	return query, []any{decisionID, accountID, orderID, live, scope.PipelineRunID, scope.PipelineRunTradeDate, scope.CopyOriginRebalanceRunID, scope.StrategyID}
+}
+
+func buildTradeDecisionFilteredQuery(accountID uuid.UUID, base string, filter repository.TradeDecisionFilter, limit, offset int, includePagination bool) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -368,6 +708,10 @@ func buildTradeDecisionFilteredQuery(base string, filter repository.TradeDecisio
 		argIdx++
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
+	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
 	}
 
 	if filter.StrategyID != nil {

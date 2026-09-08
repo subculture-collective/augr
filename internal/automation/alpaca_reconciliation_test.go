@@ -12,8 +12,20 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
+
+func TestNewAlpacaReconcilerRetainsExecutionAccount(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: binding})
+	if reconciler.executionAccount != binding {
+		t.Fatal("reconciler did not retain execution account")
+	}
+}
 
 type alpacaReconciliationBrokerStub struct {
 	positions []domain.Position
@@ -34,22 +46,29 @@ type alpacaPLAggregateStub struct {
 	calls  []string
 }
 
-func (s *alpacaPLAggregateStub) ClosedRealizedPnL(context.Context) (float64, error) {
+type recordingAlpacaOptionFillRepo struct{ inputs []repository.OptionFillInput }
+
+func (r *recordingAlpacaOptionFillRepo) ApplyAcceptedOptionFills(_ context.Context, _ execution.ExecutionScope, inputs []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
+	r.inputs = append(r.inputs, inputs...)
+	return []repository.OptionFillResult{{OrderID: inputs[0].Order.ID, PositionID: uuid.New(), TradeID: uuid.New()}}, nil
+}
+
+func (s *alpacaPLAggregateStub) ClosedRealizedPnL(context.Context, uuid.UUID, domain.AccountEnvironment) (float64, error) {
 	s.calls = append(s.calls, "closed")
 	return s.closed, nil
 }
 
-func (s *alpacaPLAggregateStub) OpenUnrealizedPnL(context.Context) (float64, error) {
+func (s *alpacaPLAggregateStub) OpenUnrealizedPnL(context.Context, uuid.UUID, domain.AccountEnvironment) (float64, error) {
 	s.calls = append(s.calls, "open")
 	return s.open, nil
 }
 
-func (s *alpacaPLAggregateStub) TradeCount(context.Context) (int, error) {
+func (s *alpacaPLAggregateStub) TradeCount(context.Context, uuid.UUID, domain.AccountEnvironment) (int, error) {
 	s.calls = append(s.calls, "count")
 	return s.trades, nil
 }
 
-func (s *alpacaPLAggregateStub) FeeTotal(context.Context) (float64, error) {
+func (s *alpacaPLAggregateStub) FeeTotal(context.Context, uuid.UUID, domain.AccountEnvironment) (float64, error) {
 	s.calls = append(s.calls, "fees")
 	return s.fees, nil
 }
@@ -168,6 +187,10 @@ type recordingOrderRepo struct {
 	list         []*domain.Order
 }
 
+func (r *recordingOrderRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 func newRecordingOrderRepo(existing ...*domain.Order) *recordingOrderRepo {
 	idx := make(map[string]*domain.Order)
 	list := make([]*domain.Order, 0, len(existing))
@@ -216,9 +239,23 @@ func (r *recordingOrderRepo) List(_ context.Context, filter repository.OrderFilt
 		if filter.Ticker != "" && order.Ticker != filter.Ticker {
 			continue
 		}
-		filtered = append(filtered, *cloneOrder(order))
+		cloned := cloneOrder(order)
+		if cloned.AccountID == uuid.Nil {
+			cloned.AccountID, cloned.Environment = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment()
+		}
+		filtered = append(filtered, *cloned)
 	}
 	return paginateOrders(filtered, limit, offset), nil
+}
+
+func (r *recordingOrderRepo) ListOptionsLifecycleOrders(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Order, error) {
+	var values []domain.Order
+	for _, order := range r.list {
+		if order.AccountID == accountID && order.Environment == environment && (order.MarketType.Normalize() == domain.MarketTypeOptions || order.AssetClass == domain.AssetClassOption) {
+			values = append(values, *cloneOrder(order))
+		}
+	}
+	return paginateOrders(values, limit, offset), nil
 }
 
 func (r *recordingOrderRepo) Count(ctx context.Context, filter repository.OrderFilter) (int, error) {
@@ -249,7 +286,11 @@ func (r *recordingOrderRepo) GetByStrategy(_ context.Context, _ uuid.UUID, _ rep
 	return nil, nil
 }
 
-func (r *recordingOrderRepo) GetByRun(_ context.Context, _ uuid.UUID, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
+func (r *recordingOrderRepo) GetByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
+	return nil, nil
+}
+
+func (r *recordingOrderRepo) GetByCopyOriginRun(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, _, _ uuid.UUID, _ repository.OrderFilter, _, _ int) ([]domain.Order, error) {
 	return nil, nil
 }
 
@@ -320,6 +361,16 @@ func (r *recordingPositionRepo) List(_ context.Context, filter repository.Positi
 	return paginatePositions(filtered, limit, offset), nil
 }
 
+func (r *recordingPositionRepo) ListOptionsLifecyclePositions(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error) {
+	var values []domain.Position
+	for _, position := range r.open {
+		if position.AccountID == accountID && position.Environment == environment && position.AssetClass == domain.AssetClassOption {
+			values = append(values, *clonePosition(position))
+		}
+	}
+	return paginatePositions(values, limit, offset), nil
+}
+
 func (r *recordingPositionRepo) Count(ctx context.Context, filter repository.PositionFilter) (int, error) {
 	positions, err := r.List(ctx, filter, 0, 0)
 	if err != nil {
@@ -366,10 +417,24 @@ func (r *recordingPositionRepo) ListOpenAlpacaOwned(_ context.Context, limit, of
 			continue
 		}
 		if _, ok := r.proven[position.ID]; ok {
-			filtered = append(filtered, *clonePosition(position))
+			cloned := clonePosition(position)
+			if cloned.AccountID == uuid.Nil {
+				cloned.AccountID, cloned.Environment = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment()
+			}
+			filtered = append(filtered, *cloned)
 		}
 	}
 	return paginatePositions(filtered, limit, offset), nil
+}
+
+func (r *recordingPositionRepo) ListOpenAlpacaOwnedByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error) {
+	positions, err := r.ListOpenAlpacaOwned(ctx, limit, offset)
+	for i := range positions {
+		if positions[i].AccountID == uuid.Nil {
+			positions[i].AccountID, positions[i].Environment = accountID, environment
+		}
+	}
+	return positions, err
 }
 
 func (r *recordingPositionRepo) CountOpen(ctx context.Context, filter repository.PositionFilter) (int, error) {
@@ -423,10 +488,33 @@ func (r *recordingTradeRepo) List(_ context.Context, _ repository.TradeFilter, _
 	var trades []domain.Trade
 	for _, bucket := range r.byOrderExternalID {
 		for _, trade := range bucket {
-			trades = append(trades, *cloneTrade(trade))
+			cloned := cloneTrade(trade)
+			if cloned.AccountID == uuid.Nil {
+				cloned.AccountID, cloned.Environment = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment()
+			}
+			trades = append(trades, *cloned)
 		}
 	}
 	return trades, nil
+}
+
+func (r *recordingTradeRepo) ListOptionsLifecycleTrades(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Trade, error) {
+	var values []domain.Trade
+	for _, bucket := range r.byOrderExternalID {
+		for _, trade := range bucket {
+			if trade.AccountID == accountID && trade.Environment == environment && trade.AssetClass == domain.AssetClassOption {
+				values = append(values, *cloneTrade(trade))
+			}
+		}
+	}
+	if offset >= len(values) {
+		return nil, nil
+	}
+	end := len(values)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	return values[offset:end], nil
 }
 
 func (r *recordingTradeRepo) Count(ctx context.Context, filter repository.TradeFilter) (int, error) {
@@ -479,12 +567,13 @@ func TestAlpacaReconcilerAuditPersistenceFailuresAreTerminal(t *testing.T) {
 	newReconciler := func() *AlpacaReconciler {
 		orders := newRecordingOrderRepo()
 		return NewAlpacaReconciler(AlpacaReconcilerDeps{
-			Broker:       &alpacaReconciliationBrokerStub{},
-			OrderRepo:    orders,
-			PositionRepo: newRecordingPositionRepo(),
-			TradeRepo:    newRecordingTradeRepo(orders),
-			AuditLogRepo: &auditLogRepoStub{err: errors.New("audit unavailable")},
-			Logger:       slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+			ExecutionAccount: testExecutionAccountBinding,
+			Broker:           &alpacaReconciliationBrokerStub{},
+			OrderRepo:        orders,
+			PositionRepo:     newRecordingPositionRepo(),
+			TradeRepo:        newRecordingTradeRepo(orders),
+			AuditLogRepo:     &auditLogRepoStub{err: errors.New("audit unavailable")},
+			Logger:           slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 		})
 	}
 
@@ -571,13 +660,14 @@ func TestAlpacaReconcilerReconcile_ImportsOrdersPositionsAndFills(t *testing.T) 
 
 	audit := &auditLogRepoStub{}
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
-		Broker:       broker,
-		StrategyRepo: strategies,
-		OrderRepo:    orders,
-		PositionRepo: positions,
-		TradeRepo:    trades,
-		AuditLogRepo: audit,
-		Logger:       slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		ExecutionAccount: testExecutionAccountBinding,
+		Broker:           broker,
+		StrategyRepo:     strategies,
+		OrderRepo:        orders,
+		PositionRepo:     positions,
+		TradeRepo:        trades,
+		AuditLogRepo:     audit,
+		Logger:           slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	})
 
 	summary, err := reconciler.Reconcile(context.Background())
@@ -640,12 +730,35 @@ func TestAlpacaReconcilerReconcile_ImportsOrdersPositionsAndFills(t *testing.T) 
 	}
 }
 
+func TestAlpacaReconcilerRejectsEscapedOrderBeforeClientIDBinding(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := uuid.New()
+	local := &domain.Order{ID: localID, AccountID: binding.AccountID(), Environment: binding.Environment(), ClientOrderID: "augr-pending", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, Broker: "alpaca"}
+	foreign := &domain.Order{ID: uuid.New(), AccountID: uuid.New(), Environment: domain.AccountEnvironmentPaperStress, ClientOrderID: "augr-pending", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, Broker: "alpaca"}
+	orders := newRecordingOrderRepo(local, foreign)
+	broker := &alpacaReconciliationBrokerStub{orders: []BrokerOrderSnapshot{{ExternalID: "provider-accepted", ClientOrderID: "augr-pending", Ticker: "AAPL", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusSubmitted, Broker: "alpaca"}}}
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: binding, Broker: broker, OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: newRecordingTradeRepo(orders)})
+	_, err = reconciler.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "foreign execution account") {
+		t.Fatalf("Reconcile() error = %v, want escaped-row rejection", err)
+	}
+	if len(orders.updated) != 0 {
+		t.Fatalf("escaped row allowed writes: %+v", orders.updated)
+	}
+	if foreign.ExternalID != "" {
+		t.Fatalf("foreign environment order was rebound: %+v", foreign)
+	}
+}
+
 func TestAlpacaReconcilerReconcile_DedupesRepeatedAlpacaImports(t *testing.T) {
 	t.Parallel()
 
 	broker := &alpacaReconciliationBrokerStub{positions: []domain.Position{{Ticker: "SNAL", Side: domain.PositionSideLong, Quantity: 10, AvgEntry: 1.23, AssetClass: domain.AssetClassEquity}}}
 	positions := newRecordingPositionRepo()
-	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{Broker: broker, OrderRepo: newRecordingOrderRepo(), PositionRepo: positions, TradeRepo: newRecordingTradeRepo(newRecordingOrderRepo()), Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))})
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: broker, OrderRepo: newRecordingOrderRepo(), PositionRepo: positions, TradeRepo: newRecordingTradeRepo(newRecordingOrderRepo()), Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))})
 	first, err := reconciler.Reconcile(context.Background())
 	if err != nil {
 		t.Fatalf("first Reconcile() error = %v", err)
@@ -659,6 +772,37 @@ func TestAlpacaReconcilerReconcile_DedupesRepeatedAlpacaImports(t *testing.T) {
 	}
 	if len(positions.created) != 1 {
 		t.Fatalf("created positions = %d, want 1", len(positions.created))
+	}
+}
+
+func TestAlpacaReconcilerFailsClosedOnDuplicateScopedTicker(t *testing.T) {
+	first := &domain.Position{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1}
+	second := clonePosition(first)
+	second.ID = uuid.New()
+	positions := newRecordingPositionRepo(first, second)
+	positions.proven = map[uuid.UUID]struct{}{first.ID: {}, second.ID: {}}
+	orders := newRecordingOrderRepo()
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: &alpacaReconciliationBrokerStub{}, OrderRepo: orders, PositionRepo: positions, TradeRepo: newRecordingTradeRepo(orders)})
+	if _, err := reconciler.Reconcile(context.Background()); err == nil || !strings.Contains(err.Error(), "duplicate scoped Alpaca positions") {
+		t.Fatalf("Reconcile() error = %v, want duplicate ticker rejection", err)
+	}
+}
+
+func TestAlpacaReconcilerRoutesOptionFillThroughAtomicRepository(t *testing.T) {
+	now := time.Now().UTC()
+	strategyID := uuid.New()
+	intent := domain.PositionIntentBuyToOpen
+	order := &domain.Order{ID: uuid.New(), StrategyID: &strategyID, AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "reconciliation", OriginID: "alpaca", ExternalID: "option-order", Ticker: "AAPL260821C00150000", MarketType: domain.MarketTypeOptions, AssetClass: domain.AssetClassOption, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusSubmitted, Broker: "alpaca", SubmittedAt: &now, ContractMultiplier: 100, PositionIntent: &intent}
+	orders := newRecordingOrderRepo(order)
+	fillRepo := &recordingAlpacaOptionFillRepo{}
+	broker := &alpacaReconciliationBrokerStub{fills: []BrokerFillSnapshot{{ActivityID: "option-fill", ExternalID: order.ExternalID, Ticker: order.Ticker, Side: order.Side, Quantity: 1, Price: 2, ExecutedAt: now}}}
+	trades := newRecordingTradeRepo(orders)
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: broker, OrderRepo: orders, PositionRepo: newRecordingPositionRepo(), TradeRepo: trades, OptionFillWriter: fillRepo})
+	if _, err := reconciler.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(fillRepo.inputs) != 1 || len(trades.created) != 0 || fillRepo.inputs[0].Premium != 200 {
+		t.Fatalf("option fill route inputs=%+v direct trades=%d", fillRepo.inputs, len(trades.created))
 	}
 }
 
@@ -784,13 +928,14 @@ func TestAlpacaReconcilerReconcile_UpdatesExistingRecordsAndSkipsKnownFills(t *t
 
 	audit := &auditLogRepoStub{}
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
-		Broker:       broker,
-		StrategyRepo: strategies,
-		OrderRepo:    orders,
-		PositionRepo: positions,
-		TradeRepo:    trades,
-		AuditLogRepo: audit,
-		Logger:       slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		ExecutionAccount: testExecutionAccountBinding,
+		Broker:           broker,
+		StrategyRepo:     strategies,
+		OrderRepo:        orders,
+		PositionRepo:     positions,
+		TradeRepo:        trades,
+		AuditLogRepo:     audit,
+		Logger:           slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	})
 
 	summary, err := reconciler.Reconcile(context.Background())
@@ -872,12 +1017,13 @@ func TestAlpacaReconcilerReconcile_ClosesLocalAlpacaPositionsMissingFromBroker(t
 	positions.proven = map[uuid.UUID]struct{}{stalePosition.ID: {}}
 	audit := &auditLogRepoStub{}
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
-		Broker:       &alpacaReconciliationBrokerStub{},
-		OrderRepo:    orders,
-		PositionRepo: positions,
-		TradeRepo:    newRecordingTradeRepo(orders),
-		AuditLogRepo: audit,
-		Logger:       slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		ExecutionAccount: testExecutionAccountBinding,
+		Broker:           &alpacaReconciliationBrokerStub{},
+		OrderRepo:        orders,
+		PositionRepo:     positions,
+		TradeRepo:        newRecordingTradeRepo(orders),
+		AuditLogRepo:     audit,
+		Logger:           slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	})
 
 	summary, err := reconciler.Reconcile(context.Background())
@@ -944,7 +1090,7 @@ func TestAlpacaReconcilerReconcile_OnlyClosesProvenAlpacaPositions(t *testing.T)
 	localPaper := &domain.Position{ID: uuid.New(), MarketType: domain.MarketTypeStock, Ticker: "MSFT", Side: domain.PositionSideLong, Quantity: 5, AvgEntry: 200, UnrealizedPnL: float64Ptr(7)}
 	positions := newRecordingPositionRepo(proven, localPaper)
 	positions.proven = map[uuid.UUID]struct{}{proven.ID: {}}
-	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{Broker: &alpacaReconciliationBrokerStub{}, OrderRepo: newRecordingOrderRepo(), PositionRepo: positions, TradeRepo: newRecordingTradeRepo(newRecordingOrderRepo()), Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))})
+	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{ExecutionAccount: testExecutionAccountBinding, Broker: &alpacaReconciliationBrokerStub{}, OrderRepo: newRecordingOrderRepo(), PositionRepo: positions, TradeRepo: newRecordingTradeRepo(newRecordingOrderRepo()), Logger: slog.New(slog.NewTextHandler(testWriter{t}, nil))})
 
 	summary, err := reconciler.Reconcile(context.Background())
 	if err != nil {
@@ -968,11 +1114,12 @@ func TestAlpacaReconcilerReconcile_ReturnsErrorWhenBrokerFails(t *testing.T) {
 	t.Parallel()
 
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
-		Broker:       &alpacaReconciliationBrokerStub{positionsErr: errors.New("boom")},
-		OrderRepo:    newRecordingOrderRepo(),
-		PositionRepo: newRecordingPositionRepo(),
-		TradeRepo:    newRecordingTradeRepo(newRecordingOrderRepo()),
-		Logger:       slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		ExecutionAccount: testExecutionAccountBinding,
+		Broker:           &alpacaReconciliationBrokerStub{positionsErr: errors.New("boom")},
+		OrderRepo:        newRecordingOrderRepo(),
+		PositionRepo:     newRecordingPositionRepo(),
+		TradeRepo:        newRecordingTradeRepo(newRecordingOrderRepo()),
+		Logger:           slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	})
 
 	_, err := reconciler.Reconcile(context.Background())
@@ -1001,6 +1148,7 @@ func TestAlpacaReconcilerVerify_NormalizesBrokerOrderPrecisionToStorage(t *testi
 		Broker:         "alpaca",
 	})
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
+		ExecutionAccount: testExecutionAccountBinding,
 		Broker: &alpacaReconciliationBrokerStub{
 			orders: []BrokerOrderSnapshot{{
 				ExternalID:     "expired-order",
@@ -1046,6 +1194,7 @@ func TestAlpacaReconcilerReconcile_NormalizesBrokerOrderPrecisionToStorage(t *te
 		Broker:         "alpaca",
 	})
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
+		ExecutionAccount: testExecutionAccountBinding,
 		Broker: &alpacaReconciliationBrokerStub{
 			orders: []BrokerOrderSnapshot{{
 				ExternalID:     "expired-order",
@@ -1091,6 +1240,7 @@ func TestAlpacaReconcilerVerify_IgnoresVolatilePositionMarkToMarketFields(t *tes
 	positions.proven = map[uuid.UUID]struct{}{positions.open[0].ID: {}}
 	orders := newRecordingOrderRepo()
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
+		ExecutionAccount: testExecutionAccountBinding,
 		Broker: &alpacaReconciliationBrokerStub{
 			positions: []domain.Position{{
 				Ticker:        "SNAL",
@@ -1124,11 +1274,12 @@ func TestAlpacaReconcilerVerify_DuplicateTickerPaperPositionDoesNotSatisfyAlpaca
 
 	positions := newRecordingPositionRepo(&domain.Position{ID: uuid.New(), Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 99})
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
-		Broker:       &alpacaReconciliationBrokerStub{positions: []domain.Position{{Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100, AssetClass: domain.AssetClassEquity}}},
-		OrderRepo:    newRecordingOrderRepo(),
-		PositionRepo: positions,
-		TradeRepo:    newRecordingTradeRepo(newRecordingOrderRepo()),
-		Logger:       slog.New(slog.NewTextHandler(testWriter{t}, nil)),
+		ExecutionAccount: testExecutionAccountBinding,
+		Broker:           &alpacaReconciliationBrokerStub{positions: []domain.Position{{Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: 100, AssetClass: domain.AssetClassEquity}}},
+		OrderRepo:        newRecordingOrderRepo(),
+		PositionRepo:     positions,
+		TradeRepo:        newRecordingTradeRepo(newRecordingOrderRepo()),
+		Logger:           slog.New(slog.NewTextHandler(testWriter{t}, nil)),
 	})
 	report, err := reconciler.Verify(context.Background())
 	if err != nil {
@@ -1160,6 +1311,7 @@ func TestAlpacaReconcilerReconcile_CreatesDistinctTradesForDuplicateExecutionFie
 	})
 	trades := newRecordingTradeRepo(orders)
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
+		ExecutionAccount: testExecutionAccountBinding,
 		Broker: &alpacaReconciliationBrokerStub{
 			orders: []BrokerOrderSnapshot{{
 				ExternalID:     "order-1",
@@ -1238,6 +1390,7 @@ func TestAlpacaReconcilerVerify_UsesTradeExternalIDToDetectDuplicateExecutionFil
 	trades.seedOrderExternalID("order-1", trade)
 
 	reconciler := NewAlpacaReconciler(AlpacaReconcilerDeps{
+		ExecutionAccount: testExecutionAccountBinding,
 		Broker: &alpacaReconciliationBrokerStub{
 			fills: []BrokerFillSnapshot{{
 				ActivityID:  "fill-1",

@@ -137,7 +137,7 @@ func Compare(input ComparisonInput) (*Run, error) {
 	if input.Legacy.Source != SourceLegacy || input.Ledger.Source != SourceLedger {
 		return nil, fmt.Errorf("accounting comparison source roles are invalid")
 	}
-	if input.Legacy.AccountID != input.Ledger.AccountID || !input.Legacy.AsOf.Equal(input.Ledger.AsOf) ||
+	if input.Legacy.AccountID != input.Ledger.AccountID || input.Legacy.ThroughTransactionID != input.Ledger.ThroughTransactionID || !input.Legacy.AsOf.Equal(input.Ledger.AsOf) ||
 		input.Legacy.Currency != input.Ledger.Currency || input.Legacy.ProjectionVersion != input.Ledger.ProjectionVersion ||
 		input.Legacy.MarkSource != input.Ledger.MarkSource || input.Legacy.MarkNamespace != input.Ledger.MarkNamespace ||
 		input.Legacy.MaxMarkAge != input.Ledger.MaxMarkAge {

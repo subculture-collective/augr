@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -48,26 +49,37 @@ func TestKalshiSettlementGateMigrationAppliesAgainstExistingSchema(t *testing.T)
 	if err != nil {
 		t.Fatalf("failed to parse db config: %v", err)
 	}
-	schemaName := "migr_" + strings.ReplaceAll(strings.ReplaceAll(t.Name(), "/", "_"), " ", "_")
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgx.Identifier{schemaName}.Sanitize()); err != nil {
+	schemaName := "migr_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schemaName}.Sanitize()); err != nil {
 		t.Fatalf("failed to create schema: %v", err)
 	}
 	t.Cleanup(func() {
 		_, _ = adminPool.Exec(ctx, `DROP SCHEMA IF EXISTS `+pgx.Identifier{schemaName}.Sanitize()+` CASCADE`)
 	})
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatalf("failed to create schema pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	var actualSchema string
+	if err := pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&actualSchema); err != nil || actualSchema != schemaName {
+		t.Fatalf("isolated schema = %q, want %q: %v", actualSchema, schemaName, err)
+	}
 	for _, filename := range sortedUpMigrationsThrough(t, "000056_kalshi_settlement_gate.up.sql") {
 		if _, err := pool.Exec(ctx, readMigrationFile(t, filename)); err != nil {
 			t.Fatalf("failed to apply %s: %v", filename, err)
 		}
 	}
 	assertTableColumns(t, ctx, pool, "kalshi_settlement_gate", map[string]columnInfo{
+		"threshold":              {dataType: "integer", nullable: "NO", defaultClause: "0"},
+		"last_outcome":           {dataType: "text", nullable: "NO", defaultClause: "''::text"},
+		"last_error":             {dataType: "text", nullable: "NO", defaultClause: "''::text"},
+		"fetched":                {dataType: "integer", nullable: "NO", defaultClause: "0"},
+		"resolved":               {dataType: "integer", nullable: "NO", defaultClause: "0"},
+		"last_run_at":            {dataType: "timestamp with time zone", nullable: "YES"},
+		"updated_at":             {dataType: "timestamp with time zone", nullable: "NO", defaultClause: "now()"},
 		"job_name":               {dataType: "text", nullable: "NO"},
 		"consecutive_successes":  {dataType: "integer", nullable: "NO", defaultClause: "0"},
 		"eligible":               {dataType: "boolean", nullable: "NO", defaultClause: "false"},

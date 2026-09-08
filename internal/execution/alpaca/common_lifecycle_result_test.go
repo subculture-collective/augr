@@ -13,6 +13,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/venue"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
@@ -428,12 +429,22 @@ func newAlpacaLifecycleFixture(t *testing.T, quantity decimal.Decimal) alpacaLif
 	}
 	return alpacaLifecycleFixture{
 		context: CommonLifecycleContext{
+			Scope:  alpacaFixtureScope{intent: aggregate.Intent},
 			Policy: policy, Aggregate: aggregate, Account: account, Instrument: primary,
 			VenueContract: contract, ReceivedAt: now.Add(10 * time.Second),
 		},
 		now: now,
 	}
 }
+
+type alpacaFixtureScope struct{ intent lifecycle.Intent }
+
+func (s alpacaFixtureScope) AccountID() uuid.UUID                   { return s.intent.AccountID }
+func (s alpacaFixtureScope) Environment() domain.AccountEnvironment { return s.intent.Environment }
+func (s alpacaFixtureScope) Origin() (ledger.ExecutionOriginType, string) {
+	return s.intent.OriginType, s.intent.OriginID
+}
+func (s alpacaFixtureScope) CopyOriginRunID() uuid.UUID { return s.intent.CopyOriginRebalanceRunID }
 
 func (fixture alpacaLifecycleFixture) orderFact(
 	t *testing.T,
@@ -613,6 +624,14 @@ func (store *alpacaResultStore) ApplyExecutionFill(
 	}
 	store.current = next
 	return next, nil
+}
+
+func (store *alpacaResultStore) ApplyAcceptedFill(ctx context.Context, input execution.AcceptedFillInput) (execution.AcceptedFillResult, error) {
+	if err := input.Validate(); err != nil {
+		return execution.AcceptedFillResult{}, err
+	}
+	persisted, err := store.ApplyExecutionFill(ctx, input.Scope.AccountID(), input.Transition)
+	return execution.AcceptedFillResult{Lifecycle: persisted}, err
 }
 
 func (store *alpacaResultStore) ApplyExecutionTransition(

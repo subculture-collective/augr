@@ -60,11 +60,10 @@ func (s *stubEconomicLedgerReader) GetByID(_ context.Context, id uuid.UUID) (*le
 func TestEconomicReadRoutesAreDisabledByDefault(t *testing.T) {
 	id := uuid.NewString()
 	for _, path := range []string{
-		"/api/v1/economic/accounts",
-		"/api/v1/economic/accounts/" + id,
-		"/api/v1/economic/accounts/" + id + "/capital-flows",
-		"/api/v1/economic/accounts/" + id + "/capital-summary",
-		"/api/v1/economic/ledger-transactions/" + id,
+		"/api/v1/accounts/" + testAPIAccountID.String() + "/economic/account",
+		"/api/v1/accounts/" + testAPIAccountID.String() + "/economic/capital-flows",
+		"/api/v1/accounts/" + testAPIAccountID.String() + "/economic/capital-summary",
+		"/api/v1/accounts/" + testAPIAccountID.String() + "/economic/ledger-transactions/" + id,
 	} {
 		rr := doRequest(t, newTestServer(t), http.MethodGet, path, nil)
 		if rr.Code != http.StatusNotImplemented {
@@ -73,8 +72,22 @@ func TestEconomicReadRoutesAreDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestCurrentUserAccountsReturnsOnlyConfiguredAccount(t *testing.T) {
+	deps := testDeps()
+	deps.EconomicAccounts = &stubEconomicAccountReader{accounts: []domain.Account{{ID: testAPIAccountID, Name: "canonical"}}}
+	srv := newTestServerWithDeps(t, deps)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/me/accounts", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	accounts := decodeJSON[[]domain.Account](t, rr)
+	if len(accounts) != 1 || accounts[0].ID != testAPIAccountID {
+		t.Fatalf("accounts=%+v", accounts)
+	}
+}
+
 func TestEconomicReadRoutesInspectAccountsAndLedger(t *testing.T) {
-	accountID := uuid.New()
+	accountID := testAPIAccountID
 	transactionID := uuid.New()
 	account := domain.Account{ID: accountID, Name: "scored-500", StartingCapital: decimal.NewFromInt(500)}
 	flow := domain.CapitalFlow{ID: uuid.New(), AccountID: accountID, Amount: decimal.NewFromInt(500)}
@@ -86,28 +99,21 @@ func TestEconomicReadRoutesInspectAccountsAndLedger(t *testing.T) {
 	deps.EconomicAccounts, deps.EconomicLedger = accounts, ledgerReader
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/economic/accounts?limit=7&offset=2", nil)
-	if rr.Code != http.StatusOK || accounts.limit != 7 || accounts.offset != 2 {
-		t.Fatalf("list status=%d paging=%d/%d body=%s", rr.Code, accounts.limit, accounts.offset, rr.Body.String())
+	base := "/api/v1/accounts/" + accountID.String() + "/economic"
+	rr := doRequest(t, srv, http.MethodGet, base+"/account", nil)
+	if rr.Code != http.StatusOK || accounts.gotID != accountID {
+		t.Fatalf("account status=%d id=%s body=%s", rr.Code, accounts.gotID, rr.Body.String())
 	}
-	listed := decodeJSON[struct {
-		Data []domain.Account `json:"data"`
-	}](t, rr)
-	if len(listed.Data) != 1 || listed.Data[0].ID != accountID {
-		t.Fatalf("unexpected accounts: %+v", listed.Data)
-	}
-
 	for _, path := range []string{
-		"/api/v1/economic/accounts/" + accountID.String(),
-		"/api/v1/economic/accounts/" + accountID.String() + "/capital-flows?limit=3&offset=1",
-		"/api/v1/economic/accounts/" + accountID.String() + "/capital-summary",
+		base + "/capital-flows?limit=3&offset=1",
+		base + "/capital-summary",
 	} {
 		rr = doRequest(t, srv, http.MethodGet, path, nil)
 		if rr.Code != http.StatusOK || accounts.gotID != accountID {
 			t.Fatalf("GET %s status=%d id=%s body=%s", path, rr.Code, accounts.gotID, rr.Body.String())
 		}
 	}
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/economic/ledger-transactions/"+transactionID.String(), nil)
+	rr = doRequest(t, srv, http.MethodGet, base+"/ledger-transactions/"+transactionID.String(), nil)
 	if rr.Code != http.StatusOK || ledgerReader.gotID != transactionID {
 		t.Fatalf("ledger status=%d id=%s body=%s", rr.Code, ledgerReader.gotID, rr.Body.String())
 	}
@@ -119,19 +125,19 @@ func TestEconomicReadRoutesRejectInvalidAndMissingIdentity(t *testing.T) {
 	deps.EconomicLedger = &stubEconomicLedgerReader{err: repository.ErrNotFound}
 	srv := newTestServerWithDeps(t, deps)
 	for _, path := range []string{
-		"/api/v1/economic/accounts/not-a-uuid",
-		"/api/v1/economic/ledger-transactions/not-a-uuid",
+		"/api/v1/accounts/" + testAPIAccountID.String() + "/economic/ledger-transactions/not-a-uuid",
 	} {
 		if rr := doRequest(t, srv, http.MethodGet, path, nil); rr.Code != http.StatusBadRequest {
 			t.Fatalf("GET %s status=%d body=%s", path, rr.Code, rr.Body.String())
 		}
 	}
 	id := uuid.NewString()
+	base := "/api/v1/accounts/" + testAPIAccountID.String() + "/economic"
 	for _, path := range []string{
-		"/api/v1/economic/accounts/" + id,
-		"/api/v1/economic/accounts/" + id + "/capital-flows",
-		"/api/v1/economic/accounts/" + id + "/capital-summary",
-		"/api/v1/economic/ledger-transactions/" + id,
+		base + "/account",
+		base + "/capital-flows",
+		base + "/capital-summary",
+		base + "/ledger-transactions/" + id,
 	} {
 		if rr := doRequest(t, srv, http.MethodGet, path, nil); rr.Code != http.StatusNotFound {
 			t.Fatalf("GET %s status=%d body=%s", path, rr.Code, rr.Body.String())

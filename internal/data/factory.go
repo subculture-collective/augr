@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"golang.org/x/sync/errgroup"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
@@ -61,6 +63,24 @@ type DataService struct {
 	logger          *slog.Logger
 	nowMu           sync.RWMutex
 	now             func() time.Time
+	boundScopeID    uuid.UUID
+	boundHistory    ManifestBoundSymbolLoader
+}
+
+// NewManifestBoundDataService creates a research-only view whose OHLCV reads
+// can reach only the configured immutable evaluation scope. Non-OHLCV methods
+// retain the base service behavior; callers must not use them as promotion
+// evidence.
+func NewManifestBoundDataService(base *DataService, scopeID uuid.UUID, loader ManifestBoundSymbolLoader) (*DataService, error) {
+	if base == nil || scopeID == uuid.Nil || loader == nil {
+		return nil, fmt.Errorf("data: manifest-bound service requires base service, scope, and loader")
+	}
+	return &DataService{
+		selection: base.selection, stockChain: base.stockChain, stockOHLCVChain: base.stockOHLCVChain,
+		cryptoChain: base.cryptoChain, polymarketChain: base.polymarketChain, kalshiChain: base.kalshiChain,
+		socialProviders: base.socialProviders, cacheRepo: base.cacheRepo, historyRepo: base.historyRepo,
+		logger: base.logger, now: base.now, boundScopeID: scopeID, boundHistory: loader,
+	}, nil
 }
 
 // SocialTriageConfig holds optional LLM dependencies for social sentiment
@@ -98,6 +118,22 @@ func NewDataService(cfg config.Config, reg *ProviderRegistry, cacheRepo reposito
 
 // GetOHLCV returns OHLCV data using the market-type chain and caches results by query.
 func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType, ticker string, timeframe Timeframe, from, to time.Time) ([]domain.OHLCV, error) {
+	return s.GetOHLCVValidated(ctx, marketType, ticker, timeframe, from, to, nil)
+}
+
+// GetOHLCVValidated validates cache and provider results before returning them.
+// Manifest-bound readers never fall back to mutable provider data.
+func (s *DataService) GetOHLCVValidated(ctx context.Context, marketType domain.MarketType, ticker string, timeframe Timeframe, from, to time.Time, accept func([]domain.OHLCV) bool) ([]domain.OHLCV, error) {
+	if s != nil && s.boundHistory != nil {
+		if normalizeMarketType(marketType) != domain.MarketTypeStock {
+			return nil, fmt.Errorf("data: manifest-bound OHLCV supports stock evidence only")
+		}
+		bars, _, err := s.boundHistory.LoadSymbol(ctx, s.boundScopeID, strings.TrimSpace(ticker), timeframe, from.UTC().Truncate(time.Microsecond), to.UTC().Truncate(time.Microsecond))
+		if err == nil && accept != nil && !accept(bars) {
+			return nil, ErrOHLCVRejected
+		}
+		return bars, err
+	}
 	fromUTC := from.UTC()
 	toUTC := to.UTC()
 
@@ -124,17 +160,27 @@ func (s *DataService) GetOHLCV(ctx context.Context, marketType domain.MarketType
 	}
 
 	if cacheSelection.Enabled {
-		if cached, ok := s.loadCachedOHLCV(ctx, key); ok {
+		if cached, ok := s.loadCachedOHLCV(ctx, key); ok && (accept == nil || accept(cached)) {
 			return cached, nil
 		}
 	}
 
-	bars, err := chain.GetOHLCV(ctx, ticker, timeframe, from, to)
+	var bars []domain.OHLCV
+	if validated, ok := chain.(interface {
+		GetOHLCVValidated(context.Context, string, Timeframe, time.Time, time.Time, func([]domain.OHLCV) bool) ([]domain.OHLCV, error)
+	}); ok && accept != nil {
+		bars, err = validated.GetOHLCVValidated(ctx, ticker, timeframe, from, to, accept)
+	} else {
+		bars, err = chain.GetOHLCV(ctx, ticker, timeframe, from, to)
+	}
 	if err != nil {
 		return nil, err
 	}
+	if accept != nil && len(bars) > 0 && !accept(bars) {
+		return nil, ErrOHLCVRejected
+	}
 
-	if cacheSelection.Enabled {
+	if cacheSelection.Enabled && (accept == nil || len(bars) > 0) {
 		s.storeCached(ctx, key, bars, ttlForOHLCV(timeframe))
 	}
 
@@ -260,6 +306,32 @@ func (s *DataService) DownloadHistoricalOHLCVWithStats(
 	from, to time.Time,
 	incremental bool,
 ) (*HistoricalOHLCVDownload, error) {
+	if s != nil && s.boundHistory != nil {
+		if normalizeMarketType(marketType) != domain.MarketTypeStock {
+			return nil, fmt.Errorf("data: manifest-bound historical download supports stock evidence only")
+		}
+		result := &HistoricalOHLCVDownload{
+			Bars: make(map[string][]domain.OHLCV, len(tickers)), ProviderRequests: make(map[string]int, len(tickers)),
+			FreshBars: make(map[string]int, len(tickers)), ProviderFailures: make(map[string]int, len(tickers)),
+			ProviderLatest: make(map[string]time.Time, len(tickers)),
+		}
+		var loadErrors []error
+		for _, ticker := range tickers {
+			trimmed := strings.TrimSpace(ticker)
+			if trimmed == "" {
+				continue
+			}
+			bars, receipt, err := s.boundHistory.LoadSymbol(ctx, s.boundScopeID, trimmed, timeframe, from.UTC().Truncate(time.Microsecond), to.UTC().Truncate(time.Microsecond))
+			if err != nil {
+				result.ProviderFailures[trimmed]++
+				loadErrors = append(loadErrors, fmt.Errorf("data: load manifest-bound history for %s: %w", trimmed, err))
+				continue
+			}
+			result.Bars[trimmed] = bars
+			result.ProviderLatest[trimmed] = receipt.EffectiveEnd
+		}
+		return result, errors.Join(loadErrors...)
+	}
 	if s == nil || s.historyRepo == nil {
 		return nil, ErrHistoricalOHLCVUnavailable
 	}

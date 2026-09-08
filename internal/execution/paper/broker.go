@@ -24,17 +24,24 @@ const (
 
 // PaperBroker implements an in-memory execution.Broker for paper trading.
 type PaperBroker struct {
-	mu            sync.RWMutex
-	nowMu         sync.RWMutex
-	orders        map[string]*domain.Order
-	positions     map[string]*domain.Position
-	optionSpreads map[string]float64
-	balance       execution.Balance
-	slippageBps   float64
-	feePct        float64
-	evaluation    domain.PaperEvaluationProfile
-	nextOrderID   uint64
-	now           func() time.Time
+	mu                  sync.RWMutex
+	nowMu               sync.RWMutex
+	orders              map[string]*domain.Order
+	positions           map[string]*domain.Position
+	optionLots          map[uuid.UUID]*domain.Position
+	pendingOptionLots   map[string][]uuid.UUID
+	optionSpreads       map[string]float64
+	optionSpreadEffects map[string][]optionPositionEffect
+	optionOrderEffects  map[string]optionPositionEffect
+	orderEffects        map[string]standardOrderEffect
+	optionSpreadOrders  map[string]execution.BrokerSpreadOrderStatus
+	settledOptions      map[uuid.UUID]struct{}
+	balance             execution.Balance
+	slippageBps         float64
+	feePct              float64
+	evaluation          domain.PaperEvaluationProfile
+	nextOrderID         uint64
+	now                 func() time.Time
 }
 
 // NewPaperBroker constructs an in-memory paper trading broker.
@@ -75,20 +82,34 @@ func NewPaperBrokerWithProfile(profile domain.PaperEvaluationProfile) (*PaperBro
 
 func newPaperBroker(profile domain.PaperEvaluationProfile) *PaperBroker {
 	return &PaperBroker{
-		orders:        make(map[string]*domain.Order),
-		positions:     make(map[string]*domain.Position),
-		optionSpreads: make(map[string]float64),
+		orders:              make(map[string]*domain.Order),
+		positions:           make(map[string]*domain.Position),
+		optionLots:          make(map[uuid.UUID]*domain.Position),
+		pendingOptionLots:   make(map[string][]uuid.UUID),
+		optionSpreads:       make(map[string]float64),
+		optionSpreadEffects: make(map[string][]optionPositionEffect),
+		optionOrderEffects:  make(map[string]optionPositionEffect),
+		orderEffects:        make(map[string]standardOrderEffect),
+		optionSpreadOrders:  make(map[string]execution.BrokerSpreadOrderStatus),
+		settledOptions:      make(map[uuid.UUID]struct{}),
 		balance: execution.Balance{
-			Currency:    "USD",
-			Cash:        profile.InitialCapital,
-			BuyingPower: profile.InitialCapital,
-			Equity:      profile.InitialCapital,
+			Currency:           "USD",
+			Cash:               profile.InitialCapital,
+			BuyingPower:        profile.InitialCapital,
+			OptionsBuyingPower: profile.InitialCapital,
+			Equity:             profile.InitialCapital,
 		},
 		slippageBps: profile.SlippageBPS,
 		feePct:      profile.FeePct,
 		evaluation:  profile,
 		now:         time.Now,
 	}
+}
+
+type standardOrderEffect struct {
+	balance  execution.Balance
+	ticker   string
+	position *domain.Position
 }
 
 // EvaluationProfile returns the broker's immutable scored-or-stress identity.
@@ -173,6 +194,8 @@ func (b *PaperBroker) RestorePositions(positions []domain.Position) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.positions = make(map[string]*domain.Position, len(positions))
+	b.optionLots = make(map[uuid.UUID]*domain.Position)
+	b.pendingOptionLots = make(map[string][]uuid.UUID)
 	grouped := make(map[string]*domain.Position)
 	for i := range positions {
 		position := clonePosition(&positions[i])
@@ -183,6 +206,13 @@ func (b *PaperBroker) RestorePositions(positions []domain.Position) error {
 			return fmt.Errorf("paper: restored position must have ticker and positive quantity")
 		}
 		key := positionKey(position)
+		if position.AssetClass == domain.AssetClassOption {
+			if position.ID == uuid.Nil {
+				return fmt.Errorf("paper: restored option position requires durable id")
+			}
+			b.optionLots[position.ID] = position
+			continue
+		}
 		if existing, ok := grouped[key]; ok {
 			merged, err := mergeRestoredPositions(existing, position)
 			if err != nil {
@@ -243,7 +273,16 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 	defer b.mu.Unlock()
 
 	now := b.currentTime().UTC()
-	externalID := b.nextExternalIDLocked()
+	externalID := strings.TrimSpace(order.ClientOrderID)
+	if externalID == "" {
+		externalID = b.nextExternalIDLocked()
+	} else if existing := b.orders[externalID]; existing != nil {
+		if existing.Ticker != order.Ticker || existing.Side != order.Side || existing.OrderType != order.OrderType || existing.Quantity != order.Quantity {
+			return "", errors.New("paper: client order id reused with different order")
+		}
+		*order = *cloneOrder(existing)
+		return externalID, nil
+	}
 
 	order.ExternalID = externalID
 	order.Status = domain.OrderStatusSubmitted
@@ -260,12 +299,17 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 	if err != nil {
 		order.Status = domain.OrderStatusRejected
 		b.orders[externalID] = cloneOrder(order)
-		return externalID, err
+		return externalID, errors.Join(execution.ErrBrokerOrderRejected, err)
 	}
 	if !shouldFill {
 		b.orders[externalID] = cloneOrder(order)
 		return externalID, nil
 	}
+	var priorPosition *domain.Position
+	if existing := b.positions[positionTicker]; existing != nil {
+		priorPosition = clonePosition(existing)
+	}
+	b.orderEffects[externalID] = standardOrderEffect{balance: b.balance, ticker: positionTicker, position: priorPosition}
 
 	notional := fillPrice * order.Quantity
 	fee := notional * b.feePct
@@ -274,7 +318,8 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 		if b.balance.Cash < totalCost {
 			order.Status = domain.OrderStatusRejected
 			b.orders[externalID] = cloneOrder(order)
-			return externalID, fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalCost, b.balance.Cash)
+			delete(b.orderEffects, externalID)
+			return externalID, errors.Join(execution.ErrBrokerOrderRejected, fmt.Errorf("paper: insufficient balance: need %.2f, have %.2f", totalCost, b.balance.Cash))
 		}
 		b.balance.Cash -= totalCost
 	} else {
@@ -292,6 +337,93 @@ func (b *PaperBroker) SubmitOrder(ctx context.Context, order *domain.Order) (str
 	b.orders[externalID] = cloneOrder(order)
 
 	return externalID, nil
+}
+
+// RollbackOrderFill restores broker state from before an immediate fill.
+func (b *PaperBroker) RollbackOrderFill(ctx context.Context, externalID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id := strings.TrimSpace(externalID)
+	effect, ok := b.orderEffects[id]
+	if !ok {
+		return fmt.Errorf("paper: order fill effect %q not found", externalID)
+	}
+	b.balance = effect.balance
+	if effect.position == nil {
+		delete(b.positions, effect.ticker)
+	} else {
+		b.positions[effect.ticker] = clonePosition(effect.position)
+	}
+	if order := b.orders[id]; order != nil {
+		order.Status, order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = domain.OrderStatusRejected, 0, nil, nil
+	}
+	delete(b.orderEffects, id)
+	return nil
+}
+
+// CommitOrderFill releases rollback state after durable persistence.
+func (b *PaperBroker) CommitOrderFill(externalID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.orderEffects, strings.TrimSpace(externalID))
+}
+
+func (b *PaperBroker) ApplyOptionSettlement(ctx context.Context, positionID uuid.UUID, settlementPrice float64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, settled := b.settledOptions[positionID]; settled {
+		return nil
+	}
+	position := b.optionLots[positionID]
+	if position != nil {
+		cash := settlementPrice * position.Quantity * position.ContractMultiplier
+		switch position.Side {
+		case domain.PositionSideLong:
+			b.balance.Cash += cash
+		case domain.PositionSideShort:
+			b.balance.Cash -= cash
+		default:
+			return errors.New("paper: option settlement position side is invalid")
+		}
+		delete(b.optionLots, positionID)
+		b.settledOptions[positionID] = struct{}{}
+		b.balance.BuyingPower = b.balance.Cash
+		b.balance.Equity = b.markToMarketEquityLocked()
+		return nil
+	}
+	return fmt.Errorf("paper: durable option position %s not found for settlement", positionID)
+}
+
+func (b *PaperBroker) BindDurableOptionPosition(ctx context.Context, ticker string, positionID uuid.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b == nil || positionID == uuid.Nil {
+		return errors.New("paper: durable option position binding is required")
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	key := canonicalPositionKey(domain.MarketTypeOptions, ticker, "")
+	queue := b.pendingOptionLots[key]
+	if len(queue) == 0 {
+		return fmt.Errorf("paper: option position %q not found for durable binding", ticker)
+	}
+	transientID := queue[0]
+	b.pendingOptionLots[key] = queue[1:]
+	position := b.optionLots[transientID]
+	if position == nil {
+		return fmt.Errorf("paper: option position %q lost before durable binding", ticker)
+	}
+	delete(b.optionLots, transientID)
+	position.ID = positionID
+	b.optionLots[positionID] = position
+	return nil
 }
 
 // CancelOrder cancels an existing resting paper order.
@@ -326,16 +458,22 @@ func (b *PaperBroker) CancelOrder(ctx context.Context, externalID string) error 
 
 // GetOrderStatus returns the tracked paper order status.
 func (b *PaperBroker) GetOrderStatus(ctx context.Context, externalID string) (domain.OrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, externalID)
+	return result.Status, err
+}
+
+// GetOrderStatusResult returns status with broker-authoritative fill evidence.
+func (b *PaperBroker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
 	if b == nil {
-		return "", errors.New("paper: broker is required")
+		return execution.BrokerOrderStatus{}, errors.New("paper: broker is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("paper: get order status: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("paper: get order status: %w", err)
 	}
 
 	id := strings.TrimSpace(externalID)
 	if id == "" {
-		return "", errors.New("paper: external order id is required")
+		return execution.BrokerOrderStatus{}, errors.New("paper: external order id is required")
 	}
 
 	b.mu.RLock()
@@ -343,10 +481,31 @@ func (b *PaperBroker) GetOrderStatus(ctx context.Context, externalID string) (do
 
 	order, ok := b.orders[id]
 	if !ok {
-		return "", fmt.Errorf("paper: order %q not found", id)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("paper: order %q not found: %w", id, execution.ErrBrokerOrderNotFound)
 	}
 
-	return order.Status, nil
+	return execution.BrokerOrderStatus{Status: order.Status, FilledQuantity: order.FilledQuantity, FilledAvgPrice: cloneFloatPtr(order.FilledAvgPrice), FilledAt: cloneTimePtr(order.FilledAt)}, nil
+}
+
+func (b *PaperBroker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	if b == nil {
+		return "", execution.BrokerOrderStatus{}, errors.New("paper: broker is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", execution.BrokerOrderStatus{}, err
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return "", execution.BrokerOrderStatus{}, errors.New("paper: client order id is required")
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for externalID, order := range b.orders {
+		if order.ClientOrderID == clientOrderID {
+			return externalID, execution.BrokerOrderStatus{Status: order.Status, FilledQuantity: order.FilledQuantity, FilledAvgPrice: cloneFloatPtr(order.FilledAvgPrice), FilledAt: cloneTimePtr(order.FilledAt)}, nil
+		}
+	}
+	return "", execution.BrokerOrderStatus{}, fmt.Errorf("paper: client order %q not found: %w", clientOrderID, execution.ErrBrokerOrderNotFound)
 }
 
 // GetPositions returns a copy of the current open paper positions.
@@ -371,6 +530,7 @@ func (b *PaperBroker) GetPositions(ctx context.Context) ([]domain.Position, erro
 	for _, ticker := range tickers {
 		positions = append(positions, *clonePosition(b.positions[ticker]))
 	}
+	positions = append(positions, aggregateOptionLots(b.optionLots)...)
 
 	return positions, nil
 }
@@ -414,6 +574,7 @@ func (b *PaperBroker) CaptureLegacyAccounting(ctx context.Context) (accountingre
 	for _, ticker := range tickers {
 		positions = append(positions, *clonePosition(b.positions[ticker]))
 	}
+	positions = append(positions, aggregateOptionLots(b.optionLots)...)
 	return accountingrecon.LegacyCapture{
 		Balance: accountingrecon.LegacyBalance{
 			Currency: b.balance.Currency, Cash: b.balance.Cash,
@@ -538,13 +699,53 @@ func (b *PaperBroker) markToMarketEquityLocked() float64 {
 		if position.CurrentPrice != nil {
 			price = *position.CurrentPrice
 		}
+		multiplier := position.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 1
+		}
 		if position.Side == domain.PositionSideLong {
-			equity += position.Quantity * price
+			equity += position.Quantity * price * multiplier
 			continue
 		}
-		equity -= position.Quantity * price
+		equity -= position.Quantity * price * multiplier
+	}
+	for _, position := range b.optionLots {
+		price := position.AvgEntry
+		if position.CurrentPrice != nil {
+			price = *position.CurrentPrice
+		}
+		value := position.Quantity * price * position.ContractMultiplier
+		if position.Side == domain.PositionSideLong {
+			equity += value
+		} else {
+			equity -= value
+		}
 	}
 	return equity
+}
+
+func aggregateOptionLots(lots map[uuid.UUID]*domain.Position) []domain.Position {
+	grouped := make(map[string]*domain.Position)
+	for _, lot := range lots {
+		key := positionKey(lot) + ":" + string(lot.Side)
+		if current := grouped[key]; current != nil {
+			total := current.Quantity + lot.Quantity
+			current.AvgEntry = (current.AvgEntry*current.Quantity + lot.AvgEntry*lot.Quantity) / total
+			current.Quantity = total
+			continue
+		}
+		grouped[key] = clonePosition(lot)
+	}
+	keys := make([]string, 0, len(grouped))
+	for key := range grouped {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]domain.Position, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, *grouped[key])
+	}
+	return result
 }
 
 func positionKey(position *domain.Position) string {
@@ -558,7 +759,7 @@ func mergeRestoredPositions(a, b *domain.Position) (*domain.Position, error) {
 	if a == nil || b == nil {
 		return nil, errors.New("paper: restored position is required")
 	}
-	if a.Ticker != b.Ticker || a.Side != b.Side || a.AssetClass != b.AssetClass || a.MarketType != b.MarketType {
+	if a.Ticker != b.Ticker || a.Side != b.Side || a.AssetClass != b.AssetClass || a.MarketType != b.MarketType || (a.AssetClass == domain.AssetClassOption && a.ContractMultiplier != b.ContractMultiplier) {
 		return nil, fmt.Errorf("paper: irreconcilable restored positions for %s", a.Ticker)
 	}
 	a.Quantity += b.Quantity
@@ -570,9 +771,13 @@ func mergeRestoredPositions(a, b *domain.Position) (*domain.Position, error) {
 	}
 	a.UnrealizedPnL = nil
 	if a.CurrentPrice != nil {
-		pnl := (*a.CurrentPrice - a.AvgEntry) * a.Quantity
+		multiplier := a.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 1
+		}
+		pnl := (*a.CurrentPrice - a.AvgEntry) * a.Quantity * multiplier
 		if a.Side == domain.PositionSideShort {
-			pnl = (a.AvgEntry - *a.CurrentPrice) * a.Quantity
+			pnl = (a.AvgEntry - *a.CurrentPrice) * a.Quantity * multiplier
 		}
 		a.UnrealizedPnL = floatPtr(pnl)
 	}

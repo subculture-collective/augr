@@ -21,35 +21,75 @@ type kalshiMarkProviderStub struct {
 	quotes map[string]kalshi.Snapshot
 	errors map[string]error
 	calls  []string
+	loadFn func(string) (kalshi.Snapshot, error)
 }
 
 func (stub *kalshiMarkProviderStub) LoadSnapshot(_ context.Context, ticker string) (kalshi.Snapshot, error) {
 	stub.calls = append(stub.calls, ticker)
+	if stub.loadFn != nil {
+		return stub.loadFn(ticker)
+	}
 	if err := stub.errors[ticker]; err != nil {
 		return kalshi.Snapshot{}, err
 	}
 	return stub.quotes[ticker], nil
 }
 
+func TestKalshiMarkingRejectsForeignInventoryBeforeProviderReads(t *testing.T) {
+	accountID := uuid.New()
+	provider := &kalshiMarkProviderStub{}
+	repo := &kalshiProjectionStub{lots: []repository.CanonicalOpenLot{{AccountID: uuid.New()}}}
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
+	if err := orch.kalshiMarking(context.Background()); err == nil || !strings.Contains(err.Error(), "foreign account lot") {
+		t.Fatalf("foreign inventory error=%v", err)
+	}
+	if len(provider.calls) != 0 {
+		t.Fatalf("foreign inventory reached provider: %v", provider.calls)
+	}
+}
+
+func TestKalshiMarkingCancellationStopsBeforeMarkWrites(t *testing.T) {
+	accountID := uuid.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	repo := &kalshiProjectionStub{lots: []repository.CanonicalOpenLot{{AccountID: accountID, InstrumentID: uuid.New(), VenueContractID: uuid.New(), Side: domain.PositionSideLong, Ticker: "KXCANCEL:YES", Currency: "USD"}}}
+	provider := &kalshiMarkProviderStub{loadFn: func(string) (kalshi.Snapshot, error) {
+		cancel()
+		return kalshi.Snapshot{Ticker: "KXCANCEL", Status: "active", BestBidYes: .4, FetchedAt: time.Now()}, nil
+	}}
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
+	if err := orch.kalshiMarking(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error=%v", err)
+	}
+	if len(repo.marks) != 0 || len(repo.rebuilds) != 0 {
+		t.Fatalf("cancellation wrote marks/rebuilds=%d/%d", len(repo.marks), len(repo.rebuilds))
+	}
+}
+
 type kalshiProjectionStub struct {
 	repository.ProjectionRepository
 	lots     []repository.CanonicalOpenLot
 	marks    []*ledger.MarkObservation
-	rebuilds []ledger.ProjectionRequest
+	rebuilds []repository.ProjectionMarkBatch
+	account  uuid.UUID
+	frontier uuid.UUID
 }
 
-func (stub *kalshiProjectionStub) ListCanonicalOpenLots(context.Context, time.Time) ([]repository.CanonicalOpenLot, error) {
+func (stub *kalshiProjectionStub) ListCanonicalOpenLots(_ context.Context, accountID uuid.UUID, _ time.Time) ([]repository.CanonicalOpenLot, error) {
+	stub.account = accountID
 	return stub.lots, nil
 }
 
-func (stub *kalshiProjectionStub) RecordMarkObservation(_ context.Context, mark *ledger.MarkObservation) (*ledger.MarkObservation, error) {
-	stub.marks = append(stub.marks, mark)
-	return mark, nil
+func (stub *kalshiProjectionStub) LatestProjectionFrontier(context.Context, uuid.UUID, time.Time) (uuid.UUID, error) {
+	if stub.frontier == uuid.Nil {
+		stub.frontier = uuid.New()
+	}
+	return stub.frontier, nil
 }
 
-func (stub *kalshiProjectionStub) RebuildPortfolioProjection(_ context.Context, request ledger.ProjectionRequest) (*ledger.PortfolioProjection, error) {
+func (stub *kalshiProjectionStub) RecordMarksAndEnqueueRebuild(_ context.Context, request repository.ProjectionMarkBatch) (uuid.UUID, error) {
+	stub.marks = append(stub.marks, request.Marks...)
 	stub.rebuilds = append(stub.rebuilds, request)
-	return &ledger.PortfolioProjection{}, nil
+	return uuid.New(), nil
 }
 
 func TestKalshiMarkingMarksCanonicalLotsAndRebuildsEachAccountOnce(t *testing.T) {
@@ -63,7 +103,7 @@ func TestKalshiMarkingMarksCanonicalLotsAndRebuildsEachAccountOnce(t *testing.T)
 		"KXONE": {Ticker: "KXONE", Status: "active", BestBidYes: 0.4, BestAskYes: 0.42, FetchedAt: now.Add(-time.Second)},
 		"KXTWO": {Ticker: "KXTWO", Status: "active", BestBidNo: 0.6, BestAskNo: 0.62, FetchedAt: now.Add(-time.Second)},
 	}}
-	orch := NewJobOrchestrator(OrchestratorDeps{KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiMarkMaxAge: time.Minute})
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
 	orch.now = func() time.Time { return now }
 	orch.RegisterAll()
 	if _, ok := orch.jobs["kalshi_marking"]; !ok {
@@ -75,8 +115,7 @@ func TestKalshiMarkingMarksCanonicalLotsAndRebuildsEachAccountOnce(t *testing.T)
 	if len(repo.marks) != 2 || len(repo.rebuilds) != 1 {
 		t.Fatalf("marks/rebuilds = %d/%d, want 2/1", len(repo.marks), len(repo.rebuilds))
 	}
-	if repo.rebuilds[0].AccountID != accountID || repo.rebuilds[0].MarkSource != kalshi.KalshiMarkSource ||
-		repo.rebuilds[0].MarkNamespace != kalshi.KalshiAccountMarkNamespace(accountID) {
+	if repo.rebuilds[0].AccountID != accountID || repo.rebuilds[0].ThroughTransactionID != repo.frontier {
 		t.Fatalf("rebuild request = %+v", repo.rebuilds[0])
 	}
 	if repo.rebuilds[0].AsOf.Before(repo.marks[1].ObservedAt) {
@@ -95,13 +134,14 @@ func TestKalshiMarkingMarksCanonicalLotsAndRebuildsEachAccountOnce(t *testing.T)
 
 func TestKalshiMarkingLeavesUnavailableLotsUnmarked(t *testing.T) {
 	now := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
+	accountID := uuid.New()
 	repo := &kalshiProjectionStub{lots: []repository.CanonicalOpenLot{{
-		AccountID: uuid.New(), InstrumentID: uuid.New(), VenueContractID: uuid.New(), Side: domain.PositionSideLong, Ticker: "KXHALT:YES", Currency: "USD",
+		AccountID: accountID, InstrumentID: uuid.New(), VenueContractID: uuid.New(), Side: domain.PositionSideLong, Ticker: "KXHALT:YES", Currency: "USD",
 	}}}
 	provider := &kalshiMarkProviderStub{quotes: map[string]kalshi.Snapshot{
 		"KXHALT": {Ticker: "KXHALT", Status: "halted", BestBidYes: 0.4, BestAskYes: 0.42, FetchedAt: now},
 	}}
-	orch := NewJobOrchestrator(OrchestratorDeps{KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiMarkMaxAge: time.Minute})
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
 	orch.now = func() time.Time { return now }
 	orch.RegisterAll()
 	if err := orch.kalshiMarking(context.Background()); err == nil || !strings.Contains(err.Error(), "canonical lots unmarked") {
@@ -125,25 +165,26 @@ func TestKalshiMarkingIsolatesOneProviderFailure(t *testing.T) {
 			Ticker: "KXOK", Status: "active", BestBidYes: 0.4, BestAskYes: 0.42, FetchedAt: now,
 		}},
 	}
-	orch := NewJobOrchestrator(OrchestratorDeps{KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiMarkMaxAge: time.Minute})
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
 	orch.now = func() time.Time { return now }
 	if err := orch.kalshiMarking(context.Background()); err == nil || !strings.Contains(err.Error(), "provider unavailable") {
 		t.Fatalf("kalshiMarking() error = %v, want aggregated provider failure", err)
 	}
-	if len(repo.marks) != 1 || len(repo.rebuilds) != 0 || len(provider.calls) != 2 {
+	if len(repo.marks) != 0 || len(repo.rebuilds) != 0 || len(provider.calls) != 2 {
 		t.Fatalf("partial account marks/rebuilds/calls = %d/%d/%d", len(repo.marks), len(repo.rebuilds), len(provider.calls))
 	}
 }
 
 func TestKalshiMarkingRejectsShortCanonicalInventory(t *testing.T) {
 	now := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
+	accountID := uuid.New()
 	repo := &kalshiProjectionStub{lots: []repository.CanonicalOpenLot{{
-		AccountID: uuid.New(), InstrumentID: uuid.New(), VenueContractID: uuid.New(), Side: domain.PositionSideShort, Ticker: "KXSHORT:YES", Currency: "USD",
+		AccountID: accountID, InstrumentID: uuid.New(), VenueContractID: uuid.New(), Side: domain.PositionSideShort, Ticker: "KXSHORT:YES", Currency: "USD",
 	}}}
 	provider := &kalshiMarkProviderStub{quotes: map[string]kalshi.Snapshot{
 		"KXSHORT": {Ticker: "KXSHORT", Status: "active", BestBidYes: 0.4, BestAskYes: 0.42, FetchedAt: now},
 	}}
-	orch := NewJobOrchestrator(OrchestratorDeps{KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiMarkMaxAge: time.Minute})
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
 	orch.now = func() time.Time { return now }
 	err := orch.kalshiMarking(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "short canonical lots are unavailable") {
@@ -166,7 +207,7 @@ func TestKalshiMarkingCapturesAsOfAfterQuoteLoad(t *testing.T) {
 	provider := &kalshiMarkProviderStub{quotes: map[string]kalshi.Snapshot{
 		"KXLATE": {Ticker: "KXLATE", Status: "active", BestBidYes: 0.4, BestAskYes: 0.42, FetchedAt: start.Add(time.Second)},
 	}}
-	orch := NewJobOrchestrator(OrchestratorDeps{KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiMarkMaxAge: time.Minute})
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: accountID, KalshiMarkProvider: provider, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
 	calls := 0
 	orch.now = func() time.Time {
 		calls++
@@ -184,7 +225,8 @@ func TestKalshiMarkingCapturesAsOfAfterQuoteLoad(t *testing.T) {
 }
 
 func TestKalshiMarkingHasNoDiscoveryDependency(t *testing.T) {
-	orch := NewJobOrchestrator(OrchestratorDeps{KalshiMarkProvider: &kalshiMarkProviderStub{}, KalshiProjectionRepo: &kalshiProjectionStub{}, KalshiMarkMaxAge: time.Minute})
+	repo := &kalshiProjectionStub{}
+	orch := NewJobOrchestrator(OrchestratorDeps{CanonicalAccountID: uuid.New(), KalshiMarkProvider: &kalshiMarkProviderStub{}, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute})
 	orch.RegisterAll()
 	if dependencies := orch.jobs["kalshi_marking"].DependsOn; len(dependencies) != 0 {
 		t.Fatalf("kalshi_marking dependencies = %v, want none", dependencies)
@@ -194,7 +236,7 @@ func TestKalshiMarkingHasNoDiscoveryDependency(t *testing.T) {
 func TestKalshiMarkingNoInventorySucceeds(t *testing.T) {
 	repo := &kalshiProjectionStub{}
 	orch := NewJobOrchestrator(OrchestratorDeps{
-		KalshiMarkProvider: &kalshiMarkProviderStub{}, KalshiProjectionRepo: repo, KalshiMarkMaxAge: time.Minute,
+		CanonicalAccountID: uuid.New(), KalshiMarkProvider: &kalshiMarkProviderStub{}, KalshiProjectionRepo: repo, KalshiProjectionOutbox: repo, KalshiMarkMaxAge: time.Minute,
 	})
 	if err := orch.kalshiMarking(context.Background()); err != nil {
 		t.Fatalf("empty inventory error = %v", err)

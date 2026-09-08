@@ -21,8 +21,6 @@ import (
 // VenueReconciliationRepo persists append-only reconciliation evidence only.
 type VenueReconciliationRepo struct{ pool *pgxpool.Pool }
 
-var _ repository.VenueReconciliationRepository = (*VenueReconciliationRepo)(nil)
-
 func NewVenueReconciliationRepo(pool *pgxpool.Pool) *VenueReconciliationRepo {
 	return &VenueReconciliationRepo{pool: pool}
 }

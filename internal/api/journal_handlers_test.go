@@ -62,20 +62,20 @@ func (s *stubTradeDecisionJournalRepo) Count(_ context.Context, filter repositor
 	return len(s.listResult), nil
 }
 
-func (s *stubTradeDecisionJournalRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *stubTradeDecisionJournalRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
-func (s *stubTradeDecisionJournalRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *stubTradeDecisionJournalRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
 func TestJournalRoutesReturnNotImplementedWithoutRepo(t *testing.T) {
 	srv := newTestServer(t)
 
 	for _, path := range []string{
-		"/api/v1/journal/decisions",
-		"/api/v1/journal/decisions/11111111-1111-1111-1111-111111111111",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/journal/decisions",
+		"/api/v1/accounts/00000000-0000-4000-8000-000000000064/journal/decisions/11111111-1111-1111-1111-111111111111",
 	} {
 		rr := doRequest(t, srv, http.MethodGet, path, nil)
 		if rr.Code != http.StatusNotImplemented {
@@ -95,7 +95,7 @@ func TestJournalRoutesListAndGet(t *testing.T) {
 	decisionID := uuid.New()
 	repo := &stubTradeDecisionJournalRepo{
 		listResult: []domain.TradeDecision{{ID: decisionID, Status: domain.TradeDecisionStatusPaper}},
-		getResult:  &domain.TradeDecision{ID: decisionID, Status: domain.TradeDecisionStatusPaper},
+		getResult:  &domain.TradeDecision{ID: decisionID, AccountID: testAPIAccountID, Status: domain.TradeDecisionStatusPaper},
 	}
 	deps := testDeps()
 	deps.TradeDecisions = repo
@@ -110,7 +110,7 @@ func TestJournalRoutesListAndGet(t *testing.T) {
 	params.Set("limit", "7")
 	params.Set("offset", "3")
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/journal/decisions?"+params.Encode(), nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/journal/decisions?"+params.Encode(), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("list status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -131,7 +131,7 @@ func TestJournalRoutesListAndGet(t *testing.T) {
 		t.Fatalf("unexpected time filters: %+v", repo.lastFilter)
 	}
 
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/journal/decisions/"+decisionID.String(), nil)
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/journal/decisions/"+decisionID.String(), nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -150,7 +150,7 @@ func TestJournalRouteGetMapsNotFound(t *testing.T) {
 	deps.TradeDecisions = repo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/journal/decisions/11111111-1111-1111-1111-111111111111", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/journal/decisions/11111111-1111-1111-1111-111111111111", nil)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusNotFound, rr.Body.String())
 	}

@@ -378,7 +378,7 @@ func TestVenueReconciliationPersistentRehearsal(t *testing.T) {
 	if policies != 1 || providers != 3 || locals != 2 || runs != 3 || incidents != 1 {
 		t.Fatalf("retained graph counts=%d/%d/%d/%d/%d", policies, providers, locals, runs, incidents)
 	}
-	if _, err := pools.owner.Exec(ctx, repositoryMigrationSQL(t, "000075_venue_reconciliation.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 75") {
+	if _, err := execRepositoryMigration(t, ctx, pools.owner, "000075_venue_reconciliation.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 75") {
 		t.Fatalf("nonempty schema-75 rollback error = %v", err)
 	}
 }
@@ -393,15 +393,7 @@ func newVenueReconciliationGoldenFixture(t *testing.T, provider venue.Provider) 
 
 func applyVenueReconciliationMigrations(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
-	for _, migration := range []string{
-		"000070_accounting_dual_run.up.sql", "000071_common_execution_lifecycle.up.sql",
-		"000072_simulation_policy_artifacts.up.sql", "000073_venue_adapter_observations.up.sql",
-		"000074_capital_margin_profiles.up.sql", "000075_venue_reconciliation.up.sql",
-	} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migration)); err != nil {
-			t.Fatalf("apply %s: %v", migration, err)
-		}
-	}
+	applyRepositoryMigrationRange(t, ctx, pool, "000069", "000108")
 }
 
 func newVenueReconciliationGoldenFixtureWithPools(
@@ -435,6 +427,7 @@ func newVenueReconciliationGoldenFixtureWithPools(
 			t.Fatal(err)
 		}
 		adapterContext := kalshi.CommonLifecycleContext{
+			Scope:  kalshiRepositoryScope(t, adapter),
 			Policy: policy, Aggregate: adapter.aggregate, Account: adapter.base.account, Instrument: adapter.base.instrument,
 			VenueContract: adapter.base.contract, Route: kalshi.CommonRouteFacts{}, ReceivedAt: adapter.base.baseTime.Add(20 * time.Second),
 		}
@@ -458,12 +451,16 @@ func newVenueReconciliationGoldenFixtureWithPools(
 		t.Fatal(err)
 	}
 	projectionRepo := NewProjectionRepo(pools.writer, pools.attestor)
-	if _, err := projectionRepo.RecordMarkObservation(ctx, mark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, mark); err != nil {
 		t.Fatal(err)
 	}
 	asOf := baseTime.Add(2 * time.Minute)
+	frontier, err := NewProjectionOutboxRepository(pools.owner).LatestProjectionFrontier(ctx, account.ID, asOf)
+	if err != nil {
+		t.Fatal(err)
+	}
 	projection, err := projectionRepo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-		AccountID: account.ID, AsOf: asOf, MarkSource: "reconciliation-golden", MarkNamespace: "marks/reconciliation-golden", MaxMarkAge: time.Hour,
+		AccountID: account.ID, ThroughTransactionID: frontier, AsOf: asOf, MarkSource: "reconciliation-golden", MarkNamespace: "marks/reconciliation-golden", MaxMarkAge: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)

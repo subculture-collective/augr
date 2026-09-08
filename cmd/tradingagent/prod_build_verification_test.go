@@ -40,8 +40,10 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		`BUILT_APP_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${PROJECT_NAME}-app:latest"`,
 		`org.opencontainers.image.revision`,
 		`org.opencontainers.image.version`,
+		`tv.subcult.augr.source-tree-sha256`,
 		`org.opencontainers.image.created`,
 		`built app revision label mismatch`,
+		`built app source-tree label mismatch`,
 		`VERIFY_WEB_IMAGE="${PROJECT_NAME}-web:latest"`,
 		`docker buildx build --load`,
 		`BUILT_WEB_REVISION=`,
@@ -50,13 +52,23 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		`compose up -d postgres redis`,
 		`wait_for_postgres`,
 		`pg_isready -h postgres`,
-		`migrate/migrate:v4.18.3`,
 		`VERIFY_ROLLBACK_SCHEMA_VERSION="${VERIFY_ROLLBACK_SCHEMA_VERSION:-60}"`,
 		`VERIFY_ROLLBACK_IMAGE="${VERIFY_ROLLBACK_IMAGE:-}"`,
 		`VERIFY_ROLLBACK_IMAGE contains unsupported characters`,
 		`VERIFY_ROLLBACK_SCHEMA_VERSION must be a non-negative integer`,
-		`ROLLBACK_STEPS=$((EXPECTED_VERSION - VERIFY_ROLLBACK_SCHEMA_VERSION))`,
-		`-path=/migrations`,
+		`compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$database"`,
+		`CREATE ROLE augr_db_owner LOGIN`,
+		`GRANT augr_db_owner TO "$POSTGRES_USER"`,
+		`ALTER DATABASE "$POSTGRES_DB" OWNER TO augr_db_owner`,
+		`initialize_schema_metadata`,
+		`CREATE EXTENSION IF NOT EXISTS pgcrypto`,
+		`CREATE EXTENSION IF NOT EXISTS vector`,
+		`CREATE EXTENSION IF NOT EXISTS timescaledb`,
+		`apply_migrations 0 "$EXPECTED_VERSION"`,
+		`printf 'SET ROLE augr_db_owner;\n'`,
+		`sed -e '/^BEGIN;$/d' -e '/^COMMIT;$/d' "$migration_file"`,
+		`UPDATE schema_migrations SET dirty=true`,
+		`UPDATE schema_migrations SET version=${next},dirty=false`,
 		`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`,
 		`schema version mismatch after migrations`,
 		`compose up -d app`,
@@ -78,12 +90,24 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		`SELECT count(*) FROM automation_job_controls`,
 		`SELECT count(*) FROM trades WHERE exit_reason IS NOT NULL`,
 		`refusing rollback rehearsal with writes in schema 61/62 structures`,
-		`down "$ROLLBACK_STEPS"`,
+		`apply_migrations "$EXPECTED_VERSION" "$VERIFY_ROLLBACK_SCHEMA_VERSION"`,
 		`schema rollback mismatch`,
 		`Verifying exact rollback image with scheduler disabled`,
 		`rollback image mismatch`,
+		`actual_rollback_image_id=$(docker inspect -f '{{.Image}}' "$rollback_container")`,
+		`rollback image content mismatch`,
 		`rollback scheduler check returned HTTP`,
+		`Proving rollback image drains admitted work on SIGTERM`,
+		`APP_ENV: production`,
+		`ENABLE_SCHEDULER: "true"`,
+		`rollback pipeline admission returned HTTP`,
+		`rollback automation admission returned HTTP`,
+		`docker stop --time 300 "$rollback_container"`,
+		`SELECT count(*) FROM pipeline_runs WHERE status='running'`,
+		`SELECT count(*) FROM automation_job_runs WHERE status='running'`,
+		`rollback image left running work after SIGTERM`,
 		`schema reapply mismatch`,
+		`apply_migrations "$VERIFY_ROLLBACK_SCHEMA_VERSION" "$EXPECTED_VERSION"`,
 		`compose down --volumes --remove-orphans --rmi local`,
 		`trap cleanup EXIT HUP INT TERM`,
 	} {
@@ -92,12 +116,26 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 		}
 	}
 
+	const projectionAccountLine = `PROJECTION_ACCOUNT_ID=00000000-0000-4000-8000-000000000064`
+	projectionAccountLines := 0
+	for _, line := range strings.Split(script, "\n") {
+		if line == projectionAccountLine {
+			projectionAccountLines++
+		}
+	}
+	if projectionAccountLines != 1 {
+		t.Fatalf("verify-prod-build.sh exact %s lines = %d, want 1", projectionAccountLine, projectionAccountLines)
+	}
+
 	for _, unwanted := range []string{
 		`AUTH_TOKEN="${AUTH_TOKEN:?`,
 		`compose up -d` + "\n" + `wait_for_postgres`,
 		`http://127.0.0.1:8080`,
 		`psql -U augr -d augr`,
 		`POLYMARKET_AUTOMATION_ENABLED=false`,
+		`docker run --rm`,
+		`/migrations:/migrations`,
+		`-path=/migrations`,
 	} {
 		if strings.Contains(script, unwanted) {
 			t.Fatalf("verify-prod-build.sh unexpectedly contains %q", unwanted)
@@ -107,12 +145,12 @@ func TestProductionBuildVerificationScriptContainsExpectedSteps(t *testing.T) {
 	appBuildIdx := strings.Index(script, `compose build app`)
 	webBuildIdx := strings.Index(script, `docker buildx build --load`)
 	dependenciesIdx := strings.Index(script, `compose up -d postgres redis`)
-	migrationsIdx := strings.Index(script, `-path=/migrations`)
+	migrationsIdx := strings.Index(script, `apply_migrations 0 "$EXPECTED_VERSION"`)
 	schemaAssertIdx := strings.Index(script, `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`)
 	appStartIdx := strings.Index(script, `compose up -d app`)
 	backupIdx := strings.Index(script, `Verifying schema-${VERIFY_ROLLBACK_SCHEMA_VERSION} predeployment backup and restore`)
 	rollbackGuardIdx := strings.Index(script, `NEW_STRUCTURE_WRITES=`)
-	downIdx := strings.Index(script, `down "$ROLLBACK_STEPS"`)
+	downIdx := strings.Index(script, `apply_migrations "$EXPECTED_VERSION" "$VERIFY_ROLLBACK_SCHEMA_VERSION"`)
 	reapplyIdx := strings.Index(script, `REAPPLIED_SCHEMA_VERSION=`)
 	healthWaitIdx := strings.LastIndex(script, "\nwait_for_app_health\n")
 	if appBuildIdx == -1 || webBuildIdx == -1 || dependenciesIdx == -1 || migrationsIdx == -1 || schemaAssertIdx == -1 || appStartIdx == -1 || backupIdx == -1 || rollbackGuardIdx == -1 || downIdx == -1 || reapplyIdx == -1 || healthWaitIdx == -1 {
@@ -142,6 +180,12 @@ func TestReleaseGateIncludesProductionVerificationAndPinnedPromtool(t *testing.T
 		`scripts/verify-secret-history.sh`,
 		`sh -n "$shell_script"`,
 		`bash -n scripts/verify-prod-build.sh`,
+		`bash scripts/update-db-targets_test.sh`,
+		`bash scripts/apply-migrations-psql_test.sh`,
+		`shellcheck scripts/apply-migrations-psql.sh scripts/apply-migrations-psql_test.sh scripts/update-db-targets.sh scripts/update-db-targets_test.sh scripts/verify-account-cutover.sh`,
+		`./scripts/verify-account-cutover.sh --schema-matrix`,
+		`./scripts/verify-account-cutover.sh --writer-fixtures`,
+		`./scripts/verify-account-cutover.sh --api-matrix`,
 		`go test -count=1 ./cmd/... ./internal/... ./migrations/...`,
 		`go vet ./cmd/... ./internal/... ./migrations/...`,
 		`golangci-lint run ./cmd/... ./internal/... ./migrations/...`,
@@ -181,6 +225,93 @@ func TestReleaseGateIncludesProductionVerificationAndPinnedPromtool(t *testing.T
 	identityIdx := strings.Index(script, `[ "$verified_commit" = "$candidate_commit" ]`)
 	if candidateIdx >= firstTreeIdx || firstTreeIdx >= goTestIdx || goTestIdx >= secretIdx || secretIdx >= lastTreeIdx || lastTreeIdx >= verifiedIdx || verifiedIdx >= identityIdx {
 		t.Fatalf("release-gate.sh expected candidate -> initial tree -> tests -> secrets -> final tree -> verified commit -> identity ordering, got %d %d %d %d %d %d %d", candidateIdx, firstTreeIdx, goTestIdx, secretIdx, lastTreeIdx, verifiedIdx, identityIdx)
+	}
+}
+
+func TestCanonicalCutoverAuditorsAreReadOnlyAndEvidenceBound(t *testing.T) {
+	repoRoot := filepath.Join(filepath.Dir(productionBuildVerificationScriptPath(t)), "..")
+	read := func(name string) string {
+		t.Helper()
+		contents, err := os.ReadFile(filepath.Join(repoRoot, "scripts", name))
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", name, err)
+		}
+		return string(contents)
+	}
+
+	verifier := read("verify-account-cutover.sh")
+	for _, want := range []string{
+		`--schema-matrix|--writer-fixtures|--api-matrix|--target-zero-history-audit|--target-graph-audit`,
+		`TARGET_DB_NAME != tradingagent`,
+		`disposable modes reject TARGET_DB_NAME`,
+		`BEGIN READ ONLY`,
+		`target run graph is vacuous`,
+		`execution_intents`,
+		`execution_orders`,
+		`execution_fills`,
+		`economic_event_normalizations`,
+		`ledger_transactions`,
+		`account_projection_outbox`,
+		`account_capital_policy_bindings`,
+		`projection_checkpoints`,
+		`octet_length(c.attestation_hmac)=32`,
+		`DROP DATABASE IF EXISTS`,
+		`grep -qx "$expected|false"`,
+	} {
+		if !strings.Contains(verifier, want) {
+			t.Fatalf("verify-account-cutover.sh missing required content %q", want)
+		}
+	}
+	if strings.Contains(verifier, `--all`) {
+		t.Fatal("verify-account-cutover.sh permits an implicit all mode")
+	}
+	if strings.Contains(verifier, `paper_evaluation_profiles`) {
+		t.Fatal("verify-account-cutover.sh references the retired paper evaluation profile name")
+	}
+
+	for _, name := range []string{"capture-old-db-baseline.sh", "verify-old-db-after-drain.sh"} {
+		script := read(name)
+		for _, want := range []string{
+			`--database tradingagent --record-dir /var/lib/augr-cutover/canonical-20260827`,
+			`psql -X -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$database"`,
+			`BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`,
+			`c.relkind IN ('r','p')`,
+			`NOT EXISTS (SELECT 1 FROM pg_inherits WHERE inhrelid=c.oid)`,
+			`'risk_state','automation_job_controls','pipeline_runs','automation_job_runs','agent_events','audit_log'`,
+		} {
+			if !strings.Contains(script, want) {
+				t.Fatalf("%s missing required content %q", name, want)
+			}
+		}
+		if got := strings.Count(script, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;"); got != 1 {
+			t.Fatalf("%s repeatable-read transactions = %d, want 1", name, got)
+		}
+	}
+
+	baselineCapture := read("capture-old-db-baseline.sh")
+	if strings.Contains(baselineCapture, `chmod 0600 "$record_dir"/*`) {
+		t.Fatal("capture-old-db-baseline.sh changes permissions on pre-existing evidence directories")
+	}
+	if !strings.Contains(baselineCapture, `for file in "${files[@]}" manifest.sha256; do`) {
+		t.Fatal("capture-old-db-baseline.sh does not limit permission changes to captured files")
+	}
+
+	postDrain := read("verify-old-db-after-drain.sh")
+	for _, want := range []string{
+		`pre-existing agent event was deleted or changed`,
+		`pre-existing audit row was deleted or changed`,
+		`canonical cutover drain`,
+		`pre-existing automation control was deleted`,
+		`new_controls.keys() - old_controls.keys()`,
+		`new automation control {name} is not an approved disabled materialization`,
+		`new.get("updated_by") != "canonical-cutover-operator"`,
+		`cmp "$record_dir/table_fingerprints.tsv"`,
+		`cmp "$record_dir/pipeline_invariants.tsv"`,
+		`cmp "$record_dir/automation_invariants.tsv"`,
+	} {
+		if !strings.Contains(postDrain, want) {
+			t.Fatalf("verify-old-db-after-drain.sh missing required content %q", want)
+		}
 	}
 }
 
@@ -459,6 +590,35 @@ func TestNUCRollbackOverrideDisablesExecution(t *testing.T) {
 		if !strings.Contains(override, want) {
 			t.Fatalf("rollback override missing fail-closed setting %q", want)
 		}
+	}
+}
+
+func TestZeroHistoryAuditAcceptsOnlyTheSeededOpeningCapitalLedger(t *testing.T) {
+	repoRoot := filepath.Join(filepath.Dir(productionBuildVerificationScriptPath(t)), "..")
+	contents, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "verify-account-cutover.sh"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+
+	script := string(contents)
+	for _, want := range []string{
+		`id='00000000-0000-4000-8000-000000000164'::UUID`,
+		`source='account_opening'`,
+		`idempotency_key='account-opening:00000000-0000-4000-8000-000000000064'`,
+		`id=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID`,
+		`metadata='{"normalizer":"capital_flow_v1","source":"account_opening"}'::JSONB`,
+		`ledger_account='asset:cash'`,
+		`ledger_account='equity:contributed_capital'`,
+		`count(DISTINCT transaction_id)=1`,
+		`bool_and(transaction_id=md5('ledger-transaction:00000000-0000-4000-8000-000000000164')::UUID)`,
+		`sum(amount)=0`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("zero-history audit missing seeded opening-capital constraint %q", want)
+		}
+	}
+	if strings.Contains(script, `(SELECT count(*) FROM ledger_transactions)+(SELECT count(*) FROM ledger_postings)`) {
+		t.Fatal("zero-history audit treats the required seeded opening ledger as operational history")
 	}
 }
 

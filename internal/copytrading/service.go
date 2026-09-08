@@ -12,8 +12,8 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/copyorigin"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/edgar"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
-	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/google/uuid"
 )
 
@@ -26,12 +26,15 @@ type PriceProvider interface {
 }
 
 type PaperOrderRequest struct {
+	Scope        execution.ExecutionScope
 	Subscription domain.CopySubscription
 	Intent       domain.CopyTradeIntent
-	Run          domain.PipelineRun
+	OriginRunID  uuid.UUID
+	ClaimID      uuid.UUID
 }
 
 type PaperOrderResult struct {
+	Scope   execution.ExecutionScope
 	OrderID *uuid.UUID
 	Status  domain.OrderStatus
 }
@@ -40,13 +43,22 @@ type PaperOrderExecutor interface {
 	ExecuteCopyOrder(ctx context.Context, request PaperOrderRequest) (PaperOrderResult, error)
 }
 
+type durableCopyOrderEffectFinder interface {
+	FindCopyOrderEffect(context.Context, PaperOrderRequest) (bool, error)
+}
+
+type CopyOriginLifecycle interface {
+	ProposeCopyIntent(context.Context, domain.CopySubscription, domain.CopyTradeIntent, uuid.UUID) error
+}
+
 type ServiceDeps struct {
-	Repo        repository.CopyTradingRepository
-	OriginRuns  copyorigin.PlannedStore
-	Strategies  repository.StrategyRepository
-	Runs        repository.PipelineRunRepository
-	Events      repository.AgentEventRepository
-	RunRegistry interface {
+	ExecutionAccount domain.ExecutionAccountBinding
+	Repo             repository.CopyTradingRepository
+	OriginRuns       copyorigin.PlannedStore
+	Strategies       repository.StrategyRepository
+	Runs             repository.PipelineRunRepository
+	Events           repository.AgentEventRepository
+	RunRegistry      interface {
 		Register(uuid.UUID, time.Time, context.CancelCauseFunc) error
 		Deregister(uuid.UUID, time.Time)
 	}
@@ -54,6 +66,7 @@ type ServiceDeps struct {
 	EDGAR     ThirteenFFetcher
 	Prices    PriceProvider
 	Executor  PaperOrderExecutor
+	Lifecycle CopyOriginLifecycle
 	Logger    *slog.Logger
 	Now       func() time.Time
 }
@@ -195,6 +208,11 @@ func (s *Service) CreateSubscription(ctx context.Context, subscription *domain.C
 	// Subscription and origin identity are server-owned. Request JSON cannot
 	// select an identity that may collide with an existing attribution graph.
 	subscription.ID = uuid.New()
+	if err := s.deps.ExecutionAccount.Validate(); err != nil {
+		return fmt.Errorf("copy subscription execution account: %w", err)
+	}
+	subscription.AccountID = s.deps.ExecutionAccount.AccountID()
+	subscription.Environment = s.deps.ExecutionAccount.Environment()
 	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
 	subscription.LegacyStrategyID = nil
 	if err := subscription.Validate(); err != nil {
@@ -231,16 +249,35 @@ func (s *Service) GetSubscription(ctx context.Context, id uuid.UUID) (*domain.Co
 }
 
 func (s *Service) UpdateSubscription(ctx context.Context, id uuid.UUID, replacement *domain.CopySubscription) (*domain.CopySubscription, error) {
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy subscription update requires execution account locker")
+	}
+	var result *domain.CopySubscription
+	err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), func() error {
+		var updateErr error
+		result, updateErr = s.updateSubscriptionLocked(ctx, id, replacement)
+		return updateErr
+	})
+	return result, err
+}
+
+func (s *Service) updateSubscriptionLocked(ctx context.Context, id uuid.UUID, replacement *domain.CopySubscription) (*domain.CopySubscription, error) {
 	current, err := s.deps.Repo.GetSubscription(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.validateSubscriptionBinding(current); err != nil {
 		return nil, err
 	}
 	if current.Status != domain.CopySubscriptionDraft && current.Status != domain.CopySubscriptionPreviewed && current.Status != domain.CopySubscriptionPaused {
 		return nil, fmt.Errorf("subscription can only be edited while draft, previewed, or paused")
 	}
 	replacement.ID, replacement.LeaderID, replacement.SourceID = current.ID, current.LeaderID, current.SourceID
+	replacement.AccountID, replacement.Environment = current.AccountID, current.Environment
 	replacement.LegacyStrategyID, replacement.OriginType, replacement.OriginID = current.LegacyStrategyID, current.OriginType, current.OriginID
 	replacement.Status, replacement.IsPaper, replacement.CreatedBy, replacement.CreatedAt = current.Status, true, current.CreatedBy, current.CreatedAt
+	replacement.UpdatedAt = current.UpdatedAt
 	if err := replacement.Validate(); err != nil {
 		return nil, err
 	}
@@ -251,8 +288,25 @@ func (s *Service) UpdateSubscription(ctx context.Context, id uuid.UUID, replacem
 }
 
 func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Preview, error) {
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy subscription preview requires execution account locker")
+	}
+	var result *Preview
+	err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), func() error {
+		var previewErr error
+		result, previewErr = s.previewLocked(ctx, subscriptionID)
+		return previewErr
+	})
+	return result, err
+}
+
+func (s *Service) previewLocked(ctx context.Context, subscriptionID uuid.UUID) (*Preview, error) {
 	subscription, err := s.deps.Repo.GetSubscription(ctx, subscriptionID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.validateSubscriptionBinding(subscription); err != nil {
 		return nil, err
 	}
 	observation, snapshot, err := s.deps.Repo.GetLatest13FSnapshot(ctx, subscription.SourceID)
@@ -280,10 +334,26 @@ func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Previ
 		}
 	}
 	positions := []domain.Position{}
-	if s.deps.Positions != nil && subscription.LegacyStrategyID != nil {
-		positions, err = s.deps.Positions.GetByStrategy(ctx, *subscription.LegacyStrategyID, repository.PositionFilter{}, 1000, 0)
-		if err != nil {
-			return nil, err
+	if s.deps.Positions != nil {
+		scoped, ok := s.deps.Positions.(repository.ExecutionScopedPositionRepository)
+		if !ok {
+			return nil, fmt.Errorf("copy trading: execution-scoped position repository is required")
+		}
+		const pageSize = 250
+		for offset := 0; ; offset += pageSize {
+			page, pageErr := scoped.GetByExecutionScope(ctx, subscription.AccountID, subscription.Environment, subscription.OriginType, subscription.OriginID.String(), repository.PositionFilter{}, pageSize, offset)
+			if pageErr != nil {
+				return nil, pageErr
+			}
+			for i := range page {
+				if page[i].AccountID != subscription.AccountID || page[i].Environment != subscription.Environment || page[i].OriginType != subscription.OriginType || page[i].OriginID != subscription.OriginID.String() {
+					return nil, fmt.Errorf("copy trading: preview position %s belongs to a foreign execution scope", page[i].ID)
+				}
+			}
+			positions = append(positions, page...)
+			if len(page) < pageSize {
+				break
+			}
 		}
 	}
 	preview := Build13FTarget(TargetInput{Subscription: *subscription, Observation: *observation, Snapshot: *snapshot, Mappings: mappings, Prices: prices, Positions: positions, DecisionAt: decisionAt})
@@ -297,15 +367,35 @@ func (s *Service) Preview(ctx context.Context, subscriptionID uuid.UUID) (*Previ
 }
 
 func (s *Service) SetStatus(ctx context.Context, id uuid.UUID, next domain.CopySubscriptionStatus) (*domain.CopySubscription, error) {
+	var result *domain.CopySubscription
+	run := func() error {
+		var err error
+		result, err = s.setStatus(ctx, id, next)
+		return err
+	}
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy subscription status update requires execution account locker")
+	}
+	if err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), run); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func (s *Service) setStatus(ctx context.Context, id uuid.UUID, next domain.CopySubscriptionStatus) (*domain.CopySubscription, error) {
 	subscription, err := s.deps.Repo.GetSubscription(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.validateSubscriptionBinding(subscription); err != nil {
 		return nil, err
 	}
 	if err := validateStatusTransition(subscription.Status, next); err != nil {
 		return nil, err
 	}
 	if next == domain.CopySubscriptionPaperActive && subscription.Status == domain.CopySubscriptionDraft {
-		if _, err := s.Preview(ctx, id); err != nil {
+		if _, err := s.previewLocked(ctx, id); err != nil {
 			return nil, fmt.Errorf("activation preview: %w", err)
 		}
 		subscription, err = s.deps.Repo.GetSubscription(ctx, id)
@@ -374,6 +464,9 @@ type SyncSummary struct {
 // immutable observation. Paused subscriptions continue collecting filings.
 func (s *Service) Sync13FSubscriptions(ctx context.Context) (SyncSummary, error) {
 	var summary SyncSummary
+	if err := s.resumeUnfinishedRuns(ctx, &summary); err != nil {
+		return summary, err
+	}
 	subscriptions := make([]domain.CopySubscription, 0)
 	for offset := 0; ; offset += 100 {
 		page, err := s.deps.Repo.ListSubscriptions(ctx, repository.CopySubscriptionFilter{}, 100, offset)
@@ -416,268 +509,291 @@ func (s *Service) Sync13FSubscriptions(ctx context.Context) (SyncSummary, error)
 	return summary, nil
 }
 
+func (s *Service) resumeUnfinishedRuns(ctx context.Context, summary *SyncSummary) error {
+	store, ok := s.deps.OriginRuns.(copyorigin.RecoveryStore)
+	if !ok {
+		return nil
+	}
+	account := s.deps.ExecutionAccount
+	if err := account.Validate(); err != nil {
+		return fmt.Errorf("resume copy runs: %w", err)
+	}
+	runs, err := store.ListUnfinishedRuns(ctx, account.AccountID(), account.Environment())
+	if err != nil {
+		return fmt.Errorf("list unfinished copy runs: %w", err)
+	}
+	for _, recoverable := range runs {
+		if recoverable.Run == nil || recoverable.SubscriptionID == uuid.Nil {
+			return fmt.Errorf("resume copy runs: incomplete persisted run identity")
+		}
+		subscription, err := s.deps.Repo.GetSubscription(ctx, recoverable.SubscriptionID)
+		if err != nil {
+			return err
+		}
+		if err := s.validateSubscriptionBinding(subscription); err != nil {
+			return err
+		}
+		preview := Preview{Intents: make([]domain.CopyTradeIntent, 0, len(recoverable.Intents))}
+		for _, intent := range recoverable.Intents {
+			preview.Intents = append(preview.Intents, intent.Intent)
+		}
+		if _, err := s.executePlannedRun(ctx, subscription, recoverable.Run, recoverable.Intents, preview); err != nil {
+			return fmt.Errorf("resume copy run %s: %w", recoverable.Run.ID(), err)
+		}
+		if summary != nil {
+			summary.Rebalanced++
+		}
+	}
+	return nil
+}
+
 func (s *Service) Rebalance(ctx context.Context, id uuid.UUID) (*RebalanceResult, error) {
+	locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return nil, fmt.Errorf("copy rebalance requires execution account locker")
+	}
+	var subscription *domain.CopySubscription
+	var persistedOrigin *copyorigin.Run
+	var registered []copyorigin.PlannedIntent
+	var preview Preview
+	err := locker.WithExecutionAccountLock(ctx, s.deps.ExecutionAccount.AccountID(), func() error {
+		var planErr error
+		subscription, persistedOrigin, registered, preview, planErr = s.planRebalanceLocked(ctx, id)
+		return planErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.executePlannedRun(ctx, subscription, persistedOrigin, registered, preview)
+}
+
+func (s *Service) planRebalanceLocked(ctx context.Context, id uuid.UUID) (*domain.CopySubscription, *copyorigin.Run, []copyorigin.PlannedIntent, Preview, error) {
 	subscription, err := s.deps.Repo.GetSubscription(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, Preview{}, err
+	}
+	if err := s.validateSubscriptionBinding(subscription); err != nil {
+		return nil, nil, nil, Preview{}, err
 	}
 	if subscription.Status != domain.CopySubscriptionPaperActive || !subscription.IsPaper {
-		return nil, fmt.Errorf("subscription must be paper_active")
+		return nil, nil, nil, Preview{}, fmt.Errorf("subscription must be paper_active")
 	}
-	preview, err := s.Preview(ctx, id)
+	if s.deps.OriginRuns == nil {
+		return nil, nil, nil, Preview{}, fmt.Errorf("copy origin run repository is unavailable")
+	}
+	observation, snapshot, err := s.deps.Repo.GetLatest13FSnapshot(ctx, subscription.SourceID)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, Preview{}, err
 	}
-	if subscription.LegacyStrategyID == nil {
-		if s.deps.OriginRuns == nil {
-			return nil, fmt.Errorf("copy origin run repository is unavailable")
+	if retries, ok := s.deps.OriginRuns.(copyorigin.RetryStore); ok {
+		persisted, intents, loadErr := retries.GetPlannedRun(ctx, subscription.ID, observation.ID, CalculationVersion)
+		if loadErr == nil {
+			preview := Preview{Observation: *observation, Snapshot: *snapshot, Intents: make([]domain.CopyTradeIntent, 0, len(intents))}
+			for _, intent := range intents {
+				preview.Intents = append(preview.Intents, intent.Intent)
+			}
+			return subscription, persisted, intents, preview, nil
 		}
-		intents := append([]domain.CopyTradeIntent(nil), preview.Intents...)
-		run, runErr := copyorigin.NewRun(*subscription, intents)
-		if runErr != nil {
-			return nil, runErr
-		}
-		persisted, intents, persistErr := s.deps.OriginRuns.RegisterPlannedRun(ctx, run, intents)
-		if persistErr != nil {
-			return nil, persistErr
-		}
-		return &RebalanceResult{OriginRunID: persisted.ID(), OriginRunSHA256: persisted.Digest(), Preview: *preview, Intents: intents}, nil
-	}
-	if s.deps.Runs == nil {
-		return nil, fmt.Errorf("pipeline run repository is unavailable")
-	}
-	now := s.deps.Now().UTC()
-	config, _ := json.Marshal(map[string]any{"copy_subscription_id": id, "source_observation_id": preview.Observation.ID, "calculation_version": CalculationVersion})
-	run := domain.PipelineRun{StrategyID: *subscription.LegacyStrategyID, Ticker: "13F:" + subscription.SourceID.String(), TradeDate: now, Status: domain.PipelineStatusRunning, StartedAt: now, ConfigSnapshot: config}
-	run.ID = uuid.New()
-	runCtx, cancelRun := context.WithCancelCause(ctx)
-	defer cancelRun(nil)
-	if s.deps.RunRegistry != nil {
-		if err := s.deps.RunRegistry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
-			return nil, fmt.Errorf("copy rebalance: register run context: %w", err)
-		}
-		defer s.deps.RunRegistry.Deregister(run.ID, run.TradeDate)
-	}
-	ctx = runCtx
-	if err := s.deps.Runs.Create(ctx, &run); err != nil {
-		return nil, err
-	}
-	result := &RebalanceResult{Run: run, Preview: *preview, Intents: make([]domain.CopyTradeIntent, 0, len(preview.Intents))}
-	planned := append([]domain.CopyTradeIntent(nil), preview.Intents...)
-	buyOrders := 0
-	sellOrders := 0
-	approvedOrders := 0
-	for i := range planned {
-		planned[i].PipelineRunID = &run.ID
-		if planned[i].PolicyStatus != "approved" {
-			continue
-		}
-		approvedOrders++
-		if planned[i].Side == domain.OrderSideSell {
-			sellOrders++
-		} else {
-			buyOrders++
+		if !errors.Is(loadErr, repository.ErrNotFound) {
+			return nil, nil, nil, Preview{}, loadErr
 		}
 	}
-
-	status := domain.PipelineStatusCompleted
-	signal := domain.PipelineSignalHold
-	message := ""
-	var planningErr error
-	if approvedOrders > 0 {
-		signal = domain.PipelineSignalBuy
-		if sellOrders > 0 && buyOrders == 0 {
-			signal = domain.PipelineSignalSell
-		}
-		if s.deps.Executor == nil {
-			status = domain.PipelineStatusFailed
-			message = "paper executor is unavailable"
-			planningErr = errors.New(message)
-		}
-	}
-	if ctx.Err() != nil {
-		status = domain.PipelineStatusFailed
-		message = ctx.Err().Error()
-		planningErr = ctx.Err()
-		if runcontrol.IsCancelled(ctx) {
-			status = domain.PipelineStatusCancelled
-			message = context.Cause(ctx).Error()
-			planningErr = context.Cause(ctx)
-		} else if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
-			message = cause.Error()
-			planningErr = cause
-		}
-	}
-
-	eventKind, title, tag := "pipeline_completed", "Copy plan authorized", "completed"
-	switch status {
-	case domain.PipelineStatusFailed:
-		eventKind, title, tag = "pipeline_failed", "Pipeline failed", "failed"
-	case domain.PipelineStatusCancelled:
-		eventKind, title, tag = "pipeline_cancelled", "Pipeline cancelled", "cancelled"
-	}
-	completionMetadata, _ := json.Marshal(map[string]any{
-		"completion_scope":      "planning_authority",
-		"source_observation_id": preview.Observation.ID,
-		"planned_intent_count":  len(planned),
-		"approved_intent_count": approvedOrders,
-	})
-	event := &domain.AgentEvent{PipelineRunID: &run.ID, StrategyID: &run.StrategyID, EventKind: eventKind, Title: title, Summary: message, Tags: []string{"pipeline", tag, "copy_trading"}}
-	if status == domain.PipelineStatusCompleted {
-		event.Metadata = completionMetadata
-	}
-	finalization := repository.PipelineRunFinalization{Status: status, Signal: &signal, CompletedAt: s.deps.Now().UTC(), ErrorMessage: message, Event: event}
-	persistParent := context.WithoutCancel(ctx)
-	if status == domain.PipelineStatusCompleted {
-		persistParent = ctx
-	}
-	persistCtx, persistCancel := context.WithTimeout(persistParent, 10*time.Second)
-	receipt, err := s.deps.Runs.Finalize(persistCtx, run.ID, run.TradeDate, finalization)
-	persistCancel()
-	if err != nil && status == domain.PipelineStatusCompleted && ctx.Err() != nil {
-		status = domain.PipelineStatusFailed
-		message = ctx.Err().Error()
-		planningErr = ctx.Err()
-		if runcontrol.IsCancelled(ctx) {
-			status = domain.PipelineStatusCancelled
-			message = context.Cause(ctx).Error()
-			planningErr = context.Cause(ctx)
-		} else if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
-			message = cause.Error()
-			planningErr = cause
-		}
-		eventKind, title, tag = "pipeline_failed", "Pipeline failed", "failed"
-		if status == domain.PipelineStatusCancelled {
-			eventKind, title, tag = "pipeline_cancelled", "Pipeline cancelled", "cancelled"
-		}
-		event = &domain.AgentEvent{PipelineRunID: &run.ID, StrategyID: &run.StrategyID, EventKind: eventKind, Title: title, Summary: message, Tags: []string{"pipeline", tag, "copy_trading"}}
-		fallbackSignal := domain.PipelineSignalHold
-		fallbackCtx, fallbackCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		receipt, err = s.deps.Runs.Finalize(fallbackCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, Signal: &fallbackSignal, CompletedAt: s.deps.Now().UTC(), ErrorMessage: message, Event: event})
-		fallbackCancel()
-	}
+	previewValue, err := s.previewLocked(ctx, id)
 	if err != nil {
-		return result, err
+		return nil, nil, nil, Preview{}, err
 	}
-	result.Run = receipt.Run
-	if !receipt.Applied {
-		err := fmt.Errorf("copy rebalance: lost terminal authority: durable status=%s signal=%s", receipt.Run.Status, receipt.Run.Signal)
-		if receipt.Run.Status == domain.PipelineStatusCancelled {
-			err = runcontrol.JoinCauseFromErrorMessage(err, receipt.Run.ErrorMessage)
-		}
-		return result, err
+	planned := append([]domain.CopyTradeIntent(nil), previewValue.Intents...)
+	originRun, err := copyorigin.NewRun(*subscription, planned)
+	if err != nil {
+		return nil, nil, nil, Preview{}, err
 	}
-	if receipt.Run.Status != domain.PipelineStatusCompleted {
-		if planningErr != nil {
-			return result, planningErr
-		}
-		return result, fmt.Errorf("copy rebalance: completed terminal authority required: durable status=%s signal=%s", receipt.Run.Status, receipt.Run.Signal)
+	persistedOrigin, registered, err := s.deps.OriginRuns.RegisterPlannedRun(ctx, originRun, planned)
+	if err != nil {
+		return nil, nil, nil, Preview{}, err
 	}
+	return subscription, persistedOrigin, registered, *previewValue, nil
+}
 
-	var effectErrs []error
-	for _, candidate := range planned {
-		candidate.PipelineRunID = &run.ID
-		created, createErr := s.deps.Repo.CreateIntent(ctx, &candidate)
-		if createErr != nil {
-			effectErr := fmt.Errorf("persist copy intent %s: %w", candidate.ID, createErr)
-			effectErrs = append(effectErrs, errors.Join(effectErr, s.recordEffectFailure(ctx, receipt.Run, candidate, effectFailure{
-				stage: "create_intent", err: createErr,
-			})))
-			continue
+func (s *Service) executePlannedRun(ctx context.Context, subscription *domain.CopySubscription, persistedOrigin *copyorigin.Run, registered []copyorigin.PlannedIntent, preview Preview) (*RebalanceResult, error) {
+	result := &RebalanceResult{OriginRunID: persistedOrigin.ID(), OriginRunSHA256: persistedOrigin.Digest(), Preview: preview, Intents: make([]domain.CopyTradeIntent, 0, len(registered))}
+	if s.deps.Executor == nil {
+		return result, fmt.Errorf("paper executor is unavailable")
+	}
+	for _, plannedIntent := range registered {
+		candidate := plannedIntent.Intent
+		if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
+			return result, err
 		}
-		if !created {
-			// An existing intent is the execution fence. It is intentionally not
-			// replayed without downstream order idempotency.
-			continue
+		retryable := candidate.Status == "received" || candidate.Status == "ordered" || candidate.Status == "partial" || (candidate.Status == "failed" && candidate.RiskStatus == "pending")
+		if subscription.Status != domain.CopySubscriptionPaperActive || !subscription.IsPaper {
+			retryable = (candidate.Status == "ordered" || candidate.Status == "partial") && candidate.OrderID != nil
+			if candidate.Status == "received" && subscription.IsPaper {
+				scope, scopeErr := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, persistedOrigin.ID())
+				if scopeErr != nil {
+					return result, scopeErr
+				}
+				finder, ok := s.deps.Executor.(durableCopyOrderEffectFinder)
+				if ok {
+					durable, effectErr := finder.FindCopyOrderEffect(ctx, PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: persistedOrigin.ID()})
+					if effectErr != nil {
+						return result, fmt.Errorf("discover durable copy order for intent %s: %w", candidate.ID, effectErr)
+					}
+					retryable = durable
+				}
+			}
 		}
-		if candidate.PolicyStatus != "approved" {
+		if candidate.PolicyStatus != "approved" || !retryable {
 			result.Intents = append(result.Intents, candidate)
 			continue
 		}
-		executionResult, executeErr := s.deps.Executor.ExecuteCopyOrder(ctx, PaperOrderRequest{Subscription: *subscription, Intent: candidate, Run: receipt.Run})
-		candidate.OrderID = executionResult.OrderID
-		if executeErr != nil {
-			candidate.Status = "risk_rejected"
-			candidate.RiskStatus = "rejected"
-			candidate.RiskReasons = []string{executeErr.Error()}
-		} else {
-			candidate.RiskStatus = "approved"
-			candidate.Status = "ordered"
-			if executionResult.Status == domain.OrderStatusFilled {
-				candidate.Status = "filled"
+		claimID := uuid.New()
+		locked := false
+		claimed := false
+		run := func() error {
+			var claimErr error
+			claimed, claimErr = s.deps.Repo.ClaimIntentExecution(ctx, candidate.ID, claimID, s.deps.Now().UTC())
+			if claimErr != nil {
+				return fmt.Errorf("claim copy intent %s: %w", candidate.ID, claimErr)
 			}
+			if !claimed {
+				return nil
+			}
+			var runErr error
+			candidate, subscription, runErr = s.executeClaimedIntent(ctx, candidate, subscription, persistedOrigin.ID(), claimID, locked)
+			return runErr
 		}
-		if updateErr := s.deps.Repo.UpdateIntent(ctx, &candidate); updateErr != nil {
-			effectErr := fmt.Errorf("update copy intent %s: %w", candidate.ID, updateErr)
-			effectErrs = append(effectErrs, errors.Join(effectErr, s.recordEffectFailure(ctx, receipt.Run, candidate, effectFailure{
-				stage:           "update_intent",
-				err:             updateErr,
-				returnedOrderID: executionResult.OrderID,
-				precedingStage:  effectStage(executeErr, "execute_order"),
-				precedingError:  executeErr,
-			})))
+		if locker, ok := s.deps.Repo.(repository.ExecutionAccountLocker); ok {
+			locked = true
+			if err := locker.WithExecutionAccountLock(ctx, subscription.AccountID, run); err != nil {
+				return result, err
+			}
+		} else if err := run(); err != nil {
+			return result, err
+		}
+		if !claimed {
+			result.Intents = append(result.Intents, candidate)
+			continue
 		}
 		result.Intents = append(result.Intents, candidate)
-	}
-	if len(effectErrs) > 0 {
-		return result, fmt.Errorf("copy rebalance execution: %w", errors.Join(effectErrs...))
 	}
 	return result, nil
 }
 
-type effectFailure struct {
-	stage           string
-	err             error
-	returnedOrderID *uuid.UUID
-	precedingStage  string
-	precedingError  error
+type lockedCopyExecutor interface {
+	ExecuteCopyOrderWithAccountLockHeld(context.Context, PaperOrderRequest) (PaperOrderResult, error)
 }
 
-func effectStage(err error, stage string) string {
-	if err == nil {
-		return ""
+func (s *Service) executeClaimedIntent(ctx context.Context, candidate domain.CopyTradeIntent, subscription *domain.CopySubscription, originRunID, claimID uuid.UUID, lockHeld bool) (domain.CopyTradeIntent, *domain.CopySubscription, error) {
+	reauthorized, currentSubscription, err := s.deps.Repo.GetClaimedIntentExecution(ctx, candidate.ID, claimID)
+	if err != nil {
+		return candidate, subscription, fmt.Errorf("reauthorize claimed copy intent %s: %w", candidate.ID, err)
 	}
-	return stage
-}
-
-func (s *Service) recordEffectFailure(ctx context.Context, run domain.PipelineRun, intent domain.CopyTradeIntent, failure effectFailure) error {
-	metadata := map[string]any{
-		"intent_id":              intent.ID,
-		"stage":                  failure.stage,
-		"error":                  failure.err.Error(),
-		"observed_intent_status": intent.Status,
+	candidate, subscription = *reauthorized, currentSubscription
+	if err := validateCopyIntentOwnership(candidate, *subscription); err != nil {
+		return candidate, subscription, err
 	}
-	if failure.returnedOrderID != nil {
-		metadata["returned_order_id"] = *failure.returnedOrderID
+	scope, err := execution.NewCopyExecutionScope(subscription.AccountID, subscription.Environment, subscription.ID, originRunID)
+	if err != nil {
+		return candidate, subscription, fmt.Errorf("copy execution scope: %w", err)
 	}
-	if failure.precedingError != nil {
-		metadata["preceding_failure_stage"] = failure.precedingStage
-		metadata["preceding_failure_error"] = failure.precedingError.Error()
+	request := PaperOrderRequest{Scope: scope, Subscription: *subscription, Intent: candidate, OriginRunID: originRunID, ClaimID: claimID}
+	hasDurableEffect := false
+	if finder, ok := s.deps.Executor.(durableCopyOrderEffectFinder); ok {
+		hasDurableEffect, err = finder.FindCopyOrderEffect(ctx, request)
+		if err != nil {
+			return candidate, subscription, fmt.Errorf("discover durable copy order for intent %s: %w", candidate.ID, err)
+		}
 	}
-	encoded, _ := json.Marshal(metadata)
-	event := &domain.AgentEvent{
-		PipelineRunID: &run.ID,
-		StrategyID:    &run.StrategyID,
-		EventKind:     "copy_rebalance_effects_failed",
-		Title:         "Copy rebalance effects failed",
-		Summary:       fmt.Sprintf("Copy intent %s failed during %s", intent.ID, failure.stage),
-		Tags:          []string{"pipeline", "copy_trading", "effects_failed"},
-		Metadata:      encoded,
+	if s.deps.Lifecycle != nil && !hasDurableEffect {
+		if err := s.deps.Lifecycle.ProposeCopyIntent(ctx, *subscription, candidate, originRunID); err != nil {
+			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{fmt.Errorf("propose copy common lifecycle: %w", err).Error()}
+			completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+			if completeErr != nil || !completed {
+				return candidate, subscription, fmt.Errorf("complete copy intent %s after lifecycle failure: applied=%t: %w", candidate.ID, completed, completeErr)
+			}
+			return candidate, subscription, nil
+		}
 	}
-	var err error
-	if s.deps.Events == nil {
-		err = errors.New("agent event repository is unavailable")
+	var executionResult PaperOrderResult
+	if executor, ok := s.deps.Executor.(lockedCopyExecutor); lockHeld && ok {
+		executionResult, err = executor.ExecuteCopyOrderWithAccountLockHeld(ctx, request)
 	} else {
-		eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		err = s.deps.Events.Create(eventCtx, event)
-		cancel()
+		executionResult, err = s.deps.Executor.ExecuteCopyOrder(ctx, request)
 	}
-	if err == nil {
-		return nil
+	if validationErr := validatePaperOrderResult(executionResult, scope); (executionResult.OrderID != nil || executionResult.Status.IsValid()) && validationErr != nil {
+		candidate.Status, candidate.RiskStatus, candidate.OrderID, candidate.RiskReasons = "failed", "pending", nil, []string{validationErr.Error()}
+		if err != nil {
+			candidate.RiskReasons = append(candidate.RiskReasons, err.Error())
+		}
+		completed, completeErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+		if completeErr != nil || !completed {
+			return candidate, subscription, fmt.Errorf("update copy intent %s: applied=%t: %w", candidate.ID, completed, completeErr)
+		}
+		return candidate, subscription, nil
 	}
-	observabilityErr := fmt.Errorf("persist copy rebalance failure event: %w", err)
-	s.deps.Logger.Error("copy rebalance failure event persistence failed", slog.Any("error", observabilityErr), slog.String("intent_id", intent.ID.String()), slog.String("stage", failure.stage))
-	return observabilityErr
+	candidate.OrderID = executionResult.OrderID
+	terminalMapped := false
+	switch executionResult.Status {
+	case domain.OrderStatusFilled:
+		candidate.Status, candidate.RiskStatus, terminalMapped = "filled", "approved", true
+	case domain.OrderStatusRejected, domain.OrderStatusCancelled:
+		candidate.Status, candidate.RiskStatus, terminalMapped = "failed", "rejected", true
+	}
+	switch {
+	case err != nil && !terminalMapped:
+		candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{err.Error()}
+		if candidate.OrderID != nil && (executionResult.Status == domain.OrderStatusPending || executionResult.Status == domain.OrderStatusSubmitted || executionResult.Status == domain.OrderStatusPartial) {
+			candidate.Status = "received"
+		}
+	case err == nil && !terminalMapped:
+		candidate.RiskStatus = "approved"
+		switch executionResult.Status {
+		case domain.OrderStatusFilled:
+			candidate.Status = "filled"
+		case domain.OrderStatusSubmitted:
+			candidate.Status = "ordered"
+		case domain.OrderStatusPartial, domain.OrderStatusPending:
+			candidate.Status = "partial"
+		default:
+			candidate.Status, candidate.RiskStatus, candidate.RiskReasons = "failed", "pending", []string{"copy executor returned terminal unsuccessful order status " + executionResult.Status.String()}
+		}
+	case err != nil:
+		candidate.RiskReasons = []string{err.Error()}
+	}
+	completed, updateErr := s.deps.Repo.CompleteIntentExecution(ctx, &candidate, claimID)
+	if updateErr != nil || !completed {
+		return candidate, subscription, fmt.Errorf("update copy intent %s: applied=%t: %w", candidate.ID, completed, updateErr)
+	}
+	return candidate, subscription, nil
+}
+
+func (s *Service) validateSubscriptionBinding(subscription *domain.CopySubscription) error {
+	if s == nil || subscription == nil {
+		return fmt.Errorf("copy subscription is required")
+	}
+	if err := s.deps.ExecutionAccount.Validate(); err != nil {
+		return fmt.Errorf("copy execution account: %w", err)
+	}
+	if subscription.AccountID != s.deps.ExecutionAccount.AccountID() || subscription.Environment != s.deps.ExecutionAccount.Environment() {
+		return fmt.Errorf("copy subscription account and environment do not match configured execution account")
+	}
+	return nil
+}
+
+func validateCopyIntentOwnership(intent domain.CopyTradeIntent, subscription domain.CopySubscription) error {
+	if intent.AccountID != subscription.AccountID || intent.Environment != subscription.Environment || intent.SubscriptionID != subscription.ID || intent.OriginType != "copy_subscription" || intent.OriginID != subscription.ID {
+		return fmt.Errorf("copy intent ownership does not match persisted subscription")
+	}
+	return nil
+}
+
+func validatePaperOrderResult(result PaperOrderResult, scope execution.ExecutionScope) error {
+	wantType, wantID := scope.Origin()
+	gotType, gotID := result.Scope.Origin()
+	if result.Scope.AccountID() != scope.AccountID() || result.Scope.Environment() != scope.Environment() || gotType != wantType || gotID != wantID || result.Scope.CopyOriginRunID() != scope.CopyOriginRunID() || result.OrderID == nil || *result.OrderID == uuid.Nil || !result.Status.IsValid() {
+		return fmt.Errorf("copy executor returned incomplete order result")
+	}
+	return nil
 }
 
 func (s *Service) ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error) {

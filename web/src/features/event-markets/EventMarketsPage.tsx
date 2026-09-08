@@ -6,13 +6,15 @@ import { Breadcrumbs } from '@/shared/components/EntityLinks'
 import { ErrorState, LastUpdated, LoadingState } from '@/shared/components/QueryStates'
 import { normalizeStatus } from '@/lib/status'
 import { StatusBadge } from '@/components/ui/status-badge'
+import { useAccount } from '@/shared/account/AccountProvider'
 
 export function EventMarketsPage() {
+  const { cockpitPath } = useAccount()
   const summary = useQuery({ queryKey: ['event-markets', 'summary'], queryFn: ({ signal }) => getEventMarketsSummary(signal) })
   const providers = summary.data?.providers.filter((provider) => provider.provider.toLowerCase() === 'kalshi')
   return (
     <div className="detail-stack">
-      <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Event markets' }]} />
+      <Breadcrumbs items={[{ label: 'Cockpit', to: cockpitPath }, { label: 'Event markets' }]} />
       <PageHeader eyebrow="Prediction markets" title="Event markets" description="Paper-first readiness for Kalshi. Live readiness is reported by the backend and never inferred by this page." actions={<span className="status-pill unknown">Paper-first</span>} />
       <section className="panel" aria-labelledby="event-provider-heading">
         <div className="panel-header"><h2 id="event-provider-heading">Provider summary</h2>{summary.data ? <LastUpdated date={summary.dataUpdatedAt} /> : null}</div>

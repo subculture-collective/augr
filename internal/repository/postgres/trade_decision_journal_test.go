@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -18,18 +19,18 @@ import (
 )
 
 func TestBuildTradeDecisionListQuery_NoFilters(t *testing.T) {
-	query, args := buildTradeDecisionListQuery(repository.TradeDecisionFilter{}, 10, 0)
+	query, args := buildTradeDecisionListQuery(canonicalRepositoryTestAccountID, repository.TradeDecisionFilter{}, 10, 0)
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
-	if args[0] != 10 || args[1] != 0 {
+	if args[1] != 10 || args[2] != 0 {
 		t.Fatalf("unexpected args: %#v", args)
 	}
 	assertContains(t, query, "FROM trade_decisions")
 	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
+	assertContains(t, query, "account_id = $1")
 }
 
 func TestBuildTradeDecisionListQuery_AllFilters(t *testing.T) {
@@ -38,7 +39,7 @@ func TestBuildTradeDecisionListQuery_AllFilters(t *testing.T) {
 	after := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
 	before := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 
-	query, args := buildTradeDecisionListQuery(repository.TradeDecisionFilter{
+	query, args := buildTradeDecisionListQuery(canonicalRepositoryTestAccountID, repository.TradeDecisionFilter{
 		StrategyID:    &strategyID,
 		InstrumentKey: instrumentKey,
 		MarketType:    domain.MarketTypeStock,
@@ -47,44 +48,79 @@ func TestBuildTradeDecisionListQuery_AllFilters(t *testing.T) {
 		CreatedBefore: &before,
 	}, 25, 50)
 
-	if len(args) != 8 {
+	if len(args) != 9 {
 		t.Fatalf("expected 7 args, got %d: %#v", len(args), args)
 	}
-	assertContains(t, query, "strategy_id = $1")
-	assertContains(t, query, "instrument_key = $2")
-	assertContains(t, query, "market_type = $3")
-	assertContains(t, query, "status = $4")
-	assertContains(t, query, "created_at >= $5")
-	assertContains(t, query, "created_at <= $6")
-	assertContains(t, query, "LIMIT $7 OFFSET $8")
-	if args[0] != strategyID || args[1] != instrumentKey || args[2] != domain.MarketTypeStock || args[3] != domain.TradeDecisionStatusLive {
-		t.Fatalf("unexpected filter args: %#v", args[:4])
+	assertContains(t, query, "strategy_id = $2")
+	assertContains(t, query, "instrument_key = $3")
+	assertContains(t, query, "market_type = $4")
+	assertContains(t, query, "status = $5")
+	assertContains(t, query, "created_at >= $6")
+	assertContains(t, query, "created_at <= $7")
+	assertContains(t, query, "LIMIT $8 OFFSET $9")
+	if args[1] != strategyID || args[2] != instrumentKey || args[3] != domain.MarketTypeStock || args[4] != domain.TradeDecisionStatusLive {
+		t.Fatalf("unexpected filter args: %#v", args[:5])
 	}
 }
 
 func TestBuildTradeDecisionCountQuery(t *testing.T) {
 	strategyID := uuid.New()
-	query, args := buildTradeDecisionCountQuery(repository.TradeDecisionFilter{StrategyID: &strategyID, Status: domain.TradeDecisionStatusPaper})
+	query, args := buildTradeDecisionCountQuery(canonicalRepositoryTestAccountID, repository.TradeDecisionFilter{StrategyID: &strategyID, Status: domain.TradeDecisionStatusPaper})
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args, got %d", len(args))
 	}
 	assertContains(t, query, "SELECT COUNT(*) FROM trade_decisions")
-	assertContains(t, query, "strategy_id = $1")
-	assertContains(t, query, "status = $2")
+	assertContains(t, query, "strategy_id = $2")
+	assertContains(t, query, "status = $3")
 	assertNotContains(t, query, "LIMIT")
 }
 
 func TestBuildTradeDecisionAttachQuery(t *testing.T) {
 	decisionID := uuid.New()
 	orderID := uuid.New()
-	query, args := buildTradeDecisionAttachQuery("paper_order_id", decisionID, orderID, domain.TradeDecisionStatusPaper)
+	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, decisionID, orderID, domain.TradeDecisionStatusPaper, false, nil)
 
-	assertContains(t, query, "UPDATE trade_decisions SET paper_order_id = $2")
-	assertContains(t, query, "status = $3")
-	assertContains(t, query, "RETURNING id")
-	if len(args) != 3 || args[0] != decisionID || args[1] != orderID || args[2] != domain.TradeDecisionStatusPaper {
+	assertContains(t, query, "UPDATE trade_decisions td SET paper_order_id = $3")
+	assertContains(t, query, "status = $4")
+	assertContains(t, query, "RETURNING td.id")
+	assertContains(t, query, "o.account_id=td.account_id")
+	assertContains(t, query, "o.pipeline_run_id IS NOT DISTINCT FROM td.pipeline_run_id")
+	assertContains(t, query, "o.pipeline_run_trade_date IS NOT DISTINCT FROM td.pipeline_run_trade_date")
+	assertContains(t, query, "o.strategy_id IS NOT DISTINCT FROM td.strategy_id")
+	if len(args) != 5 || args[0] != decisionID || args[1] != canonicalRepositoryTestAccountID || args[2] != orderID || args[3] != domain.TradeDecisionStatusPaper || args[4] != false {
 		t.Fatalf("unexpected attach args: %#v", args)
+	}
+}
+
+func TestBuildTradeDecisionAttachQuery_StrategyFreeCopyScope(t *testing.T) {
+	copyRunID := uuid.New()
+	scope := repository.DecisionOrderAttachmentScope{CopyOriginRebalanceRunID: &copyRunID}
+	query, args := buildTradeDecisionAttachQuery("paper_order_id", canonicalRepositoryTestAccountID, uuid.New(), uuid.New(), domain.TradeDecisionStatusPaper, false, &scope)
+
+	assertContains(t, query, "o.pipeline_run_id IS NOT DISTINCT FROM $6")
+	assertContains(t, query, "o.pipeline_run_trade_date IS NOT DISTINCT FROM $7")
+	assertContains(t, query, "o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $8")
+	assertContains(t, query, "o.strategy_id IS NOT DISTINCT FROM $9")
+	pipelineRunID, _ := args[5].(*uuid.UUID)
+	pipelineTradeDate, _ := args[6].(*time.Time)
+	copyOriginRunID, _ := args[7].(*uuid.UUID)
+	strategyID, _ := args[8].(*uuid.UUID)
+	if len(args) != 9 || pipelineRunID != nil || pipelineTradeDate != nil || copyOriginRunID == nil || *copyOriginRunID != copyRunID || strategyID != nil {
+		t.Fatalf("copy attach args = %#v", args)
+	}
+}
+
+func TestBuildTradeDecisionAttachmentValidationQueryIncludesFullCopyScope(t *testing.T) {
+	copyRunID := uuid.New()
+	query, args := buildTradeDecisionAttachmentValidationQuery("paper_order_id", canonicalRepositoryTestAccountID, uuid.New(), uuid.New(), false, repository.DecisionOrderAttachmentScope{CopyOriginRebalanceRunID: &copyRunID})
+	assertContains(t, query, "td.paper_order_id=$3")
+	assertContains(t, query, "o.pipeline_run_id IS NOT DISTINCT FROM $5")
+	assertContains(t, query, "o.pipeline_run_trade_date IS NOT DISTINCT FROM $6")
+	assertContains(t, query, "o.copy_origin_rebalance_run_id IS NOT DISTINCT FROM $7")
+	assertContains(t, query, "o.strategy_id IS NOT DISTINCT FROM $8")
+	if len(args) != 8 || args[6] != &copyRunID {
+		t.Fatalf("validation args = %#v", args)
 	}
 }
 
@@ -131,6 +167,11 @@ func TestScanTradeDecision_RoundTrip(t *testing.T) {
 
 	got, err := scanTradeDecision(fakeTradeDecisionScanner{values: []any{
 		uuid.New(),
+		canonicalRepositoryTestAccountID,
+		domain.AccountEnvironmentPaperScored,
+		"strategy_version",
+		uuid.NewString(),
+		&createdAt,
 		&strategyID,
 		&runID,
 		domain.MarketTypeStock,
@@ -216,7 +257,7 @@ func TestTradeDecisionJournalRepo_CountByNoActionReason_ParsesFilterAndCoalesces
 	pool, cleanup := newTradeDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewTradeDecisionJournalRepo(pool)
+	repo := NewTradeDecisionJournalRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := uuid.New()
 	if _, err := pool.Exec(ctx, `INSERT INTO strategies (id, market_type) VALUES ($1, $2)`, strategyID, domain.MarketTypeStock); err != nil {
 		t.Fatalf("insert strategy: %v", err)
@@ -262,7 +303,7 @@ func TestTradeDecisionJournalRepo_CountByNoActionReason_EmptyTableEmptyFilterRet
 	pool, cleanup := newTradeDecisionIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewTradeDecisionJournalRepo(pool)
+	repo := NewTradeDecisionJournalRepo(pool, canonicalRepositoryTestAccountID)
 	counts, err := repo.CountByNoActionReason(ctx, repository.TradeDecisionFilter{})
 	if err != nil {
 		t.Fatalf("CountByNoActionReason() error = %v", err)
@@ -271,6 +312,63 @@ func TestTradeDecisionJournalRepo_CountByNoActionReason_EmptyTableEmptyFilterRet
 		if counts[key] != 0 {
 			t.Fatalf("expected zero for %s, got %d", key, counts[key])
 		}
+	}
+}
+
+func TestTradeDecisionJournalRepo_InitialReplayRollbackAndRestartRepair(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newReplayEventIntegrationPool(t, ctx)
+	defer cleanup()
+	_, err := pool.Exec(ctx, `ALTER TABLE trade_decisions
+		ADD COLUMN account_id UUID, ADD COLUMN environment TEXT, ADD COLUMN origin_type TEXT, ADD COLUMN origin_id TEXT,
+		ADD COLUMN pipeline_run_trade_date DATE, ADD COLUMN strategy_id UUID, ADD COLUMN pipeline_run_id UUID,
+		ADD COLUMN market_type TEXT NOT NULL DEFAULT 'stock', ADD COLUMN instrument_key TEXT NOT NULL DEFAULT '', ADD COLUMN external_market_id TEXT,
+		ADD COLUMN side TEXT NOT NULL DEFAULT 'buy', ADD COLUMN outcome TEXT, ADD COLUMN fair_value NUMERIC NOT NULL DEFAULT 0,
+		ADD COLUMN executable_price NUMERIC NOT NULL DEFAULT 0, ADD COLUMN spread NUMERIC NOT NULL DEFAULT 0, ADD COLUMN depth NUMERIC NOT NULL DEFAULT 0,
+		ADD COLUMN gross_ev NUMERIC NOT NULL DEFAULT 0, ADD COLUMN net_ev NUMERIC NOT NULL DEFAULT 0, ADD COLUMN kelly_fraction NUMERIC NOT NULL DEFAULT 0,
+		ADD COLUMN proposed_size NUMERIC NOT NULL DEFAULT 0, ADD COLUMN approved_size NUMERIC NOT NULL DEFAULT 0, ADD COLUMN risk_status TEXT NOT NULL DEFAULT 'approved',
+		ADD COLUMN risk_reasons TEXT[] NOT NULL DEFAULT '{}', ADD COLUMN evidence JSONB NOT NULL DEFAULT '{}', ADD COLUMN features JSONB NOT NULL DEFAULT '{}',
+		ADD COLUMN regime_tags TEXT[] NOT NULL DEFAULT '{}', ADD COLUMN prompt_text TEXT, ADD COLUMN llm_provider TEXT, ADD COLUMN llm_model TEXT,
+		ADD COLUMN prompt_tokens INTEGER, ADD COLUMN completion_tokens INTEGER, ADD COLUMN latency_ms INTEGER, ADD COLUMN cost_usd NUMERIC,
+		ADD COLUMN paper_order_id UUID, ADD COLUMN live_order_id UUID, ADD COLUMN status TEXT NOT NULL DEFAULT 'candidate',
+		ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+		CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL;
+		CREATE FUNCTION fail_risk_replay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='risk_reviewed' THEN RAISE EXCEPTION 'injected replay failure'; END IF; RETURN NEW; END $$;
+		CREATE TRIGGER fail_risk_replay BEFORE INSERT ON replay_events FOR EACH ROW EXECUTE FUNCTION fail_risk_replay()`)
+	if err != nil {
+		t.Fatalf("prepare atomic replay schema: %v", err)
+	}
+	repo := NewTradeDecisionJournalRepo(pool, canonicalRepositoryTestAccountID)
+	decision := &domain.TradeDecision{ID: uuid.New(), Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: uuid.NewString(), MarketType: domain.MarketTypeStock, InstrumentKey: "AAPL", Side: domain.OrderSideBuy, RiskStatus: domain.RiskDecisionApproved, Status: domain.TradeDecisionStatusCandidate}
+	if err := repo.CreateWithInitialReplay(ctx, decision); err == nil {
+		t.Fatal("injected replay failure succeeded")
+	}
+	var decisions, events int
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM trade_decisions),(SELECT count(*) FROM replay_events)`).Scan(&decisions, &events); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 0 || events != 0 {
+		t.Fatalf("failed transaction retained decision/events = %d/%d", decisions, events)
+	}
+	if _, err := pool.Exec(ctx, `DROP TRIGGER fail_risk_replay ON replay_events`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateWithInitialReplay(ctx, decision); err != nil {
+		t.Fatalf("restart repair: %v", err)
+	}
+	if err := repo.CreateWithInitialReplay(ctx, decision); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	changed := *decision
+	changed.NetEV = decision.NetEV + 1
+	if err := repo.CreateWithInitialReplay(ctx, &changed); !errors.Is(err, repository.ErrIdempotencyConflict) {
+		t.Fatalf("changed same-ID payload error = %v, want ErrIdempotencyConflict", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM trade_decisions),(SELECT count(*) FROM replay_events)`).Scan(&decisions, &events); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 1 || events != 2 {
+		t.Fatalf("repaired decision/events = %d/%d, want 1/2", decisions, events)
 	}
 }
 
@@ -290,7 +388,7 @@ func newTradeDecisionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpoo
 	if err != nil {
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -317,7 +415,7 @@ func newTradeDecisionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpoo
 		`CREATE TYPE market_type AS ENUM ('stock','crypto','kalshi','polymarket')`,
 		`CREATE TYPE order_side AS ENUM ('buy','sell')`,
 		`CREATE TABLE strategies (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), market_type market_type NOT NULL)`,
-		`CREATE TABLE trade_decisions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), strategy_id UUID REFERENCES strategies(id), instrument_key TEXT NOT NULL, market_type market_type NOT NULL, side order_side NOT NULL, status trade_decision_status NOT NULL, risk_reasons TEXT[], evidence JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE trade_decisions (account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', id UUID PRIMARY KEY DEFAULT gen_random_uuid(), strategy_id UUID REFERENCES strategies(id), instrument_key TEXT NOT NULL, market_type market_type NOT NULL, side order_side NOT NULL, status trade_decision_status NOT NULL, risk_reasons TEXT[], evidence JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	}
 	for _, stmt := range ddl {
 		if _, err := pool.Exec(ctx, stmt); err != nil {

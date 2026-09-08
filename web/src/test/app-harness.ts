@@ -51,12 +51,12 @@ export class FakeWebSocket {
   }
 
   emit(type = 'pipeline_start', data?: unknown) {
-    this.onmessage?.({ data: JSON.stringify({ type, data, timestamp: fixtureDate }) })
+    this.onmessage?.({ data: JSON.stringify({ type, account_id: fixtureId(1), scope: 'account', data, timestamp: fixtureDate }) })
   }
 }
 
 export function resetApp(path = '/login') {
-  document.body.innerHTML = ''
+  cleanup()
   window.history.pushState({}, '', path)
   localStorage.clear()
   sessionStorage.clear()
@@ -69,7 +69,7 @@ export function resetApp(path = '/login') {
 
 export function installAppTestHarness() {
   beforeAll(() => {
-    server.listen({ onUnhandledRequest: 'bypass' })
+    server.listen({ onUnhandledRequest: 'error' })
     vi.stubGlobal('WebSocket', FakeWebSocket)
     vi.stubGlobal('ResizeObserver', class ResizeObserver {
       observe() {}

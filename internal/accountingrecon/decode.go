@@ -31,6 +31,7 @@ func DecodeSnapshot(payloadBytes []byte) (*Snapshot, error) {
 		Version                  string            `json:"version"`
 		Source                   SnapshotSource    `json:"source"`
 		AccountID                string            `json:"account_id"`
+		ThroughTransactionID     string            `json:"through_transaction_id"`
 		AsOf                     string            `json:"as_of"`
 		ObservedAt               string            `json:"observed_at"`
 		Currency                 string            `json:"currency"`
@@ -60,6 +61,10 @@ func DecodeSnapshot(payloadBytes []byte) (*Snapshot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode accounting snapshot account: %w", err)
 	}
+	throughTransactionID, err := uuid.Parse(payload.ThroughTransactionID)
+	if err != nil {
+		return nil, fmt.Errorf("decode accounting snapshot transaction frontier: %w", err)
+	}
 	asOf, err := time.Parse(timestampLayout, payload.AsOf)
 	if err != nil {
 		return nil, fmt.Errorf("decode accounting snapshot as_of: %w", err)
@@ -69,7 +74,7 @@ func DecodeSnapshot(payloadBytes []byte) (*Snapshot, error) {
 		return nil, fmt.Errorf("decode accounting snapshot observed_at: %w", err)
 	}
 	input := SnapshotInput{
-		Source: payload.Source, AccountID: accountID, AsOf: asOf, ObservedAt: observedAt,
+		Source: payload.Source, AccountID: accountID, ThroughTransactionID: throughTransactionID, AsOf: asOf, ObservedAt: observedAt,
 		Currency: payload.Currency, ProjectionVersion: payload.ProjectionVersion,
 		MarkSource: payload.MarkSource, MarkNamespace: payload.MarkNamespace,
 		MaxMarkAge:     time.Duration(payload.MaxMarkAgeMicroseconds) * time.Microsecond,

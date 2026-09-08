@@ -21,7 +21,11 @@ import (
 )
 
 func TestCapitalPolicyRepoRegistersLoadsAndReplaysExactArtifact(t *testing.T) {
-	ctx, pool := newCapitalPolicyIntegrationPool(t)
+	ctx := context.Background()
+	// Exercise the insert branch before migration 108 seeds the reviewed policy.
+	// The remaining current-schema tests cover replay alongside that seed.
+	pool := newLedgerIntegrationPool(t, ctx)
+	applyRepositoryMigrationRange(t, ctx, pool, "000068", "000074")
 	repo := NewCapitalPolicyRepo(pool)
 	artifact := newCapitalPolicyArtifact(t)
 	persisted, err := repo.RegisterCapitalPolicy(ctx, artifact)
@@ -42,7 +46,7 @@ func TestCapitalPolicyRepoRegistersLoadsAndReplaysExactArtifact(t *testing.T) {
 		}
 	}
 	var count int
-	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM capital_margin_policy_artifacts`).Scan(&count); err != nil || count != 1 {
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM capital_margin_policy_artifacts WHERE id=$1`, artifact.ID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("artifact count = %d/%v", count, err)
 	}
 }
@@ -114,7 +118,7 @@ func TestCapitalPolicyRepoBindsReloadsAndReplaysEveryTierPlusStress(t *testing.T
 	}
 	var bindings, accounts, openingFlows int
 	if err := pool.QueryRow(ctx, `SELECT
-		(SELECT COUNT(*) FROM account_capital_policy_bindings),
+		(SELECT COUNT(*) FROM account_capital_policy_bindings b JOIN accounts a ON a.id=b.account_id WHERE a.created_by='capital-policy-test'),
 		(SELECT COUNT(*) FROM accounts WHERE created_by = 'capital-policy-test'),
 		(SELECT COUNT(*) FROM capital_flows f JOIN accounts a ON a.id=f.account_id WHERE a.created_by='capital-policy-test' AND f.source='account_opening')`).Scan(
 		&bindings, &accounts, &openingFlows,
@@ -173,8 +177,8 @@ func TestCapitalPolicyRepoConcurrentArtifactAndBindingReplayConverges(t *testing
 	}
 	var artifacts, bindings int
 	if err := pool.QueryRow(ctx, `SELECT
-		(SELECT COUNT(*) FROM capital_margin_policy_artifacts),
-		(SELECT COUNT(*) FROM account_capital_policy_bindings)`).Scan(&artifacts, &bindings); err != nil {
+		(SELECT COUNT(*) FROM capital_margin_policy_artifacts WHERE id=$1),
+		(SELECT COUNT(*) FROM account_capital_policy_bindings WHERE account_id=$2)`, artifact.ID, account.ID).Scan(&artifacts, &bindings); err != nil {
 		t.Fatal(err)
 	}
 	if artifacts != 1 || bindings != 1 {
@@ -324,7 +328,7 @@ func newCapitalPolicyIntegrationPool(t *testing.T) (context.Context, *pgxpool.Po
 		"000073_venue_adapter_observations.up.sql",
 		"000074_capital_margin_profiles.up.sql",
 	} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migrationName)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, pool, migrationName); err != nil {
 			t.Fatalf("apply %s: %v", migrationName, err)
 		}
 	}

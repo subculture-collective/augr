@@ -7,9 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
+
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(discard{}, nil))
@@ -37,7 +41,7 @@ func TestIntegration_RiskEngine_CircuitBreakerTripAndReset(t *testing.T) {
 	// Use a real position repo so the engine is wired to a live DB,
 	// validating that the risk engine functions correctly in an
 	// integrated environment.
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
 
 	// Disable file and env kill switch mechanisms for test isolation.
 	engine.SetFileExistsFunc(func(string) bool { return false })
@@ -130,7 +134,7 @@ func TestIntegration_RiskEngine_CircuitBreakerCooldownAutoReset(t *testing.T) {
 	}
 
 	now := time.Now()
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
 	engine.SetNowFunc(func() time.Time { return now })
 	engine.SetFileExistsFunc(func(string) bool { return false })
 	engine.SetGetEnvFunc(func(string) string { return "" })
@@ -174,7 +178,7 @@ func TestIntegration_RiskEngine_DrawdownTrip(t *testing.T) {
 		CooldownDuration:     15 * time.Minute,
 	}
 
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
 	engine.SetFileExistsFunc(func(string) bool { return false })
 	engine.SetGetEnvFunc(func(string) string { return "" })
 
@@ -206,7 +210,7 @@ func TestIntegration_RiskEngine_ConsecutiveLossesTrip(t *testing.T) {
 		CooldownDuration:     15 * time.Minute,
 	}
 
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), cbConfig, r.Position, discardLogger())
 	engine.SetFileExistsFunc(func(string) bool { return false })
 	engine.SetGetEnvFunc(func(string) string { return "" })
 
@@ -231,7 +235,7 @@ func TestIntegration_RiskEngine_KillSwitchBlocksTrades(t *testing.T) {
 	r := newRepos(db)
 	ctx := context.Background()
 
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), r.Position, discardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), r.Position, discardLogger())
 	engine.SetFileExistsFunc(func(string) bool { return false })
 	engine.SetGetEnvFunc(func(string) string { return "" })
 
@@ -300,7 +304,7 @@ func TestIntegration_RiskEngine_PositionLimits(t *testing.T) {
 		MaxPerMarketPct:   0.50,
 	}
 
-	engine := risk.NewRiskEngine(limits, risk.DefaultCircuitBreakerConfig(), r.Position, discardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, limits, risk.DefaultCircuitBreakerConfig(), r.Position, discardLogger())
 	engine.SetFileExistsFunc(func(string) bool { return false })
 	engine.SetGetEnvFunc(func(string) string { return "" })
 

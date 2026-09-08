@@ -14,9 +14,10 @@ This guide is for contributors who need the full day-to-day workflow rather than
 
 Required:
 
-- Go 1.25.8 or newer (the minimum is declared in `go.mod`)
+- Go 1.25.13 (pinned in `go.mod` and `mise.toml`)
 - Node.js 22 (pinned in `.nvmrc` and `mise.toml`, and used by frontend CI)
 - npm
+- Python 3 (standard library only, for the integration gate)
 - Docker and Docker Compose v2+
 - PostgreSQL client tools if you want to inspect the database outside Compose
 
@@ -513,37 +514,93 @@ Smoke mode is especially useful when you want to verify:
 
 ## Testing and quality checks
 
-Primary Task targets:
+Run commands through `mise exec --` to use the repository's Go and Node versions.
+Install frontend dependencies with `npm ci` in `web/`, as CI does.
+
+| Command | Contracts exercised |
+| --- | --- |
+| `task test:race` | Go short suite with race detection; database skips are expected here |
+| `task test:cover` | Short-suite statement coverage, with race detection |
+| `task test:integration` | Complete Go suite against a migrated disposable `TEST_DATABASE_URL`; required contracts must pass and unexpected skips fail |
+| `task test:maintenance` | Negative tests of the integration gate: missing contracts, changed skip reasons, stale exceptions and package failures |
+| `task web:check` | Frontend ESLint, Vitest, TypeScript project build and Vite production build |
+| `task fmt:check` | Formatting check that exits nonzero on differences |
+| `task check` | Go build, race tests and lint |
+| `task ci` | Local Go build/race/lint/vulnerability and maintenance checks, plus frontend checks; database and Docker smoke remain separate |
+
+### Database execution and exceptions
+
+`task test:integration` requires an explicit PostgreSQL URL in `TEST_DATABASE_URL`
+whose database name ends in `_test`. Use a disposable Timescale/PostgreSQL 17
+service, apply the up migrations in filename order, then run:
 
 ```bash
-task build
-task tools
-task test
-task test:race
-task test:integration
-task test:cover
-task lint
-task fmt
-task fmt:check
-task vet
-task vulncheck
-task audit
-task check
-task ci
+mise exec -- task test:integration -- --output-dir /tmp/augr-integration
 ```
 
-The Go task targets are scoped to `cmd/`, `internal/`, and `migrations/` so a
-completed frontend install cannot make Go discover language ports bundled by
-packages under `web/node_modules/`. Frontend tests also force relative mock API
-and WebSocket paths; an ignored `web/.env.local` remains available for manual
-development without redirecting the test suite to a running backend.
+CI provisions the service and applies migrations before invoking the same Python
+runner. The runner executes all tests in `cmd/`, `internal/`, `migrations/`, and `monitoring/`,
+without relying on an `Integration` naming convention. Packages run serially;
+individual concurrency tests retain their own writers and race detection. Each
+package has a 30-minute timeout: the complete PostgreSQL package applies real
+migrations per isolated scenario and can take about 19 minutes locally.
+Database tests own isolated schemas and cleanup. Never point these commands at
+an existing application database.
 
-Notes:
+Current repository fixtures that build on the execution-lifecycle, projection,
+dataset or strategy-catalog schemas apply real migrations through the canonical
+account boundary (108), then any later migration needed by that contract. The
+shared `execRepositoryMigration` helper records applied files inside each isolated
+schema so layered fixtures do not replay an older up migration over newer tables.
+Down migrations clear that record. Historical migration and rollback tests still
+construct their explicit target versions; keep those distinct from current-service
+fixtures. Small CRUD fixtures must include the account, environment, origin and
+run fields read by the current repository API.
 
-- integration tests require PostgreSQL
-- database integration tests create and remove isolated schemas; point `DB_URL` or
-  `DATABASE_URL` at a disposable development database, never production
-- docs-only validation currently relies mostly on file/link checks and the dedicated docs tests in `cmd/tradingagent`
+The runner writes JSONL execution evidence and a summary outside tracked source
+(by default a temporary directory). `--coverage PATH` adds the integration
+coverage profile used by CI. Unit and integration profiles remain separately
+reported and merged by CI; no coverage threshold has been lowered or introduced.
+
+`scripts/integration-exceptions.json` records exact test names and prerequisites
+for retained historical-schema qualifications and external OpenCode/Docker smoke
+tiers. These are explicitly unexecuted in the normal database gate. Their database
+variables are cleared by that runner so a developer's retained qualification data
+cannot be used accidentally. Run a qualification separately with its documented
+schema, evidence and test command. A missing exception test, changed skip reason,
+unlisted skip, or required contract that does not pass fails the normal gate.
+Do not add an exception for a failing current-service fixture.
+
+### Contract ownership
+
+- Monitoring tests retain alert metric and job-scope contracts in the local Go targets.
+- Account/ledger repository tests own exact decimals, retry conflicts, atomic
+  failed writes and concurrent convergence. The integration runner requires named
+  examples to actually pass, including the canonical signal recorder.
+- Market-payload repository tests own migration 110's forged binding rejection,
+  immutability and rollback. Migration 111's real-database policy test owns digest
+  integrity, immutable policy evidence and refusal of nonempty rollback. SQL-text
+  checks remain structural guards, not substitutes for these exercises.
+- Copy-origin planning, execution claims, reauthorization, durable failure state
+  and order recovery replace obsolete pipeline-finalization copy tests. Current
+  service tests and repository concurrency tests own those contracts; no inactive
+  legacy test body is retained behind an unconditional skip.
+- Feature component tests own repeated list empty/error/retry/unavailable states.
+  App tests retain account/auth, cross-route navigation, realtime and confirmed
+  mutation journeys. MSW rejects unexpected requests. The full app's development
+  mocks are still intentional dynamic entrypoints, not unused test dependencies.
+- Frontend lint rejects focused, skipped and placeholder tests. Vitest also rejects
+  focused tests and empty discovery. `npm run typecheck` uses `tsc -b`, including
+  `src` test code, rather than checking only the empty project-reference root.
+
+Docker/API smoke, browser journeys, schema-specific qualification, restore/load
+and deployment soak are separate tiers. A passing local unit or database gate does
+not establish those results. Run `scripts/release-gate.sh` when preparing a release.
+
+Historical files under `docs/reports` include executable recovery/evidence checks;
+classify their purpose before cleanup. Research PDFs and recovery provenance are
+maintained inputs. Reproducible local scratch output belongs under ignored `.tmp/`
+or outside the checkout.
 
 ## CLI workflow
 

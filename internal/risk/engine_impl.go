@@ -32,6 +32,7 @@ type engineState struct {
 
 // RiskEngineImpl is the concrete implementation of RiskEngine.
 type RiskEngineImpl struct {
+	executionAccount      domain.ExecutionAccountBinding
 	limits                PositionLimits
 	pmLimits              PolymarketLimits
 	cbConfig              CircuitBreakerConfig
@@ -64,11 +65,12 @@ func defaultFileExists(path string) bool {
 }
 
 // NewRiskEngine creates a new RiskEngineImpl.
-func NewRiskEngine(limits PositionLimits, cbConfig CircuitBreakerConfig, positionRepo repository.PositionRepository, logger *slog.Logger) *RiskEngineImpl {
+func NewRiskEngine(executionAccount domain.ExecutionAccountBinding, limits PositionLimits, cbConfig CircuitBreakerConfig, positionRepo repository.PositionRepository, logger *slog.Logger) *RiskEngineImpl {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &RiskEngineImpl{
+		executionAccount:   executionAccount,
 		limits:             limits,
 		pmLimits:           DefaultPolymarketLimits(),
 		cbConfig:           cbConfig,

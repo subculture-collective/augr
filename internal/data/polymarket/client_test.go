@@ -116,6 +116,16 @@ func TestGammaClient_GetMarket_StringifiedArraysAndOutcomeTokenMapping(t *testin
 	}
 }
 
+func TestGammaClientGetMarketRejectsSubstitutedIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"slug":"different-market","conditionId":"wrong"}]`))
+	}))
+	defer server.Close()
+	if _, err := NewGammaClient(server.URL, server.Client()).GetMarket(context.Background(), "requested-market"); err == nil {
+		t.Fatal("GetMarket accepted substituted response identity")
+	}
+}
+
 func TestCLOBClient_GetOrderBook(t *testing.T) {
 	t.Parallel()
 

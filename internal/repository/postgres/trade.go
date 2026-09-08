@@ -14,28 +14,33 @@ import (
 
 // TradeRepo implements repository.TradeRepository using PostgreSQL.
 type TradeRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that TradeRepo satisfies TradeRepository.
 var _ repository.TradeRepository = (*TradeRepo)(nil)
 
 // NewTradeRepo returns a TradeRepo backed by the given connection pool.
-func NewTradeRepo(pool *pgxpool.Pool) *TradeRepo {
-	return &TradeRepo{pool: pool}
+func NewTradeRepo(pool *pgxpool.Pool, accountID uuid.UUID) *TradeRepo {
+	return &TradeRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new trade and populates the generated ID and CreatedAt on
 // the provided struct.
 func (r *TradeRepo) Create(ctx context.Context, trade *domain.Trade) error {
+	if trade.AccountID != uuid.Nil && trade.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create trade: account mismatch")
+	}
+	trade.AccountID = r.accountID
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO trades (
-			external_id, order_id, position_id, ticker, side, quantity, price, fee, executed_at,
+			account_id, environment, origin_type, origin_id, external_id, order_id, position_id, ticker, side, quantity, price, fee, executed_at,
 			asset_class, open_close, contract_multiplier, premium, exit_reason
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
 		 RETURNING id, created_at`,
-		nullString(trade.ExternalID),
+		r.accountID, trade.Environment, trade.OriginType, trade.OriginID, nullString(trade.ExternalID),
 		trade.OrderID,
 		trade.PositionID,
 		trade.Ticker,
@@ -60,25 +65,32 @@ func (r *TradeRepo) Create(ctx context.Context, trade *domain.Trade) error {
 
 // List returns trades matching the provided optional filters and pagination.
 func (r *TradeRepo) List(ctx context.Context, filter repository.TradeFilter, limit, offset int) ([]domain.Trade, error) {
-	query, args := buildTradeListQuery(filter, limit, offset)
+	query, args := buildTradeListQuery(r.accountID, filter, limit, offset)
 	return r.list(ctx, query, args, "list trades")
+}
+
+func (r *TradeRepo) ListOptionsLifecycleTrades(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Trade, error) {
+	if accountID != r.accountID || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: options lifecycle trade scope is invalid")
+	}
+	return r.list(ctx, tradeSelectSQL+` WHERE account_id=$1 AND environment=$2 AND asset_class='option' ORDER BY executed_at,id LIMIT $3 OFFSET $4`, []any{accountID, environment, limit, offset}, "list options lifecycle trades")
 }
 
 // GetByOrder returns trades for the given order with optional filtering and
 // pagination.
 func (r *TradeRepo) GetByOrder(ctx context.Context, orderID uuid.UUID, filter repository.TradeFilter, limit, offset int) ([]domain.Trade, error) {
-	query, args := buildTradeScopedListQuery("order_id", orderID, filter, limit, offset)
+	query, args := buildTradeScopedListQuery(r.accountID, "order_id", orderID, filter, limit, offset)
 	return r.list(ctx, query, args, "get trades by order")
 }
 
 // GetByPosition returns trades for the given position with optional filtering
 // and pagination.
 func (r *TradeRepo) GetByPosition(ctx context.Context, positionID uuid.UUID, filter repository.TradeFilter, limit, offset int) ([]domain.Trade, error) {
-	query, args := buildTradeScopedListQuery("position_id", positionID, filter, limit, offset)
+	query, args := buildTradeScopedListQuery(r.accountID, "position_id", positionID, filter, limit, offset)
 	return r.list(ctx, query, args, "get trades by position")
 }
 
-const tradeSelectSQL = `SELECT id, external_id, order_id, position_id, ticker, side,
+const tradeSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, external_id, order_id, position_id, ticker, side,
 		quantity::double precision, price::double precision, fee::double precision,
 		executed_at, created_at, asset_class, open_close,
 		COALESCE(contract_multiplier, 100)::double precision,
@@ -122,6 +134,7 @@ func scanTrade(sc scanner) (*domain.Trade, error) {
 
 	err := sc.Scan(
 		&trade.ID,
+		&trade.AccountID, &trade.Environment, &trade.OriginType, &trade.OriginID,
 		&externalID,
 		&orderID,
 		&positionID,
@@ -158,7 +171,7 @@ func scanTrade(sc scanner) (*domain.Trade, error) {
 // the provided optional filters.
 // Count returns the total number of trades matching the filter (ignoring pagination).
 func (r *TradeRepo) Count(ctx context.Context, filter repository.TradeFilter) (int, error) {
-	query, args := buildTradeCountQuery(filter)
+	query, args := buildTradeCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count trades: %w", err)
@@ -166,7 +179,7 @@ func (r *TradeRepo) Count(ctx context.Context, filter repository.TradeFilter) (i
 	return total, nil
 }
 
-func buildTradeCountQuery(filter repository.TradeFilter) (string, []any) {
+func buildTradeCountQuery(accountID uuid.UUID, filter repository.TradeFilter) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -177,8 +190,12 @@ func buildTradeCountQuery(filter repository.TradeFilter) (string, []any) {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 	if filter.OrderID != nil {
 		conditions = append(conditions, "order_id = "+nextArg(*filter.OrderID))
+	}
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
 	}
 	if filter.PositionID != nil {
 		conditions = append(conditions, "position_id = "+nextArg(*filter.PositionID))
@@ -202,7 +219,7 @@ func buildTradeCountQuery(filter repository.TradeFilter) (string, []any) {
 	return query, args
 }
 
-func buildTradeListQuery(filter repository.TradeFilter, limit, offset int) (string, []any) {
+func buildTradeListQuery(accountID uuid.UUID, filter repository.TradeFilter, limit, offset int) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -214,9 +231,13 @@ func buildTradeListQuery(filter repository.TradeFilter, limit, offset int) (stri
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
 	if filter.OrderID != nil {
 		conditions = append(conditions, "order_id = "+nextArg(*filter.OrderID))
+	}
+	if filter.Environment != "" {
+		conditions = append(conditions, "environment = "+nextArg(filter.Environment))
 	}
 
 	if filter.PositionID != nil {
@@ -251,7 +272,7 @@ func buildTradeListQuery(filter repository.TradeFilter, limit, offset int) (stri
 
 // buildTradeScopedListQuery constructs the SELECT query and arguments for
 // GetByOrder and GetByPosition using the supplied fixed scope.
-func buildTradeScopedListQuery(scopeColumn string, scopeValue uuid.UUID, filter repository.TradeFilter, limit, offset int) (string, []any) {
+func buildTradeScopedListQuery(accountID uuid.UUID, scopeColumn string, scopeValue uuid.UUID, filter repository.TradeFilter, limit, offset int) (string, []any) {
 	switch scopeColumn {
 	case "order_id":
 		filter.OrderID = &scopeValue
@@ -261,5 +282,5 @@ func buildTradeScopedListQuery(scopeColumn string, scopeValue uuid.UUID, filter 
 		panic(fmt.Sprintf("unsupported scope column %q in buildTradeScopedListQuery", scopeColumn))
 	}
 
-	return buildTradeListQuery(filter, limit, offset)
+	return buildTradeListQuery(accountID, filter, limit, offset)
 }

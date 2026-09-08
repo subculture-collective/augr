@@ -22,6 +22,9 @@ const (
 // Config contains application configuration loaded from the environment.
 type Config struct {
 	Environment                  string
+	CanonicalAccountID           string
+	DiscoveryEvaluationScopeID   string
+	AutomaticShadowPromotion     bool
 	Server                       ServerConfig
 	Database                     DatabaseConfig
 	Redis                        RedisConfig
@@ -50,10 +53,9 @@ type TickerDiscoveryConfig struct {
 
 // ServerConfig contains HTTP server settings.
 type ServerConfig struct {
-	Host                string
-	Port                int
-	JWTSecret           string
-	ProjectionAccountID string
+	Host      string
+	Port      int
+	JWTSecret string
 }
 
 // DatabaseConfig contains database connection settings.
@@ -623,6 +625,10 @@ func loadFromEnvironment() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	automaticShadowPromotion, err := getEnvBool("AUTOMATIC_SHADOW_PROMOTION", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	// Polymarket is retained as a historical/read compatibility surface only.
 	// New installations must opt in explicitly; Kalshi is the active event-market
@@ -648,12 +654,14 @@ func loadFromEnvironment() (Config, error) {
 	}
 
 	cfg := Config{
-		Environment: getEnvString("APP_ENV", "development"),
+		Environment:                getEnvString("APP_ENV", "development"),
+		CanonicalAccountID:         strings.TrimSpace(os.Getenv("PROJECTION_ACCOUNT_ID")),
+		DiscoveryEvaluationScopeID: strings.TrimSpace(os.Getenv("DISCOVERY_EVALUATION_SCOPE_ID")),
+		AutomaticShadowPromotion:   automaticShadowPromotion,
 		Server: ServerConfig{
-			Host:                getEnvString("APP_HOST", "0.0.0.0"),
-			Port:                serverPort,
-			JWTSecret:           os.Getenv("JWT_SECRET"),
-			ProjectionAccountID: strings.TrimSpace(os.Getenv("PROJECTION_ACCOUNT_ID")),
+			Host:      getEnvString("APP_HOST", "0.0.0.0"),
+			Port:      serverPort,
+			JWTSecret: os.Getenv("JWT_SECRET"),
 		},
 		Database: DatabaseConfig{
 			URL:      os.Getenv("DATABASE_URL"),

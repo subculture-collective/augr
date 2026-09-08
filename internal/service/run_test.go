@@ -24,15 +24,10 @@ type runRepoStub struct {
 }
 
 func (*runRepoStub) Create(context.Context, *domain.PipelineRun) error { return nil }
-func (r *runRepoStub) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
+func (r *runRepoStub) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	if r.getHook != nil {
 		r.getHook()
 	}
-	value := r.run
-	return &value, nil
-}
-
-func (r *runRepoStub) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
 	value := r.run
 	return &value, nil
 }
@@ -41,7 +36,7 @@ func (*runRepoStub) List(context.Context, repository.PipelineRunFilter, int, int
 	return nil, nil
 }
 func (*runRepoStub) Count(context.Context, repository.PipelineRunFilter) (int, error) { return 0, nil }
-func (r *runRepoStub) Finalize(ctx context.Context, _ uuid.UUID, _ time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *runRepoStub) Finalize(ctx context.Context, _ domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	r.finalizeErr = ctx.Err()
 	r.finalizeDeadline, r.hasDeadline = ctx.Deadline()
 	if r.applied {
@@ -58,7 +53,7 @@ func TestRunServiceCancelFinalizesAfterRequestCancellation(t *testing.T) {
 	repo := &runRepoStub{run: domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}, applied: true, getHook: cancel}
 	canceller := &orderedRunCanceller{repo: repo}
 
-	if err := NewRunService(repo, canceller).Cancel(ctx, repo.run.ID); err != nil {
+	if err := NewRunService(repo, canceller).Cancel(ctx, domain.PipelineRunRef{ID: repo.run.ID, TradeDate: repo.run.TradeDate}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.finalizeErr; err != nil {
@@ -72,7 +67,7 @@ func TestRunServiceCancelFinalizesAfterRequestCancellation(t *testing.T) {
 	}
 }
 
-func (*runRepoStub) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (*runRepoStub) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
@@ -93,7 +88,7 @@ func (c *orderedRunCanceller) Cancel(_ uuid.UUID, _ time.Time, cause error) bool
 func TestRunServiceCancelFinalizesBeforeCausePropagation(t *testing.T) {
 	repo := &runRepoStub{run: domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}, applied: true}
 	canceller := &orderedRunCanceller{repo: repo}
-	if err := NewRunService(repo, canceller).Cancel(context.Background(), repo.run.ID); err != nil {
+	if err := NewRunService(repo, canceller).Cancel(context.Background(), domain.PipelineRunRef{ID: repo.run.ID, TradeDate: repo.run.TradeDate}); err != nil {
 		t.Fatal(err)
 	}
 	if !canceller.called || canceller.cause != runcontrol.Operator {
@@ -104,7 +99,7 @@ func TestRunServiceCancelFinalizesBeforeCausePropagation(t *testing.T) {
 func TestRunServiceCancelLoserDoesNotPropagate(t *testing.T) {
 	repo := &runRepoStub{run: domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}}
 	canceller := &orderedRunCanceller{repo: repo}
-	err := NewRunService(repo, canceller).Cancel(context.Background(), repo.run.ID)
+	err := NewRunService(repo, canceller).Cancel(context.Background(), domain.PipelineRunRef{ID: repo.run.ID, TradeDate: repo.run.TradeDate})
 	serviceErr, ok := err.(*ServiceError)
 	if !ok || serviceErr.Status != 409 {
 		t.Fatalf("error = %v", err)
@@ -119,7 +114,7 @@ func TestRunServiceCancelFinalizationFailureDoesNotPropagate(t *testing.T) {
 	repo := &runRepoStub{run: domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), TradeDate: time.Now().UTC(), Status: domain.PipelineStatusRunning}, applied: true, resultErr: wantErr}
 	canceller := &orderedRunCanceller{repo: repo}
 
-	err := NewRunService(repo, canceller).Cancel(context.Background(), repo.run.ID)
+	err := NewRunService(repo, canceller).Cancel(context.Background(), domain.PipelineRunRef{ID: repo.run.ID, TradeDate: repo.run.TradeDate})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Cancel() error = %v, want %v", err, wantErr)
 	}

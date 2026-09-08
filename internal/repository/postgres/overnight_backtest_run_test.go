@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +37,22 @@ func TestBuildOvernightBacktestListLatestLimit(t *testing.T) {
 	assertContains(t, query, "FROM overnight_backtest_runs")
 	assertContains(t, query, "ORDER BY started_at DESC, id DESC")
 	assertContains(t, query, "LIMIT $1")
+}
+
+func TestSortPreparedStrategiesForReuseUsesSameOrderForOppositeInputs(t *testing.T) {
+	ascending := []domain.Strategy{
+		preparedOvernightStrategy("AAA", "z"),
+		preparedOvernightStrategy("AAA", "a"),
+		preparedOvernightStrategy("ZZZ", "a"),
+	}
+	descending := []domain.Strategy{ascending[2], ascending[1], ascending[0]}
+	sortPreparedStrategiesForReuse(ascending)
+	sortPreparedStrategiesForReuse(descending)
+	for i := range ascending {
+		if strategyReuseKey(ascending[i]) != strategyReuseKey(descending[i]) {
+			t.Fatalf("opposite inputs lock in different order: %#v / %#v", ascending, descending)
+		}
+	}
 }
 
 func TestOvernightBacktestRunRepoIntegration_CRUD(t *testing.T) {
@@ -235,81 +252,185 @@ func TestOvernightBacktestRunRepoIntegration_CommitRollsBackAndReuses(t *testing
 	}
 }
 
+func TestOvernightBacktestRunRepoIntegration_CommitBindsPersistedExecutionVersion(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOvernightBacktestRunRepo(pool)
+	run := domain.NewOvernightBacktestRun()
+	run.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := repo.Create(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+
+	strategy := preparedOvernightStrategy("AAPL", "versioned")
+	prepared := []domain.Strategy{strategy}
+	if _, _, err := repo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, prepared); err != nil {
+		t.Fatal(err)
+	}
+
+	var versionID uuid.UUID
+	var canonicalConfig string
+	if err := pool.QueryRow(ctx, `SELECT s.execution_strategy_version_id,convert_from(v.config_bytes,'UTF8')
+		FROM strategies s JOIN strategy_versions v ON v.id=s.execution_strategy_version_id WHERE s.id=$1`, prepared[0].ID).
+		Scan(&versionID, &canonicalConfig); err != nil {
+		t.Fatal(err)
+	}
+	if versionID == uuid.Nil || canonicalConfig != `{"research_lifecycle":{"stage":"idea"}}` {
+		t.Fatalf("execution version = %s, config = %s", versionID, canonicalConfig)
+	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_ReuseRejectsInvalidExecutionBinding(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	runRepo := NewOvernightBacktestRunRepo(pool)
+	strategyRepo := NewStrategyRepo(pool)
+
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, domain.Strategy)
+		want   string
+	}{
+		{name: "missing", want: "missing", mutate: func(t *testing.T, strategy domain.Strategy) {
+			_, err := pool.Exec(ctx, `UPDATE strategies SET execution_strategy_version_id=NULL WHERE id=$1`, strategy.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "foreign family", want: "family mismatch", mutate: func(t *testing.T, strategy domain.Strategy) {
+			foreign := preparedOvernightStrategy("FOREIGN", "foreign")
+			foreign.ID = uuid.New()
+			foreignVersionID, err := strategyRepo.CreateWithExecutionVersion(ctx, &foreign)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, `UPDATE strategies SET execution_strategy_version_id=$1 WHERE id=$2`, foreignVersionID, strategy.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "stale", want: "stale", mutate: func(t *testing.T, strategy domain.Strategy) {
+			if _, err := pool.Exec(ctx, `UPDATE strategies SET config='{"research_lifecycle":{"stage":"candidate"}}'::jsonb WHERE id=$1`, strategy.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			strategy := preparedOvernightStrategy(fmt.Sprintf("BAD%d", i), tc.name)
+			if _, err := strategyRepo.CreateWithExecutionVersion(ctx, &strategy); err != nil {
+				t.Fatal(err)
+			}
+			originalBinding := *strategy.ExecutionStrategyVersionID
+			tc.mutate(t, strategy)
+			var bindingBefore *uuid.UUID
+			if err := pool.QueryRow(ctx, `SELECT execution_strategy_version_id FROM strategies WHERE id=$1`, strategy.ID).Scan(&bindingBefore); err != nil {
+				t.Fatal(err)
+			}
+
+			run := domain.NewOvernightBacktestRun()
+			run.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+			if err := runRepo.Create(ctx, &run); err != nil {
+				t.Fatal(err)
+			}
+			_, _, err := runRepo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("CommitIfRunning() error = %v, want %q", err, tc.want)
+			}
+			var bindingAfter *uuid.UUID
+			if err := pool.QueryRow(ctx, `SELECT execution_strategy_version_id FROM strategies WHERE id=$1`, strategy.ID).Scan(&bindingAfter); err != nil {
+				t.Fatal(err)
+			}
+			if (bindingBefore == nil) != (bindingAfter == nil) || bindingBefore != nil && *bindingBefore != *bindingAfter {
+				t.Fatalf("binding repaired from %v to %v; original valid binding was %s", bindingBefore, bindingAfter, originalBinding)
+			}
+		})
+	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_ReusePrefersBoundLegacyDuplicate(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	runRepo := NewOvernightBacktestRunRepo(pool)
+	strategyRepo := NewStrategyRepo(pool)
+	ticker := "KX-LEGACY-" + uuid.NewString()
+
+	if _, err := pool.Exec(ctx, `INSERT INTO strategies(id,name,ticker,market_type,is_paper,created_at,updated_at)
+		VALUES($1,'legacy unbound',$2,'kalshi',true,now()-interval '1 hour',now()-interval '1 hour')`, uuid.New(), ticker); err != nil {
+		t.Fatal(err)
+	}
+	bound := preparedOvernightStrategy(ticker, "bound")
+	bound.MarketType = domain.MarketTypeKalshi
+	if _, err := strategyRepo.CreateWithExecutionVersion(ctx, &bound); err != nil {
+		t.Fatal(err)
+	}
+	run := domain.NewOvernightBacktestRun()
+	run.Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+	if err := runRepo.Create(ctx, &run); err != nil {
+		t.Fatal(err)
+	}
+	summary, _, err := runRepo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{{
+		ID: uuid.New(), Name: "incoming", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Reused != 1 || summary.Created != 0 {
+		t.Fatalf("summary = %+v, want one reused bound strategy", summary)
+	}
+}
+
+func TestOvernightBacktestRunRepoIntegration_ConcurrentReusePreservesBinding(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOvernightBacktestIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOvernightBacktestRunRepo(pool)
+	strategies := []domain.Strategy{preparedOvernightStrategy("RACE", "first"), preparedOvernightStrategy("RACE", "second")}
+	for i := range strategies {
+		strategies[i].MarketType = domain.MarketTypePolymarket
+	}
+	runs := []domain.OvernightBacktestRun{domain.NewOvernightBacktestRun(), domain.NewOvernightBacktestRun()}
+	for i := range runs {
+		runs[i].Phase = domain.OvernightBacktestPhaseSweepValidateDeploy
+		if err := repo.Create(ctx, &runs[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(runs))
+	for i := range runs {
+		wg.Add(1)
+		go func(runID uuid.UUID, strategy domain.Strategy) {
+			defer wg.Done()
+			_, _, err := repo.CommitIfRunning(ctx, runID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy})
+			errCh <- err
+		}(runs[i].ID, strategies[i])
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var strategyCount, boundCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*),count(execution_strategy_version_id) FROM strategies WHERE ticker='RACE'`).Scan(&strategyCount, &boundCount); err != nil {
+		t.Fatal(err)
+	}
+	if strategyCount != 1 || boundCount != 1 {
+		t.Fatalf("strategies/bound = %d/%d, want 1/1", strategyCount, boundCount)
+	}
+}
+
 func preparedOvernightStrategy(ticker, suffix string) domain.Strategy {
 	return domain.Strategy{ID: uuid.New(), Name: "discovery: " + ticker + " " + suffix, Ticker: ticker, MarketType: domain.MarketTypeStock, IsPaper: true, Status: domain.StrategyStatusInactive, Config: json.RawMessage(`{"research_lifecycle":{"stage":"idea"}}`)}
 }
 
 func newOvernightBacktestIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-	connString := os.Getenv("DB_URL")
-	if connString == "" {
-		connString = os.Getenv("DATABASE_URL")
-	}
-	if connString == "" {
-		t.Skip("skipping integration test: DB_URL or DATABASE_URL is not set")
-	}
-	adminPool, err := pgxpool.New(ctx, connString)
-	if err != nil {
-		t.Fatalf("failed to create admin pool: %v", err)
-	}
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
-		adminPool.Close()
-		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
-	}
-	schemaName := "integration_overnight_backtest_" + strings.ReplaceAll(uuid.New().String(), "-", "")
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+pqQuoteIdent(schemaName)); err != nil {
-		adminPool.Close()
-		t.Fatalf("failed to create test schema: %v", err)
-	}
-	config, err := pgxpool.ParseConfig(connString)
-	if err != nil {
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-		t.Fatalf("failed to parse pool config: %v", err)
-	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
-	pool, err := pgxpool.NewWithConfig(ctx, config)
-	if err != nil {
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-		t.Fatalf("failed to create test pool: %v", err)
-	}
-	ddl := `CREATE TABLE overnight_backtest_runs (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
-		phase TEXT NOT NULL CHECK (phase IN ('screen', 'generate', 'sweep_validate_deploy', 'done')),
-		candidate_index INTEGER NOT NULL DEFAULT 0 CHECK (candidate_index >= 0),
-		candidates JSONB NOT NULL DEFAULT '[]'::jsonb,
-		generated JSONB NOT NULL DEFAULT '[]'::jsonb,
-		errors JSONB NOT NULL DEFAULT '[]'::jsonb,
-		summary JSONB NOT NULL DEFAULT '{}'::jsonb,
-		started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-		completed_at TIMESTAMPTZ
-	);
-	CREATE TABLE strategies (
-		id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, description TEXT,
-		ticker TEXT NOT NULL, market_type TEXT NOT NULL, schedule_cron TEXT, config JSONB NOT NULL DEFAULT '{}',
-		status TEXT NOT NULL DEFAULT 'inactive', skip_next_run BOOLEAN NOT NULL DEFAULT false,
-		is_paper BOOLEAN NOT NULL DEFAULT true, is_active BOOLEAN NOT NULL DEFAULT false,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);
-	CREATE UNIQUE INDEX idx_strategies_discovery_unique ON strategies (ticker, market_type, is_paper, name)
-		WHERE is_paper = true AND (name LIKE 'discovery:%' OR name LIKE 'options:%')`
-	if _, err := pool.Exec(ctx, ddl); err != nil {
-		pool.Close()
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-		t.Fatalf("failed to apply test schema DDL: %v", err)
-	}
-	return pool, func() {
-		pool.Close()
-		_, _ = adminPool.Exec(ctx, `DROP SCHEMA `+pqQuoteIdent(schemaName)+` CASCADE`)
-		adminPool.Close()
-	}
+	return newStrategyIntegrationPool(t, ctx)
 }
 
 func pqQuoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }

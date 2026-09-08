@@ -75,6 +75,7 @@ func (p *Provider) GetSocialSentiment(_ context.Context, _ string, _, _ time.Tim
 
 type marketsPage struct {
 	Data []struct {
+		MarketSlug  string `json:"market_slug"`
 		ConditionID string `json:"condition_id"`
 		Tokens      []struct {
 			TokenID string `json:"token_id"`
@@ -126,15 +127,32 @@ func (p *Provider) resolvePriceHistoryMarketID(ctx context.Context, slug string)
 	if len(page.Data) == 0 {
 		return "", fmt.Errorf("no market found for slug %q", slug)
 	}
-	for _, token := range page.Data[0].Tokens {
+	var exact *struct {
+		MarketSlug  string `json:"market_slug"`
+		ConditionID string `json:"condition_id"`
+		Tokens      []struct {
+			TokenID string `json:"token_id"`
+			Outcome string `json:"outcome"`
+		} `json:"tokens"`
+	}
+	for i := range page.Data {
+		if strings.TrimSpace(page.Data[i].MarketSlug) == strings.TrimSpace(slug) {
+			exact = &page.Data[i]
+			break
+		}
+	}
+	if exact == nil {
+		return "", fmt.Errorf("market response did not contain exact slug %q", slug)
+	}
+	for _, token := range exact.Tokens {
 		if strings.EqualFold(strings.TrimSpace(token.Outcome), "yes") && strings.TrimSpace(token.TokenID) != "" {
 			return token.TokenID, nil
 		}
 	}
-	if len(page.Data[0].Tokens) > 0 && strings.TrimSpace(page.Data[0].Tokens[0].TokenID) != "" {
-		return page.Data[0].Tokens[0].TokenID, nil
+	if len(exact.Tokens) > 0 && strings.TrimSpace(exact.Tokens[0].TokenID) != "" {
+		return exact.Tokens[0].TokenID, nil
 	}
-	return page.Data[0].ConditionID, nil
+	return exact.ConditionID, nil
 }
 
 // fidelityMinutes converts a Timeframe to the CLOB API fidelity parameter (minutes).

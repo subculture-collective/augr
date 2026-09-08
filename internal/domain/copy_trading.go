@@ -204,6 +204,8 @@ func (m *CopyInstrumentMapping) Validate() error {
 
 type CopySubscription struct {
 	ID                 uuid.UUID              `json:"id"`
+	AccountID          uuid.UUID              `json:"account_id,omitzero"`
+	Environment        AccountEnvironment     `json:"environment,omitempty"`
 	LeaderID           uuid.UUID              `json:"leader_id"`
 	SourceID           uuid.UUID              `json:"source_id"`
 	LegacyStrategyID   *uuid.UUID             `json:"legacy_strategy_id,omitempty"`
@@ -290,39 +292,42 @@ func (s *CopySubscription) Validate() error {
 }
 
 type CopyTradeIntent struct {
-	ID                      uuid.UUID       `json:"id"`
-	SubscriptionID          uuid.UUID       `json:"subscription_id"`
-	OriginType              string          `json:"origin_type"`
-	OriginID                uuid.UUID       `json:"origin_id"`
-	SourceObservationID     uuid.UUID       `json:"source_observation_id"`
-	PipelineRunID           *uuid.UUID      `json:"pipeline_run_id,omitempty"`
-	InstrumentKey           string          `json:"instrument_key"`
-	Ticker                  string          `json:"ticker"`
-	Side                    OrderSide       `json:"side"`
-	TargetWeight            float64         `json:"target_weight"`
-	TargetValue             float64         `json:"target_value"`
-	AttributedCurrentValue  float64         `json:"attributed_current_value"`
-	RequestedNotional       float64         `json:"requested_notional"`
-	ExecutablePrice         *float64        `json:"executable_price,omitempty"`
-	QuoteGateVersion        int             `json:"quote_gate_version"`
-	DecisionQuoteSnapshotID *uuid.UUID      `json:"decision_quote_snapshot_id,omitempty"`
-	DecisionBid             string          `json:"decision_bid,omitempty"`
-	DecisionAsk             string          `json:"decision_ask,omitempty"`
-	DecisionSpreadBPS       string          `json:"decision_spread_bps,omitempty"`
-	DecisionAvailableAt     *time.Time      `json:"decision_available_at,omitempty"`
-	DecisionAt              *time.Time      `json:"decision_at,omitempty"`
-	DecisionMarketStatus    string          `json:"decision_market_status,omitempty"`
-	DecisionSessionStatus   string          `json:"decision_session_status,omitempty"`
-	CalculationVersion      int             `json:"calculation_version"`
-	Calculation             json.RawMessage `json:"calculation,omitempty"`
-	PolicyStatus            string          `json:"policy_status"`
-	PolicyReasons           []string        `json:"policy_reasons"`
-	RiskStatus              string          `json:"risk_status"`
-	RiskReasons             []string        `json:"risk_reasons"`
-	OrderID                 *uuid.UUID      `json:"order_id,omitempty"`
-	Status                  string          `json:"status"`
-	CreatedAt               time.Time       `json:"created_at"`
-	UpdatedAt               time.Time       `json:"updated_at"`
+	ID                      uuid.UUID          `json:"id"`
+	AccountID               uuid.UUID          `json:"account_id,omitzero"`
+	Environment             AccountEnvironment `json:"environment,omitempty"`
+	SubscriptionID          uuid.UUID          `json:"subscription_id"`
+	OriginType              string             `json:"origin_type"`
+	OriginID                uuid.UUID          `json:"origin_id"`
+	SourceObservationID     uuid.UUID          `json:"source_observation_id"`
+	PipelineRunID           *uuid.UUID         `json:"pipeline_run_id,omitempty"`
+	PipelineRunTradeDate    *time.Time         `json:"pipeline_run_trade_date,omitempty"`
+	InstrumentKey           string             `json:"instrument_key"`
+	Ticker                  string             `json:"ticker"`
+	Side                    OrderSide          `json:"side"`
+	TargetWeight            float64            `json:"target_weight"`
+	TargetValue             float64            `json:"target_value"`
+	AttributedCurrentValue  float64            `json:"attributed_current_value"`
+	RequestedNotional       float64            `json:"requested_notional"`
+	ExecutablePrice         *float64           `json:"executable_price,omitempty"`
+	QuoteGateVersion        int                `json:"quote_gate_version"`
+	DecisionQuoteSnapshotID *uuid.UUID         `json:"decision_quote_snapshot_id,omitempty"`
+	DecisionBid             string             `json:"decision_bid,omitempty"`
+	DecisionAsk             string             `json:"decision_ask,omitempty"`
+	DecisionSpreadBPS       string             `json:"decision_spread_bps,omitempty"`
+	DecisionAvailableAt     *time.Time         `json:"decision_available_at,omitempty"`
+	DecisionAt              *time.Time         `json:"decision_at,omitempty"`
+	DecisionMarketStatus    string             `json:"decision_market_status,omitempty"`
+	DecisionSessionStatus   string             `json:"decision_session_status,omitempty"`
+	CalculationVersion      int                `json:"calculation_version"`
+	Calculation             json.RawMessage    `json:"calculation,omitempty"`
+	PolicyStatus            string             `json:"policy_status"`
+	PolicyReasons           []string           `json:"policy_reasons"`
+	RiskStatus              string             `json:"risk_status"`
+	RiskReasons             []string           `json:"risk_reasons"`
+	OrderID                 *uuid.UUID         `json:"order_id,omitempty"`
+	Status                  string             `json:"status"`
+	CreatedAt               time.Time          `json:"created_at"`
+	UpdatedAt               time.Time          `json:"updated_at"`
 }
 
 func NormalizeSECCIK(value string) string {

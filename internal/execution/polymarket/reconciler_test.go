@@ -29,7 +29,13 @@ func (s *reconcilerBrokerStub) GetOrderStatus(context.Context, string) (domain.O
 }
 
 func (s *reconcilerBrokerStub) GetPositions(context.Context) ([]domain.Position, error) {
-	return append([]domain.Position(nil), s.positions...), s.err
+	positions := append([]domain.Position(nil), s.positions...)
+	for i := range positions {
+		if positions[i].MarketType == "" {
+			positions[i].MarketType = domain.MarketTypePolymarket
+		}
+	}
+	return positions, s.err
 }
 
 func (s *reconcilerBrokerStub) GetAccountBalance(context.Context) (execution.Balance, error) {
@@ -40,6 +46,14 @@ type reconcilerPositionRepoStub struct {
 	positions []domain.Position
 	err       error
 }
+
+var reconcilerTestBinding = func() domain.ExecutionAccountBinding {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		panic(err)
+	}
+	return binding
+}()
 
 func (r *reconcilerPositionRepoStub) Create(context.Context, *domain.Position) error { return nil }
 func (r *reconcilerPositionRepoStub) CreateAlpacaOwned(context.Context, *domain.Position) error {
@@ -71,6 +85,17 @@ func (r *reconcilerPositionRepoStub) GetOpen(_ context.Context, _ repository.Pos
 		end = len(r.positions)
 	}
 	return append([]domain.Position(nil), r.positions[offset:end]...), nil
+}
+
+func (r *reconcilerPositionRepoStub) GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	positions, err := r.GetOpen(ctx, filter, limit, offset)
+	for i := range positions {
+		positions[i].AccountID, positions[i].Environment = accountID, environment
+		if positions[i].MarketType == "" {
+			positions[i].MarketType = domain.MarketTypePolymarket
+		}
+	}
+	return positions, err
 }
 
 func (r *reconcilerPositionRepoStub) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {
@@ -197,6 +222,20 @@ func TestReconcilerQuantityMismatch(t *testing.T) {
 	assertSingleDrift(t, auditRepo.entries, "quantity_mismatch", "market-five:YES", 3, 2)
 }
 
+func TestReconcilerRejectsForeignScopedRows(t *testing.T) {
+	repo := &reconcilerPositionRepoStub{positions: []domain.Position{{AccountID: uuid.New(), Environment: domain.AccountEnvironmentLive, MarketType: domain.MarketTypePolymarket, Ticker: "foreign:YES", Side: domain.PositionSideLong, Quantity: 1}}}
+	reconciler := NewReconciler(ReconcilerDeps{ExecutionAccount: reconcilerTestBinding, Broker: &reconcilerBrokerStub{}, PositionRepo: &foreignPreservingPolymarketRepo{reconcilerPositionRepoStub: repo}})
+	if _, err := reconciler.Reconcile(context.Background()); err == nil {
+		t.Fatal("foreign account row was accepted")
+	}
+}
+
+type foreignPreservingPolymarketRepo struct{ *reconcilerPositionRepoStub }
+
+func (r *foreignPreservingPolymarketRepo) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	return r.GetOpen(ctx, filter, limit, offset)
+}
+
 func TestReconcilerKeyNormalizationYesNo(t *testing.T) {
 	t.Parallel()
 
@@ -221,6 +260,7 @@ func TestReconcilerIgnoresNonPolymarketLocalPositions(t *testing.T) {
 
 	reconciler, auditRepo, _ := newReconcilerTestHarness(nil, []domain.Position{
 		{MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.PositionSideLong, Quantity: 10},
+		{MarketType: domain.MarketTypeStock, Ticker: "CLASS:YES", Side: domain.PositionSideLong, Quantity: 2},
 		{MarketType: domain.MarketTypeCrypto, Ticker: "BTC-USD", Side: domain.PositionSideShort, Quantity: 1},
 	})
 
@@ -256,12 +296,24 @@ func newReconcilerTestHarness(brokerPositions, localPositions []domain.Position)
 	auditRepo := &reconcilerAuditRepoStub{}
 	metrics := &reconcilerMetricsStub{}
 	reconciler := NewReconciler(ReconcilerDeps{
-		Broker:       &reconcilerBrokerStub{positions: brokerPositions},
-		PositionRepo: &reconcilerPositionRepoStub{positions: localPositions},
-		AuditLogRepo: auditRepo,
-		Metrics:      metrics,
+		ExecutionAccount: reconcilerTestBinding,
+		Broker:           &reconcilerBrokerStub{positions: brokerPositions},
+		PositionRepo:     &reconcilerPositionRepoStub{positions: localPositions},
+		AuditLogRepo:     auditRepo,
+		Metrics:          metrics,
 	})
 	return reconciler, auditRepo, metrics
+}
+
+func TestNewReconcilerRetainsExecutionAccount(t *testing.T) {
+	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler := NewReconciler(ReconcilerDeps{ExecutionAccount: binding})
+	if reconciler.executionAccount != binding {
+		t.Fatal("reconciler did not retain execution account")
+	}
 }
 
 func assertSingleDrift(t *testing.T, entries []*domain.AuditLogEntry, wantType, wantKey string, wantLocal, wantExternal float64) {

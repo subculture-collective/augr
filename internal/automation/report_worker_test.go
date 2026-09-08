@@ -26,6 +26,16 @@ type stubReportStrategyRepo struct {
 type stubStrategyRepoForReports = stubReportStrategyRepo
 
 func (s *stubReportStrategyRepo) Create(_ context.Context, _ *domain.Strategy) error { return nil }
+func (s *stubReportStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := s.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+
+func (*stubReportStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
 
 func (s *stubReportStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {
 	if s.byID != nil {

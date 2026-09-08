@@ -8,8 +8,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// RequiredSchemaVersion is the minimum schema version this runtime requires.
-const RequiredSchemaVersion = 107
+const (
+	MinimumSupportedSchemaVersion = 111
+	MaximumSupportedSchemaVersion = 111
+	RequiredSchemaVersion         = MaximumSupportedSchemaVersion
+)
 
 type SchemaVersionState string
 
@@ -63,4 +66,8 @@ func CompareSchemaVersion(current, required int) SchemaVersionState {
 	default:
 		return schemaVersionMatch
 	}
+}
+
+func IsSchemaVersionCompatible(current int) bool {
+	return current >= MinimumSupportedSchemaVersion && current <= MaximumSupportedSchemaVersion
 }

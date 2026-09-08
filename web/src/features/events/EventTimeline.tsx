@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom'
 import { Alert } from '@/components/ui/alert'
 import { getEvents, type EventListParams } from '@/shared/api/endpoints'
 import { EntityId, EntityLink } from '@/shared/components/EntityLinks'
+import { useAccount } from '@/shared/account/AccountProvider'
 import { EmptyState, ErrorState, LastUpdated, LoadingState } from '@/shared/components/QueryStates'
 import { queryKeys } from '@/shared/query/keys'
 import type { AgentEvent } from '@/shared/types/domain'
@@ -20,14 +21,21 @@ function JsonMetadata({ value }: { value: unknown }) {
 }
 
 function EventLinks({ event }: { event: AgentEvent }) {
-  const metadata = event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata) ? event.metadata as Record<string, unknown> : {}
+  const metadata =
+    event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+      ? (event.metadata as Record<string, unknown>)
+      : {}
   const orderId = typeof metadata.order_id === 'string' ? metadata.order_id : undefined
   const positionId = typeof metadata.position_id === 'string' ? metadata.position_id : undefined
   const decisionId = typeof metadata.decision_id === 'string' ? metadata.decision_id : undefined
   return (
     <div className="header-cluster">
-      {event.strategy_id ? <EntityLink kind="strategy" id={event.strategy_id} copy={false} /> : null}
-      {event.pipeline_run_id ? <EntityLink kind="run" id={event.pipeline_run_id} copy={false} /> : null}
+      {event.strategy_id ? (
+        <EntityLink kind="strategy" id={event.strategy_id} copy={false} />
+      ) : null}
+      {event.pipeline_run_id ? (
+        <EntityLink kind="run" id={event.pipeline_run_id} tradeDate={event.pipeline_run_trade_date?.slice(0, 10)} copy={false} />
+      ) : null}
       {orderId ? <EntityLink kind="order" id={orderId} copy={false} /> : null}
       {positionId ? <EntityLink kind="position" id={positionId} copy={false} /> : null}
       {decisionId ? <EntityId kind="decision" id={decisionId} /> : null}
@@ -41,27 +49,42 @@ function EventCard({ event }: { event: AgentEvent }) {
       <div className="panel-header">
         <div>
           <h3>{event.title}</h3>
-          <p className="muted">{titleCase(event.event_kind)} · {new Date(event.created_at).toLocaleString()}</p>
+          <p className="muted">
+            {titleCase(event.event_kind)} · {new Date(event.created_at).toLocaleString()}
+          </p>
         </div>
         <EventLinks event={event} />
       </div>
       {event.summary ? <p>{event.summary}</p> : null}
       <dl className="kv-grid compact-kv">
-        <dt>Event ID</dt><dd><EntityId kind="event" id={event.id} /></dd>
-        <dt>Agent role</dt><dd>{event.agent_role || 'Unknown'}</dd>
-        <dt>Tags</dt><dd>{event.tags?.join(', ') || 'None'}</dd>
+        <dt>Event ID</dt>
+        <dd>
+          <EntityId kind="event" id={event.id} />
+        </dd>
+        <dt>Agent role</dt>
+        <dd>{event.agent_role || 'Unknown'}</dd>
+        <dt>Tags</dt>
+        <dd>{event.tags?.join(', ') || 'None'}</dd>
       </dl>
       {event.metadata ? <JsonMetadata value={event.metadata} /> : null}
     </article>
   )
 }
 
-export function EventTimeline({ fixedRunId, fixedStrategyId }: { fixedRunId?: string; fixedStrategyId?: string }) {
+export function EventTimeline({
+  fixedRunId,
+  fixedStrategyId,
+}: {
+  fixedRunId?: string
+  fixedStrategyId?: string
+}) {
+  const { account } = useAccount()
   const [searchParams, setSearchParams] = useSearchParams()
   const offset = Number(searchParams.get('event_offset') ?? searchParams.get('offset') ?? '0')
   const filters: EventListParams = {
     event_kind: searchParams.get('event_kind') || undefined,
-    pipeline_run_id: fixedRunId ?? searchParams.get('pipeline_run_id') ?? searchParams.get('run_id') ?? undefined,
+    pipeline_run_id:
+      fixedRunId ?? searchParams.get('pipeline_run_id') ?? searchParams.get('run_id') ?? undefined,
     strategy_id: fixedStrategyId ?? searchParams.get('strategy_id') ?? undefined,
     agent_role: searchParams.get('agent_role') || undefined,
     after: searchParams.get('after') || undefined,
@@ -69,11 +92,15 @@ export function EventTimeline({ fixedRunId, fixedStrategyId }: { fixedRunId?: st
     limit: pageSize,
     offset: Number.isFinite(offset) && offset > 0 ? offset : 0,
   }
-  const query = useQuery({ queryKey: queryKeys.eventsListFiltered(filters), queryFn: ({ signal }) => getEvents(filters, signal) })
+  const query = useQuery({
+    queryKey: queryKeys.eventsListFiltered(account.id, filters),
+    queryFn: ({ signal }) => getEvents(account.id, filters, signal),
+  })
   const events = query.data?.data ?? []
   const total = query.data?.total
   const currentOffset = filters.offset ?? 0
-  const hasNext = total === undefined ? events.length === pageSize : currentOffset + pageSize < total
+  const hasNext =
+    total === undefined ? events.length === pageSize : currentOffset + pageSize < total
 
   function updateFilters(updates: Record<string, string>) {
     const next = new URLSearchParams(searchParams)
@@ -100,31 +127,115 @@ export function EventTimeline({ fixedRunId, fixedStrategyId }: { fixedRunId?: st
       <div className="panel-header">
         <div>
           <h2 id="timeline-heading">Persisted event timeline</h2>
-          <p className="muted">Read-only stored agent and pipeline events. Backend filters use event_kind, after, and before.</p>
+          <p className="muted">
+            Read-only stored agent and pipeline events. Backend filters use event_kind, after, and
+            before.
+          </p>
         </div>
         {query.data ? <LastUpdated date={query.dataUpdatedAt} /> : null}
       </div>
-      <form className="filter-bar" aria-label="Event filters" onSubmit={(event) => event.preventDefault()}>
-        <label>Event kind<input value={searchParams.get('event_kind') ?? ''} onChange={(event) => updateFilters({ event_kind: event.target.value })} placeholder="agent_decision" /></label>
-        {!fixedRunId ? <label>Run ID<input value={searchParams.get('pipeline_run_id') ?? searchParams.get('run_id') ?? ''} onChange={(event) => updateFilters({ pipeline_run_id: event.target.value, run_id: '' })} /></label> : null}
-        {!fixedStrategyId ? <label>Strategy ID<input value={searchParams.get('strategy_id') ?? ''} onChange={(event) => updateFilters({ strategy_id: event.target.value })} /></label> : null}
-        <label>Agent role<input value={searchParams.get('agent_role') ?? ''} onChange={(event) => updateFilters({ agent_role: event.target.value })} placeholder="analyst" /></label>
-        <label>After<input type="datetime-local" value={searchParams.get('after')?.slice(0, 16) ?? ''} onChange={(event) => updateFilters({ after: event.target.value ? `${event.target.value}:00.000Z` : '' })} /></label>
-        <button type="button" onClick={() => updateFilters({ event_kind: '', pipeline_run_id: '', run_id: '', strategy_id: '', agent_role: '', after: '', before: '' })}>Clear filters</button>
+      <form
+        className="filter-bar"
+        aria-label="Event filters"
+        onSubmit={(event) => event.preventDefault()}
+      >
+        <label>
+          Event kind
+          <input
+            value={searchParams.get('event_kind') ?? ''}
+            onChange={(event) => updateFilters({ event_kind: event.target.value })}
+            placeholder="agent_decision"
+          />
+        </label>
+        {!fixedRunId ? (
+          <label>
+            Run ID
+            <input
+              value={searchParams.get('pipeline_run_id') ?? searchParams.get('run_id') ?? ''}
+              onChange={(event) =>
+                updateFilters({ pipeline_run_id: event.target.value, run_id: '' })
+              }
+            />
+          </label>
+        ) : null}
+        {!fixedStrategyId ? (
+          <label>
+            Strategy ID
+            <input
+              value={searchParams.get('strategy_id') ?? ''}
+              onChange={(event) => updateFilters({ strategy_id: event.target.value })}
+            />
+          </label>
+        ) : null}
+        <label>
+          Agent role
+          <input
+            value={searchParams.get('agent_role') ?? ''}
+            onChange={(event) => updateFilters({ agent_role: event.target.value })}
+            placeholder="analyst"
+          />
+        </label>
+        <label>
+          After
+          <input
+            type="datetime-local"
+            value={searchParams.get('after')?.slice(0, 16) ?? ''}
+            onChange={(event) =>
+              updateFilters({ after: event.target.value ? `${event.target.value}:00.000Z` : '' })
+            }
+          />
+        </label>
+        <button
+          type="button"
+          onClick={() =>
+            updateFilters({
+              event_kind: '',
+              pipeline_run_id: '',
+              run_id: '',
+              strategy_id: '',
+              agent_role: '',
+              after: '',
+              before: '',
+            })
+          }
+        >
+          Clear filters
+        </button>
       </form>
       {query.isLoading ? <LoadingState label="Loading persisted events…" /> : null}
       {query.error ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : null}
       {query.error ? <Alert variant="danger">Unable to load persisted events.</Alert> : null}
-      {query.data && events.length === 0 ? <EmptyState title="No persisted events" message="No stored events match these filters." /> : null}
+      {query.data && events.length === 0 ? (
+        <EmptyState title="No persisted events" message="No stored events match these filters." />
+      ) : null}
       {events.length > 0 ? (
         <>
           <div className="decision-list">
-            {events.map((event) => <EventCard key={event.id} event={event} />)}
+            {events.map((event) => (
+              <EventCard key={event.id} event={event} />
+            ))}
           </div>
           <nav className="pagination-controls" aria-label="Event pagination">
-            <button type="button" className="secondary-button" disabled={currentOffset === 0} onClick={() => setOffset(Math.max(0, currentOffset - pageSize))}>Previous</button>
-            <span className="muted">Showing {currentOffset + 1}–{currentOffset + events.length} {total === undefined ? 'total unavailable' : `of ${total}`}</span>
-            <button type="button" className="secondary-button" disabled={!hasNext} onClick={() => setOffset(currentOffset + pageSize)}>Next</button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={currentOffset === 0}
+              onClick={() => setOffset(Math.max(0, currentOffset - pageSize))}
+            >
+              Previous
+            </button>
+            <span className="muted">
+              Showing {currentOffset + 1}–{currentOffset + events.length}{' '}
+              {total === undefined ? 'total unavailable' : `of ${total}`}
+            </span>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={!hasNext}
+              onClick={() => setOffset(currentOffset + pageSize)}
+            >
+              Next
+            </button>
           </nav>
         </>
       ) : null}

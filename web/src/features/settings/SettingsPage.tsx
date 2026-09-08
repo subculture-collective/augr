@@ -5,6 +5,7 @@ import { getSettings } from '@/shared/api/endpoints'
 import { Breadcrumbs } from '@/shared/components/EntityLinks'
 import { ErrorState, LastUpdated, LoadingState } from '@/shared/components/QueryStates'
 import { queryKeys } from '@/shared/query/keys'
+import { useAccount } from '@/shared/account/AccountProvider'
 
 function percent(value?: number) {
   if (value === undefined) return '—'
@@ -12,13 +13,14 @@ function percent(value?: number) {
 }
 
 export function SettingsPage() {
+  const { cockpitPath } = useAccount()
   const query = useQuery({ queryKey: queryKeys.settings, queryFn: ({ signal }) => getSettings(signal) })
   const settings = query.data
   const providers = settings ? Object.entries(settings.llm.providers) : []
 
   return (
     <div className="detail-stack">
-      <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Settings & readiness' }]} />
+      <Breadcrumbs items={[{ label: 'Cockpit', to: cockpitPath }, { label: 'Settings & readiness' }]} />
       <PageHeader eyebrow="Administration" title="Settings & readiness" description="Read-only effective runtime configuration. Secrets are never returned; mutation workflows remain intentionally separate." actions={settings ? <span className={`status-pill ${settings.system.schema_status === 'current' ? 'success' : 'warning'}`}>Schema {settings.system.schema_status}</span> : undefined} />
       {query.isLoading ? <LoadingState label="Loading effective settings…" /> : null}
       {query.error ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : null}

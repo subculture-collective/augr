@@ -39,8 +39,11 @@ export type WebSocketClientCommand =
 
 export type WebSocketEventEnvelope = {
   type: WebSocketEventType
+  account_id?: UUID
+  scope: 'account' | 'system' | (string & {})
   strategy_id?: UUID
   run_id?: UUID
+  run_trade_date?: ISODate
   data?: RawJson
   timestamp: ISODate
 }

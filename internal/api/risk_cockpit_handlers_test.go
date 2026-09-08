@@ -37,7 +37,7 @@ func TestRiskCockpitRoute(t *testing.T) {
 	}}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/risk/cockpit", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/risk/cockpit", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -84,7 +84,7 @@ func TestRiskCockpitHistoricalRejectionsDoNotCreateActiveWarning(t *testing.T) {
 	deps.Risk = &stubRiskEngine{getStatusFn: func(context.Context) (risk.EngineStatus, error) { return risk.EngineStatus{}, nil }}
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/risk/cockpit", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/risk/cockpit", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -131,7 +131,7 @@ func TestRiskCockpitHandlerMissingDeps(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rr := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, "/api/v1/risk/cockpit", nil)
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/risk/cockpit", nil)
 			tc.srv.handleRiskCockpit(rr, req)
 			if rr.Code != http.StatusNotImplemented {
 				t.Fatalf("status = %d want %d body=%s", rr.Code, http.StatusNotImplemented, rr.Body.String())
@@ -150,7 +150,7 @@ func TestRiskCockpitHandlerErrors(t *testing.T) {
 		deps.TradeDecisions = &stubTradeDecisionJournalRepo{listResult: []domain.TradeDecision{{MarketType: domain.MarketTypeStock, RiskStatus: domain.RiskDecisionApproved, Status: domain.TradeDecisionStatusPaper, ApprovedSize: 1}}}
 		deps.Risk = &stubRiskEngine{getStatusFn: func(context.Context) (risk.EngineStatus, error) { return risk.EngineStatus{}, errors.New("boom") }}
 		srv := newTestServerWithDeps(t, deps)
-		rr := doRequest(t, srv, http.MethodGet, "/api/v1/risk/cockpit", nil)
+		rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/risk/cockpit", nil)
 		if rr.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d want %d body=%s", rr.Code, http.StatusInternalServerError, rr.Body.String())
 		}
@@ -165,7 +165,7 @@ func TestRiskCockpitHandlerErrors(t *testing.T) {
 		deps.TradeDecisions = repo
 		deps.Risk = &stubRiskEngine{getStatusFn: func(context.Context) (risk.EngineStatus, error) { return risk.EngineStatus{}, nil }}
 		srv := newTestServerWithDeps(t, deps)
-		rr := doRequest(t, srv, http.MethodGet, "/api/v1/risk/cockpit", nil)
+		rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/risk/cockpit", nil)
 		if rr.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d want %d body=%s", rr.Code, http.StatusInternalServerError, rr.Body.String())
 		}

@@ -1,0 +1,211 @@
+package options
+
+import (
+	"context"
+	"encoding/hex"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/data"
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+)
+
+// HistoricalOptionFrame binds an immutable underlying observation to the
+// complete option chain that was knowable at that observation's decision time.
+type HistoricalOptionFrame struct {
+	DecisionAt        time.Time                       `json:"decision_at"`
+	Underlying        domain.OHLCV                    `json:"underlying"`
+	UnderlyingReceipt data.ManifestPayloadReceipt     `json:"underlying_receipt"`
+	Chain             []domain.OptionSnapshot         `json:"chain"`
+	Receipt           data.ManifestOptionChainReceipt `json:"receipt"`
+}
+
+// LoadManifestBoundOptionFrames constructs a deterministic, no-lookahead
+// historical input. The reader is the only permitted source for options data;
+// a missing or malformed chain fails the entire requested interval closed.
+func LoadManifestBoundOptionFrames(
+	ctx context.Context,
+	reader data.ManifestBoundOptionChainReader,
+	underlying string,
+	timeframe data.Timeframe,
+	bars []domain.OHLCV,
+	start, end time.Time,
+) ([]HistoricalOptionFrame, error) {
+	underlying = strings.TrimSpace(strings.ToUpper(underlying))
+	if reader == nil || underlying == "" || timeframe == "" {
+		return nil, fmt.Errorf("options/historical: manifest-bound reader and underlying are required")
+	}
+	if !canonicalDecisionTime(start) || !canonicalDecisionTime(end) || end.Before(start) {
+		return nil, fmt.Errorf("options/historical: evaluation interval must be canonical UTC microseconds")
+	}
+
+	selected := make([]domain.OHLCV, 0, len(bars))
+	for _, bar := range bars {
+		if bar.Timestamp.Before(start) || bar.Timestamp.After(end) {
+			continue
+		}
+		if !canonicalDecisionTime(bar.Timestamp) {
+			return nil, fmt.Errorf("options/historical: underlying observation time is not canonical UTC microseconds")
+		}
+		selected = append(selected, bar)
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Timestamp.Before(selected[j].Timestamp) })
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("options/historical: no underlying observations in evaluation interval")
+	}
+	for index := 1; index < len(selected); index++ {
+		if !selected[index].Timestamp.After(selected[index-1].Timestamp) {
+			return nil, fmt.Errorf("options/historical: duplicate underlying decision time %s", selected[index].Timestamp.Format(time.RFC3339Nano))
+		}
+	}
+
+	evidenceReader, ok := reader.(data.ManifestBoundOptionFrameEvidenceReader)
+	if !ok {
+		return nil, fmt.Errorf("options/historical: manifest-bound reader does not expose complete underlying and chain receipts")
+	}
+	frames := make([]HistoricalOptionFrame, 0, len(selected))
+	var scopeID, accountID, manifestID, qualityResultID uuid.UUID
+	var manifestSHA256, qualitySHA256 string
+	for _, bar := range selected {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		boundBar, underlyingReceipt, err := evidenceReader.GetUnderlyingBarAtWithReceipt(ctx, underlying, timeframe, bar.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("options/historical: load underlying at %s: %w", bar.Timestamp.Format(time.RFC3339Nano), err)
+		}
+		if boundBar != bar {
+			return nil, fmt.Errorf("options/historical: underlying observation does not reconstruct at %s", bar.Timestamp.Format(time.RFC3339Nano))
+		}
+		if err := validateUnderlyingReceipt(bar.Timestamp, underlyingReceipt); err != nil {
+			return nil, fmt.Errorf("options/historical: underlying observation does not reconstruct at %s: %w", bar.Timestamp.Format(time.RFC3339Nano), err)
+		}
+		chain, receipt, err := evidenceReader.GetOptionsChainAtWithReceipt(ctx, underlying, bar.Timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("options/historical: load chain at %s: %w", bar.Timestamp.Format(time.RFC3339Nano), err)
+		}
+		active := make([]domain.OptionSnapshot, 0, len(chain))
+		for _, snapshot := range chain {
+			if !snapshot.Contract.Expiry.Before(bar.Timestamp) {
+				active = append(active, snapshot)
+			}
+		}
+		if err := validateHistoricalChain(underlying, bar.Timestamp, active); err != nil {
+			return nil, err
+		}
+		if err := validateHistoricalReceipt(bar.Timestamp, active, receipt); err != nil {
+			return nil, err
+		}
+		if len(frames) == 0 {
+			scopeID, accountID, manifestID, qualityResultID = receipt.ScopeID, receipt.AccountID, receipt.ManifestID, receipt.QualityResultID
+			manifestSHA256, qualitySHA256 = receipt.ManifestSHA256, receipt.QualitySHA256
+		} else if receipt.ScopeID != scopeID || receipt.AccountID != accountID || receipt.ManifestID != manifestID || receipt.QualityResultID != qualityResultID ||
+			receipt.ManifestSHA256 != manifestSHA256 || receipt.QualitySHA256 != qualitySHA256 {
+			return nil, fmt.Errorf("options/historical: evidence scope changes within evaluation interval")
+		}
+		if underlyingReceipt.ScopeID != receipt.ScopeID || underlyingReceipt.AccountID != receipt.AccountID || underlyingReceipt.ManifestID != receipt.ManifestID ||
+			underlyingReceipt.ManifestSHA256 != receipt.ManifestSHA256 || underlyingReceipt.QualityResultID != receipt.QualityResultID || underlyingReceipt.QualitySHA256 != receipt.QualitySHA256 {
+			return nil, fmt.Errorf("options/historical: underlying and chain evidence parents differ")
+		}
+		frames = append(frames, HistoricalOptionFrame{DecisionAt: bar.Timestamp, Underlying: boundBar, UnderlyingReceipt: underlyingReceipt, Chain: active, Receipt: receipt})
+	}
+	return frames, nil
+}
+
+func validateUnderlyingReceipt(decisionAt time.Time, receipt data.ManifestPayloadReceipt) error {
+	if receipt.ScopeID == uuid.Nil || receipt.AccountID == uuid.Nil || receipt.ManifestID == uuid.Nil || receipt.QualityResultID == uuid.Nil ||
+		!validHistoricalSHA(receipt.ManifestSHA256) || !validHistoricalSHA(receipt.QualitySHA256) ||
+		receipt.PayloadID == uuid.Nil || receipt.PayloadKind != "stock_bar" || receipt.PartitionSequence < 0 ||
+		!validHistoricalSHA(receipt.PartitionContentSHA256) || receipt.ObservationSequence < 0 ||
+		strings.TrimSpace(receipt.SourceKey) == "" || !validHistoricalSHA(receipt.ContentSHA256) ||
+		!receipt.EffectiveAt.Equal(decisionAt) || !canonicalDecisionTime(receipt.EffectiveAt) ||
+		!canonicalDecisionTime(receipt.AvailableAt) || receipt.AvailableAt.After(decisionAt) {
+		return fmt.Errorf("underlying receipt is invalid")
+	}
+	return nil
+}
+
+func validateHistoricalReceipt(decisionAt time.Time, chain []domain.OptionSnapshot, receipt data.ManifestOptionChainReceipt) error {
+	if receipt.ScopeID == uuid.Nil || receipt.AccountID == uuid.Nil || receipt.ManifestID == uuid.Nil ||
+		receipt.QualityResultID == uuid.Nil || !validHistoricalSHA(receipt.ManifestSHA256) ||
+		!validHistoricalSHA(receipt.QualitySHA256) || !receipt.DecisionAt.Equal(decisionAt) ||
+		!canonicalDecisionTime(receipt.DecisionAt) || !canonicalDecisionTime(receipt.DecisionCutoff) ||
+		receipt.DecisionAt.After(receipt.DecisionCutoff) || len(receipt.Observations) != len(chain)*3 {
+		return fmt.Errorf("options/historical: option chain receipt does not reconstruct at %s", decisionAt.Format(time.RFC3339Nano))
+	}
+	seen := make(map[uuid.UUID]struct{}, len(receipt.Observations))
+	for index, snapshot := range chain {
+		expected := []struct {
+			kind   string
+			id     uuid.UUID
+			digest string
+		}{
+			{kind: "option_contract", id: snapshot.ContractPayloadID, digest: snapshot.ContractSHA256},
+			{kind: "option_quote", id: snapshot.QuotePayloadID, digest: snapshot.QuoteSHA256},
+			{kind: "option_snapshot", id: snapshot.SnapshotPayloadID, digest: snapshot.SnapshotSHA256},
+		}
+		for offset, want := range expected {
+			observation := receipt.Observations[index*3+offset]
+			if observation.ScopeID != receipt.ScopeID || observation.AccountID != receipt.AccountID || observation.ManifestID != receipt.ManifestID ||
+				observation.ManifestSHA256 != receipt.ManifestSHA256 || observation.QualityResultID != receipt.QualityResultID || observation.QualitySHA256 != receipt.QualitySHA256 ||
+				observation.PayloadID != want.id || observation.PayloadKind != want.kind || observation.ContentSHA256 != want.digest ||
+				observation.PartitionSequence < 0 || !validHistoricalSHA(observation.PartitionContentSHA256) ||
+				observation.ObservationSequence < 0 || strings.TrimSpace(observation.SourceKey) == "" ||
+				!canonicalDecisionTime(observation.EffectiveAt) || !canonicalDecisionTime(observation.AvailableAt) ||
+				observation.AvailableAt.After(decisionAt) {
+				return fmt.Errorf("options/historical: option chain receipt payload does not reconstruct for %q", snapshot.Contract.OCCSymbol)
+			}
+			if _, exists := seen[observation.PayloadID]; exists {
+				return fmt.Errorf("options/historical: option chain receipt repeats payload %s", observation.PayloadID)
+			}
+			seen[observation.PayloadID] = struct{}{}
+		}
+	}
+	return nil
+}
+
+func validateHistoricalChain(underlying string, decisionAt time.Time, chain []domain.OptionSnapshot) error {
+	underlying = strings.ToUpper(strings.TrimSpace(underlying))
+	if len(chain) == 0 {
+		return fmt.Errorf("options/historical: empty manifest-bound chain at %s", decisionAt.Format(time.RFC3339Nano))
+	}
+	seen := make(map[string]struct{}, len(chain))
+	for _, snapshot := range chain {
+		contract := snapshot.Contract
+		if strings.ToUpper(contract.Underlying) != underlying || strings.TrimSpace(contract.OCCSymbol) == "" || contract.InstrumentID == uuid.Nil {
+			return fmt.Errorf("options/historical: option contract identity does not reconstruct at %s", decisionAt.Format(time.RFC3339Nano))
+		}
+		if _, exists := seen[contract.OCCSymbol]; exists {
+			return fmt.Errorf("options/historical: duplicate option contract %q at %s", contract.OCCSymbol, decisionAt.Format(time.RFC3339Nano))
+		}
+		seen[contract.OCCSymbol] = struct{}{}
+		if snapshot.ContractPayloadID == uuid.Nil || snapshot.QuotePayloadID == uuid.Nil || snapshot.SnapshotPayloadID == uuid.Nil ||
+			!validHistoricalSHA(snapshot.ContractSHA256) || !validHistoricalSHA(snapshot.QuoteSHA256) || !validHistoricalSHA(snapshot.SnapshotSHA256) {
+			return fmt.Errorf("options/historical: immutable payload provenance is incomplete for %q", contract.OCCSymbol)
+		}
+		if !canonicalDecisionTime(snapshot.ObservedAt) || !canonicalDecisionTime(snapshot.QuoteObservedAt) ||
+			snapshot.ObservedAt.After(decisionAt) || snapshot.QuoteObservedAt.After(decisionAt) {
+			return fmt.Errorf("options/historical: option evidence for %q escapes decision cutoff", contract.OCCSymbol)
+		}
+		if contract.Expiry.Location() != time.UTC || contract.Expiry.Before(decisionAt) || contract.Multiplier <= 0 || snapshot.Bid < 0 || snapshot.Ask <= 0 || snapshot.Ask < snapshot.Bid {
+			return fmt.Errorf("options/historical: option market evidence is invalid for %q", contract.OCCSymbol)
+		}
+	}
+	return nil
+}
+
+func canonicalDecisionTime(value time.Time) bool {
+	return !value.IsZero() && value.Location() == time.UTC && value.Equal(value.Truncate(time.Microsecond))
+}
+
+func validHistoricalSHA(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}

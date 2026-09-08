@@ -2,26 +2,12 @@ package api
 
 import "net/http"
 
-func (s *Server) handleListEconomicAccounts(w http.ResponseWriter, r *http.Request) {
-	if s.economicAccounts == nil {
-		respondError(w, http.StatusNotImplemented, "economic account reads are disabled", ErrCodeNotImplemented)
-		return
-	}
-	limit, offset := parsePagination(r)
-	accounts, err := s.economicAccounts.List(r.Context(), limit, offset)
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to list economic accounts", ErrCodeInternal)
-		return
-	}
-	respondList(w, accounts, limit, offset)
-}
-
 func (s *Server) handleGetEconomicAccount(w http.ResponseWriter, r *http.Request) {
 	if s.economicAccounts == nil {
 		respondError(w, http.StatusNotImplemented, "economic account reads are disabled", ErrCodeNotImplemented)
 		return
 	}
-	id, err := parseUUID(r, "id")
+	id, err := canonicalAccountIDFromPath(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
@@ -29,6 +15,10 @@ func (s *Server) handleGetEconomicAccount(w http.ResponseWriter, r *http.Request
 	account, err := s.economicAccounts.GetByID(r.Context(), id)
 	if err != nil {
 		respondEconomicReadError(w, err, "economic account not found", "failed to get economic account")
+		return
+	}
+	if account == nil || account.ID != id {
+		respondError(w, http.StatusNotFound, "economic account not found", ErrCodeNotFound)
 		return
 	}
 	respondJSON(w, http.StatusOK, account)
@@ -39,7 +29,7 @@ func (s *Server) handleListEconomicCapitalFlows(w http.ResponseWriter, r *http.R
 		respondError(w, http.StatusNotImplemented, "economic account reads are disabled", ErrCodeNotImplemented)
 		return
 	}
-	id, err := parseUUID(r, "id")
+	id, err := canonicalAccountIDFromPath(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
@@ -54,6 +44,12 @@ func (s *Server) handleListEconomicCapitalFlows(w http.ResponseWriter, r *http.R
 		respondError(w, http.StatusInternalServerError, "failed to list economic capital flows", ErrCodeInternal)
 		return
 	}
+	for _, flow := range flows {
+		if flow.AccountID != id {
+			respondError(w, http.StatusNotFound, "economic capital flow not found", ErrCodeNotFound)
+			return
+		}
+	}
 	respondList(w, flows, limit, offset)
 }
 
@@ -62,7 +58,7 @@ func (s *Server) handleGetEconomicCapitalSummary(w http.ResponseWriter, r *http.
 		respondError(w, http.StatusNotImplemented, "economic account reads are disabled", ErrCodeNotImplemented)
 		return
 	}
-	id, err := parseUUID(r, "id")
+	id, err := canonicalAccountIDFromPath(r)
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err.Error(), ErrCodeBadRequest)
 		return
@@ -70,6 +66,10 @@ func (s *Server) handleGetEconomicCapitalSummary(w http.ResponseWriter, r *http.
 	summary, err := s.economicAccounts.GetCapitalSummary(r.Context(), id)
 	if err != nil {
 		respondEconomicReadError(w, err, "economic account not found", "failed to summarize economic account")
+		return
+	}
+	if summary == nil || summary.AccountID != id {
+		respondError(w, http.StatusNotFound, "economic account not found", ErrCodeNotFound)
 		return
 	}
 	respondJSON(w, http.StatusOK, summary)
@@ -88,6 +88,11 @@ func (s *Server) handleGetEconomicLedgerTransaction(w http.ResponseWriter, r *ht
 	transaction, err := s.economicLedger.GetByID(r.Context(), id)
 	if err != nil {
 		respondEconomicReadError(w, err, "ledger transaction not found", "failed to get ledger transaction")
+		return
+	}
+	accountID, accountErr := canonicalAccountIDFromPath(r)
+	if accountErr != nil || transaction == nil || transaction.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "ledger transaction not found", ErrCodeNotFound)
 		return
 	}
 	respondJSON(w, http.StatusOK, transaction)

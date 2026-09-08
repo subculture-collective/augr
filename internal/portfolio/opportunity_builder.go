@@ -2,11 +2,14 @@ package portfolio
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/google/uuid"
 )
 
@@ -22,6 +25,7 @@ type OpportunityBuilderConfig struct {
 }
 
 type OpportunityBuildInput struct {
+	Scope             execution.ExecutionScope
 	Strategy          domain.Strategy
 	Run               *domain.PipelineRun
 	Decision          *domain.TradeDecision
@@ -37,6 +41,8 @@ type OpportunityBuildInput struct {
 	ProposedNotional  float64
 	Reason            string
 	Evidence          json.RawMessage
+	OptionSpread      *domain.OptionSpread
+	QuoteObservedAt   *time.Time
 }
 
 func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig) (*domain.Opportunity, NoActionReason, error) {
@@ -69,6 +75,21 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 	if input.Signal != domain.PipelineSignalBuy && input.Signal != domain.PipelineSignalSell {
 		return nil, NoActionReasonUnknown, fmt.Errorf("unsupported signal: %q", input.Signal)
 	}
+	if input.Run == nil || input.Run.ID == uuid.Nil || input.Run.AccountID == uuid.Nil || !input.Run.Environment.IsValid() || input.Run.OriginType != "strategy_version" || input.Run.OriginID == "" || input.Run.TradeDate.IsZero() {
+		return nil, NoActionReasonUnknown, fmt.Errorf("complete source run scope is required")
+	}
+	if input.Strategy.ExecutionStrategyVersionID == nil || input.Run.OriginID != input.Strategy.ExecutionStrategyVersionID.String() || input.Run.StrategyID != input.Strategy.ID {
+		return nil, NoActionReasonUnknown, fmt.Errorf("source run scope does not match strategy binding")
+	}
+	runRef, ok := input.Scope.PipelineRun()
+	originType, originID := input.Scope.Origin()
+	if !ok || input.Scope.AccountID() != input.Run.AccountID || input.Scope.Environment() != input.Run.Environment || string(originType) != input.Run.OriginType || originID != input.Run.OriginID || runRef.ID != input.Run.ID || !runRef.TradeDate.Equal(input.Run.TradeDate) {
+		return nil, NoActionReasonUnknown, fmt.Errorf("execution scope does not match persisted source run")
+	}
+	legacyStrategyID := input.Scope.LegacyStrategyID()
+	if legacyStrategyID == nil || *legacyStrategyID != input.Strategy.ID {
+		return nil, NoActionReasonUnknown, fmt.Errorf("execution scope does not match strategy binding")
+	}
 
 	side := orderSideFromSignal(input.Signal)
 	if input.Decision != nil && input.Decision.Side.IsValid() {
@@ -77,6 +98,10 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 
 	createdAt := now().UTC()
 	opportunity := &domain.Opportunity{
+		AccountID:         input.Scope.AccountID(),
+		Environment:       input.Scope.Environment(),
+		OriginType:        string(originType),
+		OriginID:          originID,
 		StrategyID:        input.Strategy.ID,
 		MarketType:        marketType,
 		Ticker:            ticker,
@@ -97,14 +122,21 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		CreatedAt:         createdAt,
 		UpdatedAt:         createdAt,
 	}
-
-	if input.Run != nil {
-		runID := input.Run.ID
-		opportunity.PipelineRunID = &runID
-	} else if input.Decision != nil && input.Decision.PipelineRunID != nil {
-		runID := *input.Decision.PipelineRunID
-		opportunity.PipelineRunID = &runID
+	if marketType != domain.MarketTypeOptions {
+		opportunity.ExpectedLossUSD = opportunity.ProposedNotional * opportunity.MaxLossPct
 	}
+	if err := bindPromotedOpportunityLineage(opportunity, input.Strategy, input.Run); err != nil {
+		return nil, NoActionReasonUnknown, err
+	}
+	if marketType == domain.MarketTypeOptions {
+		if err := bindDefinedRiskOptionIntent(opportunity, input.OptionSpread, input.QuoteObservedAt); err != nil {
+			return nil, NoActionReasonUnknown, err
+		}
+	}
+
+	runID, tradeDate := runRef.ID, runRef.TradeDate
+	opportunity.PipelineRunID = &runID
+	opportunity.PipelineRunTradeDate = &tradeDate
 
 	switch opportunity.MarketType {
 	case domain.MarketTypeStock, domain.MarketTypeCrypto, domain.MarketTypeOptions:
@@ -115,8 +147,99 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 		return nil, NoActionReasonUnknown, fmt.Errorf("unsupported market type: %q", input.Strategy.MarketType)
 	}
 
-	opportunity.DedupeKey = dedupeKey(createdAt, input.Strategy.ID, opportunity.MarketType, opportunity.Ticker, side, input.Signal)
+	opportunity.DedupeKey = dedupeKey(createdAt, opportunity.AccountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, runRef, input.Strategy.ID, opportunity.MarketType, opportunity.Ticker, side, input.Signal)
 	return opportunity, "", nil
+}
+
+func bindPromotedOpportunityLineage(opportunity *domain.Opportunity, strategy domain.Strategy, run *domain.PipelineRun) error {
+	if opportunity == nil || strategy.ExecutionStrategyVersionID == nil {
+		return errors.New("promoted opportunity requires an execution version")
+	}
+	lifecycle, err := domain.ParseActivePromotionExecutionLineage(strategy.Config, opportunity.AccountID)
+	if err != nil {
+		return err
+	}
+	if err := validateOpportunityRunLineage(run, *strategy.ExecutionStrategyVersionID, lifecycle); err != nil {
+		return err
+	}
+	opportunity.ExecutionVersionID = *strategy.ExecutionStrategyVersionID
+	opportunity.EvaluationScopeID = lifecycle.EvaluationScopeID
+	opportunity.ManifestID = lifecycle.ManifestID
+	opportunity.QualityResultID = lifecycle.QualityResultID
+	opportunity.DeploymentID = lifecycle.DeploymentID
+	opportunity.PromotionDecisionID = lifecycle.PromotionDecisionID
+	opportunity.CapitalBindingID = lifecycle.CapitalBindingID
+	opportunity.RiskPolicyVersion = lifecycle.RiskPolicyVersion
+	opportunity.DeploymentBudgetUSD = lifecycle.DeploymentBudgetUSD
+	return nil
+}
+
+func validateOpportunityRunLineage(run *domain.PipelineRun, versionID uuid.UUID, lifecycle domain.PromotionExecutionLineage) error {
+	if run == nil || run.ExecutionVersionID != versionID || run.EvaluationScopeID != lifecycle.EvaluationScopeID ||
+		run.ManifestID != lifecycle.ManifestID || run.QualityResultID != lifecycle.QualityResultID ||
+		run.DeploymentID != lifecycle.DeploymentID || run.PromotionDecisionID != lifecycle.PromotionDecisionID ||
+		run.CapitalBindingID != lifecycle.CapitalBindingID || run.RiskPolicyVersion != lifecycle.RiskPolicyVersion {
+		return errors.New("source run promotion lineage does not match scheduled strategy")
+	}
+	return nil
+}
+
+func bindDefinedRiskOptionIntent(opportunity *domain.Opportunity, spread *domain.OptionSpread, quoteObservedAt *time.Time) error {
+	if opportunity == nil || spread == nil || len(spread.Legs) != 2 || spread.MaxRisk <= 0 || quoteObservedAt == nil {
+		return errors.New("options opportunity requires an exact quoted defined-risk spread")
+	}
+	canonicalQuoteObservedAt := quoteObservedAt.UTC().Truncate(time.Microsecond)
+	_, offset := quoteObservedAt.Zone()
+	if offset != 0 || !quoteObservedAt.Equal(canonicalQuoteObservedAt) ||
+		!spread.QuoteObservedAt.Equal(canonicalQuoteObservedAt) {
+		return errors.New("option opportunity quote timestamp does not match the exact UTC spread observation")
+	}
+	if !strings.EqualFold(strings.TrimSpace(spread.Underlying), strings.TrimSpace(opportunity.Ticker)) {
+		return errors.New("option opportunity spread underlying does not match the opportunity")
+	}
+	opportunity.MaxLossPerUnit = spread.MaxRisk
+	opportunity.RequiredCapitalUnit = spread.MaxRisk
+	opportunity.QuoteObservedAt = &canonicalQuoteObservedAt
+	opportunity.OptionLegs = make([]domain.OpportunityOptionLeg, 0, 2)
+	for sequence, leg := range spread.Legs {
+		if leg.Contract.InstrumentID == uuid.Nil {
+			return errors.New("option opportunity contract lacks immutable instrument identity")
+		}
+		if !leg.QuoteObservedAt.Equal(canonicalQuoteObservedAt) {
+			return errors.New("option opportunity leg quote timestamp does not match the spread observation")
+		}
+		opportunity.OptionLegs = append(opportunity.OptionLegs, domain.OpportunityOptionLeg{
+			Sequence: sequence, ContractID: leg.Contract.InstrumentID,
+			ContractPayloadID: leg.ContractPayloadID, ContractSHA256: leg.ContractSHA256,
+			QuotePayloadID: leg.QuotePayloadID, QuoteSHA256: leg.QuoteSHA256,
+			SnapshotPayloadID: leg.SnapshotPayloadID, SnapshotSHA256: leg.SnapshotSHA256,
+			OCCSymbol: leg.Contract.OCCSymbol, Underlying: leg.Contract.Underlying,
+			Expiry: leg.Contract.Expiry, OptionType: string(leg.Contract.OptionType), Strike: leg.Contract.Strike, Ratio: leg.Ratio,
+			Side: leg.Side, PositionIntent: string(leg.PositionIntent), Bid: leg.Bid, Ask: leg.Ask,
+			Multiplier: int(leg.Contract.Multiplier),
+		})
+		sign := 1.0
+		if leg.Side == domain.OrderSideSell {
+			sign = -1
+		}
+		units := sign * float64(leg.Ratio) * float64(leg.Contract.Multiplier)
+		opportunity.Delta += leg.Greeks.Delta * units
+		opportunity.Gamma += leg.Greeks.Gamma * units
+		opportunity.Theta += leg.Greeks.Theta * units
+		opportunity.Vega += leg.Greeks.Vega * units
+	}
+	if !validVertical(opportunity.OptionLegs) {
+		return errors.New("option opportunity is not an exact supported vertical")
+	}
+	reconstructedType, err := verticalStrategyType(spread.Legs)
+	if err != nil || reconstructedType != spread.StrategyType {
+		return errors.New("option opportunity strategy type does not reconstruct from its legs")
+	}
+	width := math.Abs(spread.Legs[0].Contract.Strike-spread.Legs[1].Contract.Strike) * spread.Legs[0].Contract.Multiplier
+	if width <= 0 || spread.MaxRisk > width || math.Abs(spread.MaxReward-(width-spread.MaxRisk)) > 1e-9 {
+		return errors.New("option opportunity risk and reward do not reconstruct from vertical width")
+	}
+	return nil
 }
 
 func orderSideFromSignal(signal domain.PipelineSignal) domain.OrderSide {
@@ -155,9 +278,15 @@ func normalizeEvidence(evidence json.RawMessage) json.RawMessage {
 	return evidence
 }
 
-func dedupeKey(now time.Time, strategyID uuid.UUID, marketType domain.MarketType, ticker string, side domain.OrderSide, signal domain.PipelineSignal) string {
-	return strings.ToLower(fmt.Sprintf("%s:%s:%s:%s:%s:%s",
+func dedupeKey(now time.Time, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, run domain.PipelineRunRef, strategyID uuid.UUID, marketType domain.MarketType, ticker string, side domain.OrderSide, signal domain.PipelineSignal) string {
+	return strings.ToLower(fmt.Sprintf("%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s:%s",
 		now.UTC().Format("2006-01-02"),
+		accountID,
+		environment,
+		originType,
+		originID,
+		run.ID,
+		run.TradeDate.UTC().Format("2006-01-02"),
 		strategyID,
 		marketType.Normalize(),
 		ticker,

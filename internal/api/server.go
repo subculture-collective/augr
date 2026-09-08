@@ -154,7 +154,7 @@ type StrategyRunResult struct {
 
 // StrategyRunner triggers a strategy pipeline run on demand.
 type StrategyRunner interface {
-	RunStrategy(ctx context.Context, strategy domain.Strategy) (*StrategyRunResult, error)
+	RunStrategy(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*StrategyRunResult, error)
 }
 
 type BacktestRunner interface {
@@ -367,7 +367,14 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		return nil, fmt.Errorf("create auth manager: %w", err)
 	}
 
-	hub := NewHub(logger)
+	var hubAccountID uuid.UUID
+	var projectionAccountID *uuid.UUID
+	if cfg.ProjectionAccountID != nil {
+		hubAccountID = *cfg.ProjectionAccountID
+		accountID := hubAccountID
+		projectionAccountID = &accountID
+	}
+	hub := NewHub(logger, hubAccountID)
 
 	settingsService := deps.Settings
 	if settingsService == nil {
@@ -450,7 +457,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		economicLedger:        deps.EconomicLedger,
 		projections:           deps.Projections,
 		cutoverEvidence:       deps.CutoverEvidence,
-		projectionAccountID:   cfg.ProjectionAccountID,
+		projectionAccountID:   projectionAccountID,
 	}
 	// Construct services from the assembled deps.
 	s.backtestSvc = service.NewBacktestService(
@@ -507,36 +514,86 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 			sr.Get("/", s.handleListStrategies)
 			sr.Post("/", s.handleCreateStrategy)
 			sr.Get("/{id}", s.handleGetStrategy)
-			sr.Post("/{id}/run", s.handleRunStrategy)
 			sr.Put("/{id}", s.handleUpdateStrategy)
 			sr.Delete("/{id}", s.handleDeleteStrategy)
-			sr.Post("/{id}/pause", s.handlePauseStrategy)
-			sr.Post("/{id}/resume", s.handleResumeStrategy)
-			sr.Post("/{id}/skip-next", s.handleSkipNextStrategy)
-
-			// Report artifacts (nested under strategy)
-			sr.Get("/{id}/reports/latest", s.handleGetLatestReport)
-			sr.Get("/{id}/reports", s.handleListReports)
 		})
 
-		v1.Route("/copy-trading", func(cr chi.Router) {
-			cr.Get("/leaders", s.handleListCopyLeaders)
-			cr.Post("/leaders", s.handleCreateCopyLeader)
-			cr.Get("/leaders/{id}", s.handleGetCopyLeader)
-			cr.Post("/leaders/{id}/sources", s.handleAddCopySource)
-			cr.Post("/sources/{id}/refresh", s.handleRefreshCopySource)
-			cr.Put("/mappings", s.handleUpsertCopyMapping)
-			cr.Get("/subscriptions", s.handleListCopySubscriptions)
-			cr.Post("/subscriptions", s.handleCreateCopySubscription)
-			cr.Get("/subscriptions/{id}", s.handleGetCopySubscription)
-			cr.Put("/subscriptions/{id}", s.handleUpdateCopySubscription)
-			cr.Post("/subscriptions/{id}/preview", s.handlePreviewCopySubscription)
-			cr.Post("/subscriptions/{id}/activate", s.handleActivateCopySubscription)
-			cr.Post("/subscriptions/{id}/pause", s.handlePauseCopySubscription)
-			cr.Post("/subscriptions/{id}/resume", s.handleResumeCopySubscription)
-			cr.Post("/subscriptions/{id}/stop", s.handleStopCopySubscription)
-			cr.Post("/subscriptions/{id}/rebalance", s.handleRebalanceCopySubscription)
-			cr.Get("/subscriptions/{id}/intents", s.handleListCopyIntents)
+		v1.Get("/me/accounts", s.handleGetCurrentUserAccounts)
+		v1.Route("/accounts/{accountID}", func(ar chi.Router) {
+			ar.Use(s.requireCanonicalAccountPath)
+			ar.Route("/strategies/{id}", func(sr chi.Router) {
+				sr.Post("/run", s.handleRunStrategy)
+				sr.Post("/pause", s.handlePauseStrategy)
+				sr.Post("/resume", s.handleResumeStrategy)
+				sr.Post("/skip-next", s.handleSkipNextStrategy)
+				sr.Get("/reports/latest", s.handleGetLatestReport)
+				sr.Get("/reports", s.handleListReports)
+			})
+			ar.Route("/copy-trading", func(cr chi.Router) {
+				cr.Get("/leaders", s.handleListCopyLeaders)
+				cr.Post("/leaders", s.handleCreateCopyLeader)
+				cr.Get("/leaders/{id}", s.handleGetCopyLeader)
+				cr.Post("/leaders/{id}/sources", s.handleAddCopySource)
+				cr.Post("/sources/{id}/refresh", s.handleRefreshCopySource)
+				cr.Put("/mappings", s.handleUpsertCopyMapping)
+				cr.Get("/subscriptions", s.handleListCopySubscriptions)
+				cr.Post("/subscriptions", s.handleCreateCopySubscription)
+				cr.Get("/subscriptions/{id}", s.handleGetCopySubscription)
+				cr.Put("/subscriptions/{id}", s.handleUpdateCopySubscription)
+				cr.Post("/subscriptions/{id}/preview", s.handlePreviewCopySubscription)
+				cr.Post("/subscriptions/{id}/activate", s.handleActivateCopySubscription)
+				cr.Post("/subscriptions/{id}/pause", s.handlePauseCopySubscription)
+				cr.Post("/subscriptions/{id}/resume", s.handleResumeCopySubscription)
+				cr.Post("/subscriptions/{id}/stop", s.handleStopCopySubscription)
+				cr.Post("/subscriptions/{id}/rebalance", s.handleRebalanceCopySubscription)
+				cr.Get("/subscriptions/{id}/intents", s.handleListCopyIntents)
+			})
+			ar.Route("/runs", func(rr chi.Router) {
+				rr.Get("/", s.handleListRuns)
+				rr.Get("/{id}", s.handleGetRun)
+				rr.Get("/{id}/decisions", s.handleGetRunDecisions)
+				rr.Post("/{id}/cancel", s.handleCancelRun)
+				rr.Get("/{id}/snapshot", s.handleGetRunSnapshot)
+			})
+			ar.Route("/portfolio", func(pr chi.Router) {
+				pr.Get("/positions", s.handleListPositions)
+				pr.Get("/positions/open", s.handleGetOpenPositions)
+				pr.Get("/summary", s.handlePortfolioSummary)
+				pr.Get("/allocator/diagnostics", s.handleGetPortfolioAllocatorDiagnostics)
+				pr.Get("/allocator/opportunities", s.handleListPortfolioAllocatorOpportunities)
+				pr.Get("/allocator/decisions", s.handleListPortfolioAllocatorDecisions)
+				pr.Get("/allocator/summary", s.handleGetPortfolioAllocatorSummary)
+			})
+			ar.Route("/orders", func(or chi.Router) {
+				or.Get("/", s.handleListOrders)
+				or.Get("/{id}", s.handleGetOrder)
+			})
+			ar.Get("/trades", s.handleListTrades)
+			ar.Route("/journal", func(jr chi.Router) {
+				jr.Get("/decisions", s.handleListTradeDecisions)
+				jr.Get("/decisions/{id}", s.handleGetTradeDecision)
+			})
+			ar.Get("/replay/decisions/{id}", s.handleGetReplayDecision)
+			ar.Get("/events", s.handleListEvents)
+			ar.Get("/risk/status", s.handleRiskStatus)
+			ar.Get("/risk/cockpit", s.handleRiskCockpit)
+			ar.Post("/paper-evaluation-scopes", s.handleCreatePaperEvaluationScope)
+			ar.Get("/paper-evaluation-scopes", s.handleListPaperEvaluationScopes)
+			ar.Get("/economic/account", s.handleGetEconomicAccount)
+			ar.Get("/economic/capital-flows", s.handleListEconomicCapitalFlows)
+			ar.Get("/economic/capital-summary", s.handleGetEconomicCapitalSummary)
+			ar.Get("/economic/ledger-transactions/{id}", s.handleGetEconomicLedgerTransaction)
+			ar.Route("/conversations", func(cr chi.Router) {
+				cr.Get("/", s.handleListConversations)
+				cr.Post("/", s.handleCreateConversation)
+				cr.Get("/{id}/messages", s.handleGetConversationMessages)
+				cr.Post("/{id}/messages", s.handleCreateConversationMessage)
+			})
+			ar.Route("/memories", func(mr chi.Router) {
+				mr.Get("/", s.handleListMemories)
+				mr.Post("/search", s.handleSearchMemories)
+				mr.Delete("/{id}", s.handleDeleteMemory)
+			})
 		})
 
 		v1.Route("/polymarket", func(pr chi.Router) {
@@ -564,69 +621,10 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 
 		v1.Get("/marketdata/polymarket/status", s.handlePolymarketStatus)
 
-		// Pipeline runs
-		v1.Route("/runs", func(rr chi.Router) {
-			rr.Get("/", s.handleListRuns)
-			rr.Get("/{id}", s.handleGetRun)
-			rr.Get("/{id}/decisions", s.handleGetRunDecisions)
-			rr.Post("/{id}/cancel", s.handleCancelRun)
-			rr.Get("/{id}/snapshot", s.handleGetRunSnapshot)
-		})
-
-		// Portfolio
-		v1.Route("/portfolio", func(pr chi.Router) {
-			pr.Get("/positions", s.handleListPositions)
-			pr.Get("/positions/open", s.handleGetOpenPositions)
-			pr.Get("/summary", s.handlePortfolioSummary)
-			pr.Get("/allocator/diagnostics", s.handleGetPortfolioAllocatorDiagnostics)
-			pr.Route("/allocator", func(ar chi.Router) {
-				ar.Get("/opportunities", s.handleListPortfolioAllocatorOpportunities)
-				ar.Get("/decisions", s.handleListPortfolioAllocatorDecisions)
-				ar.Get("/summary", s.handleGetPortfolioAllocatorSummary)
-			})
-		})
-
-		// Orders
-		v1.Route("/orders", func(or chi.Router) {
-			or.Get("/", s.handleListOrders)
-			or.Get("/{id}", s.handleGetOrder)
-		})
-
-		// Decision journal
-		v1.Route("/journal", func(jr chi.Router) {
-			jr.Get("/decisions", s.handleListTradeDecisions)
-			jr.Get("/decisions/{id}", s.handleGetTradeDecision)
-		})
-
 		v1.Get("/evidence/assessments/{id}", s.handleGetMilestoneAssessment)
-		v1.Post("/paper-evaluation-scopes", s.handleCreatePaperEvaluationScope)
-		v1.Route("/economic", func(er chi.Router) {
-			er.Get("/accounts", s.handleListEconomicAccounts)
-			er.Get("/accounts/{id}", s.handleGetEconomicAccount)
-			er.Get("/accounts/{id}/capital-flows", s.handleListEconomicCapitalFlows)
-			er.Get("/accounts/{id}/capital-summary", s.handleGetEconomicCapitalSummary)
-			er.Get("/ledger-transactions/{id}", s.handleGetEconomicLedgerTransaction)
-		})
-
-		// Replay workbench
-		v1.Route("/replay", func(rr chi.Router) {
-			rr.Get("/decisions/{id}", s.handleGetReplayDecision)
-		})
-
-		// Trades
-		v1.Get("/trades", s.handleListTrades)
-
-		// Memories
-		v1.Route("/memories", func(mr chi.Router) {
-			mr.Get("/", s.handleListMemories)
-			mr.Post("/search", s.handleSearchMemories)
-			mr.Delete("/{id}", s.handleDeleteMemory)
-		})
 
 		// Risk
 		v1.Route("/risk", func(rr chi.Router) {
-			rr.Get("/status", s.handleRiskStatus)
-			rr.Get("/cockpit", s.handleRiskCockpit)
 			rr.Get("/breakers", s.handleRiskBreakerList)
 			rr.Post("/killswitch", s.handleKillSwitchToggle)
 			rr.Post("/breaker/reset", func(w http.ResponseWriter, r *http.Request) {
@@ -646,17 +644,6 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		v1.Route("/prompts", func(pr chi.Router) {
 			pr.Get("/", s.handleGetPrompts)
 			pr.Put("/", s.handleUpdatePrompts)
-		})
-
-		// Events
-		v1.Get("/events", s.handleListEvents)
-
-		// Conversations
-		v1.Route("/conversations", func(cr chi.Router) {
-			cr.Get("/", s.handleListConversations)
-			cr.Post("/", s.handleCreateConversation)
-			cr.Get("/{id}/messages", s.handleGetConversationMessages)
-			cr.Post("/{id}/messages", s.handleCreateConversationMessage)
 		})
 
 		// Audit log
@@ -766,6 +753,25 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 	return s, nil
 }
 
+func (s *Server) requireCanonicalAccountPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accountID, err := uuid.Parse(chi.URLParam(r, "accountID"))
+		if err != nil || s.projectionAccountID == nil || accountID != *s.projectionAccountID {
+			respondError(w, http.StatusNotFound, "account not found", ErrCodeNotFound)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func canonicalAccountIDFromPath(r *http.Request) (uuid.UUID, error) {
+	accountID, err := uuid.Parse(chi.URLParam(r, "accountID"))
+	if err != nil || accountID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("invalid account id")
+	}
+	return accountID, nil
+}
+
 // Router returns the underlying chi.Router. Useful for testing.
 func (s *Server) Router() http.Handler {
 	return s.router
@@ -805,6 +811,8 @@ func (s *Server) BroadcastRunResult(result *StrategyRunResult) {
 	run := result.Run
 	s.hub.Broadcast(WSMessage{
 		Type:       EventPipelineStart,
+		AccountID:  run.AccountID,
+		Scope:      "account",
 		StrategyID: run.StrategyID,
 		RunID:      run.ID,
 		Data: map[string]any{
@@ -816,6 +824,8 @@ func (s *Server) BroadcastRunResult(result *StrategyRunResult) {
 	if result.Signal != "" {
 		s.hub.Broadcast(WSMessage{
 			Type:       EventSignal,
+			AccountID:  run.AccountID,
+			Scope:      "account",
 			StrategyID: run.StrategyID,
 			RunID:      run.ID,
 			Data: map[string]any{
@@ -828,6 +838,8 @@ func (s *Server) BroadcastRunResult(result *StrategyRunResult) {
 	for _, order := range result.Orders {
 		s.hub.Broadcast(WSMessage{
 			Type:       EventOrderSubmitted,
+			AccountID:  run.AccountID,
+			Scope:      "account",
 			StrategyID: run.StrategyID,
 			RunID:      run.ID,
 			Data:       order,
@@ -838,6 +850,8 @@ func (s *Server) BroadcastRunResult(result *StrategyRunResult) {
 	for _, position := range result.Positions {
 		s.hub.Broadcast(WSMessage{
 			Type:       EventPositionUpdate,
+			AccountID:  run.AccountID,
+			Scope:      "account",
 			StrategyID: run.StrategyID,
 			RunID:      run.ID,
 			Data:       position,

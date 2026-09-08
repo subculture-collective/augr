@@ -62,6 +62,26 @@ type Policy struct {
 	id        uuid.UUID
 }
 
+// ReviewedPolicyV1Input returns the fixed portfolio-evaluation semantics used
+// by promotion-quality generated research. Keeping these values package-owned
+// prevents callers from quietly changing return, cash, lot, or recovery
+// conventions while retaining a plausible policy label.
+func ReviewedPolicyV1Input() PolicyInput {
+	return PolicyInput{
+		Version:            "evaluation-policy-v1@reviewed",
+		Frequency:          "daily",
+		PeriodsPerYear:     252,
+		ReturnKind:         "simple",
+		CashConvention:     "explicit_per_period",
+		LotMethod:          "fifo",
+		RecoveryDefinition: "first_equity_at_or_above_prior_peak",
+		DecimalScale:       12,
+	}
+}
+
+// ReviewedPolicyV1 constructs a fresh immutable reviewed policy artifact.
+func ReviewedPolicyV1() (*Policy, error) { return NewPolicy(ReviewedPolicyV1Input()) }
+
 func NewPolicy(input PolicyInput) (*Policy, error) {
 	if !canonicalText(input.Version, 128) || !oneOf(input.Frequency, "minute", "daily", "weekly", "monthly") || input.PeriodsPerYear <= 0 || input.PeriodsPerYear > 1000000 ||
 		input.ReturnKind != "simple" || input.CashConvention != "explicit_per_period" || input.LotMethod != "fifo" ||
@@ -661,17 +681,30 @@ func validateFrequency(policy *Policy, observations []observationCanonical) erro
 		valid := false
 		switch policy.Frequency() {
 		case "minute":
-			valid = current.Equal(prior.Add(time.Minute))
+			valid = wholePeriodGap(prior, current, time.Minute)
 		case "daily":
-			valid = current.Equal(prior.Add(24 * time.Hour))
+			valid = wholePeriodGap(prior, current, 24*time.Hour)
 		case "weekly":
-			valid = current.Equal(prior.Add(7 * 24 * time.Hour))
+			valid = wholePeriodGap(prior, current, 7*24*time.Hour)
 		case "monthly":
-			valid = current.Equal(prior.AddDate(0, 1, 0))
+			for candidate := prior.AddDate(0, 1, 0); !candidate.After(current); candidate = candidate.AddDate(0, 1, 0) {
+				if current.Equal(candidate) {
+					valid = true
+					break
+				}
+			}
 		}
 		if !valid {
 			return fmt.Errorf("evaluation observation %d violates declared %s frequency", index, policy.Frequency())
 		}
 	}
 	return nil
+}
+
+// wholePeriodGap permits absent observations for closed or unavailable
+// sessions while requiring every retained point to remain exactly on the
+// declared frequency grid.
+func wholePeriodGap(prior, current time.Time, period time.Duration) bool {
+	gap := current.Sub(prior)
+	return gap >= period && gap%period == 0
 }

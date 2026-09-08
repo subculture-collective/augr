@@ -63,7 +63,7 @@ func openEconomicBackend(ctx context.Context, url string) (economicBackend, erro
 		return nil, err
 	}
 	version, err := postgresrepo.CurrentSchemaVersion(ctx, db.Pool)
-	if err != nil || version != postgresrepo.RequiredSchemaVersion {
+	if err != nil || !postgresrepo.IsSchemaVersionCompatible(version) {
 		db.Close()
 		if err != nil {
 			return nil, err
@@ -107,7 +107,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer, 
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-103 PostgreSQL connection URL")
+	databaseURL := flags.String("db-url", firstSet(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL")), "schema-110 PostgreSQL connection URL")
 	inputPath := flags.String("input", "-", "JSON input path, or - for stdin")
 	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
 		return fmt.Errorf("augr-economic: invalid flags")

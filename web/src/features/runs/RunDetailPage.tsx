@@ -14,6 +14,7 @@ import { queryKeys } from '@/shared/query/keys'
 import type { AgentDecision, PipelineRun, RunSnapshot } from '@/shared/types/domain'
 import { normalizeStatus } from '@/lib/status'
 import { useRealtime } from '@/shared/websocket/RealtimeProvider'
+import { useAccount } from '@/shared/account/AccountProvider'
 
 const staleEventTypes = new Set(['agent_decision', 'debate_round', 'signal', 'error', 'pipeline_health'])
 const decisionsPageSize = 10
@@ -123,7 +124,7 @@ function DecisionCard({ decision }: { decision: AgentDecision }) {
   )
 }
 
-function DecisionsPanel({ runId, realtimeStale }: { runId: string; realtimeStale: boolean }) {
+function DecisionsPanel({ accountId, runId, tradeDate, realtimeStale }: { accountId: string; runId: string; tradeDate: string; realtimeStale: boolean }) {
   const [searchParams, setSearchParams] = useSearchParams()
   const decisionOffset = Number(searchParams.get('decision_offset') ?? '0')
   const filters = useMemo(() => ({
@@ -134,8 +135,8 @@ function DecisionsPanel({ runId, realtimeStale }: { runId: string; realtimeStale
     offset: Number.isFinite(decisionOffset) && decisionOffset > 0 ? decisionOffset : 0,
   }), [decisionOffset, searchParams])
   const query = useQuery({
-    queryKey: queryKeys.runDecisions(runId, filters),
-    queryFn: ({ signal }) => getRunDecisions(runId, filters, signal),
+    queryKey: queryKeys.runDecisions(accountId, runId, tradeDate, filters),
+    queryFn: ({ signal }) => getRunDecisions(accountId, runId, tradeDate, filters, signal),
   })
   const decisions = query.data?.data ?? []
   const offset = filters.offset ?? 0
@@ -203,10 +204,10 @@ function DecisionsPanel({ runId, realtimeStale }: { runId: string; realtimeStale
   )
 }
 
-function SnapshotPanel({ run, realtimeStale }: { run: PipelineRun; realtimeStale: boolean }) {
+function SnapshotPanel({ accountId, run, tradeDate, realtimeStale }: { accountId: string; run: PipelineRun; tradeDate: string; realtimeStale: boolean }) {
   const query = useQuery({
-    queryKey: queryKeys.runSnapshot(run.id),
-    queryFn: ({ signal }) => getRunSnapshot(run.id, signal),
+    queryKey: queryKeys.runSnapshot(accountId, run.id, tradeDate),
+    queryFn: ({ signal }) => getRunSnapshot(accountId, run.id, tradeDate, signal),
   })
   const entries = snapshotEntries(query.data)
   const showRunningWarning = run.status === 'running'
@@ -241,17 +242,19 @@ function SnapshotPanel({ run, realtimeStale }: { run: PipelineRun; realtimeStale
 }
 
 export function RunDetailPage() {
+  const { account } = useAccount()
   const { id } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const runId = id ?? ''
+  const tradeDate = searchParams.get('trade_date') ?? ''
   const tabParam = searchParams.get('tab')
   const activeTab: RunDetailTab = tabParam === 'decisions' ? 'decisions' : tabParam === 'snapshot' ? 'snapshot' : tabParam === 'timeline' ? 'timeline' : 'overview'
   const realtime = useRealtime()
   const [realtimeStale, setRealtimeStale] = useState(false)
   const runQuery = useQuery({
-    queryKey: queryKeys.runDetail(runId),
-    queryFn: ({ signal }) => getRun(runId, signal),
-    enabled: Boolean(runId),
+    queryKey: queryKeys.runDetail(account.id, runId, tradeDate),
+    queryFn: ({ signal }) => getRun(account.id, runId, tradeDate, signal),
+    enabled: Boolean(runId && tradeDate),
   })
 
   useEffect(() => {
@@ -275,7 +278,7 @@ export function RunDetailPage() {
 
   return (
     <div className="detail-stack">
-      <Breadcrumbs items={[{ label: 'Cockpit', to: '/cockpit' }, { label: 'Runs', to: '/runs' }, { label: run?.ticker ?? 'Run detail' }]} />
+      <Breadcrumbs items={[{ label: 'Cockpit', to: `/accounts/${account.id}/cockpit` }, { label: 'Runs', to: `/accounts/${account.id}/runs` }, { label: run?.ticker ?? 'Run detail' }]} />
 
       <PageHeader eyebrow="Run detail" title={run ? `${run.ticker} run` : 'Run detail'} description={run ? `Run ID: ${run.id}` : 'Loading run detail…'} actions={run ? <div className="header-cluster"><EntityLink kind="strategy" id={run.strategy_id} label="Open strategy" copy={false} /><RunStatusPill value={run.status} /></div> : undefined} />
 
@@ -314,9 +317,9 @@ export function RunDetailPage() {
                 </div>
               </div>
             ) : activeTab === 'decisions' ? (
-              <DecisionsPanel runId={run.id} realtimeStale={realtimeStale} />
+              <DecisionsPanel accountId={account.id} runId={run.id} tradeDate={tradeDate} realtimeStale={realtimeStale} />
             ) : activeTab === 'snapshot' ? (
-              <SnapshotPanel run={run} realtimeStale={realtimeStale} />
+              <SnapshotPanel accountId={account.id} run={run} tradeDate={tradeDate} realtimeStale={realtimeStale} />
             ) : (
               <div role="tabpanel" aria-label="Run timeline"><EventTimeline fixedRunId={run.id} fixedStrategyId={run.strategy_id} /></div>
             )}

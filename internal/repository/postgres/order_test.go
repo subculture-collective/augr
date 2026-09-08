@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +14,32 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
+
+func TestOrderRepoCreatePreservesDeterministicIDAndCastsSideForEnumInsert(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
+	order := domain.Order{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "reconciliation", OriginID: "alpaca", Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
+	wantID := order.ID
+	if err := repo.Create(ctx, &order); err != nil {
+		t.Fatal(err)
+	}
+	if order.ID != wantID || order.CreatedAt.IsZero() {
+		t.Fatalf("created identity=%s at=%v, want %s", order.ID, order.CreatedAt, wantID)
+	}
+	retry := domain.Order{ID: wantID, AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "reconciliation", OriginID: "alpaca", Ticker: "DETERMINISTIC", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 2, Status: domain.OrderStatusPending, Broker: "paper"}
+	if err := repo.Create(ctx, &retry); err != nil {
+		t.Fatalf("idempotent retry: %v", err)
+	}
+	if retry.CreatedAt != order.CreatedAt {
+		t.Fatalf("retry created_at=%v, want %v", retry.CreatedAt, order.CreatedAt)
+	}
+	retry.Quantity = 3
+	if err := repo.Create(ctx, &retry); !errors.Is(err, repository.ErrIdempotencyConflict) {
+		t.Fatalf("changed retry error=%v", err)
+	}
+}
 
 func TestBuildOrderListQuery_NoFilters(t *testing.T) {
 	query, args := buildOrderListQuery(repository.OrderFilter{}, 10, 0)
@@ -32,6 +59,14 @@ func TestBuildOrderListQuery_NoFilters(t *testing.T) {
 	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
 	assertContains(t, query, "LIMIT $1 OFFSET $2")
 	assertNotContains(t, query, "WHERE")
+}
+
+func TestOrderRepoCreateRejectsPartialAllocationAuthorization(t *testing.T) {
+	repo := NewOrderRepo(nil, uuid.New())
+	order := &domain.Order{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", AllocationOpportunityID: func() *uuid.UUID { id := uuid.New(); return &id }()}
+	if err := repo.Create(context.Background(), order); err == nil || !strings.Contains(err.Error(), "provided together") {
+		t.Fatalf("Create() error = %v, want paired allocation fields", err)
+	}
 }
 
 func TestBuildOrderListQuery_AllFilters(t *testing.T) {
@@ -84,6 +119,51 @@ func TestBuildOrderScopedListQuery_StrategyScopeAndPartialFilters(t *testing.T) 
 	assertNotContains(t, query, "order_type =")
 }
 
+func TestBuildOrderScopedListQuery_CopyOriginRequiresMatchingAccountAndSubscription(t *testing.T) {
+	runID, accountID, subscriptionID := uuid.New(), uuid.New(), uuid.New()
+	query, args := buildOrderQuery("copy_origin", copyOrderScope{accountID, domain.AccountEnvironmentPaperScored, subscriptionID, runID}, repository.OrderFilter{Ticker: "AAPL"}, 10, 0)
+	if len(args) != 8 || args[0] != accountID || args[2] != subscriptionID.String() || args[3] != runID || args[4] != subscriptionID {
+		t.Fatalf("args=%v", args)
+	}
+	for _, clause := range []string{
+		"account_id = $1",
+		"environment = $2",
+		"origin_type = 'copy_subscription'",
+		"origin_id = $3",
+		"copy_origin_rebalance_run_id = $4",
+		"EXISTS (SELECT 1 FROM copy_origin_rebalance_runs r WHERE r.id = $4 AND r.account_id = $1 AND r.environment = $2 AND r.subscription_id = $5 AND r.origin_type = 'copy_subscription' AND r.origin_id = $5)",
+	} {
+		assertContains(t, query, clause)
+	}
+}
+
+func TestCloseCommandsMatchFullLockedPositions(t *testing.T) {
+	accountID, strategyID, positionID := uuid.New(), uuid.New(), uuid.New()
+	expiry := time.Date(2027, 12, 17, 0, 0, 0, 0, time.UTC)
+	optionType, strike, closeIntent := domain.OptionTypeCall, 150.0, domain.PositionIntentSellToClose
+	position := &domain.Position{ID: positionID, AccountID: accountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, MarketType: domain.MarketTypeOptions, Ticker: "AAPL271217C00150000", Side: domain.PositionSideLong, Quantity: 2, AssetClass: domain.AssetClassOption, UnderlyingTicker: "AAPL", OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100}
+	order := &domain.Order{AccountID: accountID, Environment: position.Environment, OriginType: position.OriginType, OriginID: position.OriginID, StrategyID: &strategyID, MarketType: domain.MarketTypeOptions, Ticker: position.Ticker, Side: domain.OrderSideSell, Quantity: position.Quantity, AssetClass: position.AssetClass, UnderlyingTicker: position.UnderlyingTicker, OptionType: &optionType, Strike: &strike, Expiry: &expiry, ContractMultiplier: 100, PositionIntent: &closeIntent, ClosePositionIDs: []uuid.UUID{positionID}}
+	if err := validateOptionCloseCommand(order, position); err != nil {
+		t.Fatal(err)
+	}
+	tampered := *order
+	tampered.ContractMultiplier = 50
+	if validateOptionCloseCommand(&tampered, position) == nil {
+		t.Fatal("tampered option contract accepted")
+	}
+
+	predictionPosition := &domain.Position{ID: uuid.New(), AccountID: accountID, Environment: position.Environment, OriginType: position.OriginType, OriginID: position.OriginID, MarketType: domain.MarketTypePolymarket, Ticker: "event:YES", Side: domain.PositionSideLong, Quantity: .2}
+	predictionOrder := &domain.Order{AccountID: accountID, Environment: position.Environment, OriginType: position.OriginType, OriginID: position.OriginID, MarketType: domain.MarketTypePolymarket, Ticker: "event", PredictionSide: "YES", PolymarketIntent: "ORDER_INTENT_SELL_LONG", Side: domain.OrderSideSell, OrderType: domain.OrderTypeMarket, Quantity: .2, PositionIntent: &closeIntent, ClosePositionIDs: []uuid.UUID{predictionPosition.ID}}
+	if err := validatePredictionExitCommand(predictionOrder, predictionPosition); err != nil {
+		t.Fatal(err)
+	}
+	tamperedPrediction := *predictionOrder
+	tamperedPrediction.PredictionSide = "NO"
+	if validatePredictionExitCommand(&tamperedPrediction, predictionPosition) == nil {
+		t.Fatal("tampered prediction contract accepted")
+	}
+}
+
 func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	t.Helper()
 
@@ -91,27 +171,32 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOrderRepo(pool)
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	runID := uuid.New()
 	submittedAt := time.Date(2026, 3, 21, 13, 30, 0, 0, time.UTC)
 	limitPrice := 185.25
 
 	order := &domain.Order{
-		StrategyID:       &strategyID,
-		PipelineRunID:    &runID,
-		ExternalID:       "broker-123",
-		Ticker:           "AAPL",
-		MarketType:       domain.MarketTypeCrypto,
-		Side:             domain.OrderSideBuy,
-		OrderType:        domain.OrderTypeLimit,
-		Quantity:         10,
-		LimitPrice:       &limitPrice,
-		Status:           domain.OrderStatusPending,
-		Broker:           "alpaca",
-		SubmittedAt:      &submittedAt,
-		PredictionSide:   "YES",
-		PolymarketIntent: "BUY",
+		AccountID:            canonicalRepositoryTestAccountID,
+		Environment:          domain.AccountEnvironmentPaperScored,
+		OriginType:           "strategy_version",
+		OriginID:             uuid.NewString(),
+		StrategyID:           &strategyID,
+		PipelineRunID:        &runID,
+		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		ExternalID:           "broker-123",
+		Ticker:               "AAPL",
+		MarketType:           domain.MarketTypeCrypto,
+		Side:                 domain.OrderSideBuy,
+		OrderType:            domain.OrderTypeLimit,
+		Quantity:             10,
+		LimitPrice:           &limitPrice,
+		Status:               domain.OrderStatusPending,
+		Broker:               "alpaca",
+		SubmittedAt:          &submittedAt,
+		PredictionSide:       "YES",
+		PolymarketIntent:     "BUY",
 	}
 
 	if err := repo.Create(ctx, order); err != nil {
@@ -160,8 +245,6 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	order.FilledAvgPrice = &filledAvgPrice
 	order.Status = domain.OrderStatusFilled
 	order.FilledAt = &filledAt
-	order.PredictionSide = "NO"
-	order.PolymarketIntent = "SELL"
 
 	if err := repo.Update(ctx, order); err != nil {
 		t.Fatalf("Update() error = %v", err)
@@ -186,8 +269,8 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	if updated.FilledAt == nil || !updated.FilledAt.Equal(filledAt) {
 		t.Fatalf("expected FilledAt %v, got %v", filledAt, updated.FilledAt)
 	}
-	if updated.PredictionSide != "NO" || updated.PolymarketIntent != "SELL" {
-		t.Fatalf("expected updated prediction metadata, got side=%q intent=%q", updated.PredictionSide, updated.PolymarketIntent)
+	if updated.PredictionSide != "YES" || updated.PolymarketIntent != "BUY" {
+		t.Fatalf("expected immutable prediction metadata, got side=%q intent=%q", updated.PredictionSide, updated.PolymarketIntent)
 	}
 
 	if err := repo.Delete(ctx, order.ID); err != nil {
@@ -203,6 +286,30 @@ func TestOrderRepoIntegration_CreateGetUpdateDelete(t *testing.T) {
 	}
 }
 
+func TestOrderRepoIntegration_OpeningSpreadCreationRollsBackIncompleteBatch(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
+	strategyID := createTestStrategy(t, ctx, pool)
+	originID := uuid.NewString()
+	intent := domain.PositionIntentBuyToOpen
+	orders := []*domain.Order{
+		{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: originID, StrategyID: &strategyID, Ticker: "AAPL271217C00150000", MarketType: domain.MarketTypeOptions, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, PositionIntent: &intent},
+		{ID: uuid.New(), AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: originID, StrategyID: &strategyID, Ticker: "AAPL271217P00140000", MarketType: domain.MarketTypeOptions, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusRejected, PositionIntent: &intent},
+	}
+	if err := repo.CreateOptionOrders(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, "strategy_version", originID, orders); err == nil {
+		t.Fatal("CreateOptionOrders() error=nil")
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM orders WHERE id=ANY($1)`, []uuid.UUID{orders[0].ID, orders[1].ID}).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("persisted spread legs=%d", count)
+	}
+}
+
 func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	t.Helper()
 
@@ -210,7 +317,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOrderRepo(pool)
+	repo := NewOrderRepo(pool, canonicalRepositoryTestAccountID)
 	strategyA := createTestStrategy(t, ctx, pool)
 	strategyB := createTestStrategy(t, ctx, pool)
 	runA := uuid.New()
@@ -218,40 +325,46 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	baseTime := time.Date(2026, 3, 21, 9, 0, 0, 0, time.UTC)
 
 	orderA := &domain.Order{
-		StrategyID:    &strategyA,
-		PipelineRunID: &runA,
-		Ticker:        "AAPL",
-		MarketType:    domain.MarketTypeStock,
-		Side:          domain.OrderSideBuy,
-		OrderType:     domain.OrderTypeLimit,
-		Quantity:      10,
-		Status:        domain.OrderStatusSubmitted,
-		Broker:        "alpaca",
-		SubmittedAt:   timePtr(baseTime),
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
+		StrategyID:           &strategyA,
+		PipelineRunID:        &runA,
+		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		Ticker:               "AAPL",
+		MarketType:           domain.MarketTypeStock,
+		Side:                 domain.OrderSideBuy,
+		OrderType:            domain.OrderTypeLimit,
+		Quantity:             10,
+		Status:               domain.OrderStatusSubmitted,
+		Broker:               "alpaca",
+		SubmittedAt:          timePtr(baseTime),
 	}
 	orderB := &domain.Order{
-		StrategyID:    &strategyA,
-		PipelineRunID: &runA,
-		Ticker:        "AAPL",
-		MarketType:    domain.MarketTypeCrypto,
-		Side:          domain.OrderSideBuy,
-		OrderType:     domain.OrderTypeLimit,
-		Quantity:      5,
-		Status:        domain.OrderStatusFilled,
-		Broker:        "alpaca",
-		SubmittedAt:   timePtr(baseTime.Add(30 * time.Minute)),
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
+		StrategyID:           &strategyA,
+		PipelineRunID:        &runA,
+		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		Ticker:               "AAPL",
+		MarketType:           domain.MarketTypeCrypto,
+		Side:                 domain.OrderSideBuy,
+		OrderType:            domain.OrderTypeLimit,
+		Quantity:             5,
+		Status:               domain.OrderStatusFilled,
+		Broker:               "alpaca",
+		SubmittedAt:          timePtr(baseTime.Add(30 * time.Minute)),
 	}
 	orderC := &domain.Order{
-		StrategyID:    &strategyB,
-		PipelineRunID: &runB,
-		Ticker:        "MSFT",
-		MarketType:    domain.MarketTypePolymarket,
-		Side:          domain.OrderSideSell,
-		OrderType:     domain.OrderTypeMarket,
-		Quantity:      7,
-		Status:        domain.OrderStatusCancelled,
-		Broker:        "ibkr",
-		SubmittedAt:   timePtr(baseTime.Add(60 * time.Minute)),
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
+		StrategyID:           &strategyB,
+		PipelineRunID:        &runB,
+		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		Ticker:               "MSFT",
+		MarketType:           domain.MarketTypePolymarket,
+		Side:                 domain.OrderSideSell,
+		OrderType:            domain.OrderTypeMarket,
+		Quantity:             7,
+		Status:               domain.OrderStatusCancelled,
+		Broker:               "ibkr",
+		SubmittedAt:          timePtr(baseTime.Add(60 * time.Minute)),
 	}
 
 	for _, order := range []*domain.Order{orderA, orderB, orderC} {
@@ -294,7 +407,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 		t.Fatalf("expected orderB, got %s", strategyOrders[0].ID)
 	}
 
-	runOrders, err := repo.GetByRun(ctx, runA, repository.OrderFilter{
+	runOrders, err := repo.GetByRun(ctx, domain.PipelineRunRef{ID: runA, TradeDate: canonicalRepositoryTestTradeDate}, repository.OrderFilter{
 		SubmittedAfter: timePtr(baseTime.Add(15 * time.Minute)),
 	}, 10, 0)
 	if err != nil {
@@ -314,6 +427,64 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	if len(page) != 2 {
 		t.Fatalf("expected 2 orders on first page, got %d", len(page))
 	}
+}
+
+func TestOrderRepoIntegration_SlowStaleAllocatorCannotCreateSecondEffect(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+
+	accountID, opportunityID, staleOwner, takeoverOwner := canonicalRepositoryTestAccountID, uuid.New(), uuid.New(), uuid.New()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	tradeDate := canonicalRepositoryTestTradeDate
+	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(id,account_id,environment,origin_type,origin_id,strategy_id,pipeline_run_id,pipeline_run_trade_date,status,allocation_claim_id,allocation_claimed_at,allocation_claim_expires_at) VALUES($1,$2,$3,'strategy_version',$4,$5,$6,$7,'selected',$8,NOW()-INTERVAL '2 minutes',NOW()-INTERVAL '1 minute')`, opportunityID, accountID, domain.AccountEnvironmentPaperScored, versionID.String(), strategyID, runID, tradeDate, staleOwner); err != nil {
+		t.Fatal(err)
+	}
+	staleMayResume := make(chan struct{})
+	staleDone := make(chan error, 1)
+	go func() {
+		<-staleMayResume
+		staleDone <- NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, staleOwner, strategyID, runID, tradeDate, versionID))
+	}()
+	if _, err := pool.Exec(ctx, `UPDATE portfolio_opportunities SET allocation_claim_id=$1,allocation_claimed_at=NOW(),allocation_claim_expires_at=NOW()+INTERVAL '1 minute' WHERE id=$2 AND allocation_claim_expires_at<=NOW()`, takeoverOwner, opportunityID); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewOrderRepo(pool, accountID).Create(ctx, allocationRaceOrder(opportunityID, takeoverOwner, strategyID, runID, tradeDate, versionID)); err != nil {
+		t.Fatalf("takeover Create() error = %v", err)
+	}
+	close(staleMayResume)
+	if err := <-staleDone; err == nil || !strings.Contains(err.Error(), "claim ownership lost") {
+		t.Fatalf("stale Create() error = %v, want ownership lost", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM orders WHERE allocation_opportunity_id=$1`, opportunityID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("durable effects = %d, %v; want 1", count, err)
+	}
+}
+
+func TestOrderRepoIntegration_AllocationAuthorizationRejectsLineageMismatch(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOrderTradeIntegrationPool(t, ctx)
+	defer cleanup()
+	accountID, opportunityID, claimID := canonicalRepositoryTestAccountID, uuid.New(), uuid.New()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	tradeDate := canonicalRepositoryTestTradeDate
+	if _, err := pool.Exec(ctx, `INSERT INTO portfolio_opportunities(id,account_id,environment,origin_type,origin_id,strategy_id,pipeline_run_id,pipeline_run_trade_date,status,allocation_claim_id,allocation_claimed_at,allocation_claim_expires_at) VALUES($1,$2,$3,'strategy_version',$4,$5,$6,$7,'selected',$8,NOW(),NOW()+INTERVAL '1 minute')`, opportunityID, accountID, domain.AccountEnvironmentPaperScored, versionID.String(), strategyID, runID, tradeDate, claimID); err != nil {
+		t.Fatal(err)
+	}
+	order := allocationRaceOrder(opportunityID, claimID, strategyID, runID, tradeDate, versionID)
+	order.Environment = domain.AccountEnvironmentLive
+	if err := NewOrderRepo(pool, accountID).Create(ctx, order); err == nil || !strings.Contains(err.Error(), "allocation lineage") {
+		t.Fatalf("Create() error = %v, want lineage rejection", err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM orders WHERE allocation_opportunity_id=$1`, opportunityID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unauthorized order count = %d, %v", count, err)
+	}
+}
+
+func allocationRaceOrder(opportunityID, claimID, strategyID, runID uuid.UUID, tradeDate time.Time, versionID uuid.UUID) *domain.Order {
+	return &domain.Order{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: &strategyID, PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate, Ticker: "AAPL", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, Status: domain.OrderStatusPending, AllocationOpportunityID: &opportunityID, AllocationClaimID: &claimID}
 }
 
 func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
@@ -336,7 +507,7 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -389,8 +560,50 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 		`CREATE TABLE strategies (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid()
 		)`,
+		`CREATE TABLE portfolio_opportunities (
+			id UUID PRIMARY KEY,
+			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
+			strategy_id UUID,
+			pipeline_run_id UUID,
+			pipeline_run_trade_date DATE,
+			status TEXT NOT NULL,
+			allocation_claim_id UUID,
+			allocation_claimed_at TIMESTAMPTZ,
+			allocation_claim_expires_at TIMESTAMPTZ
+		)`,
+		`CREATE TABLE copy_subscriptions (
+			id UUID PRIMARY KEY,
+			account_id UUID NOT NULL,
+			environment TEXT NOT NULL,
+			status TEXT NOT NULL,
+			is_paper BOOLEAN NOT NULL
+		)`,
+		`CREATE TABLE copy_trade_intents (
+			id UUID PRIMARY KEY,
+			subscription_id UUID NOT NULL,
+			account_id UUID NOT NULL,
+			environment TEXT NOT NULL,
+			ticker TEXT NOT NULL,
+			side TEXT NOT NULL,
+			execution_claim_id UUID,
+			status TEXT NOT NULL,
+			order_id UUID
+		)`,
+		`CREATE TABLE copy_origin_rebalance_intents (
+			run_id UUID NOT NULL,
+			intent_id UUID NOT NULL,
+			account_id UUID NOT NULL,
+			environment TEXT NOT NULL,
+			origin_type TEXT NOT NULL,
+			origin_id TEXT NOT NULL
+		)`,
 		`CREATE TABLE positions (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
 			strategy_id UUID REFERENCES strategies (id),
 			ticker TEXT NOT NULL,
 			side position_side NOT NULL,
@@ -399,12 +612,22 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			unrealized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
 			realized_pnl NUMERIC(20, 8) NOT NULL DEFAULT 0,
 			opened_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			closed_at TIMESTAMPTZ
+			closed_at TIMESTAMPTZ,
+			close_reservation_order_id UUID
 		)`,
 		`CREATE TABLE orders (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			strategy_id UUID REFERENCES strategies (id),
 			pipeline_run_id UUID,
+			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
+			pipeline_run_trade_date DATE,
+			copy_origin_rebalance_run_id UUID,
+			copy_intent_id UUID,
+			copy_execution_claim_id UUID,
+			allocation_opportunity_id UUID REFERENCES portfolio_opportunities(id),
 			external_id TEXT,
 			ticker TEXT NOT NULL,
 			side trade_side NOT NULL,
@@ -429,10 +652,16 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			leg_group_id        UUID,
 			market_type         market_type NOT NULL DEFAULT 'stock',
 			prediction_side     TEXT,
-			polymarket_intent   TEXT
+			polymarket_intent   TEXT,
+			client_order_id     TEXT,
+			spread_max_risk     NUMERIC(20, 8),
+			spread_max_reward   NUMERIC(20, 8),
+			UNIQUE(account_id, allocation_opportunity_id)
 		)`,
-		`CREATE TABLE trades (
+		`CREATE TABLE trades (origin_type TEXT, origin_id TEXT, strategy_id UUID, pipeline_run_id UUID, pipeline_run_trade_date DATE,
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
 			external_id TEXT,
 			order_id UUID REFERENCES orders (id),
 			position_id UUID REFERENCES positions (id),

@@ -13,14 +13,12 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
-	"github.com/PatrickFanella/get-rich-quick/internal/execution/venue"
 	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/marketdata"
 	"github.com/PatrickFanella/get-rich-quick/internal/simulation"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
-	"github.com/PatrickFanella/get-rich-quick/internal/venuerecon"
 )
 
 var (
@@ -115,28 +113,29 @@ type CapitalPolicyRepository interface {
 	GetCapitalBinding(context.Context, uuid.UUID) (*capital.Binding, error)
 }
 
-// VenuePolicyRepository registers only reviewed immutable venue-adapter
-// artifacts and reloads the exact version pinned on a routed order.
-type VenuePolicyRepository interface {
-	RegisterVenuePolicy(context.Context, *venue.PolicyArtifact) (*venue.PolicyArtifact, error)
-	GetVenuePolicyByVersion(context.Context, string) (*venue.PolicyArtifact, error)
-}
-
-// VenueObservationRepository journals exact provider evidence before any
-// lifecycle or economic interpretation is applied.
-type VenueObservationRepository interface {
-	RecordVenueObservation(context.Context, *venue.Observation) (*venue.Observation, error)
-	GetVenueObservationByID(context.Context, uuid.UUID) (*venue.Observation, error)
-}
-
 // ProjectionRepository persists canonical marks and immutable rebuild
 // checkpoints without changing any legacy position or balance read path.
 type ProjectionRepository interface {
-	RecordMarkObservation(context.Context, *ledger.MarkObservation) (*ledger.MarkObservation, error)
 	GetMarkObservationByID(context.Context, uuid.UUID) (*ledger.MarkObservation, error)
-	ListCanonicalOpenLots(context.Context, time.Time) ([]CanonicalOpenLot, error)
+	ListCanonicalOpenLots(context.Context, uuid.UUID, time.Time) ([]CanonicalOpenLot, error)
 	RebuildPortfolioProjection(context.Context, ledger.ProjectionRequest) (*ledger.PortfolioProjection, error)
 	GetProjectionCheckpointByID(context.Context, uuid.UUID) (*ledger.ProjectionCheckpoint, error)
+}
+
+// ProjectionMarkBatch is one runtime-pool transaction that appends canonical
+// marks and queues a rebuild at an explicit ledger frontier.
+type ProjectionMarkBatch struct {
+	AccountID            uuid.UUID
+	ThroughTransactionID uuid.UUID
+	AsOf                 time.Time
+	MarkAsOf             time.Time
+	MaxMarkAge           time.Duration
+	Marks                []*ledger.MarkObservation
+}
+
+type ProjectionOutboxRepository interface {
+	LatestProjectionFrontier(context.Context, uuid.UUID, time.Time) (uuid.UUID, error)
+	RecordMarksAndEnqueueRebuild(context.Context, ProjectionMarkBatch) (uuid.UUID, error)
 }
 
 // ProjectionSnapshot is one canonical account-scoped checkpoint and the
@@ -153,6 +152,10 @@ type ProjectionSnapshot struct {
 	FreshMarks                      int
 	StaleMarks                      int
 	UnavailableMarks                int
+	ProjectionWorkPending           int
+	ProjectionWorkProcessing        int
+	ProjectionWorkRetrying          int
+	ProjectionWorkDegraded          int
 }
 
 // ProjectionReader exposes no mark or checkpoint write authority.
@@ -175,6 +178,12 @@ type CutoverEvidenceReader interface {
 	GetCutoverEvidenceInventory(context.Context, uuid.UUID) (*CutoverEvidenceInventory, error)
 }
 
+// ScopedCutoverEvidenceReader resolves only the caller-selected evaluation
+// scope. Promotion-quality automation must never infer a latest scope.
+type ScopedCutoverEvidenceReader interface {
+	GetCutoverEvidenceInventoryForScope(context.Context, uuid.UUID, uuid.UUID) (*CutoverEvidenceInventory, error)
+}
+
 // CanonicalOpenLot identifies an account-scoped open position whose Kalshi
 // contract identity is complete. Legacy positions never enter this read path.
 type CanonicalOpenLot struct {
@@ -195,21 +204,14 @@ type AccountingReconciliationRepository interface {
 	ListAccountingRuns(context.Context, uuid.UUID, int, int) ([]*accountingrecon.Run, error)
 }
 
-// VenueReconciliationRepository appends exact read-only provider/local
-// evidence and deterministic discrepancy graphs. It exposes no mutation path.
-type VenueReconciliationRepository interface {
-	RegisterVenueReconciliationPolicy(context.Context, *venuerecon.PolicyArtifact) (*venuerecon.PolicyArtifact, error)
-	RecordVenueProviderSnapshot(context.Context, *venuerecon.StableProviderSnapshot, time.Time) error
-	RecordVenueLocalSnapshot(context.Context, *venuerecon.LocalSnapshot, time.Time) error
-	RecordVenueReconciliationRun(context.Context, *venuerecon.Run, time.Time) (*venuerecon.Run, error)
-	GetVenueReconciliationRun(context.Context, uuid.UUID) (*venuerecon.Run, error)
-}
-
 // DatasetRepository persists immutable point-in-time manifests and their
 // deterministic quality evidence. It neither fetches data nor selects a
 // current manifest for an experiment.
 type DatasetRepository interface {
 	RegisterDatasetPolicy(context.Context, *dataset.PolicyArtifact) (*dataset.PolicyArtifact, error)
+	RecordMarketPayload(context.Context, *dataset.MarketPayload, time.Time) (*dataset.MarketPayload, error)
+	GetMarketPayload(context.Context, uuid.UUID) (*dataset.MarketPayload, error)
+	RecordBoundMarketDataset(context.Context, *dataset.BoundMarketDataset, time.Time) (*dataset.Manifest, error)
 	RecordDatasetManifest(context.Context, *dataset.Manifest, time.Time) (*dataset.Manifest, error)
 	GetDatasetManifest(context.Context, uuid.UUID) (*dataset.Manifest, error)
 	RecordDatasetQualityResult(context.Context, *dataset.QualityResult, time.Time) (*dataset.QualityResult, error)
@@ -302,23 +304,24 @@ type AgentDecisionFilter struct {
 
 // ConversationFilter defines supported filters when listing conversations.
 type ConversationFilter struct {
-	PipelineRunID *uuid.UUID
-	AgentRole     domain.AgentRole
+	PipelineRunRef *domain.PipelineRunRef
+	AgentRole      domain.AgentRole
 }
 
 // AgentEventFilter defines supported filters when listing agent events.
 type AgentEventFilter struct {
-	PipelineRunID *uuid.UUID
-	StrategyID    *uuid.UUID
-	AgentRole     domain.AgentRole
-	EventKind     string
-	Tags          []string
-	CreatedAfter  *time.Time
-	CreatedBefore *time.Time
+	PipelineRunRef *domain.PipelineRunRef
+	StrategyID     *uuid.UUID
+	AgentRole      domain.AgentRole
+	EventKind      string
+	Tags           []string
+	CreatedAfter   *time.Time
+	CreatedBefore  *time.Time
 }
 
 // OrderFilter defines supported filters when listing or querying orders.
 type OrderFilter struct {
+	Environment     domain.AccountEnvironment
 	Ticker          string
 	Broker          string
 	MarketType      domain.MarketType
@@ -339,16 +342,18 @@ type PositionFilter struct {
 
 // TradeFilter defines supported filters when retrieving trades.
 type TradeFilter struct {
-	OrderID    *uuid.UUID
-	PositionID *uuid.UUID
-	Ticker     *string
-	Side       *domain.OrderSide
-	StartDate  *time.Time
-	EndDate    *time.Time
+	Environment domain.AccountEnvironment
+	OrderID     *uuid.UUID
+	PositionID  *uuid.UUID
+	Ticker      *string
+	Side        *domain.OrderSide
+	StartDate   *time.Time
+	EndDate     *time.Time
 }
 
 // TradeDecisionFilter defines supported filters when listing trade decisions.
 type TradeDecisionFilter struct {
+	Environment   domain.AccountEnvironment
 	StrategyID    *uuid.UUID
 	InstrumentKey string
 	MarketType    domain.MarketType
@@ -372,10 +377,10 @@ type CopySubscriptionFilter struct {
 
 // AlpacaPLAggregateRepository provides read-only Alpaca-only P/L aggregates.
 type AlpacaPLAggregateRepository interface {
-	ClosedRealizedPnL(ctx context.Context) (float64, error)
-	OpenUnrealizedPnL(ctx context.Context) (float64, error)
-	TradeCount(ctx context.Context) (int, error)
-	FeeTotal(ctx context.Context) (float64, error)
+	ClosedRealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error)
+	OpenUnrealizedPnL(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error)
+	TradeCount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (int, error)
+	FeeTotal(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (float64, error)
 }
 
 // OpportunityFilter defines supported filters when listing opportunities.
@@ -412,7 +417,7 @@ type PolymarketAccountFilter struct {
 // MemorySearchFilter defines supported filters when searching agent memories.
 type MemorySearchFilter struct {
 	AgentRole         domain.AgentRole
-	PipelineRunID     *uuid.UUID
+	PipelineRunRef    *domain.PipelineRunRef
 	MinRelevanceScore *float64
 	CreatedAfter      *time.Time
 	CreatedBefore     *time.Time
@@ -467,7 +472,8 @@ type AuditLogFilter struct {
 
 // StrategyRepository provides CRUD operations for strategies.
 type StrategyRepository interface {
-	Create(ctx context.Context, strategy *domain.Strategy) error
+	CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error)
+	ResolveExecutionVersionID(ctx context.Context, strategyID uuid.UUID) (uuid.UUID, error)
 	Get(ctx context.Context, id uuid.UUID) (*domain.Strategy, error)
 	List(ctx context.Context, filter StrategyFilter, limit, offset int) ([]domain.Strategy, error)
 	// Count returns the total number of strategies matching the filter (ignoring pagination).
@@ -560,27 +566,26 @@ type CapitalLadderRepository interface {
 // PipelineRunRepository provides access to pipeline runs.
 type PipelineRunRepository interface {
 	Create(ctx context.Context, run *domain.PipelineRun) error
-	GetByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error)
-	Get(ctx context.Context, id uuid.UUID, tradeDate time.Time) (*domain.PipelineRun, error)
+	Get(ctx context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error)
 	List(ctx context.Context, filter PipelineRunFilter, limit, offset int) ([]domain.PipelineRun, error)
 	// Count returns the total number of pipeline runs matching the filter (ignoring pagination).
 	Count(ctx context.Context, filter PipelineRunFilter) (int, error)
-	Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization PipelineRunFinalization) (PipelineRunFinalizationReceipt, error)
-	RefineCompletedSignal(ctx context.Context, id uuid.UUID, tradeDate time.Time, expected, signal domain.PipelineSignal) (PipelineRunFinalizationReceipt, error)
+	Finalize(ctx context.Context, ref domain.PipelineRunRef, finalization PipelineRunFinalization) (PipelineRunFinalizationReceipt, error)
+	RefineCompletedSignal(ctx context.Context, ref domain.PipelineRunRef, expected, signal domain.PipelineSignal) (PipelineRunFinalizationReceipt, error)
 }
 
 // PipelineRunSnapshotRepository provides access to snapshots captured during a run.
 type PipelineRunSnapshotRepository interface {
 	Create(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error
-	GetByRun(ctx context.Context, runID uuid.UUID) ([]domain.PipelineRunSnapshot, error)
+	GetByRun(ctx context.Context, ref domain.PipelineRunRef) ([]domain.PipelineRunSnapshot, error)
 }
 
 // AgentDecisionRepository provides access to agent decisions created during a run.
 type AgentDecisionRepository interface {
 	Create(ctx context.Context, decision *domain.AgentDecision) error
-	GetByRun(ctx context.Context, runID uuid.UUID, filter AgentDecisionFilter, limit, offset int) ([]domain.AgentDecision, error)
+	GetByRun(ctx context.Context, ref domain.PipelineRunRef, filter AgentDecisionFilter, limit, offset int) ([]domain.AgentDecision, error)
 	// CountByRun returns the total number of decisions for the given run matching the filter.
-	CountByRun(ctx context.Context, runID uuid.UUID, filter AgentDecisionFilter) (int, error)
+	CountByRun(ctx context.Context, ref domain.PipelineRunRef, filter AgentDecisionFilter) (int, error)
 }
 
 // AgentEventRepository provides access to structured agent and pipeline events.
@@ -619,7 +624,16 @@ type OrderRepository interface {
 	Update(ctx context.Context, order *domain.Order) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
-	GetByRun(ctx context.Context, runID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
+	GetByRun(ctx context.Context, ref domain.PipelineRunRef, filter OrderFilter, limit, offset int) ([]domain.Order, error)
+	GetByCopyOriginRun(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, subscriptionID, copyOriginRunID uuid.UUID, filter OrderFilter, limit, offset int) ([]domain.Order, error)
+}
+
+type AllocationOrderRepository interface {
+	GetByAllocationOpportunity(ctx context.Context, opportunity domain.Opportunity) (*domain.Order, error)
+}
+
+type AllocationPackageOrderRepository interface {
+	ListByAllocationOpportunity(ctx context.Context, opportunity domain.Opportunity) ([]domain.Order, error)
 }
 
 // PositionRepository provides CRUD operations for positions.
@@ -639,6 +653,60 @@ type PositionRepository interface {
 	GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter PositionFilter, limit, offset int) ([]domain.Position, error)
 }
 
+// ExecutionScopedPositionRepository reads positions by canonical account and origin ownership.
+type ExecutionScopedPositionRepository interface {
+	GetByExecutionScope(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter PositionFilter, limit, offset int) ([]domain.Position, error)
+}
+
+type AccountScopedPositionRepository interface {
+	GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter PositionFilter, limit, offset int) ([]domain.Position, error)
+}
+
+type OptionsLifecycleOrderRepository interface {
+	ListOptionsLifecycleOrders(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Order, error)
+}
+
+type OptionsLifecyclePositionRepository interface {
+	ListOptionsLifecyclePositions(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Position, error)
+}
+
+type OptionsLifecycleTradeRepository interface {
+	ListOptionsLifecycleTrades(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Trade, error)
+}
+
+// AtomicOptionCloseRepository creates close orders and reserves their exact
+// positions in one transaction, then repairs interrupted reservations at startup.
+type AtomicOptionCloseRepository interface {
+	CreateOptionCloseOrdersAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []uuid.UUID, []*domain.Order) error
+	ReleaseOptionClosePositions(context.Context, uuid.UUID, []uuid.UUID, []uuid.UUID) error
+	ReconcileOptionCloseReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error
+}
+
+type AtomicOptionOrderRepository interface {
+	CreateOptionOrders(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, []*domain.Order) error
+}
+
+// OptionDefinitiveRejectionRepository records provider-authoritative rejection
+// and releases any linked close reservations in one transaction.
+type OptionDefinitiveRejectionRepository interface {
+	RejectOptionOrdersAndRelease(context.Context, uuid.UUID, domain.AccountEnvironment, []uuid.UUID) error
+}
+
+type OptionCloseReservationLookup interface {
+	GetOptionClosePositionByOrder(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID) (*domain.Position, error)
+}
+
+type AtomicPredictionExitRepository interface {
+	CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error
+	ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error
+	ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error
+}
+
+type PredictionExitReservationLookup interface {
+	GetPredictionExitOrderByPosition(context.Context, uuid.UUID, domain.AccountEnvironment, uuid.UUID) (*domain.Order, error)
+}
+
 // TradeRepository provides access to executed trades.
 type TradeRepository interface {
 	Create(ctx context.Context, trade *domain.Trade) error
@@ -651,10 +719,16 @@ type TradeRepository interface {
 
 // PaperAccountRepository provides provenance-safe paper-account reconstruction reads.
 type PaperAccountRepository interface {
-	ListPaperTrades(ctx context.Context, limit, offset int) ([]domain.Trade, error)
-	GetOpenPaperPositions(ctx context.Context, limit, offset int) ([]domain.Position, error)
-	ListOpenPaperOrders(ctx context.Context, limit, offset int) ([]domain.Order, error)
-	GetMaxPaperExternalIDSequence(ctx context.Context) (uint64, error)
+	ListPaperTrades(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Trade, error)
+	GetOpenPaperPositions(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error)
+	ListOpenPaperOrders(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Order, error)
+	GetMaxPaperExternalIDSequence(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment) (uint64, error)
+}
+
+// ExecutionAccountLocker serializes account-level risk snapshots and effects
+// across every runtime process using a PostgreSQL transaction advisory lock.
+type ExecutionAccountLocker interface {
+	WithExecutionAccountLock(context.Context, uuid.UUID, func() error) error
 }
 
 // OrderFillIntent describes the execution fill that should be persisted atomically.
@@ -681,17 +755,42 @@ type OrderFillResult struct {
 	PositionID *uuid.UUID
 	Position   *domain.Position
 	TradeID    uuid.UUID
+	Trade      *domain.Trade
 	CreatedAt  time.Time
 	Replayed   bool
+}
+
+// OrderFillCommitResolver resolves an ambiguous ApplyOrderFill result from its
+// durable idempotency row before an in-memory venue effect is compensated.
+type OrderFillCommitResolver interface {
+	ResolveOrderFillCommit(context.Context, OrderFillInput) (OrderFillResult, bool, error)
 }
 
 // PredictionDecisionSettlementInput carries settlement persistence details.
 type PredictionDecisionSettlementInput struct {
 	IdempotencyKey string
+	AccountID      uuid.UUID
+	Environment    domain.AccountEnvironment
+	OriginType     string
+	OriginID       string
 	Decision       *domain.TradeDecision
 	PositionTicker string
 	Payout         float64
 	ResolvedAt     time.Time
+	Resolution     PredictionResolutionEvidence
+}
+
+// PredictionResolutionEvidence is the exact provider payload and stable
+// identity used to interpret one resolved prediction contract. It is carried
+// through the neutral repository input so the upstream economic planner never
+// has to reconstruct provider evidence from a mutable market row.
+type PredictionResolutionEvidence struct {
+	Source          string
+	SourceNamespace string
+	SourceEventID   string
+	SourceRevision  string
+	ObservedAt      time.Time
+	RawPayload      []byte
 }
 
 // PredictionDecisionSettlementResult returns the persisted settlement ids.
@@ -707,6 +806,11 @@ type PredictionDecisionSettlementResult struct {
 // OptionPositionSettlementInput identifies one expired option position and
 // the intrinsic cash value that must be persisted with its closing trade.
 type OptionPositionSettlementInput struct {
+	IdempotencyKey  string
+	AccountID       uuid.UUID
+	Environment     domain.AccountEnvironment
+	OriginType      string
+	OriginID        string
 	PositionID      uuid.UUID
 	SettlementPrice float64
 	SettledAt       time.Time
@@ -726,18 +830,33 @@ type OptionSettlementRepository interface {
 	SettleOptionPosition(ctx context.Context, input OptionPositionSettlementInput) (OptionPositionSettlementResult, error)
 }
 
+type OptionSettlementCommitResolver interface {
+	ResolveOptionSettlementCommit(context.Context, OptionPositionSettlementInput) (OptionPositionSettlementResult, bool, error)
+}
+
+type OptionSettlementSyncRetryRepository interface {
+	HasOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) (bool, error)
+	ResolveOptionSettlementSyncRetries(context.Context, uuid.UUID, domain.AccountEnvironment) error
+}
+
 // OptionFillInput carries one fully accounted option fill for atomic
 // order-position-trade persistence. PositionID is required for closing fills
 // and must be nil for opening fills.
 type OptionFillInput struct {
-	Order        *domain.Order
-	PositionID   *uuid.UUID
-	FillPrice    float64
-	FillQuantity float64
-	Fee          float64
-	Premium      float64
-	FilledAt     time.Time
-	ExitReason   string
+	IdempotencyKey string
+	AccountID      uuid.UUID
+	Environment    domain.AccountEnvironment
+	OriginType     string
+	OriginID       string
+	Order          *domain.Order
+	PositionID     *uuid.UUID
+	FillPrice      float64
+	FillQuantity   float64
+	Fee            float64
+	Premium        float64
+	FilledAt       time.Time
+	ExitReason     string
+	StatusOnly     bool
 }
 
 // OptionFillResult returns the durable identities committed for one option fill.
@@ -753,6 +872,12 @@ type OptionFillRepository interface {
 	ApplyOptionFills(ctx context.Context, inputs []OptionFillInput) ([]OptionFillResult, error)
 }
 
+// OptionFillCommitResolver resolves a failed commit acknowledgement from
+// durable idempotency rows without applying or rolling back any venue effect.
+type OptionFillCommitResolver interface {
+	ResolveOptionFillCommit(ctx context.Context, inputs []OptionFillInput) ([]OptionFillResult, bool, error)
+}
+
 // FinancialLifecycleRepository persists atomic fill and prediction settlement lifecycles.
 type FinancialLifecycleRepository interface {
 	ApplyOrderFill(ctx context.Context, input OrderFillInput) (OrderFillResult, error)
@@ -766,8 +891,41 @@ type TradeDecisionJournalRepository interface {
 	List(ctx context.Context, filter TradeDecisionFilter, limit, offset int) ([]domain.TradeDecision, error)
 	// Count returns the total number of trade decisions matching the filter.
 	Count(ctx context.Context, filter TradeDecisionFilter) (int, error)
-	AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) error
-	AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) error
+	AttachPaperOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error)
+	AttachLiveOrder(ctx context.Context, decisionID, orderID uuid.UUID) (bool, error)
+}
+
+// AtomicOrderReplayRepository links an order and records its ordered replay
+// event in one transaction. Implementations must make same-order retries
+// idempotent.
+type AtomicOrderReplayRepository interface {
+	AttachOrderWithReplay(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time) error
+}
+
+// DecisionOrderAttachmentScope carries lineage that is present on orders but
+// not on trade decisions.
+type DecisionOrderAttachmentScope struct {
+	PipelineRunID            *uuid.UUID
+	PipelineRunTradeDate     *time.Time
+	CopyOriginRebalanceRunID *uuid.UUID
+	StrategyID               *uuid.UUID
+}
+
+// ScopedOrderReplayRepository validates the complete execution lineage while
+// atomically attaching an order and replay event.
+type ScopedOrderReplayRepository interface {
+	AttachOrderWithReplayScoped(ctx context.Context, decisionID, orderID uuid.UUID, live bool, source string, occurredAt time.Time, scope DecisionOrderAttachmentScope) error
+}
+
+// ScopedDecisionOrderRepository validates complete execution lineage when no
+// replay ledger is configured.
+type ScopedDecisionOrderRepository interface {
+	AttachPaperOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope DecisionOrderAttachmentScope) (bool, error)
+	AttachLiveOrderScoped(ctx context.Context, decisionID, orderID uuid.UUID, scope DecisionOrderAttachmentScope) (bool, error)
+}
+
+type AttachedOrderDecisionRepository interface {
+	GetByOrderScoped(ctx context.Context, orderID uuid.UUID, live bool, scope DecisionOrderAttachmentScope) (*domain.TradeDecision, error)
 }
 
 // OpportunityRepository provides CRUD operations for portfolio opportunities.
@@ -778,9 +936,25 @@ type OpportunityRepository interface {
 	List(ctx context.Context, filter OpportunityFilter, limit, offset int) ([]domain.Opportunity, error)
 	ExpireQueuedBefore(ctx context.Context, before time.Time) (int64, error)
 	ListQueuedForAllocation(ctx context.Context, asOf time.Time) ([]domain.Opportunity, error)
+	ListSelectedForAllocation(ctx context.Context, claimID uuid.UUID, asOf time.Time) ([]domain.Opportunity, error)
+	ClaimQueuedForAllocation(ctx context.Context, id, claimID uuid.UUID, claimedAt, claimExpiresAt time.Time) (bool, error)
+	TakeOverExpiredAllocationClaim(ctx context.Context, id, claimID uuid.UUID, asOf, claimExpiresAt time.Time) (bool, error)
+	RenewAllocationClaim(ctx context.Context, id, claimID uuid.UUID, lease time.Duration) (bool, error)
+	TransitionClaimedStatus(ctx context.Context, id, claimID uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error)
+	TransitionStatus(ctx context.Context, id uuid.UUID, from, to domain.OpportunityStatus, rejectReason string) (bool, error)
 	// Count returns the total number of opportunities matching the filter.
 	Count(ctx context.Context, filter OpportunityFilter) (int, error)
 	UpdateStatus(ctx context.Context, id uuid.UUID, status domain.OpportunityStatus, rejectReason string) error
+}
+
+// AtomicDecisionReplayRepository persists a decision and its required initial
+// replay events in one transaction.
+type AtomicDecisionReplayRepository interface {
+	CreateWithInitialReplay(ctx context.Context, decision *domain.TradeDecision) error
+}
+
+type AtomicOrderDecisionRepository interface {
+	CreateOrderWithDecision(ctx context.Context, order *domain.Order, decision *domain.TradeDecision, live bool, scope DecisionOrderAttachmentScope) error
 }
 
 // AllocationDecisionRepository provides access to allocator decision records.
@@ -789,6 +963,7 @@ type AllocationDecisionRepository interface {
 	List(ctx context.Context, filter AllocationDecisionFilter, limit, offset int) ([]domain.AllocationDecision, error)
 	// Count returns the total number of decisions matching the filter.
 	Count(ctx context.Context, filter AllocationDecisionFilter) (int, error)
+	RecordPaperOrderResult(ctx context.Context, id, claimID uuid.UUID, orderID *uuid.UUID, action domain.AllocationDecisionAction, reasons []string) (bool, error)
 }
 
 // ReplayEventRepository provides access to persisted replay events.
@@ -951,4 +1126,7 @@ type CopyTradingRepository interface {
 	CreateIntent(ctx context.Context, intent *domain.CopyTradeIntent) (bool, error)
 	ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error)
 	UpdateIntent(ctx context.Context, intent *domain.CopyTradeIntent) error
+	ClaimIntentExecution(ctx context.Context, intentID, claimID uuid.UUID, now time.Time) (bool, error)
+	GetClaimedIntentExecution(ctx context.Context, intentID, claimID uuid.UUID) (*domain.CopyTradeIntent, *domain.CopySubscription, error)
+	CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, claimID uuid.UUID) (bool, error)
 }

@@ -1,18 +1,25 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/dataset"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/eventmarkets"
+	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
+	"github.com/PatrickFanella/get-rich-quick/internal/optionsstrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 )
 
 // ErrNotFound is an alias for the repository-level sentinel so that existing
@@ -32,18 +39,27 @@ func NewStrategyRepo(pool *pgxpool.Pool) *StrategyRepo {
 	return &StrategyRepo{pool: pool}
 }
 
-// Create inserts a new strategy and populates the generated ID and timestamps
-// on the provided struct.
-func (r *StrategyRepo) Create(ctx context.Context, s *domain.Strategy) error {
+func (r *StrategyRepo) CreateWithExecutionVersion(ctx context.Context, s *domain.Strategy) (uuid.UUID, error) {
+	if s == nil || s.ID == uuid.Nil {
+		return uuid.Nil, fmt.Errorf("postgres: strategy ID is required")
+	}
 	configBytes, err := marshalConfig(s.Config)
 	if err != nil {
-		return err
+		return uuid.Nil, err
 	}
-
-	row := r.pool.QueryRow(ctx,
-		`INSERT INTO strategies (name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, is_active)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-		 RETURNING id, created_at, updated_at`,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: begin create strategy: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := lockStrategyReuseKey(ctx, tx, *s); err != nil {
+		return uuid.Nil, err
+	}
+	row := tx.QueryRow(ctx,
+		`INSERT INTO strategies (id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, is_active)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 RETURNING created_at, updated_at`,
+		s.ID,
 		s.Name,
 		s.Description,
 		s.Ticker,
@@ -56,17 +72,205 @@ func (r *StrategyRepo) Create(ctx context.Context, s *domain.Strategy) error {
 		s.Status == domain.StrategyStatusActive,
 	)
 
-	if err := row.Scan(&s.ID, &s.CreatedAt, &s.UpdatedAt); err != nil {
-		return fmt.Errorf("postgres: create strategy: %w", err)
+	if err := row.Scan(&s.CreatedAt, &s.UpdatedAt); err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: create strategy: %w", err)
+	}
+	versionID, err := bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: commit create strategy: %w", err)
+	}
+	s.ExecutionStrategyVersionID = &versionID
+	return versionID, nil
+}
+
+func lockStrategyReuseKey(ctx context.Context, tx pgx.Tx, strategy domain.Strategy) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "augr:strategy-reuse:"+strategyReuseKey(strategy)); err != nil {
+		return fmt.Errorf("postgres: lock strategy reuse key: %w", err)
+	}
+	return nil
+}
+
+func strategyReuseKey(strategy domain.Strategy) string {
+	marketType := string(strategy.MarketType.Normalize())
+	key := fmt.Sprintf("%d:%s|%d:%s", len(marketType), marketType, len(strategy.Ticker), strategy.Ticker)
+	if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
+		key += fmt.Sprintf("|%d:%s", len(strategy.Name), strategy.Name)
+	}
+	return key
+}
+
+const resolveExecutionVersionSQL = `SELECT s.execution_strategy_version_id,v.id,v.family_id,s.market_type,
+	strategy_legacy_snapshot_sha(s.id),convert_to(strategy_canonical_json(s.config),'UTF8'),v.sha256,v.canonical_bytes
+	FROM strategies s
+	JOIN strategy_versions v ON v.id=s.execution_strategy_version_id
+	JOIN strategy_families f ON f.id=v.family_id
+	WHERE s.id=$1`
+
+func (r *StrategyRepo) ResolveExecutionVersionID(ctx context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
+	var bindingID, versionID, familyID uuid.UUID
+	var snapshot string
+	var canonicalConfig, versionCanonical []byte
+	var versionDigest string
+	var marketType domain.MarketType
+	err := r.pool.QueryRow(ctx, resolveExecutionVersionSQL, strategyID).Scan(
+		&bindingID, &versionID, &familyID, &marketType, &snapshot, &canonicalConfig, &versionDigest, &versionCanonical,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, fmt.Errorf("postgres: resolve execution version for strategy %s: %w", strategyID, ErrNotFound)
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: resolve execution version for strategy %s: %w", strategyID, err)
+	}
+	if bindingID != versionID {
+		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version family mismatch", strategyID)
+	}
+	stored, err := strategycatalog.VersionFromCanonical(versionID, versionDigest, versionCanonical)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: validate strategy %s execution version: %w", strategyID, err)
+	}
+	if stored.FamilyID() != familyID {
+		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version family mismatch", strategyID)
+	}
+	if stored.CompilerKind() == optionsstrategy.CompilerKindV1 {
+		if marketType.Normalize() != domain.MarketTypeOptions {
+			return uuid.Nil, fmt.Errorf("postgres: strategy %s native options market mismatch", strategyID)
+		}
+		family, err := getStrategyFamilyQuery(ctx, r.pool, familyID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if err := optionsstrategy.ValidateRuntimeConfig(canonicalConfig, family, stored); err != nil {
+			return uuid.Nil, fmt.Errorf("postgres: strategy %s native options binding is stale: %w", strategyID, err)
+		}
+		return versionID, nil
+	}
+	if familyID != strategycatalog.LegacyFamilyID(strategyID) {
+		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version family mismatch", strategyID)
+	}
+	_, kinds, err := legacyExecutionRequirements(marketType)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	expected, err := strategycatalog.NewLegacyVersion(familyID, snapshot, canonicalConfig, kinds)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: construct strategy %s execution version: %w", strategyID, err)
+	}
+	if versionID != expected.ID() || !bytes.Equal(stored.CanonicalBytes(), expected.CanonicalBytes()) {
+		return uuid.Nil, fmt.Errorf("postgres: strategy %s execution version binding is stale", strategyID)
+	}
+	return versionID, nil
+}
+
+func bindExecutionVersion(ctx context.Context, tx pgx.Tx, strategy *domain.Strategy) (uuid.UUID, error) {
+	assetClass, kinds, err := legacyExecutionRequirements(strategy.MarketType)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	family, err := strategycatalog.NewLegacyFamily(strategy.ID, assetClass)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	createdAt := time.Now().UTC().Truncate(time.Microsecond)
+	var storedFamilyCanonical []byte
+	err = tx.QueryRow(ctx, `SELECT canonical_bytes FROM strategy_families WHERE id=$1`, family.ID()).Scan(&storedFamilyCanonical)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, fmt.Errorf("postgres: check legacy strategy family: %w", err)
+	}
+	if err == nil && !bytes.Equal(storedFamilyCanonical, family.CanonicalBytes()) {
+		return uuid.Nil, fmt.Errorf("postgres: legacy strategy family changed: %w", repository.ErrIdempotencyConflict)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		assetClasses, err := json.Marshal(family.AssetClasses())
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO strategy_families(
+			id,schema_name,slug,name,thesis,asset_classes,sha256,canonical_bytes,canonical_json,created_at
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,convert_from($8,'UTF8')::jsonb,$9)`,
+			family.ID(), strategycatalog.FamilySchemaV1, family.Slug(), family.Name(), family.Thesis(), string(assetClasses),
+			family.Digest(), family.CanonicalBytes(), createdAt); err != nil {
+			return uuid.Nil, fmt.Errorf("postgres: insert legacy strategy family: %w", err)
+		}
+		evidence, err := strategycatalog.NewInitialLifecycleEvidence(strategycatalog.EntityFamily, family.ID(), family.Digest())
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if err := insertStrategyLifecycle(ctx, tx, evidence, createdAt); err != nil {
+			return uuid.Nil, fmt.Errorf("postgres: insert legacy family lifecycle: %w", err)
+		}
 	}
 
-	return nil
+	var snapshot string
+	var canonicalConfig []byte
+	if err := tx.QueryRow(ctx, `SELECT strategy_legacy_snapshot_sha(id),convert_to(strategy_canonical_json(config),'UTF8') FROM strategies WHERE id=$1`, strategy.ID).
+		Scan(&snapshot, &canonicalConfig); err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: read persisted strategy snapshot: %w", err)
+	}
+	version, err := strategycatalog.NewLegacyVersion(family.ID(), snapshot, canonicalConfig, kinds)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: construct legacy strategy version: %w", err)
+	}
+	result, err := tx.Exec(ctx, `INSERT INTO strategy_versions(
+		id,schema_name,family_id,compiler_kind,compiler_version,source_commit,source_tree_sha256,config_schema,config_bytes,config,
+		decision_contract,required_kind_count,sha256,canonical_bytes,canonical_json,created_at
+	) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,convert_from($9,'UTF8')::jsonb,$10,$11,$12,$13,convert_from($13,'UTF8')::jsonb,$14)
+	ON CONFLICT(id) DO NOTHING`, version.ID(), strategycatalog.VersionSchemaV1, version.FamilyID(), version.CompilerKind(),
+		version.CompilerVersion(), version.SourceCommit(), version.SourceTreeSHA256(), version.ConfigSchema(), version.Config(),
+		version.DecisionContract(), len(version.RequiredDatasetKinds()), version.Digest(), version.CanonicalBytes(), createdAt)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: insert legacy strategy version: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		var storedVersionCanonical []byte
+		if err := tx.QueryRow(ctx, `SELECT canonical_bytes FROM strategy_versions WHERE id=$1`, version.ID()).Scan(&storedVersionCanonical); err != nil {
+			return uuid.Nil, fmt.Errorf("postgres: read legacy strategy version: %w", err)
+		}
+		if !bytes.Equal(storedVersionCanonical, version.CanonicalBytes()) {
+			return uuid.Nil, fmt.Errorf("postgres: legacy strategy version changed: %w", repository.ErrIdempotencyConflict)
+		}
+	}
+	if result.RowsAffected() > 0 {
+		for sequence, kind := range version.RequiredDatasetKinds() {
+			if _, err := tx.Exec(ctx, `INSERT INTO strategy_version_dataset_kinds(version_id,family_id,sequence,kind) VALUES($1,$2,$3,$4)`, version.ID(), family.ID(), sequence, kind); err != nil {
+				return uuid.Nil, fmt.Errorf("postgres: insert legacy version dataset kind: %w", err)
+			}
+		}
+		evidence, err := strategycatalog.NewInitialLifecycleEvidence(strategycatalog.EntityVersion, version.ID(), version.Digest())
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if err := insertStrategyLifecycle(ctx, tx, evidence, createdAt); err != nil {
+			return uuid.Nil, fmt.Errorf("postgres: insert legacy version lifecycle: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE strategies SET execution_strategy_version_id=$1 WHERE id=$2`, version.ID(), strategy.ID); err != nil {
+		return uuid.Nil, fmt.Errorf("postgres: bind strategy execution version: %w", err)
+	}
+	return version.ID(), nil
+}
+
+func legacyExecutionRequirements(marketType domain.MarketType) (instrument.AssetClass, []dataset.Kind, error) {
+	switch marketType.Normalize() {
+	case domain.MarketTypeStock:
+		return instrument.AssetClassEquity, []dataset.Kind{dataset.KindBars}, nil
+	case domain.MarketTypeCrypto:
+		return instrument.AssetClassCryptoSpot, []dataset.Kind{dataset.KindBars}, nil
+	case domain.MarketTypeOptions:
+		return instrument.AssetClassOption, []dataset.Kind{dataset.KindBars, dataset.KindOptionChains}, nil
+	case domain.MarketTypeKalshi, domain.MarketTypePolymarket:
+		return instrument.AssetClassPredictionContract, []dataset.Kind{dataset.KindPredictionBooks, dataset.KindPredictionRules, dataset.KindResolutions}, nil
+	default:
+		return instrument.AssetClassUnknown, nil, fmt.Errorf("postgres: unsupported strategy market type %q", marketType)
+	}
 }
 
 // Get retrieves a strategy by ID. It returns ErrNotFound when no row matches.
 func (r *StrategyRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Strategy, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at
+		`SELECT id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id
 		 FROM strategies
 		 WHERE id = $1`,
 		id,
@@ -204,7 +408,12 @@ func (r *StrategyRepo) Update(ctx context.Context, s *domain.Strategy) error {
 		return err
 	}
 
-	row := r.pool.QueryRow(ctx,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin update strategy: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx,
 		`UPDATE strategies
 		 SET name = $1, description = $2, ticker = $3, market_type = $4,
 		     schedule_cron = $5, config = $6, status = $7, skip_next_run = $8, is_paper = $9,
@@ -229,7 +438,14 @@ func (r *StrategyRepo) Update(ctx context.Context, s *domain.Strategy) error {
 		}
 		return fmt.Errorf("postgres: update strategy: %w", err)
 	}
-
+	versionID, err := bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit update strategy: %w", err)
+	}
+	s.ExecutionStrategyVersionID = &versionID
 	return nil
 }
 
@@ -237,11 +453,16 @@ func (r *StrategyRepo) Update(ctx context.Context, s *domain.Strategy) error {
 // another. It returns ErrNotFound when no row satisfies the ID, paper-mode, and
 // status preconditions.
 func (r *StrategyRepo) TransitionPaperStatus(ctx context.Context, id uuid.UUID, fromStatus, toStatus string) (*domain.Strategy, error) {
-	row := r.pool.QueryRow(ctx,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: begin transition paper strategy: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx,
 		`UPDATE strategies
 		 SET status = $1, updated_at = NOW()
 		 WHERE id = $2 AND is_paper = TRUE AND status = $3
-		 RETURNING id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at`,
+		 RETURNING id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id`,
 		toStatus,
 		id,
 		fromStatus,
@@ -254,6 +475,14 @@ func (r *StrategyRepo) TransitionPaperStatus(ctx context.Context, id uuid.UUID, 
 		}
 		return nil, fmt.Errorf("postgres: transition paper strategy: %w", err)
 	}
+	versionID, err := bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: commit transition paper strategy: %w", err)
+	}
+	s.ExecutionStrategyVersionID = &versionID
 	return s, nil
 }
 
@@ -261,11 +490,16 @@ func (r *StrategyRepo) TransitionPaperStatus(ctx context.Context, id uuid.UUID, 
 // scheduled run. It returns ErrNotFound when the ID, paper-mode, and active
 // status preconditions are not all satisfied.
 func (r *StrategyRepo) MarkPaperSkipNext(ctx context.Context, id uuid.UUID) (*domain.Strategy, error) {
-	row := r.pool.QueryRow(ctx,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: begin mark paper skip-next: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx,
 		`UPDATE strategies
 		 SET skip_next_run = TRUE, updated_at = NOW()
 		 WHERE id = $1 AND is_paper = TRUE AND status = $2
-		 RETURNING id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at`,
+		 RETURNING id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id`,
 		id,
 		domain.StrategyStatusActive,
 	)
@@ -277,6 +511,14 @@ func (r *StrategyRepo) MarkPaperSkipNext(ctx context.Context, id uuid.UUID) (*do
 		}
 		return nil, fmt.Errorf("postgres: mark paper skip-next: %w", err)
 	}
+	versionID, err := bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("postgres: commit mark paper skip-next: %w", err)
+	}
+	s.ExecutionStrategyVersionID = &versionID
 	return s, nil
 }
 
@@ -304,16 +546,30 @@ func (r *StrategyRepo) UpdateThesis(ctx context.Context, strategyID uuid.UUID, t
 	if len(thesis) > 0 {
 		thesisArg = []byte(thesis)
 	}
-	tag, err := r.pool.Exec(ctx,
-		`UPDATE strategies SET active_thesis = $1, updated_at = NOW() WHERE id = $2`,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin update thesis %s: %w", strategyID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	row := tx.QueryRow(ctx,
+		`UPDATE strategies SET active_thesis = $1, updated_at = NOW() WHERE id = $2
+		 RETURNING id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id`,
 		thesisArg,
 		strategyID,
 	)
+	s, err := scanStrategy(row)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: update thesis %s: %w", strategyID, ErrNotFound)
+		}
 		return fmt.Errorf("postgres: update thesis %s: %w", strategyID, err)
 	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("postgres: update thesis %s: %w", strategyID, ErrNotFound)
+	_, err = bindExecutionVersion(ctx, tx, s)
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit update thesis %s: %w", strategyID, err)
 	}
 	return nil
 }
@@ -363,6 +619,7 @@ func scanStrategy(sc scanner) (*domain.Strategy, error) {
 		&s.IsPaper,
 		&s.CreatedAt,
 		&s.UpdatedAt,
+		&s.ExecutionStrategyVersionID,
 	)
 	if err != nil {
 		return nil, err
@@ -392,6 +649,7 @@ func scanStrategyWithLatestRun(sc scanner) (*domain.Strategy, error) {
 		&s.IsPaper,
 		&s.CreatedAt,
 		&s.UpdatedAt,
+		&s.ExecutionStrategyVersionID,
 		&latestRunJSON,
 	); err != nil {
 		return nil, err
@@ -440,7 +698,7 @@ func buildListQuery(filter repository.StrategyFilter, limit, offset int) (string
 		conditions = append(conditions, "s.is_paper = "+nextArg(*filter.IsPaper))
 	}
 
-	base := `SELECT s.id, s.name, s.description, s.ticker, s.market_type, s.schedule_cron, s.config, s.status, s.skip_next_run, s.is_paper, s.created_at, s.updated_at, latest_run_summary.latest_run_summary
+	base := `SELECT s.id, s.name, s.description, s.ticker, s.market_type, s.schedule_cron, s.config, s.status, s.skip_next_run, s.is_paper, s.created_at, s.updated_at, s.execution_strategy_version_id, latest_run_summary.latest_run_summary
 		 FROM strategies s
 		 LEFT JOIN LATERAL (
              SELECT jsonb_build_object(

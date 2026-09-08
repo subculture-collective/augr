@@ -25,6 +25,15 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
+
+func TestNewJobOrchestratorRetainsExecutionAccount(t *testing.T) {
+	orch := NewJobOrchestrator(OrchestratorDeps{ExecutionAccount: testExecutionAccountBinding})
+	if orch.deps.ExecutionAccount != testExecutionAccountBinding {
+		t.Fatal("orchestrator did not retain execution account")
+	}
+}
+
 func TestDiscoveryReadinessLockOmitsFiveJobsAndRecordsSortedDiagnostics(t *testing.T) {
 	readiness := &DiscoveryReadiness{Reason: pgrepo.DiscoveryDeploymentUnavailableReason, Err: pgrepo.ErrDiscoveryDeploymentImmutableBinding}
 	orch := NewJobOrchestrator(OrchestratorDeps{DiscoveryReadiness: readiness})
@@ -74,6 +83,25 @@ func TestDiscoveryReadinessEvaluationFailureUsesGenericDiagnostics(t *testing.T)
 	for _, diagnostic := range diagnostics {
 		if diagnostic.Reason != DiscoveryReadinessEvaluationErrorReason {
 			t.Fatalf("evaluation failure reason = %q", diagnostic.Reason)
+		}
+	}
+}
+
+func TestStockReadinessDoesNotHoldOptionsFailureAgainstStockJobs(t *testing.T) {
+	readiness := &DiscoveryReadiness{
+		Ready: true, CapabilitiesEvaluated: true, StockReady: true,
+		OptionsReason: "immutable option contract metadata is missing",
+	}
+	orch := NewJobOrchestrator(OrchestratorDeps{DiscoveryReadiness: readiness})
+	diagnostics := orch.UnavailableJobs()
+	if len(diagnostics) != 1 || diagnostics[0].Name != "options_discovery" || diagnostics[0].Reason != readiness.OptionsReason {
+		t.Fatalf("unavailable diagnostics = %#v", diagnostics)
+	}
+	for _, name := range stockDiscoveryDeploymentJobNames {
+		for _, diagnostic := range diagnostics {
+			if diagnostic.Name == name {
+				t.Fatalf("stock job %q was held by options-only evidence gap", name)
+			}
 		}
 	}
 }
@@ -1194,12 +1222,15 @@ func TestJobOrchestratorRegisterAllAddsPolymarketReconcile(t *testing.T) {
 	t.Parallel()
 
 	reconciler := polymarketexecution.NewReconciler(polymarketexecution.ReconcilerDeps{
-		Broker: &polymarketBrokerStub{positions: []domain.Position{{Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 10}}},
+		ExecutionAccount: testExecutionAccountBinding,
+		Broker:           &polymarketBrokerStub{positions: []domain.Position{{MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 10}}},
 		PositionRepo: &polymarketPositionRepoStub{positions: []domain.Position{{
-			MarketType: domain.MarketTypePolymarket,
-			Ticker:     "market-one",
-			Side:       domain.PositionSideLong,
-			Quantity:   10,
+			AccountID:   testExecutionAccountBinding.AccountID(),
+			Environment: testExecutionAccountBinding.Environment(),
+			MarketType:  domain.MarketTypePolymarket,
+			Ticker:      "market-one",
+			Side:        domain.PositionSideLong,
+			Quantity:    10,
 		}}},
 		AuditLogRepo: &polymarketAuditRepoStub{},
 		Metrics:      &polymarketReconcilerMetricsStub{},
@@ -1308,7 +1339,7 @@ func TestJobOrchestratorRegisterAllAddsKalshiSettlement(t *testing.T) {
 	t.Parallel()
 	orch := NewJobOrchestrator(OrchestratorDeps{
 		KalshiCatalog:     kalshiCatalogStub{},
-		PredictionSettler: predictionexecution.NewSettler(nil, nil, nil, nil, nil),
+		PredictionSettler: predictionexecution.NewSettler(testExecutionAccountBinding, nil, nil, nil, nil, nil),
 	})
 	orch.RegisterAll()
 	status := singleJobStatus(t, orch, "kalshi_settlement")
@@ -1550,6 +1581,17 @@ type kalshiStrategyRepoStub struct {
 }
 
 func (s *kalshiStrategyRepoStub) Create(context.Context, *domain.Strategy) error { return nil }
+func (s *kalshiStrategyRepoStub) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := s.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+
+func (*kalshiStrategyRepoStub) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
 func (s *kalshiStrategyRepoStub) Get(context.Context, uuid.UUID) (*domain.Strategy, error) {
 	return nil, repository.ErrNotFound
 }
@@ -1658,6 +1700,10 @@ func (s *polymarketPositionRepoStub) Count(context.Context, repository.PositionF
 func (s *polymarketPositionRepoStub) Update(context.Context, *domain.Position) error { return nil }
 func (s *polymarketPositionRepoStub) Delete(context.Context, uuid.UUID) error        { return nil }
 func (s *polymarketPositionRepoStub) GetOpen(context.Context, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return append([]domain.Position(nil), s.positions...), nil
+}
+
+func (s *polymarketPositionRepoStub) GetOpenByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
 	return append([]domain.Position(nil), s.positions...), nil
 }
 

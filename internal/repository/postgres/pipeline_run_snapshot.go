@@ -14,31 +14,37 @@ import (
 
 // PipelineRunSnapshotRepo implements repository.PipelineRunSnapshotRepository using PostgreSQL.
 type PipelineRunSnapshotRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that PipelineRunSnapshotRepo satisfies PipelineRunSnapshotRepository.
 var _ repository.PipelineRunSnapshotRepository = (*PipelineRunSnapshotRepo)(nil)
 
-const pipelineRunSnapshotSelectSQL = `SELECT id, pipeline_run_id, data_type, payload, created_at FROM pipeline_run_snapshots`
+const pipelineRunSnapshotSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, data_type, payload, created_at FROM pipeline_run_snapshots`
 
 // NewPipelineRunSnapshotRepo returns a PipelineRunSnapshotRepo backed by the given connection pool.
-func NewPipelineRunSnapshotRepo(pool *pgxpool.Pool) *PipelineRunSnapshotRepo {
-	return &PipelineRunSnapshotRepo{pool: pool}
+func NewPipelineRunSnapshotRepo(pool *pgxpool.Pool, accountID uuid.UUID) *PipelineRunSnapshotRepo {
+	return &PipelineRunSnapshotRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new pipeline run snapshot and populates the generated ID and CreatedAt on the provided struct.
 func (r *PipelineRunSnapshotRepo) Create(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error {
+	if snapshot.AccountID != uuid.Nil && snapshot.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create pipeline run snapshot: account mismatch")
+	}
+	snapshot.AccountID = r.accountID
 	payload, err := marshalPipelineRunSnapshotPayload(snapshot.Payload)
 	if err != nil {
 		return err
 	}
 
 	row := r.pool.QueryRow(ctx,
-		`INSERT INTO pipeline_run_snapshots (pipeline_run_id, data_type, payload)
-		 VALUES ($1, $2, $3)
+		`INSERT INTO pipeline_run_snapshots (account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, data_type, payload)
+		 SELECT $1,$2,$3,$4,$5,$6,$7,$8 FROM pipeline_runs run
+		 WHERE run.id=$5 AND run.trade_date=$6::date AND run.account_id=$1
 		 RETURNING id, created_at`,
-		snapshot.PipelineRunID,
+		r.accountID, snapshot.Environment, snapshot.OriginType, snapshot.OriginID, snapshot.PipelineRunID, snapshot.PipelineRunTradeDate,
 		snapshot.DataType,
 		payload,
 	)
@@ -51,10 +57,10 @@ func (r *PipelineRunSnapshotRepo) Create(ctx context.Context, snapshot *domain.P
 }
 
 // GetByRun returns snapshots for the given pipeline run ordered by creation time, then id.
-func (r *PipelineRunSnapshotRepo) GetByRun(ctx context.Context, runID uuid.UUID) ([]domain.PipelineRunSnapshot, error) {
+func (r *PipelineRunSnapshotRepo) GetByRun(ctx context.Context, ref domain.PipelineRunRef) ([]domain.PipelineRunSnapshot, error) {
 	rows, err := r.pool.Query(ctx,
-		pipelineRunSnapshotSelectSQL+` WHERE pipeline_run_id = $1 ORDER BY created_at, id`,
-		runID,
+		pipelineRunSnapshotSelectSQL+` WHERE pipeline_run_id = $1 AND pipeline_run_trade_date=$2::date AND account_id=$3 ORDER BY created_at, id`,
+		ref.ID, ref.TradeDate, r.accountID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: get pipeline run snapshots by run: %w", err)
@@ -85,7 +91,9 @@ func scanPipelineRunSnapshot(sc scanner) (*domain.PipelineRunSnapshot, error) {
 
 	if err := sc.Scan(
 		&snapshot.ID,
+		&snapshot.AccountID, &snapshot.Environment, &snapshot.OriginType, &snapshot.OriginID,
 		&snapshot.PipelineRunID,
+		&snapshot.PipelineRunTradeDate,
 		&snapshot.DataType,
 		&payloadJSON,
 		&snapshot.CreatedAt,

@@ -3,6 +3,7 @@ package rules
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -56,6 +57,17 @@ func SelectSpreadLegs(chain []domain.OptionSnapshot, selectors map[string]LegSel
 	if len(selectors) == 0 {
 		return nil, fmt.Errorf("leg_selector: no leg selectors provided")
 	}
+	if len(selectors) == 2 {
+		names := make([]string, 0, 2)
+		for name := range selectors {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		first, second := selectors[names[0]], selectors[names[1]]
+		if first.DTEMin == second.DTEMin && first.DTEMax == second.DTEMax {
+			return selectSameExpiryPair(chain, names, first, second, now)
+		}
+	}
 
 	result := make(map[string]*domain.OptionSnapshot, len(selectors))
 	for name, sel := range selectors {
@@ -66,6 +78,48 @@ func SelectSpreadLegs(chain []domain.OptionSnapshot, selectors map[string]LegSel
 		result[name] = snap
 	}
 	return result, nil
+}
+
+func selectSameExpiryPair(chain []domain.OptionSnapshot, names []string, first, second LegSelector, now time.Time) (map[string]*domain.OptionSnapshot, error) {
+	var bestA, bestB *domain.OptionSnapshot
+	bestScore := math.Inf(1)
+	bestKey := ""
+	for firstIndex := range chain {
+		a := &chain[firstIndex]
+		if !legMatchesSelector(*a, first, now) {
+			continue
+		}
+		for secondIndex := range chain {
+			b := &chain[secondIndex]
+			if optionContractSelectionKey(a.Contract) == optionContractSelectionKey(b.Contract) || !a.Contract.Expiry.Equal(b.Contract.Expiry) || !legMatchesSelector(*b, second, now) {
+				continue
+			}
+			score := math.Abs(math.Abs(a.Greeks.Delta)-math.Abs(first.DeltaTarget)) + math.Abs(math.Abs(b.Greeks.Delta)-math.Abs(second.DeltaTarget))
+			key := a.Contract.Expiry.UTC().Format(time.RFC3339Nano) + "\x00" + optionContractSelectionKey(a.Contract) + "\x00" + optionContractSelectionKey(b.Contract)
+			if score < bestScore || score == bestScore && (bestKey == "" || key < bestKey) {
+				bestA, bestB, bestScore, bestKey = a, b, score, key
+			}
+		}
+	}
+	if bestA == nil || bestB == nil {
+		return nil, fmt.Errorf("leg_selector: no distinct same-expiry contract pair matches both selectors")
+	}
+	return map[string]*domain.OptionSnapshot{names[0]: bestA, names[1]: bestB}, nil
+}
+
+func optionContractSelectionKey(contract domain.OptionContract) string {
+	if contract.OCCSymbol != "" {
+		return contract.OCCSymbol
+	}
+	return fmt.Sprintf("%s:%s:%.8f:%s", contract.Underlying, contract.OptionType, contract.Strike, contract.Expiry.UTC().Format(time.RFC3339Nano))
+}
+
+func legMatchesSelector(snapshot domain.OptionSnapshot, selector LegSelector, now time.Time) bool {
+	if snapshot.Contract.OptionType != selector.OptionType {
+		return false
+	}
+	dte := daysToExpiry(snapshot.Contract.Expiry, now)
+	return dte >= selector.DTEMin && dte <= selector.DTEMax
 }
 
 // BuildSpread constructs an OptionSpread from selected legs.
@@ -84,7 +138,13 @@ func BuildSpread(
 		Underlying:   underlying,
 	}
 
-	for name, snap := range selectedLegs {
+	names := make([]string, 0, len(selectedLegs))
+	for name := range selectedLegs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		snap := selectedLegs[name]
 		sel, ok := selectors[name]
 		if !ok {
 			return nil, fmt.Errorf("leg_selector: missing selector for leg %q", name)

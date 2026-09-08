@@ -327,6 +327,17 @@ type stubStrategyRepo struct {
 }
 
 func (s *stubStrategyRepo) Create(context.Context, *domain.Strategy) error { return nil }
+func (s *stubStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := s.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+
+func (*stubStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
 func (s *stubStrategyRepo) Get(context.Context, uuid.UUID) (*domain.Strategy, error) {
 	if s.strategy == nil {
 		return nil, repository.ErrNotFound

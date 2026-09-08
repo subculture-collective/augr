@@ -12,13 +12,14 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
 var kalshiMarkingSpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "25 * * * *"}
 
 func (o *JobOrchestrator) registerKalshiMarkingJob() {
-	if o.deps.KalshiMarkProvider == nil || o.deps.KalshiProjectionRepo == nil || o.deps.KalshiMarkMaxAge <= 0 {
+	if o.deps.KalshiMarkProvider == nil || o.deps.KalshiProjectionRepo == nil || o.deps.KalshiProjectionOutbox == nil || o.deps.KalshiMarkMaxAge <= 0 {
 		return
 	}
 	o.Register("kalshi_marking", "Record conservative canonical Kalshi liquidation marks", kalshiMarkingSpec, o.kalshiMarking)
@@ -27,76 +28,93 @@ func (o *JobOrchestrator) registerKalshiMarkingJob() {
 func (o *JobOrchestrator) kalshiMarking(ctx context.Context) error {
 	inventoryAsOf := o.now().UTC().Truncate(time.Microsecond)
 	maxAge := o.deps.KalshiMarkMaxAge
-	lots, err := o.deps.KalshiProjectionRepo.ListCanonicalOpenLots(ctx, inventoryAsOf)
+	accountID := o.deps.CanonicalAccountID
+	if accountID == uuid.Nil {
+		return fmt.Errorf("kalshi_marking: configured canonical account is required")
+	}
+	lots, err := o.deps.KalshiProjectionRepo.ListCanonicalOpenLots(ctx, accountID, inventoryAsOf)
 	if err != nil {
 		return fmt.Errorf("kalshi_marking: list canonical open lots: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	for _, lot := range lots {
+		if lot.AccountID != accountID {
+			return fmt.Errorf("kalshi_marking: repository returned foreign account lot %s for configured account %s", lot.AccountID, accountID)
+		}
+	}
 	summary := map[string]int{"lots": len(lots), "marked": 0, "unavailable": 0, "accounts_rebuilt": 0}
 	defer func() { o.SetLastSummary("kalshi_marking", summary) }()
-	accountAsOf := make(map[uuid.UUID]time.Time)
-	accountFailed := make(map[uuid.UUID]bool)
+	var accountAsOf time.Time
+	accountFailed := false
 	var failures []error
+	marks := make([]*ledger.MarkObservation, 0, len(lots))
 	for _, lot := range lots {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if lot.Currency != "USD" {
 			summary["unavailable"]++
-			accountFailed[lot.AccountID] = true
+			accountFailed = true
 			failures = append(failures, fmt.Errorf("%s: unsupported currency %q", lot.Ticker, lot.Currency))
 			continue
 		}
 		if lot.Side == domain.PositionSideShort {
 			summary["unavailable"]++
-			accountFailed[lot.AccountID] = true
+			accountFailed = true
 			failures = append(failures, fmt.Errorf("%s: short canonical lots are unavailable", lot.Ticker))
 			continue
 		}
 		marketTicker, _, ok := strings.Cut(lot.Ticker, ":")
 		if !ok {
 			summary["unavailable"]++
-			accountFailed[lot.AccountID] = true
+			accountFailed = true
 			failures = append(failures, fmt.Errorf("%s: invalid canonical ticker", lot.Ticker))
 			continue
 		}
 		quote, loadErr := o.deps.KalshiMarkProvider.LoadSnapshot(ctx, marketTicker)
 		if loadErr != nil {
 			summary["unavailable"]++
-			accountFailed[lot.AccountID] = true
+			accountFailed = true
 			failures = append(failures, fmt.Errorf("%s: load snapshot: %w", lot.Ticker, loadErr))
 			continue
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		evaluatedAt := o.now().UTC().Truncate(time.Microsecond)
 		mark, markErr := kalshi.NewMarkObservation(kalshi.KalshiMarkInput{
-			AccountID: lot.AccountID, InstrumentID: lot.InstrumentID, VenueContractID: lot.VenueContractID,
+			AccountID: accountID, InstrumentID: lot.InstrumentID, VenueContractID: lot.VenueContractID,
 			Side: lot.Side, Ticker: lot.Ticker, Quote: quote, ObservedAt: evaluatedAt, MaxAge: maxAge,
 		})
 		if markErr != nil {
 			summary["unavailable"]++
-			accountFailed[lot.AccountID] = true
+			accountFailed = true
 			failures = append(failures, fmt.Errorf("%s: evaluate mark: %w", lot.Ticker, markErr))
 			continue
 		}
-		if _, err := o.deps.KalshiProjectionRepo.RecordMarkObservation(ctx, mark); err != nil {
-			summary["unavailable"]++
-			accountFailed[lot.AccountID] = true
-			failures = append(failures, fmt.Errorf("%s: record mark: %w", lot.Ticker, err))
-			continue
-		}
+		marks = append(marks, mark)
 		summary["marked"]++
-		if evaluatedAt.After(accountAsOf[lot.AccountID]) {
-			accountAsOf[lot.AccountID] = evaluatedAt
+		if evaluatedAt.After(accountAsOf) {
+			accountAsOf = evaluatedAt
 		}
 	}
-	for accountID, asOf := range accountAsOf {
-		if accountFailed[accountID] {
-			continue
+	if !accountAsOf.IsZero() && !accountFailed {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		if _, err := o.deps.KalshiProjectionRepo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-			AccountID: accountID, AsOf: asOf, MarkSource: kalshi.KalshiMarkSource,
-			MarkNamespace: kalshi.KalshiAccountMarkNamespace(accountID), MaxMarkAge: maxAge,
+		frontier, err := o.deps.KalshiProjectionOutbox.LatestProjectionFrontier(ctx, accountID, accountAsOf)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("resolve account %s projection frontier: %w", accountID, err))
+		} else if _, err := o.deps.KalshiProjectionOutbox.RecordMarksAndEnqueueRebuild(ctx, repository.ProjectionMarkBatch{
+			AccountID: accountID, ThroughTransactionID: frontier, AsOf: accountAsOf,
+			MarkAsOf: accountAsOf, MaxMarkAge: maxAge, Marks: marks,
 		}); err != nil {
-			failures = append(failures, fmt.Errorf("rebuild account %s projection: %w", accountID, err))
-			continue
+			failures = append(failures, fmt.Errorf("record marks and enqueue account %s projection: %w", accountID, err))
+		} else {
+			summary["accounts_rebuilt"]++
 		}
-		summary["accounts_rebuilt"]++
 	}
 	if len(failures) > 0 {
 		return fmt.Errorf("kalshi_marking incomplete (%d of %d canonical lots unmarked): %w", summary["unavailable"], len(lots), errors.Join(failures...))

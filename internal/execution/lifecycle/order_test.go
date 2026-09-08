@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
@@ -34,6 +35,22 @@ func TestRouteOrderCopiesExactAllocatedQuantityAndStableIdentity(t *testing.T) {
 	}
 	if retry.Order.ID != transition.Order.ID || !SameOrderPayload(retry.Order, transition.Order) {
 		t.Fatal("identical route retry did not converge on the same order")
+	}
+}
+
+func TestRouteOrderCarriesCopyOriginRebalanceRun(t *testing.T) {
+	fixture := validProposeInput(t)
+	fixture.OriginType = "copy_subscription"
+	fixture.OriginID = uuid.NewString()
+	fixture.StrategyVersionID = ""
+	fixture.CopyOriginRebalanceRunID = uuid.New()
+	aggregate := riskApprovedAggregateFromFixture(t, fixture, decimal.NewFromInt(8))
+	transition, err := Route(aggregate, validRouteInput(t, aggregate, fixture))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transition.Order.CopyOriginRebalanceRunID != fixture.CopyOriginRebalanceRunID {
+		t.Fatalf("order copy run=%s, want %s", transition.Order.CopyOriginRebalanceRunID, fixture.CopyOriginRebalanceRunID)
 	}
 }
 
@@ -131,6 +148,11 @@ func riskApprovedAggregate(t *testing.T, allocatedQuantity decimal.Decimal) (*Ag
 	} else if allocatedQuantity.GreaterThan(decimal.NewFromInt(10)) {
 		fixture.DesiredQuantityDelta = allocatedQuantity
 	}
+	return riskApprovedAggregateFromFixture(t, fixture, allocatedQuantity), fixture
+}
+
+func riskApprovedAggregateFromFixture(t *testing.T, fixture ProposeInput, allocatedQuantity decimal.Decimal) *Aggregate {
+	t.Helper()
 	proposed, err := Propose(fixture)
 	if err != nil {
 		t.Fatalf("Propose() error = %v", err)
@@ -158,7 +180,7 @@ func riskApprovedAggregate(t *testing.T, allocatedQuantity decimal.Decimal) (*Ag
 	if err != nil {
 		t.Fatalf("ApplyTransition(approval) error = %v", err)
 	}
-	return approved, fixture
+	return approved
 }
 
 func validRouteInput(t *testing.T, aggregate *Aggregate, fixture ProposeInput) RouteInput {

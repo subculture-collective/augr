@@ -1,19 +1,39 @@
 package execution
 
 import (
+	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
-func TestQuantizeKalshiContractsUsesFixedPointGranularity(t *testing.T) {
+type statusCodeTestError int
+
+func (e statusCodeTestError) Error() string   { return http.StatusText(int(e)) }
+func (e statusCodeTestError) StatusCode() int { return int(e) }
+
+func TestIsDefinitiveBrokerRejection(t *testing.T) {
+	t.Parallel()
+	if !IsDefinitiveBrokerRejection(statusCodeTestError(http.StatusUnprocessableEntity)) {
+		t.Fatal("422 must be definitive")
+	}
+	if IsDefinitiveBrokerRejection(statusCodeTestError(http.StatusTooManyRequests)) {
+		t.Fatal("429 must remain ambiguous")
+	}
+	if !IsDefinitiveBrokerRejection(errors.Join(ErrBrokerOrderRejected, errors.New("provider declined"))) {
+		t.Fatal("typed rejection must be definitive")
+	}
+}
+
+func TestQuantizeKalshiContractsUsesWholeContracts(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		input float64
 		want  float64
 	}{
-		{input: 1.234567, want: 1.23},
-		{input: 0.019, want: 0.01},
+		{input: 1.234567, want: 1},
+		{input: 0.019, want: 0},
 		{input: 2, want: 2},
 		{input: 0.009, want: 0},
 	} {

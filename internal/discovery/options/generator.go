@@ -20,7 +20,7 @@ const optionsGeneratorSystemPrompt = `You are a quantitative options strategy de
 The JSON schema is:
 {
   "version": 1,
-  "strategy_type": "<one of: bull_put_spread, bear_call_spread, covered_call>",
+  "strategy_type": "<one of: bull_call_spread, bear_put_spread, bull_put_spread, bear_call_spread>",
   "underlying": "<TICKER>",
   "entry": {
     "operator": "AND" | "OR",
@@ -60,9 +60,10 @@ The JSON schema is:
 }
 
 Available strategy types for v1:
+- "bull_call_spread": Buy lower-strike call, sell higher-strike call. Bullish, defined-risk debit spread.
+- "bear_put_spread": Buy higher-strike put, sell lower-strike put. Bearish, defined-risk debit spread.
 - "bull_put_spread": Sell higher-strike put, buy lower-strike put. Bullish/neutral, benefits from high IV. Use when IV rank > 50.
 - "bear_call_spread": Sell lower-strike call, buy higher-strike call. Bearish/neutral, benefits from high IV. Use when IV rank > 50.
-- "covered_call": Sell OTM call against long stock. Neutral/mildly bullish. Good for income when IV is moderate.
 
 Available fields for conditions (same as equity indicators + options-specific):
 - Equity: close, volume, sma_20, sma_50, sma_200, ema_12, rsi_14, mfi_14, atr_14, macd_line, macd_signal, macd_histogram, bollinger_upper, bollinger_middle, bollinger_lower, stochastic_k, stochastic_d
@@ -71,15 +72,16 @@ Available fields for conditions (same as equity indicators + options-specific):
 Available operators: gt, gte, lt, lte, eq, cross_above, cross_below
 
 Leg selection guidelines:
+- bull_call_spread: 2 legs — "long_call" (buy, buy_to_open) and "short_call" (sell, sell_to_open)
+- bear_put_spread: 2 legs — "long_put" (buy, buy_to_open) and "short_put" (sell, sell_to_open)
 - bull_put_spread: 2 legs — "short_put" (sell, delta ~0.16-0.30, sell_to_open) and "long_put" (buy, delta ~0.05-0.16, buy_to_open)
 - bear_call_spread: 2 legs — "short_call" (sell, delta ~0.16-0.30, sell_to_open) and "long_call" (buy, delta ~0.05-0.16, buy_to_open)
-- covered_call: 1 leg — "short_call" (sell, delta ~0.20-0.35, sell_to_open)
 
-DTE ranges should be 20-50 days for premium selling strategies.
+Both legs must use ratio 1 and the exact same DTE range so one expiry can be selected atomically. DTE ranges should be 20-50 days.
 
 Management guidelines:
-- Premium selling: close_at_profit_pct 0.50 (take profit at 50% of max), close_at_dte 5-7, stop_loss_pct 1.0-2.0
-- Covered call: close_at_profit_pct 0.75, close_at_dte 3
+- Credit vertical: close_at_profit_pct 0.50 (take profit at 50% of max), close_at_dte 5-7, stop_loss_pct 1.0-2.0
+- Debit vertical: close_at_profit_pct 0.50-0.75, close_at_dte 5-7, stop_loss_pct 0.5-1.0
 
 Position sizing: use "max_risk" with max_risk_usd between 500-2000 for paper trading.
 
@@ -182,6 +184,9 @@ func GenerateOptionsStrategyWithEvidence(ctx context.Context, cfg discovery.Gene
 			parseErr = errors.New("rules: empty JSON response")
 		}
 		if parseErr == nil && parsed != nil {
+			parseErr = rules.ValidateDefinedRiskVertical(parsed)
+		}
+		if parseErr == nil && parsed != nil {
 			outcome := "success_first_attempt"
 			if attempt > 0 {
 				outcome = "success_after_retry"
@@ -261,7 +266,7 @@ func buildOptionsUserPrompt(c OptionsScoredCandidate) string {
 	if c.IVRank > 50 {
 		sb.WriteString("IV rank is elevated — prefer premium-selling strategies (bull_put_spread or bear_call_spread). ")
 	} else {
-		sb.WriteString("IV rank is moderate — consider a covered_call for income. ")
+		sb.WriteString("IV rank is moderate — prefer a directional defined-risk debit vertical (bull_call_spread or bear_put_spread). ")
 	}
 	sb.WriteString("Keep entry conditions simple (1-2 conditions). Use the options metrics above to inform your thresholds.")
 

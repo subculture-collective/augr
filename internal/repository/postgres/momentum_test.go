@@ -30,10 +30,10 @@ func newMomentumRepositoryFixture(t *testing.T) momentumRepositoryFixture {
 	base := newBenchmarkFixture(t)
 	ctx := context.Background()
 	pool := base.evaluation.experiment.strategy.pool
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000083_quality_filtered_wheel_v1.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000083_quality_filtered_wheel_v1.up.sql"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000084_momentum_quality_baseline.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000084_momentum_quality_baseline.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	fixture, err := momentumqualification.Build(strategycatalog.ExperimentPaperScored)
@@ -139,7 +139,7 @@ func TestMomentumRepositoryAtomicStagesAppendOnlyAndRollbackRefusal(t *testing.T
 	if _, err := pool.Exec(ctx, `UPDATE momentum_v1_rebalances SET cash='1.000000000000' WHERE report_id=$1 AND sequence=1`, fixture.report.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("append-only=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000084_momentum_quality_baseline.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000084_momentum_quality_baseline.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 }
@@ -175,16 +175,16 @@ func TestMomentumMigrationEmptyRollbackAndReapply(t *testing.T) {
 	base := newBenchmarkFixture(t)
 	ctx := context.Background()
 	pool := base.evaluation.experiment.strategy.pool
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000083_quality_filtered_wheel_v1.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000083_quality_filtered_wheel_v1.up.sql"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000084_momentum_quality_baseline.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000084_momentum_quality_baseline.up.sql"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000084_momentum_quality_baseline.down.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000084_momentum_quality_baseline.down.sql"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000084_momentum_quality_baseline.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000084_momentum_quality_baseline.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 }

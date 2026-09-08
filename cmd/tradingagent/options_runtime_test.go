@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -18,7 +19,10 @@ func runtimeOptionSnapshot(symbol string, optionType domain.OptionType, delta, b
 	}
 	contract.OptionType = optionType
 	contract.Expiry = expiry
-	return domain.OptionSnapshot{Contract: *contract, Greeks: domain.OptionGreeks{Delta: delta, IV: 0.25}, Bid: bid, Ask: ask, OpenInterest: 100, Volume: 20}
+	return domain.OptionSnapshot{
+		Contract: *contract, Greeks: domain.OptionGreeks{Delta: delta, IV: 0.25}, Bid: bid, BidSize: 20, Ask: ask, AskSize: 20,
+		OpenInterest: 100, Volume: 20, ObservedAt: expiry.AddDate(0, -1, 0), QuoteObservedAt: expiry.AddDate(0, -1, 0),
+	}
 }
 
 func TestBuildPaperSingleLegPlanSelectsExecutableContract(t *testing.T) {
@@ -90,6 +94,29 @@ func TestBuildPaperDebitSpreadPlanUsesExecutableSides(t *testing.T) {
 	}
 	if quantity != 3 || spread.MaxRisk != 300 || spread.MaxReward != 200 {
 		t.Fatalf("unexpected spread sizing: quantity=%v spread=%+v", quantity, spread)
+	}
+	if spread.LiquidityUSD != 6000 || spread.SpreadPct <= 0 {
+		t.Fatalf("spread liquidity evidence = %+v", spread)
+	}
+}
+
+func TestBuildPaperDebitSpreadPlanSupportsDefinedRiskCreditVertical(t *testing.T) {
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	expiry := time.Date(2026, 12, 18, 0, 0, 0, 0, time.UTC)
+	cfg := &rules.OptionsRulesConfig{StrategyType: domain.StrategyBullPutSpread, Underlying: "AAPL", LegSelection: map[string]rules.LegSelector{
+		"short": {OptionType: domain.OptionTypePut, DeltaTarget: -0.4, DTEMin: 30, DTEMax: 60, Side: domain.OrderSideSell, Intent: domain.PositionIntentSellToOpen, Ratio: 1},
+		"long":  {OptionType: domain.OptionTypePut, DeltaTarget: -0.2, DTEMin: 30, DTEMax: 60, Side: domain.OrderSideBuy, Intent: domain.PositionIntentBuyToOpen, Ratio: 1},
+	}, PositionSizing: rules.OptionsSizingConfig{Method: "max_risk", MaxRiskUSD: 1000}}
+	chain := []domain.OptionSnapshot{
+		runtimeOptionSnapshot("AAPL261218P00150000", domain.OptionTypePut, -0.2, 2, 2.2, expiry),
+		runtimeOptionSnapshot("AAPL261218P00155000", domain.OptionTypePut, -0.4, 4.8, 5, expiry),
+	}
+	spread, quantity, err := buildPaperDebitSpreadPlan(cfg, chain, now)
+	if err != nil {
+		t.Fatalf("buildPaperDebitSpreadPlan() error = %v", err)
+	}
+	if quantity != 4 || math.Abs(spread.MaxRisk-240) > 1e-9 || math.Abs(spread.MaxReward-260) > 1e-9 {
+		t.Fatalf("unexpected credit spread sizing: quantity=%v spread=%+v", quantity, spread)
 	}
 }
 

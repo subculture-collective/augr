@@ -2,6 +2,7 @@ package portfolio
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ func TestAllocatorSelectsAndSizesHighQualityStock(t *testing.T) {
 		LiquidityUSD:     2_000_000,
 		SpreadPct:        0.004,
 		ProposedNotional: 500,
+		MaxLossPct:       0.05,
 		MarketCapUSD:     3_000_000_000_000,
 		CreatedAt:        now.Add(-30 * time.Minute),
 		ExpiresAt:        now.Add(6 * time.Hour),
@@ -50,8 +52,8 @@ func TestAllocatorSelectsAndSizesHighQualityStock(t *testing.T) {
 	if dec.Mode != domain.AllocationDecisionModeShadow {
 		t.Fatalf("mode = %q, want shadow", dec.Mode)
 	}
-	if math.Abs(dec.NotionalUSD-2000) > 1e-9 {
-		t.Fatalf("notional = %v, want 2000", dec.NotionalUSD)
+	if math.Abs(dec.NotionalUSD-500) > 1e-9 {
+		t.Fatalf("notional = %v, want proposal cap 500", dec.NotionalUSD)
 	}
 	if res.Summary.Selected != 1 || res.Summary.Rejected != 0 {
 		t.Fatalf("summary = %+v, want 1 selected / 0 rejected", res.Summary)
@@ -61,6 +63,32 @@ func TestAllocatorSelectsAndSizesHighQualityStock(t *testing.T) {
 	}
 	if len(dec.Reasons) == 0 {
 		t.Fatal("selected decision reasons empty")
+	}
+}
+
+func TestAllocatorCapsStockNotionalByExpectedLossBudget(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	cfg := DefaultAllocatorConfig()
+	cfg.Now = func() time.Time { return now }
+	cfg.MaxPerPositionPct[domain.MarketTypeStock] = .50
+	cfg.MaxPositionRiskPct = .01
+	opp := strongOpportunity("RISK", now, .99)
+	opp.EntryPrice = 100
+	opp.ProposedNotional = 50000
+	opp.MaxLossPct = .10
+	result := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{Equity: 100000, BuyingPower: 100000, MarketExposure: map[domain.MarketType]float64{}}, cfg)
+	decision := result.Decisions[0]
+	if decision.Action != domain.AllocationDecisionActionShadowSelected || decision.NotionalUSD != 10000 || decision.Quantity != 100 || decision.BindingConstraint != "position_risk" {
+		t.Fatalf("decision=%+v", decision)
+	}
+	if decision.ExposureAfterUSD != 10000 || len(decision.RiskCaps) == 0 {
+		t.Fatalf("risk evidence=%+v", decision)
+	}
+	opp.MaxLossPct = 0
+	rejected := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{Equity: 100000, BuyingPower: 100000}, cfg).Decisions[0]
+	if rejected.Action != domain.AllocationDecisionActionShadowRejected || !containsReason(rejected.Reasons, reasonUndefinedStockRisk) {
+		t.Fatalf("undefined stock risk decision=%+v", rejected)
 	}
 }
 
@@ -259,6 +287,144 @@ func TestAllocatorRejectsExpiredAndNonQueuedDeterministically(t *testing.T) {
 	}
 }
 
+func TestAllocatorSizesDefinedRiskVerticalInWholeContracts(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	cfg := DefaultAllocatorConfig()
+	cfg.Now = func() time.Time { return now }
+	quoteAt := now.Add(-time.Minute)
+	opp := strongOptionOpportunity(now, quoteAt)
+	opp.DeploymentBudgetUSD = 1250
+	opp.ProposedNotional = 2200
+	result := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{
+		Equity: 100000, BuyingPower: 100000, OptionsBuyingPower: 100000, AccountSnapshotID: uuid.New(), MarketExposure: map[domain.MarketType]float64{},
+	}, cfg)
+	if len(result.Decisions) != 1 || result.Decisions[0].Action != domain.AllocationDecisionActionShadowSelected {
+		t.Fatalf("result = %+v", result)
+	}
+	decision := result.Decisions[0]
+	if decision.ProposedQuantity != 4 || decision.Quantity != 2 || decision.ReservedRiskUSD != 1000 || decision.ReservedCapitalUSD != 900 || decision.BindingConstraint != "deployment_budget" || decision.ExecutionRoute != "alpaca_mleg" {
+		t.Fatalf("defined-risk decision = %+v", decision)
+	}
+}
+
+func TestAllocatorGreekCapsAllowRiskReducingOptionPackages(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	cfg := DefaultAllocatorConfig()
+	cfg.Now = func() time.Time { return now }
+	for name, values := range map[string]struct{ current, perUnit float64 }{
+		"reduce negative delta": {-490, 20},
+		"reduce positive delta": {490, -20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opp := strongOptionOpportunity(now, now)
+			opp.Delta = values.perUnit
+			result := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{
+				Equity: 100000, BuyingPower: 100000, OptionsBuyingPower: 100000, AccountSnapshotID: uuid.New(),
+				MarketExposure: map[domain.MarketType]float64{}, Delta: values.current,
+			}, cfg)
+			if result.Decisions[0].Action != domain.AllocationDecisionActionShadowSelected || containsReason(result.Decisions[0].Reasons, reasonGreekLimit) {
+				t.Fatalf("risk-reducing package rejected: %+v", result.Decisions[0])
+			}
+		})
+	}
+}
+
+func TestAllocatorConsumesMaximumLossAcrossSelectedOptionPackages(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	cfg := DefaultAllocatorConfig()
+	cfg.Now = func() time.Time { return now }
+	cfg.TargetGrossExposurePct = .02
+	first := strongOptionOpportunity(now, now)
+	first.Ticker = "AAA"
+	first.DeploymentBudgetUSD = 1500
+	second := strongOptionOpportunity(now, now)
+	second.Ticker = "BBB"
+	second.DeploymentBudgetUSD = 1500
+	result := AllocateShadow([]domain.Opportunity{first, second}, PortfolioState{
+		Equity: 100000, BuyingPower: 100000, OptionsBuyingPower: 100000, AccountSnapshotID: uuid.New(), MarketExposure: map[domain.MarketType]float64{},
+	}, cfg)
+	if result.Summary.Selected != 2 {
+		t.Fatalf("selected=%d decisions=%+v", result.Summary.Selected, result.Decisions)
+	}
+	if result.Decisions[0].ExposureBeforeUSD != 0 || result.Decisions[0].ExposureAfterUSD != 1000 ||
+		result.Decisions[1].ExposureBeforeUSD != 1000 || result.Decisions[1].ExposureAfterUSD != 2000 {
+		t.Fatalf("maximum-loss exposure was not consumed sequentially: %+v", result.Decisions)
+	}
+}
+
+func TestAllocatorRejectsUnsafeOptionEvidenceAndRiskState(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	cfg := DefaultAllocatorConfig()
+	cfg.Now = func() time.Time { return now }
+	oldQuote := now.Add(-10 * time.Minute)
+	opp := strongOptionOpportunity(now, oldQuote)
+	opp.OptionLegs = opp.OptionLegs[:1]
+	opp.MaxLossPerUnit = 0
+	opp.RiskPolicyVersion = "wrong@sha256:" + strings.Repeat("0", 64)
+	result := AllocateShadow([]domain.Opportunity{opp}, PortfolioState{
+		Equity: 100000, BuyingPower: 100000, AccountSnapshotID: uuid.New(), CircuitBreakerOpen: true,
+	}, cfg)
+	decision := result.Decisions[0]
+	for _, reason := range []string{reasonCircuitBreakerOpen, reasonRiskPolicyMismatch, reasonUndefinedOptionRisk, reasonUnsupportedOptionPackage, reasonStaleOptionQuote} {
+		if !containsReason(decision.Reasons, reason) {
+			t.Fatalf("reasons=%v missing %s", decision.Reasons, reason)
+		}
+	}
+}
+
+func TestValidVerticalAcceptsOnlyAtomicOneToOneSameExpiryPackage(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 3, 15, 0, 0, 0, time.UTC)
+	base := strongOptionOpportunity(now, now).OptionLegs
+	if !validVertical(base) {
+		t.Fatal("valid bull call rejected")
+	}
+	mutations := []func([]domain.OpportunityOptionLeg){
+		func(legs []domain.OpportunityOptionLeg) { legs[1].Ratio = 2 },
+		func(legs []domain.OpportunityOptionLeg) { legs[1].Expiry = legs[1].Expiry.AddDate(0, 1, 0) },
+		func(legs []domain.OpportunityOptionLeg) { legs[1].Underlying = "QQQ" },
+		func(legs []domain.OpportunityOptionLeg) { legs[1].PositionIntent = "sell_to_close" },
+		func(legs []domain.OpportunityOptionLeg) { legs[1].Side = domain.OrderSideBuy },
+	}
+	for index, mutate := range mutations {
+		legs := append([]domain.OpportunityOptionLeg(nil), base...)
+		mutate(legs)
+		if validVertical(legs) {
+			t.Fatalf("unsafe mutation %d accepted: %+v", index, legs)
+		}
+	}
+}
+
+func strongOptionOpportunity(now, quoteAt time.Time) domain.Opportunity {
+	policy, _ := ReviewedPortfolioRiskPolicyV1()
+	expiry := time.Date(2026, 10, 16, 20, 0, 0, 0, time.UTC)
+	return domain.Opportunity{
+		ID: uuid.New(), StrategyID: uuid.New(), MarketType: domain.MarketTypeOptions, Ticker: "SPY",
+		Side:   domain.OrderSideBuy,
+		Status: domain.OpportunityStatusQueued, Confidence: .98, EdgePct: .04, LiquidityUSD: 100000,
+		SpreadPct: .02, ProposedNotional: 1000, MaxLossPerUnit: 500, RequiredCapitalUnit: 450,
+		QuoteObservedAt: &quoteAt, Delta: 20, Gamma: 2, Theta: -5, Vega: 10, RiskPolicyVersion: policy.Reference(),
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		OptionLegs: []domain.OpportunityOptionLeg{
+			optionOpportunityLegEvidence(0, "SPY261016C00500000", expiry, 500, domain.OrderSideBuy, "buy_to_open", 10, 10.2),
+			optionOpportunityLegEvidence(1, "SPY261016C00505000", expiry, 505, domain.OrderSideSell, "sell_to_open", 5.5, 5.7),
+		},
+	}
+}
+
+func optionOpportunityLegEvidence(sequence int, symbol string, expiry time.Time, strike float64, side domain.OrderSide, intent string, bid, ask float64) domain.OpportunityOptionLeg {
+	return domain.OpportunityOptionLeg{
+		Sequence: sequence, ContractID: uuid.New(), ContractPayloadID: uuid.New(), ContractSHA256: strings.Repeat("a", 64),
+		QuotePayloadID: uuid.New(), QuoteSHA256: strings.Repeat("b", 64), SnapshotPayloadID: uuid.New(), SnapshotSHA256: strings.Repeat("c", 64),
+		OCCSymbol: symbol, Underlying: "SPY", Expiry: expiry, OptionType: "call", Strike: strike, Ratio: 1,
+		Side: side, PositionIntent: intent, Bid: bid, Ask: ask, Multiplier: 100,
+	}
+}
+
 func strongOpportunity(ticker string, now time.Time, confidence float64) domain.Opportunity {
 	return domain.Opportunity{
 		ID:               uuid.New(),
@@ -271,6 +437,7 @@ func strongOpportunity(ticker string, now time.Time, confidence float64) domain.
 		LiquidityUSD:     2_000_000,
 		SpreadPct:        0.004,
 		ProposedNotional: 100,
+		MaxLossPct:       0.05,
 		MarketCapUSD:     3_000_000_000_000,
 		CreatedAt:        now,
 		ExpiresAt:        now.Add(1 * time.Hour),

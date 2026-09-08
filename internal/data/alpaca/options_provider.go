@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,9 +83,11 @@ type optionSnapshot struct {
 }
 
 type optionTrade struct {
-	Price float64 `json:"p"`
-	Size  float64 `json:"s"`
-	Time  string  `json:"t"`
+	ID       int64   `json:"i"`
+	Price    float64 `json:"p"`
+	Size     float64 `json:"s"`
+	Time     string  `json:"t"`
+	Exchange string  `json:"x"`
 }
 
 type optionQuote struct {
@@ -110,21 +114,43 @@ func (p *OptionsDataProvider) GetOptionsChain(
 	expiry time.Time,
 	optionType domain.OptionType,
 ) ([]domain.OptionSnapshot, error) {
+	snapshots, _, err := p.GetOptionsChainWithReceipt(ctx, underlying, expiry, optionType, "indicative")
+	return snapshots, err
+}
+
+// GetOptionsChainWithReceipt returns current snapshots and proves the exact
+// requested feed plus terminal pagination. It does not claim historical chain
+// coverage.
+func (p *OptionsDataProvider) GetOptionsChainWithReceipt(
+	ctx context.Context,
+	underlying string,
+	expiry time.Time,
+	optionType domain.OptionType,
+	feed string,
+) ([]domain.OptionSnapshot, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw"}
 	if p == nil {
-		return nil, fmt.Errorf("alpaca/options: provider is nil")
+		return nil, receipt, fmt.Errorf("alpaca/options: provider is nil")
 	}
 
 	underlying = strings.TrimSpace(strings.ToUpper(underlying))
 	if underlying == "" {
-		return nil, fmt.Errorf("alpaca/options: underlying ticker is required")
+		return nil, receipt, fmt.Errorf("alpaca/options: underlying ticker is required")
 	}
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed != "indicative" && feed != "opra" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported feed %q", feed)
+	}
+	receipt.Feed = feed
 
 	var allSnapshots []domain.OptionSnapshot
 	var pageToken string
+	seenPageTokens := make(map[string]struct{})
+	seenSymbols := make(map[string]struct{})
 
 	for {
 		params := url.Values{}
-		params.Set("feed", "indicative")
+		params.Set("feed", feed)
 		params.Set("limit", "100")
 		if pageToken != "" {
 			params.Set("page_token", pageToken)
@@ -133,24 +159,24 @@ func (p *OptionsDataProvider) GetOptionsChain(
 		requestPath := fmt.Sprintf("/v1beta1/options/snapshots/%s", url.PathEscape(underlying))
 		body, err := p.doGet(ctx, requestPath, params)
 		if err != nil {
-			return nil, fmt.Errorf("alpaca/options: chain request failed: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: chain request failed: %w", err)
 		}
+		receipt.Pages++
 
 		var resp snapshotsResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("alpaca/options: unmarshal chain response: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: unmarshal chain response: %w", err)
 		}
 
 		for occSymbol, snap := range resp.Snapshots {
 			parsed, err := domain.ParseOCC(occSymbol)
 			if err != nil {
-				// Skip unparseable OCC symbols.
-				p.logger.Debug("alpaca/options: skipping unparseable OCC symbol",
-					slog.String("symbol", occSymbol),
-					slog.Any("error", err),
-				)
-				continue
+				return nil, receipt, fmt.Errorf("alpaca/options: unparseable OCC symbol %s: %w", occSymbol, err)
 			}
+			if _, duplicate := seenSymbols[parsed.OCCSymbol]; duplicate {
+				return nil, receipt, fmt.Errorf("alpaca/options: duplicate OCC symbol %s across pages", parsed.OCCSymbol)
+			}
+			seenSymbols[parsed.OCCSymbol] = struct{}{}
 
 			// Client-side filters.
 			if !expiry.IsZero() && !parsed.Expiry.Equal(expiry) {
@@ -179,7 +205,13 @@ func (p *OptionsDataProvider) GetOptionsChain(
 
 			if snap.LatestQuote != nil {
 				ds.Bid = snap.LatestQuote.BidPrice
+				ds.BidSize = snap.LatestQuote.BidSize
 				ds.Ask = snap.LatestQuote.AskPrice
+				ds.AskSize = snap.LatestQuote.AskSize
+				if observedAt, parseErr := parseAlpacaTime(snap.LatestQuote.Time); parseErr == nil {
+					ds.ObservedAt = observedAt
+					ds.QuoteObservedAt = observedAt
+				}
 				if ds.Bid > 0 && ds.Ask > 0 {
 					ds.Mid = (ds.Bid + ds.Ask) / 2
 				}
@@ -187,18 +219,42 @@ func (p *OptionsDataProvider) GetOptionsChain(
 
 			if snap.LatestTrade != nil {
 				ds.Last = snap.LatestTrade.Price
+				ds.LastSize = snap.LatestTrade.Size
+				if observedAt, parseErr := parseAlpacaTime(snap.LatestTrade.Time); parseErr == nil {
+					ds.LastTradeObservedAt = observedAt
+					if ds.ObservedAt.IsZero() {
+						ds.ObservedAt = observedAt
+					}
+				}
 			}
 
 			allSnapshots = append(allSnapshots, ds)
 		}
 
 		if resp.NextPageToken == "" {
+			receipt.Entitled = true
+			receipt.PaginationComplete = true
 			break
 		}
+		if _, duplicate := seenPageTokens[resp.NextPageToken]; duplicate {
+			return nil, receipt, fmt.Errorf("alpaca/options: repeated page token")
+		}
+		seenPageTokens[resp.NextPageToken] = struct{}{}
 		pageToken = resp.NextPageToken
 	}
 
-	return allSnapshots, nil
+	sort.Slice(allSnapshots, func(i, j int) bool {
+		return allSnapshots[i].Contract.OCCSymbol < allSnapshots[j].Contract.OCCSymbol
+	})
+	return allSnapshots, receipt, nil
+}
+
+func parseAlpacaTime(value string) (time.Time, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed.UTC().Truncate(time.Microsecond), nil
 }
 
 // ------------------------------------------------------------------
@@ -209,6 +265,11 @@ func (p *OptionsDataProvider) GetOptionsChain(
 type barsResponse struct {
 	Bars          map[string][]optionBar `json:"bars"`
 	NextPageToken string                 `json:"next_page_token"`
+}
+
+type tradesResponse struct {
+	Trades        map[string][]optionTrade `json:"trades"`
+	NextPageToken string                   `json:"next_page_token"`
 }
 
 type optionBar struct {
@@ -229,22 +290,45 @@ func (p *OptionsDataProvider) GetOptionsOHLCV(
 	timeframe data.Timeframe,
 	from, to time.Time,
 ) ([]domain.OHLCV, error) {
+	bars, _, err := p.GetOptionsOHLCVWithReceipt(ctx, occSymbol, timeframe, from, to, "indicative", "raw")
+	return bars, err
+}
+
+// GetOptionsOHLCVWithReceipt returns historical bars together with the exact
+// feed and terminal-pagination evidence required by immutable imports.
+func (p *OptionsDataProvider) GetOptionsOHLCVWithReceipt(
+	ctx context.Context,
+	occSymbol string,
+	timeframe data.Timeframe,
+	from, to time.Time,
+	feed, adjustmentPolicy string,
+) ([]domain.OHLCV, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: adjustmentPolicy}
 	if p == nil {
-		return nil, fmt.Errorf("alpaca/options: provider is nil")
+		return nil, receipt, fmt.Errorf("alpaca/options: provider is nil")
 	}
 
 	occSymbol = strings.TrimSpace(occSymbol)
 	if occSymbol == "" {
-		return nil, fmt.Errorf("alpaca/options: OCC symbol is required")
+		return nil, receipt, fmt.Errorf("alpaca/options: OCC symbol is required")
+	}
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed != "indicative" && feed != "opra" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported feed %q", feed)
+	}
+	receipt.Feed = feed
+	if adjustmentPolicy != "raw" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported adjustment policy %q", adjustmentPolicy)
 	}
 
 	alpacaTF, err := mapTimeframe(timeframe)
 	if err != nil {
-		return nil, err
+		return nil, receipt, err
 	}
 
 	var allBars []domain.OHLCV
 	var pageToken string
+	seenPageTokens := make(map[string]struct{})
 
 	for {
 		params := url.Values{}
@@ -253,27 +337,29 @@ func (p *OptionsDataProvider) GetOptionsOHLCV(
 		params.Set("start", from.UTC().Format(time.RFC3339))
 		params.Set("end", to.UTC().Format(time.RFC3339))
 		params.Set("limit", "1000")
+		params.Set("feed", feed)
 		if pageToken != "" {
 			params.Set("page_token", pageToken)
 		}
 
 		body, err := p.doGet(ctx, "/v1beta1/options/bars", params)
 		if err != nil {
-			return nil, fmt.Errorf("alpaca/options: ohlcv request failed: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: ohlcv request failed: %w", err)
 		}
+		receipt.Pages++
 
 		var resp barsResponse
 		if err := json.Unmarshal(body, &resp); err != nil {
-			return nil, fmt.Errorf("alpaca/options: unmarshal ohlcv response: %w", err)
+			return nil, receipt, fmt.Errorf("alpaca/options: unmarshal ohlcv response: %w", err)
 		}
 
 		bars, ok := resp.Bars[occSymbol]
 		if !ok {
-			// Try without O: prefix or with it.
-			for _, b := range resp.Bars {
-				bars = b
-				break
-			}
+			prefixed := "O:" + strings.TrimPrefix(occSymbol, "O:")
+			bars, ok = resp.Bars[prefixed]
+		}
+		if !ok && len(resp.Bars) != 0 {
+			return nil, receipt, fmt.Errorf("alpaca/options: response omitted requested symbol %s", occSymbol)
 		}
 
 		for _, bar := range bars {
@@ -296,12 +382,94 @@ func (p *OptionsDataProvider) GetOptionsOHLCV(
 		}
 
 		if resp.NextPageToken == "" {
+			receipt.Entitled = true
+			receipt.PaginationComplete = true
 			break
 		}
+		if _, duplicate := seenPageTokens[resp.NextPageToken]; duplicate {
+			return nil, receipt, fmt.Errorf("alpaca/options: repeated page token")
+		}
+		seenPageTokens[resp.NextPageToken] = struct{}{}
 		pageToken = resp.NextPageToken
 	}
 
-	return allBars, nil
+	return allBars, receipt, nil
+}
+
+// GetOptionsTradesWithReceipt returns exact historical trades for one OCC
+// symbol and is complete only after a terminal provider page.
+func (p *OptionsDataProvider) GetOptionsTradesWithReceipt(ctx context.Context, occSymbol string, from, to time.Time, feed string) ([]data.OptionTradeObservation, data.HistoricalFetchReceipt, error) {
+	receipt := data.HistoricalFetchReceipt{Provider: "alpaca", Feed: feed, AdjustmentPolicy: "raw"}
+	if p == nil {
+		return nil, receipt, fmt.Errorf("alpaca/options: provider is nil")
+	}
+	occSymbol = domain.AlpacaSymbol(strings.TrimSpace(occSymbol))
+	if _, err := domain.ParseOCC(occSymbol); err != nil {
+		return nil, receipt, fmt.Errorf("alpaca/options: invalid OCC symbol: %w", err)
+	}
+	if from.After(to) {
+		return nil, receipt, fmt.Errorf("alpaca/options: trade range is invalid")
+	}
+	feed = strings.ToLower(strings.TrimSpace(feed))
+	if feed != "indicative" && feed != "opra" {
+		return nil, receipt, fmt.Errorf("alpaca/options: unsupported feed %q", feed)
+	}
+	receipt.Feed = feed
+	var values []data.OptionTradeObservation
+	var pageToken string
+	seenPageTokens := make(map[string]struct{})
+	seenTrades := make(map[string]struct{})
+	for {
+		params := url.Values{}
+		params.Set("symbols", occSymbol)
+		params.Set("start", from.UTC().Format(time.RFC3339Nano))
+		params.Set("end", to.UTC().Format(time.RFC3339Nano))
+		params.Set("feed", feed)
+		params.Set("limit", "1000")
+		if pageToken != "" {
+			params.Set("page_token", pageToken)
+		}
+		body, err := p.doGet(ctx, "/v1beta1/options/trades", params)
+		if err != nil {
+			return nil, receipt, fmt.Errorf("alpaca/options: trades request failed: %w", err)
+		}
+		receipt.Pages++
+		var response tradesResponse
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, receipt, fmt.Errorf("alpaca/options: unmarshal trades response: %w", err)
+		}
+		trades, ok := response.Trades[occSymbol]
+		if !ok {
+			trades, ok = response.Trades["O:"+occSymbol]
+		}
+		if !ok && len(response.Trades) != 0 {
+			return nil, receipt, fmt.Errorf("alpaca/options: trades response omitted requested symbol %s", occSymbol)
+		}
+		for _, trade := range trades {
+			at, err := parseAlpacaTime(trade.Time)
+			if err != nil || trade.ID <= 0 || trade.Price <= 0 || trade.Size <= 0 {
+				return nil, receipt, fmt.Errorf("alpaca/options: invalid trade for %s", occSymbol)
+			}
+			key := strconv.FormatInt(trade.ID, 10)
+			if _, duplicate := seenTrades[key]; duplicate {
+				return nil, receipt, fmt.Errorf("alpaca/options: duplicate trade for %s", occSymbol)
+			}
+			seenTrades[key] = struct{}{}
+			values = append(values, data.OptionTradeObservation{ProviderID: key, Price: trade.Price, Size: trade.Size, Timestamp: at, Exchange: trade.Exchange})
+		}
+		if response.NextPageToken == "" {
+			receipt.Entitled = true
+			receipt.PaginationComplete = true
+			break
+		}
+		if _, duplicate := seenPageTokens[response.NextPageToken]; duplicate {
+			return nil, receipt, fmt.Errorf("alpaca/options: repeated page token")
+		}
+		seenPageTokens[response.NextPageToken] = struct{}{}
+		pageToken = response.NextPageToken
+	}
+	sort.Slice(values, func(i, j int) bool { return values[i].Timestamp.Before(values[j].Timestamp) })
+	return values, receipt, nil
 }
 
 // ------------------------------------------------------------------

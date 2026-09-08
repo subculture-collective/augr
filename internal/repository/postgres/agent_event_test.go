@@ -17,56 +17,58 @@ import (
 )
 
 func TestBuildAgentEventListQuery_NoFilters(t *testing.T) {
-	query, args := buildAgentEventListQuery(repository.AgentEventFilter{}, 10, 0)
+	query, args := buildAgentEventListQuery(canonicalRepositoryTestAccountID, repository.AgentEventFilter{}, 10, 0)
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
 
-	if args[0] != 10 {
-		t.Errorf("expected limit=10, got %v", args[0])
+	if args[1] != 10 {
+		t.Errorf("expected limit=10, got %v", args[1])
 	}
 
-	if args[1] != 0 {
-		t.Errorf("expected offset=0, got %v", args[1])
+	if args[2] != 0 {
+		t.Errorf("expected offset=0, got %v", args[2])
 	}
 
 	assertContains(t, query, "FROM agent_events")
 	assertContains(t, query, "ORDER BY created_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
+	assertContains(t, query, "account_id = $1")
 }
 
 func TestBuildAgentEventListQuery_AllFilters(t *testing.T) {
 	runID := uuid.New()
+	runRef := domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}
 	strategyID := uuid.New()
 	after := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	before := time.Date(2026, time.December, 31, 0, 0, 0, 0, time.UTC)
 
 	filter := repository.AgentEventFilter{
-		PipelineRunID: &runID,
-		StrategyID:    &strategyID,
-		AgentRole:     domain.AgentRoleTrader,
-		EventKind:     "phase.started",
-		Tags:          []string{"phase", "trading"},
-		CreatedAfter:  &after,
-		CreatedBefore: &before,
+		PipelineRunRef: &runRef,
+		StrategyID:     &strategyID,
+		AgentRole:      domain.AgentRoleTrader,
+		EventKind:      "phase.started",
+		Tags:           []string{"phase", "trading"},
+		CreatedAfter:   &after,
+		CreatedBefore:  &before,
 	}
 
-	query, args := buildAgentEventListQuery(filter, 25, 50)
+	query, args := buildAgentEventListQuery(canonicalRepositoryTestAccountID, filter, 25, 50)
 
-	if len(args) != 9 {
-		t.Fatalf("expected 9 args, got %d: %v", len(args), args)
+	if len(args) != 11 {
+		t.Fatalf("expected 11 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "pipeline_run_id = $1")
-	assertContains(t, query, "strategy_id = $2")
-	assertContains(t, query, "agent_role = $3")
-	assertContains(t, query, "event_kind = $4")
-	assertContains(t, query, "tags && $5")
-	assertContains(t, query, "created_at >= $6")
-	assertContains(t, query, "created_at <= $7")
-	assertContains(t, query, "LIMIT $8 OFFSET $9")
+	assertContains(t, query, "pipeline_run_id = $2")
+	assertContains(t, query, "pipeline_run_trade_date = $3::date")
+	assertContains(t, query, "strategy_id = $4")
+	assertContains(t, query, "agent_role = $5")
+	assertContains(t, query, "event_kind = $6")
+	assertContains(t, query, "tags && $7")
+	assertContains(t, query, "created_at >= $8")
+	assertContains(t, query, "created_at <= $9")
+	assertContains(t, query, "LIMIT $10 OFFSET $11")
 }
 
 func TestBuildAgentEventListQuery_PartialFilters(t *testing.T) {
@@ -75,17 +77,28 @@ func TestBuildAgentEventListQuery_PartialFilters(t *testing.T) {
 		Tags:      []string{"analysis"},
 	}
 
-	query, args := buildAgentEventListQuery(filter, 10, 5)
+	query, args := buildAgentEventListQuery(canonicalRepositoryTestAccountID, filter, 10, 5)
 
-	if len(args) != 4 {
+	if len(args) != 5 {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "event_kind = $1")
-	assertContains(t, query, "tags && $2")
+	assertContains(t, query, "event_kind = $2")
+	assertContains(t, query, "tags && $3")
 	assertNotContains(t, query, "pipeline_run_id =")
 	assertNotContains(t, query, "strategy_id =")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "LIMIT $4 OFFSET $5")
+}
+
+func TestBuildAgentEventCountQuery_RunRefUsesIDAndTradeDate(t *testing.T) {
+	ref := domain.PipelineRunRef{ID: uuid.New(), TradeDate: canonicalRepositoryTestTradeDate}
+	query, args := buildAgentEventCountQuery(canonicalRepositoryTestAccountID, repository.AgentEventFilter{PipelineRunRef: &ref})
+
+	if len(args) != 3 || args[1] != ref.ID || !args[2].(time.Time).Equal(ref.TradeDate) {
+		t.Fatalf("count args = %#v, want account and run ref", args)
+	}
+	assertContains(t, query, "pipeline_run_id = $2")
+	assertContains(t, query, "pipeline_run_trade_date = $3::date")
 }
 
 func TestMarshalAgentEventMetadata_ValidJSON(t *testing.T) {
@@ -124,19 +137,21 @@ func TestAgentEventRepoIntegration_CreatePersistsEvent(t *testing.T) {
 	pool, cleanup := newAgentEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentEventRepo(pool)
+	repo := NewAgentEventRepo(pool, canonicalRepositoryTestAccountID)
 	runID := uuid.New()
+	runRef := domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate}
 	strategyID := uuid.New()
 
 	event := &domain.AgentEvent{
-		PipelineRunID: &runID,
-		StrategyID:    &strategyID,
-		AgentRole:     domain.AgentRoleTrader,
-		EventKind:     "phase.started",
-		Title:         "Trading phase started",
-		Summary:       "Trader entered the execution phase",
-		Tags:          []string{"phase", "trading"},
-		Metadata:      json.RawMessage(`{"step":"trading","status":"started"}`),
+		PipelineRunID:        &runID,
+		PipelineRunTradeDate: &runRef.TradeDate,
+		StrategyID:           &strategyID,
+		AgentRole:            domain.AgentRoleTrader,
+		EventKind:            "phase.started",
+		Title:                "Trading phase started",
+		Summary:              "Trader entered the execution phase",
+		Tags:                 []string{"phase", "trading"},
+		Metadata:             json.RawMessage(`{"step":"trading","status":"started"}`),
 	}
 
 	if err := repo.Create(ctx, event); err != nil {
@@ -150,7 +165,7 @@ func TestAgentEventRepoIntegration_CreatePersistsEvent(t *testing.T) {
 		t.Fatal("expected Create() to populate CreatedAt")
 	}
 
-	got, err := repo.List(ctx, repository.AgentEventFilter{PipelineRunID: &runID}, 10, 0)
+	got, err := repo.List(ctx, repository.AgentEventFilter{PipelineRunRef: &runRef}, 10, 0)
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
@@ -193,10 +208,11 @@ func TestAgentEventRepoIntegration_ListFilters(t *testing.T) {
 	pool, cleanup := newAgentEventIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAgentEventRepo(pool)
+	repo := NewAgentEventRepo(pool, canonicalRepositoryTestAccountID)
 
 	runIDOne := uuid.New()
 	runIDTwo := uuid.New()
+	runRefOne := domain.PipelineRunRef{ID: runIDOne, TradeDate: canonicalRepositoryTestTradeDate}
 	strategyIDOne := uuid.New()
 	strategyIDTwo := uuid.New()
 
@@ -247,7 +263,7 @@ func TestAgentEventRepoIntegration_ListFilters(t *testing.T) {
 		t.Fatalf("expected results ordered by created_at desc, got IDs %s ... %s", all[0].ID, all[3].ID)
 	}
 
-	byRun, err := repo.List(ctx, repository.AgentEventFilter{PipelineRunID: &runIDOne}, 10, 0)
+	byRun, err := repo.List(ctx, repository.AgentEventFilter{PipelineRunRef: &runRefOne}, 10, 0)
 	if err != nil {
 		t.Fatalf("List(PipelineRunID) error = %v", err)
 	}
@@ -306,9 +322,9 @@ func TestAgentEventRepoIntegration_ListFilters(t *testing.T) {
 	}
 
 	combined, err := repo.List(ctx, repository.AgentEventFilter{
-		PipelineRunID: &runIDOne,
-		Tags:          []string{"complete"},
-		CreatedAfter:  &after,
+		PipelineRunRef: &runRefOne,
+		Tags:           []string{"complete"},
+		CreatedAfter:   &after,
 	}, 10, 0)
 	if err != nil {
 		t.Fatalf("List(combined filters) error = %v", err)
@@ -334,6 +350,11 @@ func insertAgentEventRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	t.Helper()
 
 	var event domain.AgentEvent
+	tradeDate := (*time.Time)(nil)
+	if row.PipelineRunID != nil {
+		date := canonicalRepositoryTestTradeDate
+		tradeDate = &date
+	}
 	metadata, err := marshalAgentEventMetadata(row.Metadata)
 	if err != nil {
 		t.Fatalf("marshalAgentEventMetadata() error = %v", err)
@@ -341,10 +362,12 @@ func insertAgentEventRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 
 	err = pool.QueryRow(ctx,
 		`INSERT INTO agent_events (
-			pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata, created_at
+			environment, origin_type, origin_id, account_id, pipeline_run_trade_date, pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata, created_at
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 VALUES ('paper_scored','operator','fixture',$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING id, created_at`,
+		canonicalRepositoryTestAccountID,
+		tradeDate,
 		row.PipelineRunID,
 		row.StrategyID,
 		nullString(row.AgentRole.String()),
@@ -391,7 +414,7 @@ func newAgentEventIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -420,6 +443,11 @@ func newAgentEventIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 	ddl := []string{
 		`CREATE TABLE agent_events (
 			id              UUID        NOT NULL DEFAULT gen_random_uuid(),
+			account_id      UUID,
+			environment     TEXT,
+			origin_type     TEXT,
+			origin_id       TEXT,
+			pipeline_run_trade_date DATE,
 			pipeline_run_id UUID,
 			strategy_id     UUID,
 			agent_role      TEXT,

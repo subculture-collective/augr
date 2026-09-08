@@ -3,6 +3,7 @@ package automation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -442,11 +443,17 @@ func (o *JobOrchestrator) optionsScan(ctx context.Context) error {
 			return ctx.Err()
 		}
 		if o.deps.DataService != nil {
-			priceNow := time.Now()
-			bars, err := o.deps.DataService.GetOHLCV(ctx, domain.MarketTypeStock, ticker, data.Timeframe1d, priceNow.AddDate(0, 0, -5), priceNow)
+			priceNow := o.now()
+			bars, err := o.deps.DataService.GetOHLCVValidated(ctx, domain.MarketTypeStock, ticker, data.Timeframe1d, priceNow.AddDate(0, 0, -5), priceNow, func(bars []domain.OHLCV) bool {
+				return len(bars) > 0 && dailyBarFresh(priceNow, bars[len(bars)-1].Timestamp)
+			})
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
+				}
+				if errors.Is(err, data.ErrOHLCVRejected) {
+					summary["price_stale"]++
+					continue
 				}
 				summary["price_fetch_failed"]++
 				o.logger.Warn("options_scan: price lookup failed", slog.String("ticker", ticker), slog.Any("error", err))

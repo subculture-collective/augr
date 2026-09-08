@@ -23,7 +23,15 @@ do
   sh -n "$shell_script"
 done
 bash -n scripts/verify-prod-build.sh
-go test -count=1 ./cmd/... ./internal/... ./migrations/...
+bash scripts/update-db-targets_test.sh
+bash scripts/apply-migrations-psql_test.sh
+python3 scripts/parse-old-db-snapshot_test.py
+shellcheck scripts/apply-migrations-psql.sh scripts/apply-migrations-psql_test.sh scripts/update-db-targets.sh scripts/update-db-targets_test.sh scripts/verify-account-cutover.sh
+shellcheck scripts/capture-old-db-baseline.sh scripts/verify-old-db-after-drain.sh
+./scripts/verify-account-cutover.sh --schema-matrix
+./scripts/verify-account-cutover.sh --writer-fixtures
+./scripts/verify-account-cutover.sh --api-matrix
+env -u DATABASE_URL -u DB_URL -u TEST_DATABASE_URL go test -count=1 ./cmd/... ./internal/... ./migrations/...
 go vet ./cmd/... ./internal/... ./migrations/...
 golangci-lint run ./cmd/... ./internal/... ./migrations/...
 (
@@ -36,6 +44,7 @@ golangci-lint run ./cmd/... ./internal/... ./migrations/...
 docker compose config --quiet
 docker compose -f docker-compose.nuc.yml config --quiet
 docker compose -f docker-compose.nuc.yml -f deploy/docker-compose.nuc.rollback.yml config --quiet
+docker compose -f docker-compose.nuc.yml -f deploy/docker-compose.nuc.scheduler-paused.yml config --quiet
 MIGRATION_DOWN_STEPS=2 docker compose -f docker-compose.nuc.yml -f deploy/docker-compose.nuc.migrate-down.yml config --quiet
 docker buildx build --check -f Dockerfile .
 docker buildx build --check -f Dockerfile.web .

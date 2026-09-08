@@ -68,20 +68,49 @@ func (b *Broker) CancelOrder(ctx context.Context, orderID string) error {
 
 // GetOrderStatus reads through the live client when configured.
 func (b *Broker) GetOrderStatus(ctx context.Context, orderID string) (domain.OrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, orderID)
+	return result.Status, err
+}
+
+func (b *Broker) GetOrderStatusResult(ctx context.Context, orderID string) (execution.BrokerOrderStatus, error) {
 	if b == nil {
-		return "", errors.New("kalshi: broker is required")
+		return execution.BrokerOrderStatus{}, errors.New("kalshi: broker is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("kalshi: get order status: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("kalshi: get order status: %w", err)
 	}
 	if b.client != nil {
 		resp, err := b.client.GetOrder(ctx, orderID)
 		if err != nil {
-			return "", fmt.Errorf("kalshi: get order status: %w", err)
+			return execution.BrokerOrderStatus{}, fmt.Errorf("kalshi: get order status: %w", err)
 		}
-		return mapOrderStatus(resp.Status)
+		return richOrderStatus(resp)
 	}
-	return "", errors.New("kalshi live order status is unavailable; paper trading only")
+	return execution.BrokerOrderStatus{}, errors.New("kalshi live order status is unavailable; paper trading only")
+}
+
+func (b *Broker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	lookup, ok := b.client.(ClientOrderLookup)
+	if !ok {
+		return "", execution.BrokerOrderStatus{}, errors.New("kalshi: client-order-id lookup is unavailable")
+	}
+	resp, err := lookup.GetOrderByClientOrderID(ctx, strings.TrimSpace(clientOrderID))
+	if err != nil {
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("kalshi: lookup client order id: %w", err)
+	}
+	status, err := richOrderStatus(resp)
+	return strings.TrimSpace(resp.OrderID), status, err
+}
+
+func richOrderStatus(resp OrderResponse) (execution.BrokerOrderStatus, error) {
+	status, err := mapOrderStatus(resp.Status)
+	if err != nil {
+		return execution.BrokerOrderStatus{}, err
+	}
+	if resp.FilledCount > 0 && (status == domain.OrderStatusPending || status == domain.OrderStatusSubmitted) {
+		status = domain.OrderStatusPartial
+	}
+	return execution.BrokerOrderStatus{Status: status, FilledQuantity: float64(resp.FilledCount), FilledAvgPrice: resp.AveragePrice, FilledAt: resp.FilledAt}, nil
 }
 
 // GetPositions reads positions through the live client when configured.

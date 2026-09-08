@@ -18,11 +18,12 @@ import (
 )
 
 type operationalUniverseRepo struct {
-	watchlist []universe.TrackedTicker
-	err       error
-	limit     int
-	limits    []int
-	listCalls int
+	watchlist      []universe.TrackedTicker
+	err            error
+	updateScoreErr error
+	limit          int
+	limits         []int
+	listCalls      int
 }
 
 func (r *operationalUniverseRepo) Upsert(context.Context, *universe.TrackedTicker) error { return nil }
@@ -50,7 +51,9 @@ func (r *operationalUniverseRepo) Watchlist(_ context.Context, limit int) ([]uni
 	return append([]universe.TrackedTicker(nil), watchlist...), r.err
 }
 
-func (r *operationalUniverseRepo) UpdateScore(context.Context, string, float64) error { return nil }
+func (r *operationalUniverseRepo) UpdateScore(context.Context, string, float64) error {
+	return r.updateScoreErr
+}
 
 func (r *operationalUniverseRepo) Count(context.Context) (int, error) { return 0, nil }
 

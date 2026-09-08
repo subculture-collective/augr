@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Copy, Check } from 'lucide-react'
+import { useOptionalAccount } from '@/shared/account/AccountProvider'
 
 type EntityKind = 'strategy' | 'run' | 'order' | 'trade' | 'position' | 'decision' | 'event' | 'opportunity' | 'risk'
 
@@ -19,17 +20,18 @@ function defaultEntityLabel(kind: EntityKind, id: string, label?: string) {
   return `${kind[0]!.toUpperCase()}${kind.slice(1)} ${shortId(id)}`
 }
 
-function hrefFor(kind: EntityKind, id: string) {
+function hrefFor(kind: EntityKind, id: string, accountId?: string, tradeDate?: string) {
+  const base = accountId ? `/accounts/${accountId}` : ''
   switch (kind) {
     case 'strategy': return `/strategies/${id}`
-    case 'run': return `/runs/${id}`
-    case 'order': return `/orders/${id}`
-    case 'position': return `/trades?position_id=${encodeURIComponent(id)}`
-    case 'trade': return `/trades?trade_id=${encodeURIComponent(id)}`
-    case 'decision': return `/events?decision_id=${encodeURIComponent(id)}`
-    case 'event': return `/events?event_id=${encodeURIComponent(id)}`
-    case 'opportunity': return `/portfolio?tab=allocator&opportunity_id=${encodeURIComponent(id)}`
-    case 'risk': return '/risk'
+    case 'run': return tradeDate ? `${base}/runs/${id}?trade_date=${encodeURIComponent(tradeDate)}` : undefined
+    case 'order': return `${base}/orders/${id}`
+    case 'position': return `${base}/trades?position_id=${encodeURIComponent(id)}`
+    case 'trade': return `${base}/trades?trade_id=${encodeURIComponent(id)}`
+    case 'decision': return `${base}/events?decision_id=${encodeURIComponent(id)}`
+    case 'event': return `${base}/events?event_id=${encodeURIComponent(id)}`
+    case 'opportunity': return `${base}/portfolio?tab=allocator&opportunity_id=${encodeURIComponent(id)}`
+    case 'risk': return `${base}/risk`
   }
 }
 
@@ -59,15 +61,18 @@ export function CopyButton({ value, label = 'Copy ID' }: { value: string; label?
   )
 }
 
-export function EntityLink({ kind, id, label, preserveContext = true, copy = true }: { kind: EntityKind; id?: string; label?: string; preserveContext?: boolean; copy?: boolean }) {
+export function EntityLink({ kind, id, label, accountId, tradeDate, preserveContext = true, copy = true }: { kind: EntityKind; id?: string; label?: string; accountId?: string; tradeDate?: string; preserveContext?: boolean; copy?: boolean }) {
+  const accountContext = useOptionalAccount()
+  const resolvedAccountId = accountId ?? accountContext?.account.id
   const location = useLocation()
   const from = `${location.pathname}${location.search}`
-  const href = useMemo(() => id ? withSourceContext(hrefFor(kind, id), from) : undefined, [from, id, kind])
+  const baseHref = id ? hrefFor(kind, id, resolvedAccountId, tradeDate) : undefined
+  const href = useMemo(() => baseHref ? withSourceContext(baseHref, from) : undefined, [baseHref, from])
   if (!id) return <span className="muted">No {kind} ID recorded</span>
   const text = defaultEntityLabel(kind, id, label)
   return (
     <span className="entity-link">
-      {preserveContext && href ? <Link to={href}>{text}</Link> : <Link to={hrefFor(kind, id)}>{text}</Link>}
+      {href ? <Link to={preserveContext ? href : baseHref!}>{text}</Link> : <span title="Run trade date is required for navigation">{text}</span>}
       {copy ? <> <CopyButton value={id} label={`Copy ${kind} ID`} /></> : null}
     </span>
   )

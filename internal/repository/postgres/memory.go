@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -14,33 +15,42 @@ import (
 
 // MemoryRepo implements repository.MemoryRepository using PostgreSQL.
 type MemoryRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that MemoryRepo satisfies MemoryRepository.
 var _ repository.MemoryRepository = (*MemoryRepo)(nil)
 
 // NewMemoryRepo returns a MemoryRepo backed by the given connection pool.
-func NewMemoryRepo(pool *pgxpool.Pool) *MemoryRepo {
-	return &MemoryRepo{pool: pool}
+func NewMemoryRepo(pool *pgxpool.Pool, accountID uuid.UUID) *MemoryRepo {
+	return &MemoryRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new agent memory and populates the generated ID and
 // CreatedAt on the provided struct. The situation_tsv column is populated
 // automatically by the database trigger.
 func (r *MemoryRepo) Create(ctx context.Context, memory *domain.AgentMemory) error {
+	if err := validateOptionalPipelineRunRef(memory.PipelineRunID, memory.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create agent memory: %w", err)
+	}
+	if memory.AccountID != uuid.Nil && memory.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create agent memory: account mismatch")
+	}
+	memory.AccountID = r.accountID
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO agent_memories (
-			agent_role, situation, recommendation, outcome,
-			pipeline_run_id, relevance_score
+			account_id, environment, agent_role, situation, recommendation, outcome,
+			pipeline_run_id, pipeline_run_trade_date, relevance_score
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING id, created_at`,
-		memory.AgentRole,
+		r.accountID, memory.Environment, memory.AgentRole,
 		memory.Situation,
 		memory.Recommendation,
 		nilIfEmpty(memory.Outcome),
 		memory.PipelineRunID,
+		memory.PipelineRunTradeDate,
 		memory.RelevanceScore,
 	)
 
@@ -57,7 +67,7 @@ func (r *MemoryRepo) Create(ctx context.Context, memory *domain.AgentMemory) err
 // memories matching the filter, ordered by created_at DESC.
 func (r *MemoryRepo) Search(ctx context.Context, query string, filter repository.MemorySearchFilter, limit, offset int) ([]domain.AgentMemory, error) {
 	trimmedQuery := strings.TrimSpace(query)
-	sqlQuery, args := buildSearchQuery(trimmedQuery, filter, limit, offset)
+	sqlQuery, args := buildSearchQuery(r.accountID, trimmedQuery, filter, limit, offset)
 
 	rows, err := r.pool.Query(ctx, sqlQuery, args...)
 	if err != nil {
@@ -84,7 +94,7 @@ func (r *MemoryRepo) Search(ctx context.Context, query string, filter repository
 // Delete removes an agent memory by its ID. It returns ErrNotFound when no row
 // matches.
 func (r *MemoryRepo) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM agent_memories WHERE id = $1`, id)
+	tag, err := r.pool.Exec(ctx, `DELETE FROM agent_memories WHERE id = $1 AND account_id = $2`, id, r.accountID)
 	if err != nil {
 		return fmt.Errorf("postgres: delete agent memory: %w", err)
 	}
@@ -103,10 +113,11 @@ func (r *MemoryRepo) Delete(ctx context.Context, id uuid.UUID) error {
 // for ordering). RelevanceScore always reflects the stored column value.
 func scanAgentMemory(sc scanner, withRank bool) (*domain.AgentMemory, error) {
 	var (
-		m              domain.AgentMemory
-		outcome        *string
-		pipelineRunID  *uuid.UUID
-		relevanceScore *float64
+		m                    domain.AgentMemory
+		outcome              *string
+		pipelineRunID        *uuid.UUID
+		pipelineRunTradeDate *time.Time
+		relevanceScore       *float64
 	)
 
 	var err error
@@ -114,11 +125,13 @@ func scanAgentMemory(sc scanner, withRank bool) (*domain.AgentMemory, error) {
 		var rank float64 // consumed for ordering; not mapped onto the domain struct
 		err = sc.Scan(
 			&m.ID,
+			&m.AccountID, &m.Environment,
 			&m.AgentRole,
 			&m.Situation,
 			&m.Recommendation,
 			&outcome,
 			&pipelineRunID,
+			&pipelineRunTradeDate,
 			&relevanceScore,
 			&m.CreatedAt,
 			&rank,
@@ -126,11 +139,13 @@ func scanAgentMemory(sc scanner, withRank bool) (*domain.AgentMemory, error) {
 	} else {
 		err = sc.Scan(
 			&m.ID,
+			&m.AccountID, &m.Environment,
 			&m.AgentRole,
 			&m.Situation,
 			&m.Recommendation,
 			&outcome,
 			&pipelineRunID,
+			&pipelineRunTradeDate,
 			&relevanceScore,
 			&m.CreatedAt,
 		)
@@ -144,6 +159,7 @@ func scanAgentMemory(sc scanner, withRank bool) (*domain.AgentMemory, error) {
 		m.Outcome = *outcome
 	}
 	m.PipelineRunID = pipelineRunID
+	m.PipelineRunTradeDate = pipelineRunTradeDate
 	if relevanceScore != nil {
 		m.RelevanceScore = relevanceScore
 	}
@@ -154,7 +170,7 @@ func scanAgentMemory(sc scanner, withRank bool) (*domain.AgentMemory, error) {
 // buildSearchQuery constructs the SELECT query and arguments for Search with
 // dynamic WHERE conditions and optional full-text ranking. All values are
 // parameterized.
-func buildSearchQuery(query string, filter repository.MemorySearchFilter, limit, offset int) (string, []any) {
+func buildSearchQuery(accountID uuid.UUID, query string, filter repository.MemorySearchFilter, limit, offset int) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -166,6 +182,7 @@ func buildSearchQuery(query string, filter repository.MemorySearchFilter, limit,
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
 	hasFTS := query != ""
 
@@ -181,8 +198,9 @@ func buildSearchQuery(query string, filter repository.MemorySearchFilter, limit,
 		conditions = append(conditions, "agent_role = "+nextArg(filter.AgentRole))
 	}
 
-	if filter.PipelineRunID != nil {
-		conditions = append(conditions, "pipeline_run_id = "+nextArg(*filter.PipelineRunID))
+	if filter.PipelineRunRef != nil {
+		conditions = append(conditions, "pipeline_run_id = "+nextArg(filter.PipelineRunRef.ID))
+		conditions = append(conditions, "pipeline_run_trade_date = "+nextArg(filter.PipelineRunRef.TradeDate)+"::date")
 	}
 
 	if filter.MinRelevanceScore != nil {
@@ -198,8 +216,8 @@ func buildSearchQuery(query string, filter repository.MemorySearchFilter, limit,
 	}
 
 	// Build SELECT clause.
-	selectCols := `id, agent_role, situation, recommendation, outcome,
-		 pipeline_run_id, relevance_score, created_at`
+	selectCols := `id, account_id, environment, agent_role, situation, recommendation, outcome,
+		 pipeline_run_id, pipeline_run_trade_date, relevance_score, created_at`
 
 	if hasFTS {
 		selectCols += ", " + rankExpr + " AS rank"

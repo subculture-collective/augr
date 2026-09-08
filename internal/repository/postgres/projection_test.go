@@ -26,6 +26,21 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+func recordProjectionMarkForTest(ctx context.Context, pool *pgxpool.Pool, mark *ledger.MarkObservation) (*ledger.MarkObservation, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := insertMarkObservationTx(ctx, tx, mark); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return NewProjectionRepo(pool, ProjectionCheckpointAttestor{}).GetMarkObservationByID(ctx, mark.ID)
+}
+
 func TestMarkObservationRepoConvergesAndRejectsChangedEvidence(t *testing.T) {
 	ctx := context.Background()
 	pools := newProjectionIntegrationPool(t, ctx)
@@ -44,11 +59,11 @@ func TestMarkObservationRepoConvergesAndRejectsChangedEvidence(t *testing.T) {
 		}
 		return value
 	}
-	created, err := repo.RecordMarkObservation(ctx, newMark("v1", json.RawMessage(`{"quality":"official","sequence":9007199254740993}`)))
+	created, err := recordProjectionMarkForTest(ctx, pools.owner, newMark("v1", json.RawMessage(`{"quality":"official","sequence":9007199254740993}`)))
 	if err != nil {
 		t.Fatalf("RecordMarkObservation() error = %v", err)
 	}
-	replayed, err := repo.RecordMarkObservation(ctx, newMark("v1", json.RawMessage(`{"sequence":9007199254740993,"quality":"official"}`)))
+	replayed, err := recordProjectionMarkForTest(ctx, pools.owner, newMark("v1", json.RawMessage(`{"sequence":9007199254740993,"quality":"official"}`)))
 	if err != nil {
 		t.Fatalf("RecordMarkObservation(retry) error = %v", err)
 	}
@@ -62,7 +77,7 @@ func TestMarkObservationRepoConvergesAndRejectsChangedEvidence(t *testing.T) {
 	if !ledger.SameMarkObservation(created, loaded) {
 		t.Fatalf("loaded mark differs: created=%+v loaded=%+v", created, loaded)
 	}
-	if _, err := repo.RecordMarkObservation(ctx, newMark("v2", json.RawMessage(`{"quality":"official","sequence":9007199254740993}`))); !errors.Is(err, repository.ErrIdempotencyConflict) {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, newMark("v2", json.RawMessage(`{"quality":"official","sequence":9007199254740993}`))); !errors.Is(err, repository.ErrIdempotencyConflict) {
 		t.Fatalf("changed revision error = %v, want ErrIdempotencyConflict", err)
 	}
 }
@@ -72,7 +87,6 @@ func TestMarkObservationRepoConcurrentIdenticalWritesConverge(t *testing.T) {
 	pools := newProjectionIntegrationPool(t, ctx)
 	pool := pools.owner
 	fixture := newEconomicLedgerFixture(t, ctx, pool, "projection-mark-concurrent")
-	repo := NewProjectionRepo(pools.writer, pools.attestor)
 	effectiveAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	mark, err := ledger.NewMarkObservation(ledger.MarkObservationInput{
 		InstrumentID: fixture.instrument.ID, Price: decimal.Zero, PriceCurrency: "USD",
@@ -90,7 +104,7 @@ func TestMarkObservationRepoConcurrentIdenticalWritesConverge(t *testing.T) {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			value, writeErr := repo.RecordMarkObservation(ctx, mark)
+			value, writeErr := recordProjectionMarkForTest(ctx, pools.owner, mark)
 			if writeErr != nil {
 				errorsFound <- writeErr
 				return
@@ -133,11 +147,11 @@ func TestPortfolioProjectionRepoRebuildsAndPersistsExactCheckpoint(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.RecordMarkObservation(ctx, mark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, mark); err != nil {
 		t.Fatal(err)
 	}
 	request := ledger.ProjectionRequest{
-		AccountID: fixture.account.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
+		AccountID: fixture.account.ID, ThroughTransactionID: fixture.normalization.Transaction.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
 		MarkSource: "test-source", MarkNamespace: "marks/repository", MaxMarkAge: 48 * time.Hour,
 	}
 	futureMark, err := ledger.NewMarkObservation(ledger.MarkObservationInput{
@@ -149,14 +163,15 @@ func TestPortfolioProjectionRepoRebuildsAndPersistsExactCheckpoint(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.RecordMarkObservation(ctx, futureMark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, futureMark); err != nil {
 		t.Fatal(err)
 	}
 	first, err := repo.RebuildPortfolioProjection(ctx, request)
 	if err != nil {
 		t.Fatalf("RebuildPortfolioProjection() error = %v", err)
 	}
-	if first.TransactionCount < 2 || len(first.Lots) != 1 || len(first.Positions) != 1 {
+	// The pinned August fill precedes the migration-created opening flow.
+	if first.TransactionCount != 1 || len(first.Lots) != 1 || len(first.Positions) != 1 {
 		t.Fatalf("projection boundary/lots/positions = %d/%d/%d", first.TransactionCount, len(first.Lots), len(first.Positions))
 	}
 	if !first.Totals.TotalPnL.Equal(decimal.RequireFromString("3.5")) {
@@ -247,7 +262,7 @@ func TestProjectionRepoListsOnlyResolvableCanonicalKalshiOpenLots(t *testing.T) 
 	if _, err := ledgerRepo.ApplyEconomicNormalization(ctx, normalization); err != nil {
 		t.Fatal(err)
 	}
-	lots, err := NewProjectionRepo(pools.writer, pools.attestor).ListCanonicalOpenLots(ctx, now)
+	lots, err := NewProjectionRepo(pools.writer, pools.attestor).ListCanonicalOpenLots(ctx, account.ID, now)
 	if err != nil {
 		t.Fatalf("ListCanonicalOpenLots() error = %v", err)
 	}
@@ -279,11 +294,11 @@ func TestPortfolioProjectionRepoConcurrentIdenticalRebuildsConverge(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.RecordMarkObservation(ctx, mark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, mark); err != nil {
 		t.Fatal(err)
 	}
 	request := ledger.ProjectionRequest{
-		AccountID: fixture.account.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
+		AccountID: fixture.account.ID, ThroughTransactionID: fixture.normalization.Transaction.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
 		MarkSource: "test-source", MarkNamespace: "marks/repository", MaxMarkAge: 48 * time.Hour,
 	}
 	const workers = 6
@@ -351,7 +366,7 @@ func TestPortfolioProjectionRepoFailureLeavesEvidenceUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.RecordMarkObservation(ctx, mark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, mark); err != nil {
 		t.Fatal(err)
 	}
 	var beforeTransactions, beforePostings, beforeMarks int
@@ -362,7 +377,7 @@ func TestPortfolioProjectionRepoFailureLeavesEvidenceUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = repo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-		AccountID: fixture.account.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
+		AccountID: fixture.account.ID, ThroughTransactionID: fixture.normalization.Transaction.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
 		MarkSource: "missing-source", MarkNamespace: "marks/repository", MaxMarkAge: 48 * time.Hour,
 	})
 	if err == nil {
@@ -382,7 +397,7 @@ func TestPortfolioProjectionRepoFailureLeavesEvidenceUntouched(t *testing.T) {
 	}
 }
 
-func TestPortfolioProjectionRepoLateBackdatedInputCreatesCorrectedCheckpoint(t *testing.T) {
+func TestPortfolioProjectionRepoPinnedFrontierIncludesLateRowsInsideItsTuple(t *testing.T) {
 	ctx := context.Background()
 	pools := newProjectionIntegrationPool(t, ctx)
 	pool := pools.owner
@@ -404,11 +419,11 @@ func TestPortfolioProjectionRepoLateBackdatedInputCreatesCorrectedCheckpoint(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repo.RecordMarkObservation(ctx, mark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, mark); err != nil {
 		t.Fatal(err)
 	}
 	request := ledger.ProjectionRequest{
-		AccountID: fixture.account.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
+		AccountID: fixture.account.ID, ThroughTransactionID: fixture.normalization.Transaction.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
 		MarkSource: "test-source", MarkNamespace: "marks/repository", MaxMarkAge: 48 * time.Hour,
 	}
 	first, err := repo.RebuildPortfolioProjection(ctx, request)
@@ -447,13 +462,47 @@ func TestPortfolioProjectionRepoLateBackdatedInputCreatesCorrectedCheckpoint(t *
 		t.Fatal(err)
 	}
 	if corrected.CheckpointID == first.CheckpointID || corrected.InputChecksum == first.InputChecksum {
-		t.Fatal("late/backdated input did not produce a corrected checkpoint identity")
+		t.Fatal("late/backdated input inside the pinned tuple did not correct the checkpoint")
 	}
 	if corrected.ThroughTransactionID != first.ThroughTransactionID {
 		t.Fatalf("late/backdated through ID = %s, want unchanged %s", corrected.ThroughTransactionID, first.ThroughTransactionID)
 	}
-	if !corrected.Totals.TotalPnL.Equal(first.Totals.TotalPnL.Sub(decimal.RequireFromString("0.25"))) {
-		t.Fatalf("corrected total P&L = %s, want %s", corrected.Totals.TotalPnL, first.Totals.TotalPnL.Sub(decimal.RequireFromString("0.25")))
+	if corrected.TransactionCount != first.TransactionCount+1 || !corrected.Totals.TotalPnL.Equal(first.Totals.TotalPnL.Sub(decimal.RequireFromString("0.25"))) {
+		t.Fatalf("corrected frontier = count:%d pnl:%s, first count:%d pnl:%s", corrected.TransactionCount, corrected.Totals.TotalPnL, first.TransactionCount, first.Totals.TotalPnL)
+	}
+
+	futureObservedAt := request.AsOf.Add(time.Minute)
+	futureSource, err := ledger.NewEconomicSourceEvent(ledger.EconomicSourceEventInput{
+		AccountID: fixture.account.ID, Source: "simulator", SourceNamespace: "costs/repository",
+		SourceEventID: "future-observed-cost", SourceRevision: "v1", ObservedAt: futureObservedAt,
+		RawPayload: json.RawMessage(`{"fee":"future-observed"}`), CreatedAt: futureObservedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureCost, err := ledger.NewCostEconomicNormalization(ledger.CostEconomicEventInput{
+		Base: ledger.EconomicNormalizationBaseInput{
+			SourceEvent: futureSource, Account: fixture.account, NormalizerVersion: "economic_event_v1",
+			ExecutionOriginType: ledger.ExecutionOriginReconciliation, ExecutionOriginID: "future-observed-reconciliation",
+			ReferenceType: "cost", ReferenceID: "future-observed-cost", EffectiveAt: lateEffectiveAt.Add(time.Second),
+		},
+		Kind: ledger.CostKindFee, Currency: "USD", Amount: decimal.RequireFromString("0.50"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledgerRepo.RecordEconomicSourceEvent(ctx, futureSource); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledgerRepo.ApplyEconomicNormalization(ctx, futureCost); err != nil {
+		t.Fatal(err)
+	}
+	stillCorrected, err := repo.RebuildPortfolioProjection(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillCorrected.CheckpointID != corrected.CheckpointID || stillCorrected.InputChecksum != corrected.InputChecksum || stillCorrected.TransactionCount != corrected.TransactionCount {
+		t.Fatal("transaction observed after as_of entered the explicit bitemporal frontier")
 	}
 }
 
@@ -462,7 +511,7 @@ func TestPortfolioProjectionRepoRejectsUnsafeOwnerWriter(t *testing.T) {
 	pools := newProjectionIntegrationPool(t, ctx)
 	repo := NewProjectionRepo(pools.owner, pools.attestor)
 	_, err := repo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-		AccountID: uuid.New(), AsOf: time.Now().UTC().Truncate(time.Microsecond),
+		AccountID: uuid.New(), ThroughTransactionID: uuid.New(), AsOf: time.Now().UTC().Truncate(time.Microsecond),
 		MarkSource: "test-source", MarkNamespace: "marks/repository", MaxMarkAge: time.Hour,
 	})
 	if err == nil || !strings.Contains(err.Error(), "unsafe checkpoint writer privileges") {
@@ -481,7 +530,6 @@ func TestPortfolioProjectionRepoRejectsMismatchedAttestationSecret(t *testing.T)
 	if _, err := ledgerRepo.ApplyEconomicNormalization(ctx, fixture.normalization); err != nil {
 		t.Fatal(err)
 	}
-	goodRepo := NewProjectionRepo(pools.writer, pools.attestor)
 	markEffectiveAt := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
 	mark, err := ledger.NewMarkObservation(ledger.MarkObservationInput{
 		InstrumentID: fixture.instrument.ID, Price: decimal.NewFromInt(12), PriceCurrency: "USD",
@@ -491,7 +539,7 @@ func TestPortfolioProjectionRepoRejectsMismatchedAttestationSecret(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := goodRepo.RecordMarkObservation(ctx, mark); err != nil {
+	if _, err := recordProjectionMarkForTest(ctx, pools.owner, mark); err != nil {
 		t.Fatal(err)
 	}
 	wrongAttestor := pools.attestor
@@ -499,7 +547,7 @@ func TestPortfolioProjectionRepoRejectsMismatchedAttestationSecret(t *testing.T)
 	wrongAttestor.Secret[0] ^= 0xff
 	badRepo := NewProjectionRepo(pools.writer, wrongAttestor)
 	_, err = badRepo.RebuildPortfolioProjection(ctx, ledger.ProjectionRequest{
-		AccountID: fixture.account.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
+		AccountID: fixture.account.ID, ThroughTransactionID: fixture.normalization.Transaction.ID, AsOf: time.Now().UTC().Add(time.Minute).Truncate(time.Microsecond),
 		MarkSource: "test-source", MarkNamespace: "marks/repository", MaxMarkAge: 48 * time.Hour,
 	})
 	if err == nil || !strings.Contains(err.Error(), "attestation HMAC") {
@@ -518,6 +566,36 @@ type projectionIntegrationPools struct {
 	owner    *pgxpool.Pool
 	writer   *pgxpool.Pool
 	attestor ProjectionCheckpointAttestor
+}
+
+func applyRepositoryMigrationRange(t *testing.T, ctx context.Context, pool *pgxpool.Pool, after, through string) {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller() failed")
+	}
+	migrationDirectory := filepath.Join(filepath.Dir(filename), "..", "..", "..", "migrations")
+	entries, err := os.ReadDir(migrationDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".up.sql") || len(name) < 6 {
+			continue
+		}
+		version := name[:6]
+		if version > after && version <= through {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if _, err := execRepositoryMigration(t, ctx, pool, name); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
 }
 
 func newProjectionIntegrationPool(t *testing.T, ctx context.Context) projectionIntegrationPools {
@@ -586,6 +664,9 @@ func newProjectionIntegrationPool(t *testing.T, ctx context.Context) projectionI
 			}
 		}
 	}
+	if !preMigratedSchema {
+		applyRepositoryMigrationRange(t, ctx, ownerPool, "000069", "000108")
+	}
 	signingSecret := make([]byte, 32)
 	if _, err := rand.Read(signingSecret); err != nil {
 		t.Fatal(err)
@@ -613,9 +694,6 @@ func newProjectionIntegrationPool(t *testing.T, ctx context.Context) projectionI
 		accounts, ledger_transactions, ledger_postings, economic_event_normalizations,
 		venue_contracts, option_contract_terms, instruments, mark_observations,
 		projection_checkpoints TO `+roleIdentifier); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ownerPool.Exec(ctx, `GRANT INSERT ON mark_observations TO `+roleIdentifier); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerPool.Exec(ctx, `GRANT EXECUTE ON FUNCTION persist_canonical_projection_checkpoint(BYTEA,TEXT,BYTEA) TO `+roleIdentifier); err != nil {

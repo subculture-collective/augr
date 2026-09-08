@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +11,16 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
+
+func TestAlpacaPLAggregateLegacyEvidenceRequiresEnvironmentEquality(t *testing.T) {
+	for name, query := range map[string]string{"closed": alpacaClosedRealizedPnLSQL, "open": alpacaOpenUnrealizedPnLSQL} {
+		for _, required := range []string{"t.environment=p.environment", "o.environment=p.environment"} {
+			if !strings.Contains(query, required) {
+				t.Fatalf("%s aggregate legacy child linkage lacks %q", name, required)
+			}
+		}
+	}
+}
 
 func TestAlpacaPLAggregateRepo_IncludesProvenanceLegacyAndDedupes(t *testing.T) {
 	t.Helper()
@@ -45,19 +56,19 @@ func TestAlpacaPLAggregateRepo_IncludesProvenanceLegacyAndDedupes(t *testing.T) 
 	wantTrades := 4
 	wantFees := 0.50 + 0.75 + 1.25 + 1.50
 
-	open, err := repo.OpenUnrealizedPnL(ctx)
+	open, err := repo.OpenUnrealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("OpenUnrealizedPnL() error = %v", err)
 	}
-	closed, err := repo.ClosedRealizedPnL(ctx)
+	closed, err := repo.ClosedRealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("ClosedRealizedPnL() error = %v", err)
 	}
-	trades, err := repo.TradeCount(ctx)
+	trades, err := repo.TradeCount(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("TradeCount() error = %v", err)
 	}
-	fees, err := repo.FeeTotal(ctx)
+	fees, err := repo.FeeTotal(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("FeeTotal() error = %v", err)
 	}
@@ -92,19 +103,19 @@ func TestAlpacaPLAggregateRepo_ExcludesPaperAndNonAlpaca(t *testing.T) {
 	paperTrade := seedAggregatePosition(t, ctx, pool, strategyID, "IGNORED", 1, 1, 9, nil)
 	attachNonAlpacaTrade(t, ctx, pool, strategyID, paperTrade)
 
-	open, err := repo.OpenUnrealizedPnL(ctx)
+	open, err := repo.OpenUnrealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("OpenUnrealizedPnL() error = %v", err)
 	}
-	closed, err := repo.ClosedRealizedPnL(ctx)
+	closed, err := repo.ClosedRealizedPnL(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("ClosedRealizedPnL() error = %v", err)
 	}
-	trades, err := repo.TradeCount(ctx)
+	trades, err := repo.TradeCount(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("TradeCount() error = %v", err)
 	}
-	fees, err := repo.FeeTotal(ctx)
+	fees, err := repo.FeeTotal(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
 	if err != nil {
 		t.Fatalf("FeeTotal() error = %v", err)
 	}
@@ -118,14 +129,14 @@ func seedAggregatePosition(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	t.Helper()
 	positionID := uuid.New()
 	if closedAt != nil {
-		if _, err := pool.Exec(ctx, `INSERT INTO positions (id, strategy_id, ticker, side, quantity, avg_entry, realized_pnl, closed_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, positionID, strategyID, ticker, domain.PositionSideLong, quantity, avgEntry, pnl, closedAt); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO positions (account_id, environment, id, strategy_id, ticker, side, quantity, avg_entry, realized_pnl, closed_at)
+			VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$7,$8)`, positionID, strategyID, ticker, domain.PositionSideLong, quantity, avgEntry, pnl, closedAt); err != nil {
 			t.Fatalf("insert closed position: %v", err)
 		}
 		return positionID
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO positions (id, strategy_id, ticker, side, quantity, avg_entry, unrealized_pnl)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`, positionID, strategyID, ticker, domain.PositionSideLong, quantity, avgEntry, pnl); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO positions (account_id, environment, id, strategy_id, ticker, side, quantity, avg_entry, unrealized_pnl)
+		VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$7)`, positionID, strategyID, ticker, domain.PositionSideLong, quantity, avgEntry, pnl); err != nil {
 		t.Fatalf("insert open position: %v", err)
 	}
 	return positionID
@@ -141,12 +152,12 @@ func markPositionProvenance(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 func attachAlpacaTrade(t *testing.T, ctx context.Context, pool *pgxpool.Pool, strategyID, positionID uuid.UUID, fee float64) {
 	t.Helper()
 	orderID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO orders (id, strategy_id, ticker, side, order_type, quantity, filled_quantity, status, broker, submitted_at, filled_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$6,$7,'alpaca',NOW(),NOW())`, orderID, strategyID, "ALP", domain.OrderSideBuy, domain.OrderTypeLimit, 1, domain.OrderStatusFilled); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO orders (account_id, environment, id, strategy_id, ticker, side, order_type, quantity, filled_quantity, status, broker, submitted_at, filled_at)
+		VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$6,$7,'alpaca',NOW(),NOW())`, orderID, strategyID, "ALP", domain.OrderSideBuy, domain.OrderTypeLimit, 1, domain.OrderStatusFilled); err != nil {
 		t.Fatalf("insert order: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO trades (id, order_id, position_id, ticker, side, quantity, price, fee, executed_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())`, uuid.New(), orderID, positionID, "ALP", domain.OrderSideBuy, 1, 1, fee); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO trades (account_id, environment, id, order_id, position_id, ticker, side, quantity, price, fee, executed_at)
+		VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$7,$8,NOW())`, uuid.New(), orderID, positionID, "ALP", domain.OrderSideBuy, 1, 1, fee); err != nil {
 		t.Fatalf("insert trade: %v", err)
 	}
 }
@@ -154,12 +165,12 @@ func attachAlpacaTrade(t *testing.T, ctx context.Context, pool *pgxpool.Pool, st
 func attachNonAlpacaTrade(t *testing.T, ctx context.Context, pool *pgxpool.Pool, strategyID, positionID uuid.UUID) {
 	t.Helper()
 	orderID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO orders (id, strategy_id, ticker, side, order_type, quantity, filled_quantity, status, broker, submitted_at, filled_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$6,$7,'paper',NOW(),NOW())`, orderID, strategyID, "IGN", domain.OrderSideBuy, domain.OrderTypeLimit, 1, domain.OrderStatusFilled); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO orders (account_id, environment, id, strategy_id, ticker, side, order_type, quantity, filled_quantity, status, broker, submitted_at, filled_at)
+		VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$6,$7,'paper',NOW(),NOW())`, orderID, strategyID, "IGN", domain.OrderSideBuy, domain.OrderTypeLimit, 1, domain.OrderStatusFilled); err != nil {
 		t.Fatalf("insert paper order: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO trades (id, order_id, position_id, ticker, side, quantity, price, fee, executed_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())`, uuid.New(), orderID, positionID, "IGN", domain.OrderSideBuy, 1, 1, 9.99); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO trades (account_id, environment, id, order_id, position_id, ticker, side, quantity, price, fee, executed_at)
+		VALUES ('00000000-0000-4000-8000-000000000064','paper_scored',$1,$2,$3,$4,$5,$6,$7,$8,NOW())`, uuid.New(), orderID, positionID, "IGN", domain.OrderSideBuy, 1, 1, 9.99); err != nil {
 		t.Fatalf("insert paper trade: %v", err)
 	}
 }

@@ -33,7 +33,7 @@ func newDefinedRiskRepositoryFixtureFor(t *testing.T, execution definedrisk.Exec
 	ctx := context.Background()
 	pool := base.evaluation.experiment.strategy.pool
 	for _, migration := range []string{"000083_quality_filtered_wheel_v1.up.sql", "000084_momentum_quality_baseline.up.sql", "000085_etf_time_series_trend.up.sql", "000086_defined_risk_options.up.sql"} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migration)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, pool, migration); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -167,7 +167,7 @@ func TestDefinedRiskRepositoryAtomicStagesAppendOnlyAndRollbackRefusal(t *testin
 	if _, err := pool.Exec(ctx, `UPDATE defined_risk_v1_fills SET price='999' WHERE report_id=$1 AND sequence=0`, fixture.fixture.Report.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("append-only=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000086_defined_risk_options.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000086_defined_risk_options.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 }
@@ -200,7 +200,7 @@ func TestDefinedRiskMigrationEmptyRollbackAndReapply(t *testing.T) {
 	ctx := context.Background()
 	pool := base.evaluation.experiment.strategy.pool
 	for _, migration := range []string{"000083_quality_filtered_wheel_v1.up.sql", "000084_momentum_quality_baseline.up.sql", "000085_etf_time_series_trend.up.sql", "000086_defined_risk_options.up.sql", "000086_defined_risk_options.down.sql", "000086_defined_risk_options.up.sql"} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migration)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, pool, migration); err != nil {
 			t.Fatalf("%s: %v", migration, err)
 		}
 	}

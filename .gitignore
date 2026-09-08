@@ -36,6 +36,7 @@ go.work.sum
 # Logs
 logs
 *.log
+.blacktower/handoff.md
 .blacktower/deepwork/
 npm-debug.log*
 yarn-debug.log*
@@ -412,3 +413,6 @@ TradingAgents/
 
 # Local deepwork session state
 .blacktower/deepwork/
+
+# Local scratch session output
+/.tmp/

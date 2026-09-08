@@ -22,9 +22,21 @@ func TestNewsScanCompletionErrorRejectsPartialCoverage(t *testing.T) {
 	if err := newsScanCompletionError(map[string]int{}); err != nil {
 		t.Fatalf("newsScanCompletionError(empty) = %v, want nil", err)
 	}
-	err := newsScanCompletionError(map[string]int{"feed_errors": 1, "triage_missing": 2})
+	err := newsScanCompletionError(map[string]int{"feeds_attempted": 5, "feeds_succeeded": 4, "feed_errors": 1, "triage_missing": 2})
 	if err == nil || !strings.Contains(err.Error(), "feed_errors=1") || !strings.Contains(err.Error(), "triage_missing=2") {
 		t.Fatalf("newsScanCompletionError(partial) = %v", err)
+	}
+}
+
+func TestNewsScanCompletionErrorDegradesUsableProviderCoverage(t *testing.T) {
+	t.Parallel()
+
+	err := newsScanCompletionError(map[string]int{"feeds_attempted": 5, "feeds_succeeded": 4, "feed_retries": 1, "feed_errors": 1})
+	if !IsDegraded(err) || !strings.Contains(err.Error(), "feeds_succeeded=4") || !strings.Contains(err.Error(), "feed_retries=1") {
+		t.Fatalf("newsScanCompletionError(80%% provider coverage) = %v, want detailed degraded result", err)
+	}
+	if err := newsScanCompletionError(map[string]int{"feeds_attempted": 5, "feeds_succeeded": 3, "feed_errors": 2}); err == nil || IsDegraded(err) {
+		t.Fatalf("newsScanCompletionError(60%% provider coverage) = %v, want hard error", err)
 	}
 }
 

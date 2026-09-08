@@ -5,19 +5,55 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/google/uuid"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
-func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository) error {
+type optionRecoveryDependencies struct {
+	Orders       repository.OrderRepository
+	OptionWriter execution.AcceptedOptionFillWriter
+	OrderWriter  execution.AcceptedOrderFillWriter
+	Trades       repository.TradeRepository
+	Decisions    execution.DecisionRecorder
+}
+
+type durableOptionSettlementState struct {
+	broker  *paper.PaperBroker
+	rebuild func(context.Context) error
+}
+
+func (s *durableOptionSettlementState) ApplyOptionSettlement(ctx context.Context, positionID uuid.UUID, settlementPrice float64) error {
+	return s.broker.ApplyOptionSettlement(ctx, positionID, settlementPrice)
+}
+
+func (s *durableOptionSettlementState) RebuildOptionSettlementState(ctx context.Context) error {
+	if s == nil || s.broker == nil || s.rebuild == nil {
+		return fmt.Errorf("paper options durable settlement rebuild is unavailable")
+	}
+	return s.rebuild(ctx)
+}
+
+func bootstrapPaperOptionsAccount(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos []repository.AtomicOptionCloseRepository, recovery ...optionRecoveryDependencies) error {
 	if broker == nil || paperRepo == nil {
 		return fmt.Errorf("paper options account dependencies are required")
 	}
+	locker, ok := paperRepo.(repository.ExecutionAccountLocker)
+	if !ok {
+		return fmt.Errorf("paper options bootstrap requires execution account locker")
+	}
+	return locker.WithExecutionAccountLock(ctx, binding.AccountID(), func() error {
+		return bootstrapPaperOptionsAccountLocked(ctx, binding, broker, paperRepo, closeRepos, recovery...)
+	})
+}
+
+func bootstrapPaperOptionsAccountLocked(ctx context.Context, binding domain.ExecutionAccountBinding, broker *paper.PaperBroker, paperRepo repository.PaperAccountRepository, closeRepos []repository.AtomicOptionCloseRepository, recovery ...optionRecoveryDependencies) error {
 	var allTrades []domain.Trade
 	for offset := 0; ; offset += 250 {
-		trades, err := paperRepo.ListPaperTrades(ctx, 250, offset)
+		trades, err := paperRepo.ListPaperTrades(ctx, binding.AccountID(), binding.Environment(), 250, offset)
 		if err != nil {
 			return err
 		}
@@ -28,7 +64,7 @@ func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker
 	}
 	var allPositions []domain.Position
 	for offset := 0; ; offset += 250 {
-		positions, err := paperRepo.GetOpenPaperPositions(ctx, 250, offset)
+		positions, err := paperRepo.GetOpenPaperPositions(ctx, binding.AccountID(), binding.Environment(), 250, offset)
 		if err != nil {
 			return err
 		}
@@ -39,7 +75,7 @@ func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker
 	}
 	var allOrders []domain.Order
 	for offset := 0; ; offset += 250 {
-		orders, err := paperRepo.ListOpenPaperOrders(ctx, 250, offset)
+		orders, err := paperRepo.ListOpenPaperOrders(ctx, binding.AccountID(), binding.Environment(), 250, offset)
 		if err != nil {
 			return err
 		}
@@ -62,15 +98,49 @@ func bootstrapPaperOptionsAccount(ctx context.Context, broker *paper.PaperBroker
 	if err := broker.RestorePositions(allPositions); err != nil {
 		return err
 	}
-	if err := broker.RestoreOrders(allOrders); err != nil {
+	restorable := make([]domain.Order, 0, len(allOrders))
+	for i := range allOrders {
+		if allOrders[i].ExternalID != "" {
+			restorable = append(restorable, allOrders[i])
+		}
+	}
+	if err := broker.RestoreOrders(restorable); err != nil {
 		return err
 	}
-	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx)
+	maxSeq, err := paperRepo.GetMaxPaperExternalIDSequence(ctx, binding.AccountID(), binding.Environment())
 	if err != nil {
 		return err
 	}
 	if err := broker.RestoreOrderSequence(maxSeq); err != nil {
 		return err
+	}
+	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].OptionWriter != nil {
+		manager := execution.NewOptionsOrderManager(broker, recovery[0].Orders, nil, recovery[0].Trades, nil, nil).WithAcceptedOptionFillWriter(recovery[0].OptionWriter)
+		if err := manager.ReconcilePendingOptionOrdersWithAccountLockHeld(ctx, binding, allOrders, allPositions); err != nil {
+			return fmt.Errorf("reconcile pending option orders: %w", err)
+		}
+	}
+	if len(recovery) > 0 && recovery[0].Orders != nil && recovery[0].OrderWriter != nil {
+		manager := execution.NewOrderManager(broker, "paper", nil, nil, recovery[0].Orders, nil, nil, nil, execution.SizingConfig{}, nil).
+			WithAcceptedOrderFillWriter(recovery[0].OrderWriter).WithDecisionRecorder(recovery[0].Decisions)
+		for i := range allOrders {
+			order := &allOrders[i]
+			if order.MarketType.Normalize() == domain.MarketTypeOptions {
+				continue
+			}
+			scope, scopeErr := execution.ExecutionScopeFromOrder(*order)
+			if scopeErr != nil {
+				return fmt.Errorf("rebuild pending paper order %s scope: %w", order.ID, scopeErr)
+			}
+			if _, reconcileErr := manager.ReconcilePersistedOrderWithAccountLockHeld(ctx, scope, order); reconcileErr != nil {
+				return fmt.Errorf("reconcile pending paper order %s: %w", order.ID, reconcileErr)
+			}
+		}
+	}
+	if len(closeRepos) > 0 && closeRepos[0] != nil {
+		if err := closeRepos[0].ReconcileOptionCloseReservations(ctx, binding.AccountID(), binding.Environment()); err != nil {
+			return fmt.Errorf("reconcile option close reservations: %w", err)
+		}
 	}
 	return nil
 }
@@ -110,7 +180,14 @@ func reconstructPaperBalance(initialCash float64, trades []domain.Trade, positio
 }
 
 func tradeNotional(trade domain.Trade) float64 {
-	return trade.Price * trade.Quantity
+	multiplier := 1.0
+	if trade.AssetClass == domain.AssetClassOption {
+		multiplier = trade.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 100
+		}
+	}
+	return trade.Price * trade.Quantity * multiplier
 }
 
 func positionMarketValue(position domain.Position) float64 {
@@ -118,5 +195,12 @@ func positionMarketValue(position domain.Position) float64 {
 	if position.CurrentPrice != nil && *position.CurrentPrice > 0 {
 		price = *position.CurrentPrice
 	}
-	return price * position.Quantity
+	multiplier := 1.0
+	if position.AssetClass == domain.AssetClassOption {
+		multiplier = position.ContractMultiplier
+		if multiplier <= 0 {
+			multiplier = 100
+		}
+	}
+	return price * position.Quantity * multiplier
 }

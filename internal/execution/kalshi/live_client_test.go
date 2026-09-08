@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/url"
 	"testing"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 )
 
 func TestHTTPClientCreateOrder_MapsNoSideLimitBuy(t *testing.T) {
@@ -97,6 +99,49 @@ func TestHTTPClientGetOrder_InfersExecutedWhenRemainingZero(t *testing.T) {
 	}
 }
 
+func TestHTTPClientGetOrderByClientOrderID(t *testing.T) {
+	client := &fakeSignedClient{getHandler: func(path string, _ map[string]string) ([]byte, error) {
+		if path == "/historical/orders" {
+			return []byte(`{"orders":[]}`), nil
+		}
+		return []byte(`{"orders":[{"order_id":"ord-123","client_order_id":"client-123","status":"resting"}]}`), nil
+	}}
+	adapter, err := NewLiveHTTPClient(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, err := adapter.GetOrderByClientOrderID(context.Background(), "client-123")
+	if err != nil || order.OrderID != "ord-123" || order.ClientOrderID != "client-123" {
+		t.Fatalf("GetOrderByClientOrderID() = (%+v, %v)", order, err)
+	}
+	if client.getQueries[0]["client_order_id"] != "client-123" {
+		t.Fatalf("lookup request = %q %+v", client.getPath, client.getQueries)
+	}
+}
+
+func TestHTTPClientGetOrderByClientOrderIDRejectsMultipleMatches(t *testing.T) {
+	client := &fakeSignedClient{getResp: []byte(`{"orders":[{"order_id":"ord-1","client_order_id":"client-123","status":"resting"},{"order_id":"ord-2","client_order_id":"client-123","status":"resting"}]}`)}
+	adapter, err := NewLiveHTTPClient(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.GetOrderByClientOrderID(context.Background(), "client-123"); err == nil {
+		t.Fatal("multiple client-id matches were accepted")
+	}
+}
+
+func TestHTTPClientGetOrderByClientOrderIDDoesNotTreatCollection404AsAuthoritativeAbsence(t *testing.T) {
+	client := &fakeSignedClient{getErr: errors.New("kalshi: request failed (status=404): not found")}
+	adapter, err := NewLiveHTTPClient(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adapter.GetOrderByClientOrderID(context.Background(), "missing")
+	if err == nil || errors.Is(err, execution.ErrBrokerOrderNotFound) {
+		t.Fatalf("GetOrderByClientOrderID() error = %v", err)
+	}
+}
+
 func TestHTTPClientListPositions_PaginatesAndMapsPositions(t *testing.T) {
 	t.Parallel()
 
@@ -169,6 +214,7 @@ type fakeSignedClient struct {
 	getPath     string
 	getQueries  []map[string]string
 	getResp     []byte
+	getErr      error
 	getHandler  func(path string, query map[string]string) ([]byte, error)
 }
 
@@ -208,6 +254,9 @@ func (f *fakeSignedClient) Get(_ context.Context, path string, query url.Values,
 	f.getQueries = append(f.getQueries, q)
 	if f.getHandler != nil {
 		return f.getHandler(path, q)
+	}
+	if f.getErr != nil {
+		return nil, f.getErr
 	}
 	return f.getResp, nil
 }

@@ -134,6 +134,17 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildUser())
     }),
 
+    http.get(endpoint(apiBaseUrl, '/me/accounts'), async ({ request }) => {
+      const authError = authGuard(request, state)
+      if (authError) return authError
+      return HttpResponse.json([{
+        id: fixtureId(1), name: 'Canonical paper account', environment: 'paper_scored', venue: 'paper',
+        base_currency: 'USD', storage_namespace: 'canonical-paper', evidence_class: 'paper_scored',
+        starting_capital: '100000', buying_power_multiplier: '1', margin_profile: 'cash', status: 'active',
+        created_by: 'fixture', creation_metadata: {}, created_at: fixtureDate,
+      }])
+    }),
+
     http.get(endpoint(apiBaseUrl, '/settings'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
@@ -188,7 +199,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/economic/accounts'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/economic/accounts'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -200,7 +211,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ data, total: data.length, limit: 100, offset: 0 })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/economic/accounts/:id/capital-summary'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/economic/accounts/:id/capital-summary'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -209,7 +220,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ account_id: params.id, currency: 'USD', starting_capital: '500.00000000', deposits: '25.00000000', withdrawals: '10.00000000', net_capital: '515.00000000', flow_count: 3 })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/economic/accounts/:id/capital-flows'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/economic/accounts/:id/capital-flows'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -228,7 +239,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ id: params.id, sha256: 'a'.repeat(64), campaign: 'fixture-shadow-campaign', outcome: 'held', blockers: ['30 elapsed days are required'], parents: [], canonical: { schema: 'milestone-7-evidence-assessment-v1', outcome: 'held' } })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/economic/ledger-transactions/:id'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/economic/ledger-transactions/:id'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -312,7 +323,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ data, total: data.length, limit: 20, offset: 0 })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/journal/decisions'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/journal/decisions'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -325,7 +336,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ data, total: data.length, limit: 50, offset: 0 })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/replay/decisions/:id'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/replay/decisions/:id'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -337,7 +348,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ source, events, summary: { event_count: events.length, first_event_at: events.length ? fixtureDate : undefined, last_event_at: events.length ? fixtureDate : undefined, has_paper_order: true, has_live_order: false, has_fill: false, has_outcome: false, latest_status: 'paper_ordered', total_approved_size: 5, total_net_ev: 1.75, rejection_count: 0 } })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/events'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/events'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -370,7 +381,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(response)
     }),
 
-    http.get(endpoint(apiBaseUrl, '/risk/status'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/risk/status'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -428,7 +439,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ market_type: marketType, active: false })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/risk/cockpit'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/risk/cockpit'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -464,7 +475,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ scope, reset: true })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/portfolio/summary'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/portfolio/summary'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -473,7 +484,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
 			return HttpResponse.json(state.scenario === 'empty-data' ? buildPortfolioSummary({ open_positions: 0, unrealized_pnl: '0' }) : buildPortfolioSummary())
     }),
 
-    http.get(endpoint(apiBaseUrl, '/portfolio/positions/open'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/portfolio/positions/open'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -505,7 +516,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(response)
     }),
 
-    http.get(endpoint(apiBaseUrl, '/portfolio/allocator/diagnostics'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/portfolio/allocator/diagnostics'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -521,7 +532,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildAllocatorDiagnostics())
     }),
 
-    http.get(endpoint(apiBaseUrl, '/portfolio/allocator/summary'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/portfolio/allocator/summary'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -532,7 +543,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildAllocatorSummary())
     }),
 
-    http.get(endpoint(apiBaseUrl, '/portfolio/allocator/opportunities'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/portfolio/allocator/opportunities'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -567,7 +578,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(response)
     }),
 
-    http.get(endpoint(apiBaseUrl, '/portfolio/allocator/decisions'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/portfolio/allocator/decisions'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -599,7 +610,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(response)
     }),
 
-    http.get(endpoint(apiBaseUrl, '/runs/:id/snapshot'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/runs/:id/snapshot'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -616,7 +627,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildRunSnapshot())
     }),
 
-    http.get(endpoint(apiBaseUrl, '/runs/:id'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/runs/:id'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -639,7 +650,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildRun({ id: String(params.id) }))
     }),
 
-    http.get(endpoint(apiBaseUrl, '/runs/:id/decisions'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/runs/:id/decisions'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -668,7 +679,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json({ data: page, total: filtered.length, limit, offset })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/runs'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/runs'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -702,7 +713,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(response)
     }),
 
-    http.get(endpoint(apiBaseUrl, '/orders/:id'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/orders/:id'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -745,7 +756,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/orders'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/orders'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -791,7 +802,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(response)
     }),
 
-    http.get(endpoint(apiBaseUrl, '/trades'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/trades'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -965,12 +976,23 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       }), { status: 201 })
     }),
 
-    http.get(endpoint(apiBaseUrl, '/strategies/:id/reports/latest'), async ({ request, params }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/paper-evaluation-scopes'), async ({ request, params }) => {
+      const authError = authGuard(request, state)
+      if (authError) return authError
+      return HttpResponse.json([{
+        id: fixtureId(70), account_id: String(params.accountId), label: 'Canonical paper window',
+        start_date: '2026-01-01', end_date: '2026-01-31', account_config_digest: 'account-digest',
+        strategy_set_digest: 'strategy-digest', market_data_snapshot_digest: 'market-digest',
+        execution_policy_digest: 'execution-digest', created_at: fixtureDate,
+      }])
+    }),
+
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/strategies/:id/reports/latest'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
       const scopeQuery = new URL(request.url).searchParams
-      if (scopeQuery.get('legacy') !== 'legacy_unscoped' && !(scopeQuery.get('account_id') && scopeQuery.get('scope_id'))) {
+      if (!scopeQuery.get('evidence_scope_id')) {
         return errorJson(400, 'explicit report scope required', 'ERR_BAD_REQUEST')
       }
       const error = scenarioError(state)
@@ -990,12 +1012,12 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildLatestReport())
     }),
 
-    http.get(endpoint(apiBaseUrl, '/strategies/:id/reports'), async ({ request }) => {
+    http.get(endpoint(apiBaseUrl, '/accounts/:accountId/strategies/:id/reports'), async ({ request }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
       const scopeQuery = new URL(request.url).searchParams
-      if (scopeQuery.get('legacy') !== 'legacy_unscoped' && !(scopeQuery.get('account_id') && scopeQuery.get('scope_id'))) {
+      if (!scopeQuery.get('evidence_scope_id')) {
         return errorJson(400, 'explicit report scope required', 'ERR_BAD_REQUEST')
       }
       const error = scenarioError(state)
@@ -1036,6 +1058,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
             ticker: 'AUGR',
             status: 'new_run_status',
             signal: 'unknown_signal',
+            trade_date: '2026-01-15T00:00:00.000Z',
             started_at: '2026-01-15T12:00:00.000Z',
           },
         }))
@@ -1047,6 +1070,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
           ticker: 'AUGR',
           status: 'completed',
           signal: 'hold',
+          trade_date: '2026-01-15T00:00:00.000Z',
           started_at: '2026-01-15T12:00:00.000Z',
           completed_at: '2026-01-15T12:10:00.000Z',
         },
@@ -1090,7 +1114,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return new HttpResponse(null, { status: 204 })
     }),
 
-    http.post(endpoint(apiBaseUrl, '/strategies/:id/pause'), async ({ request, params }) => {
+    http.post(endpoint(apiBaseUrl, '/accounts/:accountId/strategies/:id/pause'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -1100,7 +1124,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildStrategy({ id: String(params.id), status: 'paused', is_paper: true }))
     }),
 
-    http.post(endpoint(apiBaseUrl, '/strategies/:id/resume'), async ({ request, params }) => {
+    http.post(endpoint(apiBaseUrl, '/accounts/:accountId/strategies/:id/resume'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -1110,7 +1134,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildStrategy({ id: String(params.id), status: 'active', is_paper: true }))
     }),
 
-    http.post(endpoint(apiBaseUrl, '/strategies/:id/skip-next'), async ({ request, params }) => {
+    http.post(endpoint(apiBaseUrl, '/accounts/:accountId/strategies/:id/skip-next'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError
@@ -1120,7 +1144,7 @@ export function createP0RestHandlers(options: P0MockHandlersOptions = {}) {
       return HttpResponse.json(buildStrategy({ id: String(params.id), status: 'active', skip_next_run: true, is_paper: true }))
     }),
 
-    http.post(endpoint(apiBaseUrl, '/strategies/:id/run'), async ({ request, params }) => {
+    http.post(endpoint(apiBaseUrl, '/accounts/:accountId/strategies/:id/run'), async ({ request, params }) => {
       await applyScenarioDelay(state)
       const authError = authGuard(request, state)
       if (authError) return authError

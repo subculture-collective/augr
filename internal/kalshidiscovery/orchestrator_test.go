@@ -319,6 +319,29 @@ func (r *fakeKalshiStrategyRepo) Create(_ context.Context, strategy *domain.Stra
 	return nil
 }
 
+func (r *fakeKalshiStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := r.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategy.ID.String()))
+	strategy.ExecutionStrategyVersionID = &versionID
+	for i := range r.created {
+		if r.created[i].ID == strategy.ID {
+			r.created[i].ExecutionStrategyVersionID = &versionID
+		}
+	}
+	return versionID, nil
+}
+
+func (r *fakeKalshiStrategyRepo) ResolveExecutionVersionID(_ context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
+	for i := range r.created {
+		if r.created[i].ID == strategyID && r.created[i].ExecutionStrategyVersionID != nil {
+			return *r.created[i].ExecutionStrategyVersionID, nil
+		}
+	}
+	return uuid.Nil, repository.ErrNotFound
+}
+
 func (r *fakeKalshiStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {
 	for i := range r.created {
 		if r.created[i].ID == id {

@@ -8,6 +8,14 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores(['dist', 'public/mockServiceWorker.js']),
   {
+    files: ['**/*.test.{ts,tsx}'],
+    rules: {
+      'no-restricted-properties': ['error', ...['it', 'test', 'describe'].flatMap((object) =>
+        ['only', 'skip', 'todo', 'skipIf', 'runIf'].map((property) => ({ object, property,
+          message: 'Frontend contracts must run in CI; express browser prerequisites through an explicit test project.' })))],
+    },
+  },
+  {
     files: ['**/*.{ts,tsx}'],
     extends: [
       js.configs.recommended,

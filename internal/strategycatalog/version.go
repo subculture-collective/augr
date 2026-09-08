@@ -95,6 +95,20 @@ func NewVersion(input VersionInput) (*Version, error) {
 	}, nil
 }
 
+func NewLegacyVersion(familyID uuid.UUID, snapshotSHA256 string, config json.RawMessage, kinds []dataset.Kind) (*Version, error) {
+	return NewVersion(VersionInput{
+		FamilyID:             familyID,
+		CompilerKind:         "legacy-runtime-v1",
+		CompilerVersion:      "legacy-runtime-v1",
+		SourceCommit:         snapshotSHA256,
+		SourceTreeSHA256:     snapshotSHA256,
+		ConfigSchema:         "legacy-strategy-config-v1",
+		Config:               config,
+		DecisionContract:     "agent-pipeline-v1",
+		RequiredDatasetKinds: kinds,
+	})
+}
+
 func VersionFromCanonical(id uuid.UUID, digest string, raw []byte) (*Version, error) {
 	if id == uuid.Nil || !sha256Pattern.MatchString(digest) || hashBytes(raw) != digest {
 		return nil, fmt.Errorf("strategy version envelope is invalid")

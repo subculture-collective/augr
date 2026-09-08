@@ -2,7 +2,6 @@ package prediction
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -12,12 +11,15 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
 const (
-	pendingMarketCap  = 5000
-	marketDecisionCap = 1000
+	pendingMarketCap        = 5000
+	marketDecisionCap       = 1000
+	settlementTradePageSize = 250
 )
 
 type settlementDecisionRepository interface {
@@ -48,22 +50,29 @@ func (p *SettlementPreview) GetDecisionIDs() []uuid.UUID {
 
 // Settler durably cash-settles side-qualified paper event contracts.
 type Settler struct {
-	financialLifecycle repository.FinancialLifecycleRepository
-	decisions          settlementDecisionRepository
-	positions          repository.PositionRepository
-	trades             repository.TradeRepository
-	replay             repository.ReplayEventRepository
-	now                func() time.Time
+	executionAccount domain.ExecutionAccountBinding
+	economicWriter   execution.AcceptedPredictionSettlementWriter
+	decisions        settlementDecisionRepository
+	positions        repository.PositionRepository
+	trades           repository.TradeRepository
+	replay           repository.ReplayEventRepository
+	now              func() time.Time
+	accountLocker    repository.ExecutionAccountLocker
 }
 
-func NewSettler(financialLifecycle repository.FinancialLifecycleRepository, decisions settlementDecisionRepository, positions repository.PositionRepository, trades repository.TradeRepository, replay repository.ReplayEventRepository) *Settler {
-	return &Settler{financialLifecycle: financialLifecycle, decisions: decisions, positions: positions, trades: trades, replay: replay, now: time.Now}
+func NewSettler(executionAccount domain.ExecutionAccountBinding, economicWriter execution.AcceptedPredictionSettlementWriter, decisions settlementDecisionRepository, positions repository.PositionRepository, trades repository.TradeRepository, replay repository.ReplayEventRepository) *Settler {
+	locker, _ := economicWriter.(repository.ExecutionAccountLocker)
+	return &Settler{executionAccount: executionAccount, economicWriter: economicWriter, decisions: decisions, positions: positions, trades: trades, replay: replay, now: time.Now, accountLocker: locker}
 }
 
 // SettleMarket settles every still-open paper decision for one resolved market.
 // Repeated calls are safe because only paper_ordered decisions are selected.
 func (s *Settler) SettleMarket(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time) (int, error) {
-	return s.settleMarket(ctx, marketType, instrument, winningOutcome, resolvedAt, true)
+	return s.SettleMarketWithEvidence(ctx, marketType, instrument, winningOutcome, resolvedAt, ResolutionEvidence{})
+}
+
+func (s *Settler) SettleMarketWithEvidence(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, evidence ResolutionEvidence) (int, error) {
+	return s.settleMarket(ctx, marketType, instrument, winningOutcome, resolvedAt, evidence, true)
 }
 
 func (s *Settler) PreviewMarket(ctx context.Context, marketType domain.MarketType, instrument string) (int, error) {
@@ -91,8 +100,31 @@ func (s *Settler) SettlePreview(ctx context.Context, marketType domain.MarketTyp
 }
 
 func (s *Settler) SettleDecisions(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, decisionIDs []uuid.UUID) (int, error) {
+	return s.SettleDecisionsWithEvidence(ctx, marketType, instrument, winningOutcome, resolvedAt, decisionIDs, ResolutionEvidence{})
+}
+
+func (s *Settler) SettleDecisionsWithEvidence(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, decisionIDs []uuid.UUID, evidence ResolutionEvidence) (int, error) {
+	if s == nil || s.accountLocker == nil {
+		return 0, fmt.Errorf("prediction settlement: execution account locker is required")
+	}
+	var settled int
+	err := s.accountLocker.WithExecutionAccountLock(ctx, s.executionAccount.AccountID(), func() error {
+		var settleErr error
+		settled, settleErr = s.settleDecisionsLocked(ctx, marketType, instrument, winningOutcome, resolvedAt, decisionIDs, evidence)
+		return settleErr
+	})
+	return settled, err
+}
+
+func (s *Settler) settleDecisionsLocked(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, decisionIDs []uuid.UUID, evidence ResolutionEvidence) (int, error) {
 	if len(decisionIDs) == 0 {
 		return 0, nil
+	}
+	if s == nil || s.decisions == nil {
+		return 0, fmt.Errorf("prediction settlement: repositories are required")
+	}
+	if err := s.executionAccount.Validate(); err != nil {
+		return 0, fmt.Errorf("prediction settlement: execution account: %w", err)
 	}
 	marketType = marketType.Normalize()
 	instrument = strings.TrimSpace(instrument)
@@ -112,10 +144,13 @@ func (s *Settler) SettleDecisions(ctx context.Context, marketType domain.MarketT
 		if err != nil {
 			return settled, fmt.Errorf("prediction settlement: get decision %s: %w", id, err)
 		}
-		if decision == nil || decision.Status != domain.TradeDecisionStatusPaper || decision.MarketType.Normalize() != marketType || strings.TrimSpace(decision.InstrumentKey) != instrument {
+		if decision == nil || decision.AccountID != s.executionAccount.AccountID() || decision.Environment != s.executionAccount.Environment() || (decision.Status != domain.TradeDecisionStatusPaper && decision.Status != domain.TradeDecisionStatusClosed) || decision.MarketType.Normalize() != marketType || strings.TrimSpace(decision.InstrumentKey) != instrument {
 			return settled, fmt.Errorf("prediction settlement: decision %s changed before settlement", id)
 		}
-		if err := s.settleDecision(ctx, decision, winner, resolvedAt); err != nil {
+		if decision.Status == domain.TradeDecisionStatusClosed && s.economicWriter == nil {
+			return settled, fmt.Errorf("prediction settlement: closed decision %s requires repository idempotency", id)
+		}
+		if err := s.settleDecision(ctx, decision, winner, resolvedAt, evidence); err != nil {
 			return settled, err
 		}
 		settled++
@@ -127,11 +162,14 @@ func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketTy
 	if s == nil || s.decisions == nil {
 		return nil, fmt.Errorf("prediction settlement: repositories are required")
 	}
+	if err := s.executionAccount.Validate(); err != nil {
+		return nil, fmt.Errorf("prediction settlement: execution account: %w", err)
+	}
 	marketType = marketType.Normalize()
 	if marketType != domain.MarketTypeKalshi && marketType != domain.MarketTypePolymarket {
 		return nil, fmt.Errorf("prediction settlement: unsupported market type %q", marketType)
 	}
-	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{MarketType: marketType, Status: domain.TradeDecisionStatusPaper}, pendingMarketCap+1, 0)
+	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{Environment: s.executionAccount.Environment(), MarketType: marketType, Status: domain.TradeDecisionStatusPaper}, pendingMarketCap+1, 0)
 	if err != nil {
 		return nil, fmt.Errorf("prediction settlement: list decisions: %w", err)
 	}
@@ -141,6 +179,9 @@ func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketTy
 	seen := make(map[string]struct{}, len(decisions))
 	out := make([]string, 0, len(decisions))
 	for i := range decisions {
+		if decisions[i].AccountID != s.executionAccount.AccountID() || decisions[i].Environment != s.executionAccount.Environment() {
+			return nil, fmt.Errorf("prediction settlement: decision %s belongs to a foreign execution account", decisions[i].ID)
+		}
 		instrument := strings.ToUpper(strings.TrimSpace(decisions[i].InstrumentKey))
 		if instrument == "" {
 			continue
@@ -155,9 +196,28 @@ func (s *Settler) PendingMarkets(ctx context.Context, marketType domain.MarketTy
 	return out, nil
 }
 
-func (s *Settler) settleMarket(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, mutate bool) (int, error) {
-	if s == nil || s.decisions == nil || (mutate && s.financialLifecycle == nil && (s.positions == nil || s.trades == nil || s.replay == nil)) {
+func (s *Settler) settleMarket(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, evidence ResolutionEvidence, mutate bool) (int, error) {
+	if mutate {
+		if s == nil || s.accountLocker == nil {
+			return 0, fmt.Errorf("prediction settlement: execution account locker is required")
+		}
+		var settled int
+		err := s.accountLocker.WithExecutionAccountLock(ctx, s.executionAccount.AccountID(), func() error {
+			var settleErr error
+			settled, settleErr = s.settleMarketLocked(ctx, marketType, instrument, winningOutcome, resolvedAt, evidence, true)
+			return settleErr
+		})
+		return settled, err
+	}
+	return s.settleMarketLocked(ctx, marketType, instrument, winningOutcome, resolvedAt, evidence, false)
+}
+
+func (s *Settler) settleMarketLocked(ctx context.Context, marketType domain.MarketType, instrument, winningOutcome string, resolvedAt time.Time, evidence ResolutionEvidence, mutate bool) (int, error) {
+	if s == nil || s.decisions == nil || (mutate && s.economicWriter == nil) {
 		return 0, fmt.Errorf("prediction settlement: repositories are required")
+	}
+	if err := s.executionAccount.Validate(); err != nil {
+		return 0, fmt.Errorf("prediction settlement: execution account: %w", err)
 	}
 	marketType = marketType.Normalize()
 	if marketType != domain.MarketTypePolymarket && marketType != domain.MarketTypeKalshi {
@@ -185,7 +245,7 @@ func (s *Settler) settleMarket(ctx context.Context, marketType domain.MarketType
 	settled := 0
 	for i := range validated {
 		if mutate {
-			if err := s.settleDecision(ctx, &validated[i], winner, resolvedAt); err != nil {
+			if err := s.settleDecision(ctx, &validated[i], winner, resolvedAt, evidence); err != nil {
 				return settled, err
 			}
 		}
@@ -200,6 +260,9 @@ func (s *Settler) validateMatches(ctx context.Context, matches []domain.TradeDec
 		decision := matches[i]
 		if decision.ID == uuid.Nil {
 			return nil, fmt.Errorf("prediction settlement: invalid decision identifiers")
+		}
+		if decision.AccountID != s.executionAccount.AccountID() || decision.Environment != s.executionAccount.Environment() {
+			return nil, fmt.Errorf("prediction settlement: decision %s belongs to a foreign execution account", decision.ID)
 		}
 		if decision.StrategyID == nil || decision.PaperOrderID == nil {
 			return nil, fmt.Errorf("prediction settlement: decision %s lacks strategy or paper order", decision.ID)
@@ -223,15 +286,30 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 	if s.trades == nil || s.positions == nil {
 		return fmt.Errorf("prediction settlement: repositories are required")
 	}
-	trades, err := s.trades.GetByOrder(ctx, *decision.PaperOrderID, repository.TradeFilter{}, 10, 0)
-	if err != nil {
-		return fmt.Errorf("prediction settlement: load paper order %s trades: %w", decision.PaperOrderID.String(), err)
+	var trades []domain.Trade
+	for offset := 0; ; offset += settlementTradePageSize {
+		page, err := s.trades.GetByOrder(ctx, *decision.PaperOrderID, repository.TradeFilter{}, settlementTradePageSize, offset)
+		if err != nil {
+			return fmt.Errorf("prediction settlement: load paper order %s trades: %w", decision.PaperOrderID.String(), err)
+		}
+		trades = append(trades, page...)
+		if len(page) < settlementTradePageSize {
+			break
+		}
 	}
 	var opening *domain.Trade
+	openingQuantity := 0.0
 	for i := range trades {
 		if trades[i].OrderID != nil && *trades[i].OrderID == *decision.PaperOrderID {
-			opening = &trades[i]
-			break
+			if trades[i].PositionID == nil || trades[i].AccountID != decision.AccountID || trades[i].Environment != decision.Environment || trades[i].OriginType != decision.OriginType || trades[i].OriginID != decision.OriginID || trades[i].Quantity <= 0 {
+				return fmt.Errorf("prediction settlement: opening trade ownership does not match decision %s", decision.ID)
+			}
+			if opening == nil {
+				opening = &trades[i]
+			} else if *opening.PositionID != *trades[i].PositionID {
+				return fmt.Errorf("prediction settlement: paper order %s fills multiple positions", decision.PaperOrderID.String())
+			}
+			openingQuantity += trades[i].Quantity
 		}
 	}
 	if opening == nil || opening.PositionID == nil {
@@ -244,8 +322,17 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 	if position == nil || position.ClosedAt != nil || position.Quantity <= 0 {
 		return fmt.Errorf("prediction settlement: open position %s not found", opening.PositionID.String())
 	}
+	accountMismatch := position.AccountID != decision.AccountID
+	environmentMismatch := position.Environment != decision.Environment
+	originMismatch := position.OriginType != decision.OriginType || position.OriginID != decision.OriginID
+	if accountMismatch || environmentMismatch || originMismatch || position.StrategyID == nil || decision.StrategyID == nil || *position.StrategyID != *decision.StrategyID {
+		return fmt.Errorf("prediction settlement: position %s ownership does not match decision %s", position.ID, decision.ID)
+	}
 	if !strings.EqualFold(strings.TrimSpace(position.Ticker), strings.TrimSpace(decision.InstrumentKey)+":"+held) {
 		return fmt.Errorf("prediction settlement: position %s does not match decision %s", position.ID, decision.ID)
+	}
+	if position.Quantity-openingQuantity > 1e-9 {
+		return fmt.Errorf("prediction settlement: position %s exceeds total opening fill quantity", position.ID)
 	}
 	if mutate && position.ID == uuid.Nil {
 		return fmt.Errorf("prediction settlement: invalid position identifiers")
@@ -254,7 +341,7 @@ func (s *Settler) validateCandidateLinkage(ctx context.Context, decision *domain
 }
 
 func (s *Settler) matchPaperDecisions(ctx context.Context, marketType domain.MarketType, instrument string) ([]domain.TradeDecision, error) {
-	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{MarketType: marketType, Status: domain.TradeDecisionStatusPaper, InstrumentKey: instrument}, marketDecisionCap+1, 0)
+	decisions, err := s.decisions.List(ctx, repository.TradeDecisionFilter{Environment: s.executionAccount.Environment(), MarketType: marketType, Status: domain.TradeDecisionStatusPaper, InstrumentKey: instrument}, marketDecisionCap+1, 0)
 	if err != nil {
 		return nil, fmt.Errorf("prediction settlement: list decisions: %w", err)
 	}
@@ -266,7 +353,7 @@ func (s *Settler) matchPaperDecisions(ctx context.Context, marketType domain.Mar
 	return matches, nil
 }
 
-func (s *Settler) settleDecision(ctx context.Context, decision *domain.TradeDecision, winner string, resolvedAt time.Time) error {
+func (s *Settler) settleDecision(ctx context.Context, decision *domain.TradeDecision, winner string, resolvedAt time.Time, evidence ResolutionEvidence) error {
 	if decision.StrategyID == nil || decision.PaperOrderID == nil {
 		return fmt.Errorf("prediction settlement: decision %s lacks strategy or paper order", decision.ID)
 	}
@@ -274,13 +361,13 @@ func (s *Settler) settleDecision(ctx context.Context, decision *domain.TradeDeci
 	if held == "" {
 		return fmt.Errorf("prediction settlement: decision %s lacks held outcome", decision.ID)
 	}
-	if s.financialLifecycle != nil {
-		return s.settleDecisionAtomic(ctx, decision, held, winner, resolvedAt)
+	if s.economicWriter == nil {
+		return fmt.Errorf("prediction settlement: accepted economic writer is required")
 	}
-	return s.settleDecisionLegacy(ctx, decision, held, winner, resolvedAt)
+	return s.settleDecisionAtomic(ctx, decision, held, winner, resolvedAt, evidence)
 }
 
-func (s *Settler) settleDecisionAtomic(ctx context.Context, decision *domain.TradeDecision, held, winner string, resolvedAt time.Time) error {
+func (s *Settler) settleDecisionAtomic(ctx context.Context, decision *domain.TradeDecision, held, winner string, resolvedAt time.Time, evidence ResolutionEvidence) error {
 	if decision.ID == uuid.Nil || decision.StrategyID == nil || decision.PaperOrderID == nil {
 		return fmt.Errorf("prediction settlement: invalid decision identifiers")
 	}
@@ -296,47 +383,30 @@ func (s *Settler) settleDecisionAtomic(ctx context.Context, decision *domain.Tra
 	if math.IsNaN(payout) || math.IsInf(payout, 0) || payout < 0 || payout > 1 {
 		return fmt.Errorf("prediction settlement: invalid payout %.8f", payout)
 	}
-	_, err := s.financialLifecycle.SettlePredictionDecision(ctx, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + decision.ID.String(), Decision: decision, PositionTicker: positionTicker, Payout: payout, ResolvedAt: resolvedAt})
+	scope, err := executionScopeFromDecision(decision)
+	if err != nil {
+		return err
+	}
+	originType, originID := scope.Origin()
+	_, err = s.economicWriter.SettleAcceptedPredictionDecision(ctx, scope, repository.PredictionDecisionSettlementInput{IdempotencyKey: "prediction_settlement:v1:" + scope.AccountID().String() + ":" + decision.ID.String(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(originType), OriginID: originID, Decision: decision, PositionTicker: positionTicker, Payout: payout, ResolvedAt: resolvedAt, Resolution: evidence})
 	return err
 }
 
-func (s *Settler) settleDecisionLegacy(ctx context.Context, decision *domain.TradeDecision, held, winner string, resolvedAt time.Time) error {
-	key := strings.TrimSpace(decision.InstrumentKey) + ":" + held
-	positions, err := s.positions.GetByStrategy(ctx, *decision.StrategyID, repository.PositionFilter{Ticker: key, Side: domain.PositionSideLong}, 10, 0)
-	if err != nil {
-		return fmt.Errorf("prediction settlement: load %s position: %w", key, err)
+func executionScopeFromDecision(decision *domain.TradeDecision) (execution.ExecutionScope, error) {
+	if decision == nil {
+		return execution.ExecutionScope{}, fmt.Errorf("prediction settlement: persisted decision is required")
 	}
-	var position *domain.Position
-	for i := range positions {
-		if positions[i].ClosedAt == nil && positions[i].Quantity > 0 {
-			position = &positions[i]
-			break
+	originType, originID := decision.OriginType, decision.OriginID
+	if originType == "strategy_version" {
+		versionID, err := uuid.Parse(originID)
+		if err != nil || decision.PipelineRunID == nil || decision.PipelineRunTradeDate == nil {
+			return execution.ExecutionScope{}, fmt.Errorf("prediction settlement: decision %s lacks complete strategy run ownership", decision.ID)
 		}
+		legacy := []uuid.UUID{}
+		if decision.StrategyID != nil {
+			legacy = append(legacy, *decision.StrategyID)
+		}
+		return execution.NewStrategyExecutionScope(decision.AccountID, decision.Environment, versionID, domain.PipelineRunRef{ID: *decision.PipelineRunID, TradeDate: *decision.PipelineRunTradeDate}, legacy...)
 	}
-	if position == nil {
-		return fmt.Errorf("prediction settlement: open position %s not found", key)
-	}
-	quantity := position.Quantity
-	payout := 0.0
-	if held == winner {
-		payout = 1
-	}
-	position.CurrentPrice = &payout
-	position.RealizedPnL += (payout - position.AvgEntry) * quantity
-	position.UnrealizedPnL = nil
-	position.Quantity = 0
-	closedAt := resolvedAt.UTC()
-	position.ClosedAt = &closedAt
-	if err := s.positions.Update(ctx, position); err != nil {
-		return fmt.Errorf("prediction settlement: close position: %w", err)
-	}
-	trade := &domain.Trade{ID: uuid.New(), OrderID: decision.PaperOrderID, PositionID: &position.ID, Ticker: decision.InstrumentKey, Side: domain.OrderSideSell, Quantity: quantity, Price: payout, ExecutedAt: closedAt, CreatedAt: closedAt}
-	if err := s.trades.Create(ctx, trade); err != nil {
-		return fmt.Errorf("prediction settlement: record payout trade: %w", err)
-	}
-	if err := s.decisions.ResolvePredictionOutcome(ctx, decision.ID); err != nil {
-		return err
-	}
-	payload, _ := json.Marshal(map[string]any{"instrument": decision.InstrumentKey, "held_outcome": held, "winning_outcome": winner, "payout": payout, "quantity": quantity, "realized_pnl": position.RealizedPnL, "position_id": position.ID, "trade_id": trade.ID})
-	return s.replay.CreateReplayEvent(ctx, &domain.ReplayEvent{TradeDecisionID: decision.ID, EventType: domain.ReplayEventTypeOutcomeResolved, Source: "prediction_settler", Payload: payload, OccurredAt: closedAt})
+	return execution.NewNonRunExecutionScope(decision.AccountID, decision.Environment, ledger.ExecutionOriginType(originType), originID)
 }

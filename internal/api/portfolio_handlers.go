@@ -117,6 +117,15 @@ func (s *Server) loadPortfolioValuation(ctx context.Context, accountID *uuid.UUI
 		result.UnavailableReasons = append(result.UnavailableReasons, "projection_boundary_invalid")
 		return result
 	}
+	if snapshot.ProjectionWorkDegraded > 0 {
+		result.UnavailableReasons = append(result.UnavailableReasons, "projection_degraded")
+	}
+	if snapshot.ProjectionWorkRetrying > 0 {
+		result.UnavailableReasons = append(result.UnavailableReasons, "projection_retrying")
+	}
+	if snapshot.ProjectionWorkPending > 0 || snapshot.ProjectionWorkProcessing > 0 {
+		result.UnavailableReasons = append(result.UnavailableReasons, "projection_update_pending")
+	}
 	asOf := snapshot.Checkpoint.AsOf
 	result.AsOf = &asOf
 	openPositions, markedPositions, unmarkedPositions := 0, 0, 0

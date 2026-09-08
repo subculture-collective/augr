@@ -229,6 +229,7 @@ func ensureBacktestConfigTable(t *testing.T, ctx context.Context, pool *pgxpool.
 		schedule_cron     TEXT        NOT NULL DEFAULT '',
 		start_date        DATE        NOT NULL,
 		end_date          DATE        NOT NULL,
+		scope_id UUID,
 		simulation_params JSONB       NOT NULL DEFAULT '{}',
 		created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 		updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()

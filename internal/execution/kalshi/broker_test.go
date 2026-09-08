@@ -6,6 +6,9 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
@@ -24,6 +27,15 @@ type fakeLiveClient struct {
 	positionsErr  error
 	balance       BalanceResponse
 	balanceErr    error
+}
+
+func TestRichOrderStatusMapsRestingFillToPartial(t *testing.T) {
+	price := 0.42
+	filledAt := time.Now().UTC()
+	status, err := richOrderStatus(OrderResponse{Status: "resting", FilledCount: 2, AveragePrice: &price, FilledAt: &filledAt})
+	if err != nil || status.Status != domain.OrderStatusPartial || status.FilledQuantity != 2 {
+		t.Fatalf("resting fill status = %+v, err=%v", status, err)
+	}
 }
 
 func (f *fakeLiveClient) CreateOrder(_ context.Context, req CreateOrderRequest) (CreateOrderResponse, error) {
@@ -86,7 +98,7 @@ func TestBrokerSubmitOrder_UsesLiveClient(t *testing.T) {
 	t.Parallel()
 
 	price := 0.42
-	order := &domain.Order{Ticker: "KX-EXAMPLE", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 3, LimitPrice: &price, PredictionSide: "YES"}
+	order := &domain.Order{ClientOrderID: uuid.NewString(), Ticker: "KX-EXAMPLE", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 3, LimitPrice: &price, PredictionSide: "YES"}
 	client := &fakeLiveClient{createResp: CreateOrderResponse{OrderID: "ext-123"}}
 
 	got, err := NewBroker(client).SubmitOrder(context.Background(), order)
@@ -112,7 +124,7 @@ func TestBrokerSubmitOrder_WrapsClientError(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeLiveClient{createErr: errors.New("boom")}
-	_, err := NewBroker(client).SubmitOrder(context.Background(), &domain.Order{Ticker: "KX-EXAMPLE", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, PredictionSide: "YES"})
+	_, err := NewBroker(client).SubmitOrder(context.Background(), &domain.Order{ClientOrderID: uuid.NewString(), Ticker: "KX-EXAMPLE", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, PredictionSide: "YES"})
 	if err == nil || !strings.Contains(err.Error(), "kalshi: submit order:") {
 		t.Fatalf("SubmitOrder() error = %v, want wrapped client error", err)
 	}

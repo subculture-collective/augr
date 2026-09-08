@@ -5,14 +5,31 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 )
 
 // DB wraps a pgxpool.Pool and provides a shared connection pool for
 // all PostgreSQL repository implementations.
 type DB struct {
 	Pool *pgxpool.Pool
+}
+
+func (db *DB) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
+	if db == nil || db.Pool == nil {
+		return fmt.Errorf("postgres: execution account advisory lock database is required")
+	}
+	return (&OrderRepo{pool: db.Pool, accountID: accountID}).WithExecutionAccountLock(ctx, accountID, fn)
+}
+
+func (db *DB) RecordEconomicSourceEvent(ctx context.Context, event *ledger.EconomicSourceEvent) (*ledger.EconomicSourceEvent, error) {
+	if db == nil || db.Pool == nil {
+		return nil, fmt.Errorf("postgres: economic source event database is required")
+	}
+	return NewLedgerRepo(db.Pool).RecordEconomicSourceEvent(ctx, event)
 }
 
 // NewDB creates a connection pool using the provided connection string and

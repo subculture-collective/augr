@@ -20,13 +20,17 @@ const (
 )
 
 type ReplayEvent struct {
-	ID              uuid.UUID       `json:"id"`
-	TradeDecisionID uuid.UUID       `json:"trade_decision_id"`
-	EventType       ReplayEventType `json:"event_type"`
-	Source          string          `json:"source"`
-	Payload         json.RawMessage `json:"payload"`
-	OccurredAt      time.Time       `json:"occurred_at"`
-	CreatedAt       time.Time       `json:"created_at"`
+	ID              uuid.UUID          `json:"id"`
+	AccountID       uuid.UUID          `json:"account_id,omitzero"`
+	Environment     AccountEnvironment `json:"environment,omitempty"`
+	OriginType      string             `json:"origin_type,omitempty"`
+	OriginID        string             `json:"origin_id,omitempty"`
+	TradeDecisionID uuid.UUID          `json:"trade_decision_id"`
+	EventType       ReplayEventType    `json:"event_type"`
+	Source          string             `json:"source"`
+	Payload         json.RawMessage    `json:"payload"`
+	OccurredAt      time.Time          `json:"occurred_at"`
+	CreatedAt       time.Time          `json:"created_at"`
 }
 
 type ReplayWorkbenchSummary struct {

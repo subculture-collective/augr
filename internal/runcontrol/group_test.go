@@ -63,3 +63,32 @@ func TestGroupLeaseMarker(t *testing.T) {
 	}
 	lease.Done()
 }
+
+func TestGroupStopWaitsForCanceledRunTerminalWrite(t *testing.T) {
+	g := NewGroup()
+	terminalWriteStarted := make(chan struct{})
+	allowTerminalWrite := make(chan struct{})
+	done := make(chan struct{})
+	if err := g.Go(context.Background(), func(ctx context.Context) {
+		<-ctx.Done()
+		close(terminalWriteStarted)
+		<-allowTerminalWrite
+	}); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		g.StopAndWait(Shutdown)
+		close(done)
+	}()
+	<-terminalWriteStarted
+	if _, _, err := g.Admit(context.Background()); !errors.Is(err, ErrDraining) {
+		t.Fatalf("admission during terminal write = %v, want ErrDraining", err)
+	}
+	select {
+	case <-done:
+		t.Fatal("StopAndWait returned before terminal write completed")
+	default:
+	}
+	close(allowTerminalWrite)
+	<-done
+}

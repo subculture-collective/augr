@@ -69,7 +69,7 @@ func TestReportArtifactsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	}
 	t.Cleanup(adminPool.Close)
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := prepareMigrationTestExtensions(ctx, adminPool); err != nil {
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestReportArtifactsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse database config: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
@@ -141,17 +141,17 @@ func TestReportArtifactsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 		},
 		"prompt_tokens": {
 			dataType:      "integer",
-			nullable:      "YES",
+			nullable:      "NO",
 			defaultClause: "0",
 		},
 		"completion_tokens": {
 			dataType:      "integer",
-			nullable:      "YES",
+			nullable:      "NO",
 			defaultClause: "0",
 		},
 		"latency_ms": {
 			dataType:      "integer",
-			nullable:      "YES",
+			nullable:      "NO",
 			defaultClause: "0",
 		},
 		"error_message": {
@@ -192,7 +192,7 @@ VALUES ($1, 'paper_validation', $2::timestamptz, 'pending')
 	// Second insert on same key should conflict with the unique constraint.
 	_, err = pool.Exec(ctx, `
 INSERT INTO report_artifacts (strategy_id, report_type, time_bucket, status)
-VALUES ($1, 'paper_validation', $2::timestamptz, 'completed')
+VALUES ($1, 'paper_validation', $2::timestamptz, 'pending')
 `, strategyID, timeBucket)
 	if err == nil {
 		t.Fatal("expected unique constraint violation on duplicate (strategy_id, report_type, time_bucket), got nil")

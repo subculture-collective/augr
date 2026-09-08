@@ -2,6 +2,7 @@ package paper
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -95,6 +96,9 @@ func TestPaperBrokerSubmitOrder_MarketOrderWithoutReferenceFailsClosed(t *testin
 	if status != domain.OrderStatusRejected {
 		t.Fatalf("stored unpriced order status = %q", status)
 	}
+	if _, ok := broker.orderEffects[externalID]; ok {
+		t.Fatal("insufficient-cash rejection retained an unused rollback snapshot")
+	}
 }
 
 func TestPaperBrokerSubmitOrder_DeductsFee(t *testing.T) {
@@ -169,6 +173,9 @@ func TestPaperBrokerSubmitOrder_RejectsInsufficientBalance(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "insufficient balance") {
 		t.Fatalf("SubmitOrder() error = %q, want insufficient balance", err.Error())
+	}
+	if !errors.Is(err, execution.ErrBrokerOrderRejected) {
+		t.Fatalf("SubmitOrder() error = %v, want ErrBrokerOrderRejected", err)
 	}
 	if order.Status != domain.OrderStatusRejected {
 		t.Fatalf("SubmitOrder() status = %q, want %q", order.Status, domain.OrderStatusRejected)

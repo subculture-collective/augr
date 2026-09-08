@@ -268,7 +268,11 @@ func TestClientGetMarket_DecodesNakedAndWrappedResponses(t *testing.T) {
 				t.Fatalf("NewClient() error = %v", err)
 			}
 			api.SetHTTPClient(server.Client())
-			market, err := NewClient(api).GetMarket(context.Background(), "k")
+			wantTicker := "KAL-3"
+			if tt.name == "wrapped" {
+				wantTicker = "KAL-4"
+			}
+			market, err := NewClient(api).GetMarket(context.Background(), wantTicker)
 			if err != nil || market == nil {
 				t.Fatalf("GetMarket() = %#v, %v", market, err)
 			}
@@ -279,6 +283,21 @@ func TestClientGetMarket_DecodesNakedAndWrappedResponses(t *testing.T) {
 				t.Fatalf("market=%#v", market)
 			}
 		})
+	}
+}
+
+func TestClientGetMarketRejectsProviderTickerSubstitution(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"market":{"ticker":"SUBSTITUTE"}}`))
+	}))
+	defer server.Close()
+	api, err := dataKalshi.NewClient(server.URL+"/trade-api/v2", "", "", testDiscoveryLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetHTTPClient(server.Client())
+	if _, err := NewClient(api).GetMarket(context.Background(), "EXACT"); err == nil {
+		t.Fatal("GetMarket accepted provider ticker substitution")
 	}
 }
 

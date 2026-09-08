@@ -21,24 +21,24 @@ import (
 )
 
 func TestBuildPipelineRunListQuery_NoFilters(t *testing.T) {
-	query, args := buildPipelineRunListQuery(repository.PipelineRunFilter{}, 10, 0)
+	query, args := buildPipelineRunListQuery(canonicalRepositoryTestAccountID, repository.PipelineRunFilter{}, 10, 0)
 
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
 
-	if args[0] != 10 {
-		t.Errorf("expected limit=10, got %v", args[0])
+	if args[1] != 10 {
+		t.Errorf("expected limit=10, got %v", args[1])
 	}
 
-	if args[1] != 0 {
-		t.Errorf("expected offset=0, got %v", args[1])
+	if args[2] != 0 {
+		t.Errorf("expected offset=0, got %v", args[2])
 	}
 
 	assertContains(t, query, "FROM pipeline_runs")
 	assertContains(t, query, "ORDER BY started_at DESC, id DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
-	assertNotContains(t, query, "WHERE")
+	assertContains(t, query, "account_id = $1")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 }
 
 func TestBuildPipelineRunListQuery_AllFilters(t *testing.T) {
@@ -56,29 +56,29 @@ func TestBuildPipelineRunListQuery_AllFilters(t *testing.T) {
 		StartedBefore: &startedBefore,
 	}
 
-	query, args := buildPipelineRunListQuery(filter, 25, 50)
+	query, args := buildPipelineRunListQuery(canonicalRepositoryTestAccountID, filter, 25, 50)
 
-	if len(args) != 8 {
+	if len(args) != 9 {
 		t.Fatalf("expected 8 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "strategy_id = $1")
-	assertContains(t, query, "ticker = $2")
-	assertContains(t, query, "status = $3")
-	assertContains(t, query, "trade_date = $4::date")
-	assertContains(t, query, "started_at >= $5")
-	assertContains(t, query, "started_at <= $6")
-	assertContains(t, query, "LIMIT $7 OFFSET $8")
+	assertContains(t, query, "strategy_id = $2")
+	assertContains(t, query, "ticker = $3")
+	assertContains(t, query, "status = $4")
+	assertContains(t, query, "trade_date = $5::date")
+	assertContains(t, query, "started_at >= $6")
+	assertContains(t, query, "started_at <= $7")
+	assertContains(t, query, "LIMIT $8 OFFSET $9")
 
-	if args[0] != strategyID {
+	if args[1] != strategyID {
 		t.Errorf("expected strategy_id arg %s, got %v", strategyID, args[0])
 	}
 
-	if args[1] != "AAPL" {
+	if args[2] != "AAPL" {
 		t.Errorf("expected ticker arg AAPL, got %v", args[1])
 	}
 
-	if args[2] != domain.PipelineStatusRunning {
+	if args[3] != domain.PipelineStatusRunning {
 		t.Errorf("expected status arg running, got %v", args[2])
 	}
 }
@@ -90,17 +90,17 @@ func TestBuildPipelineRunListQuery_PartialFilters(t *testing.T) {
 		Status:     domain.PipelineStatusFailed,
 	}
 
-	query, args := buildPipelineRunListQuery(filter, 10, 0)
+	query, args := buildPipelineRunListQuery(canonicalRepositoryTestAccountID, filter, 10, 0)
 
-	if len(args) != 4 {
+	if len(args) != 5 {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "strategy_id = $1")
+	assertContains(t, query, "strategy_id = $2")
 	assertNotContains(t, query, "ticker =")
-	assertContains(t, query, "status = $2")
+	assertContains(t, query, "status = $3")
 	assertNotContains(t, query, "trade_date =")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "LIMIT $4 OFFSET $5")
 }
 
 func TestMarshalConfigSnapshot_ValidJSON(t *testing.T) {
@@ -191,13 +191,13 @@ func TestPipelineRunRepoIntegration_FinalizationReceiptsAndSignalPreservation(t 
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	run := createRunningPipelineRun(t, ctx, repo, domain.PipelineSignalBuy)
 	completedAt := run.StartedAt.Add(time.Minute)
 	runID := run.ID
 	event := &domain.AgentEvent{PipelineRunID: &runID, EventKind: "pipeline_completed", Title: "done", Metadata: json.RawMessage(`{"ok":true}`)}
 
-	receipt, err := repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+	receipt, err := repo.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{
 		Status: domain.PipelineStatusCompleted, CompletedAt: completedAt,
 		PhaseTimings: json.RawMessage(`{"analysis_ms":12}`), Event: event,
 	})
@@ -215,7 +215,7 @@ func TestPipelineRunRepoIntegration_FinalizationReceiptsAndSignalPreservation(t 
 		t.Fatalf("terminal event count = %d, err = %v", eventCount, err)
 	}
 
-	loser, err := repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+	loser, err := repo.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{
 		Status: domain.PipelineStatusFailed, CompletedAt: completedAt.Add(time.Second), ErrorMessage: "late failure",
 	})
 	if err != nil {
@@ -230,31 +230,45 @@ func TestPipelineRunRepoIntegration_CreatePreservesIDAndGeneratesMissingID(t *te
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	tradeDate := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
 
 	providedID := uuid.New()
 	provided := &domain.PipelineRun{ID: providedID, StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: tradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(provided)
 	if err := repo.Create(ctx, provided); err != nil {
 		t.Fatal(err)
 	}
 	if provided.ID != providedID {
 		t.Fatalf("Create() ID = %s, want caller ID %s", provided.ID, providedID)
 	}
-	stored, err := repo.GetByID(ctx, providedID)
+	stored, err := repo.Get(ctx, domain.PipelineRunRef{ID: providedID, TradeDate: tradeDate})
 	if err != nil || stored.ID != providedID {
-		t.Fatalf("GetByID() = (%+v, %v), want durable caller ID", stored, err)
+		t.Fatalf("Get() = (%+v, %v), want durable caller ID", stored, err)
 	}
 
 	generated := &domain.PipelineRun{StrategyID: uuid.New(), Ticker: "MSFT", TradeDate: tradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(generated)
 	if err := repo.Create(ctx, generated); err != nil {
 		t.Fatal(err)
 	}
 	if generated.ID == uuid.Nil {
 		t.Fatal("Create() left missing ID at zero")
 	}
-	if _, err := repo.GetByID(ctx, generated.ID); err != nil {
+	if _, err := repo.Get(ctx, domain.PipelineRunRef{ID: generated.ID, TradeDate: tradeDate}); err != nil {
 		t.Fatalf("generated ID %s was not durable: %v", generated.ID, err)
+	}
+}
+
+func TestPipelineRunRepoIntegration_Migration108OwnershipChecks(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
+	defer cleanup()
+	run := &domain.PipelineRun{StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: canonicalRepositoryTestTradeDate, Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(run)
+	run.Environment = domain.AccountEnvironment("invalid")
+	if err := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, run); err == nil {
+		t.Fatal("Create() accepted an environment rejected by migration 108")
 	}
 }
 
@@ -262,8 +276,9 @@ func TestPipelineRunRepoIntegration_RegisteredIDSurvivesCreateAndCancel(t *testi
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	run := &domain.PipelineRun{ID: uuid.New(), StrategyID: uuid.New(), Ticker: "AAPL", TradeDate: time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC), Status: domain.PipelineStatusRunning, StartedAt: time.Now().UTC()}
+	scopePipelineRunTestRow(run)
 	registry := agent.NewRunContextRegistry()
 	runCtx, cancelRun := context.WithCancelCause(context.Background())
 	if err := registry.Register(run.ID, run.TradeDate, cancelRun); err != nil {
@@ -272,13 +287,13 @@ func TestPipelineRunRepoIntegration_RegisteredIDSurvivesCreateAndCancel(t *testi
 	if err := repo.Create(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.NewRunService(repo, registry).Cancel(ctx, run.ID); err != nil {
+	if err := service.NewRunService(repo, registry).Cancel(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}); err != nil {
 		t.Fatal(err)
 	}
 	if !errors.Is(context.Cause(runCtx), runcontrol.Operator) {
 		t.Fatalf("registry cancellation cause = %v, want operator", context.Cause(runCtx))
 	}
-	stored, err := repo.GetByID(ctx, run.ID)
+	stored, err := repo.Get(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil || stored.Status != domain.PipelineStatusCancelled {
 		t.Fatalf("durable run = (%+v, %v), want cancelled registered ID", stored, err)
 	}
@@ -288,9 +303,9 @@ func TestPipelineRunRepoIntegration_FinalizationMissingAndEventRollback(t *testi
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	tradeDate := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
-	_, err := repo.Finalize(ctx, uuid.New(), tradeDate, repository.PipelineRunFinalization{
+	_, err := repo.Finalize(ctx, domain.PipelineRunRef{ID: uuid.New(), TradeDate: tradeDate}, repository.PipelineRunFinalization{
 		Status: domain.PipelineStatusCompleted, CompletedAt: time.Now(),
 	})
 	if !errors.Is(err, repository.ErrNotFound) {
@@ -305,14 +320,14 @@ func TestPipelineRunRepoIntegration_FinalizationMissingAndEventRollback(t *testi
 		t.Fatalf("create rejecting trigger: %v", err)
 	}
 	runID := run.ID
-	_, err = repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{
+	_, err = repo.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{
 		Status: domain.PipelineStatusCompleted, CompletedAt: time.Now(),
 		Event: &domain.AgentEvent{PipelineRunID: &runID, EventKind: "pipeline_completed", Title: "done"},
 	})
 	if err == nil {
 		t.Fatal("Finalize() succeeded despite event insert failure")
 	}
-	durable, getErr := repo.Get(ctx, run.ID, run.TradeDate)
+	durable, getErr := repo.Get(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if getErr != nil || durable.Status != domain.PipelineStatusRunning || durable.CompletedAt != nil {
 		t.Fatalf("event failure did not roll back run: run=%+v err=%v", durable, getErr)
 	}
@@ -322,7 +337,7 @@ func TestPipelineRunRepoIntegration_ConcurrentFinalizersHaveOneWinner(t *testing
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	run := createRunningPipelineRun(t, ctx, repo, domain.PipelineSignalHold)
 	inputs := []repository.PipelineRunFinalization{
 		{Status: domain.PipelineStatusCompleted, CompletedAt: time.Now()},
@@ -340,7 +355,7 @@ func TestPipelineRunRepoIntegration_ConcurrentFinalizersHaveOneWinner(t *testing
 		go func(input repository.PipelineRunFinalization) {
 			defer wg.Done()
 			<-start
-			receipt, err := repo.Finalize(ctx, run.ID, run.TradeDate, input)
+			receipt, err := repo.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, input)
 			results <- result{receipt: receipt, err: err}
 		}(input)
 	}
@@ -372,34 +387,34 @@ func TestPipelineRunRepoIntegration_RefineCompletedSignal(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	run := createRunningPipelineRun(t, ctx, repo, domain.PipelineSignalBuy)
-	running, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalBuy, domain.PipelineSignalSell)
+	running, err := repo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, domain.PipelineSignalBuy, domain.PipelineSignalSell)
 	if err != nil || running.Applied || running.Run.Status != domain.PipelineStatusRunning || running.Run.Signal != domain.PipelineSignalBuy {
 		t.Fatalf("running signal refinement = %+v, %v", running, err)
 	}
 	completedAt := time.Now()
-	finalized, err := repo.Finalize(ctx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: completedAt})
+	finalized, err := repo.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{Status: domain.PipelineStatusCompleted, CompletedAt: completedAt})
 	if err != nil {
 		t.Fatalf("Finalize() error = %v", err)
 	}
 
-	refined, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalBuy, domain.PipelineSignalSell)
+	refined, err := repo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, domain.PipelineSignalBuy, domain.PipelineSignalSell)
 	if err != nil || !refined.Applied || refined.Run.Signal != domain.PipelineSignalSell {
 		t.Fatalf("RefineCompletedSignal() = %+v, %v", refined, err)
 	}
 	if refined.Run.Status != finalized.Run.Status || refined.Run.ErrorMessage != finalized.Run.ErrorMessage || refined.Run.CompletedAt == nil || !refined.Run.CompletedAt.Equal(*finalized.Run.CompletedAt) {
 		t.Fatalf("signal refinement altered terminal fields: before=%+v after=%+v", finalized.Run, refined.Run)
 	}
-	retry, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalBuy, domain.PipelineSignalSell)
+	retry, err := repo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, domain.PipelineSignalBuy, domain.PipelineSignalSell)
 	if err != nil || !retry.Applied {
 		t.Fatalf("same-value retry = %+v, %v", retry, err)
 	}
-	loser, err := repo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, domain.PipelineSignalHold, domain.PipelineSignalBuy)
+	loser, err := repo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, domain.PipelineSignalHold, domain.PipelineSignalBuy)
 	if err != nil || loser.Applied || loser.Run.Signal != domain.PipelineSignalSell {
 		t.Fatalf("refinement CAS loser = %+v, %v", loser, err)
 	}
-	_, err = repo.RefineCompletedSignal(ctx, uuid.New(), run.TradeDate, "", domain.PipelineSignalBuy)
+	_, err = repo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: uuid.New(), TradeDate: run.TradeDate}, "", domain.PipelineSignalBuy)
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("missing refinement error = %v, want ErrNotFound", err)
 	}
@@ -410,8 +425,9 @@ func createRunningPipelineRun(t *testing.T, ctx context.Context, repo *PipelineR
 	run := &domain.PipelineRun{
 		StrategyID: uuid.New(), Ticker: "AAPL",
 		TradeDate: time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC),
-		Status:    domain.PipelineStatusRunning, Signal: signal, StartedAt: time.Now(),
+		Status:    domain.PipelineStatusRunning, Signal: signal, StartedAt: time.Now().UTC().Truncate(time.Microsecond),
 	}
+	scopePipelineRunTestRow(run)
 	if err := repo.Create(ctx, run); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -425,7 +441,7 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := uuid.New()
 
 	tradeDate1 := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
@@ -462,6 +478,7 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	}
 
 	for _, run := range []*domain.PipelineRun{run1, run2, run3} {
+		scopePipelineRunTestRow(run)
 		if err := repo.Create(ctx, run); err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
@@ -470,23 +487,23 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 		}
 	}
 
-	byID1, err := repo.GetByID(ctx, run1.ID)
+	byID1, err := repo.Get(ctx, domain.PipelineRunRef{ID: run1.ID, TradeDate: run1.TradeDate})
 	if err != nil {
-		t.Fatalf("GetByID() run1 error = %v", err)
+		t.Fatalf("Get() run1 error = %v", err)
 	}
 	if byID1.ID != run1.ID || byID1.TradeDate.Format("2006-01-02") != run1.TradeDate.Format("2006-01-02") {
-		t.Fatalf("GetByID() run1 returned unexpected row: %+v", byID1)
+		t.Fatalf("Get() run1 returned unexpected row: %+v", byID1)
 	}
 
-	byID2, err := repo.GetByID(ctx, run2.ID)
+	byID2, err := repo.Get(ctx, domain.PipelineRunRef{ID: run2.ID, TradeDate: run2.TradeDate})
 	if err != nil {
-		t.Fatalf("GetByID() run2 error = %v", err)
+		t.Fatalf("Get() run2 error = %v", err)
 	}
 	if byID2.ID != run2.ID || byID2.TradeDate.Format("2006-01-02") != run2.TradeDate.Format("2006-01-02") {
-		t.Fatalf("GetByID() run2 returned unexpected row: %+v", byID2)
+		t.Fatalf("Get() run2 returned unexpected row: %+v", byID2)
 	}
 
-	got, err := repo.Get(ctx, run1.ID, run1.TradeDate)
+	got, err := repo.Get(ctx, domain.PipelineRunRef{ID: run1.ID, TradeDate: run1.TradeDate})
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -508,7 +525,7 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	}
 
 	completedAt := startedAt1.Add(30 * time.Minute)
-	if _, err := repo.Finalize(ctx, run1.ID, run1.TradeDate, repository.PipelineRunFinalization{
+	if _, err := repo.Finalize(ctx, domain.PipelineRunRef{ID: run1.ID, TradeDate: run1.TradeDate}, repository.PipelineRunFinalization{
 		Status:       domain.PipelineStatusCompleted,
 		CompletedAt:  completedAt,
 		ErrorMessage: "",
@@ -516,7 +533,7 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 		t.Fatalf("Finalize() error = %v", err)
 	}
 
-	updated, err := repo.Get(ctx, run1.ID, run1.TradeDate)
+	updated, err := repo.Get(ctx, domain.PipelineRunRef{ID: run1.ID, TradeDate: run1.TradeDate})
 	if err != nil {
 		t.Fatalf("Get() after update error = %v", err)
 	}
@@ -577,14 +594,14 @@ func TestPipelineRunRepoIntegration_CRUDAndFilters(t *testing.T) {
 	}
 }
 
-func TestPipelineRunRepoIntegration_GetByIDUsesRunIDOnly(t *testing.T) {
+func TestPipelineRunRepoIntegration_GetUsesCompositeIdentity(t *testing.T) {
 	t.Helper()
 
 	ctx := context.Background()
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	sharedID := uuid.New()
 	tradeDate1 := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
 	tradeDate2 := time.Date(2027, time.January, 3, 0, 0, 0, 0, time.UTC)
@@ -601,8 +618,8 @@ func TestPipelineRunRepoIntegration_GetByIDUsesRunIDOnly(t *testing.T) {
 		{tradeDate: tradeDate2, ticker: "MSFT", status: domain.PipelineStatusFailed, startedAt: startedAt2},
 	} {
 		if _, err := pool.Exec(ctx, `INSERT INTO pipeline_runs (
-			id, strategy_id, ticker, trade_date, status, signal, started_at, error_message
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			id, strategy_id, ticker, trade_date, status, signal, started_at, error_message, account_id, environment, origin_type, origin_id
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 			sharedID,
 			uuid.New(),
 			tc.ticker,
@@ -611,18 +628,20 @@ func TestPipelineRunRepoIntegration_GetByIDUsesRunIDOnly(t *testing.T) {
 			"",
 			tc.startedAt,
 			"",
+			canonicalRepositoryTestAccountID,
+			domain.AccountEnvironmentPaperScored, "strategy_version", "00000000-0000-4000-8000-000000000108",
 		); err != nil {
 			t.Fatalf("failed to seed duplicate id rows: %v", err)
 		}
 	}
 
-	got, err := repo.GetByID(ctx, sharedID)
+	got, err := repo.Get(ctx, domain.PipelineRunRef{ID: sharedID, TradeDate: tradeDate2})
 	if err != nil {
-		t.Fatalf("GetByID() error = %v", err)
+		t.Fatalf("Get() error = %v", err)
 	}
 
 	if got.Ticker != "MSFT" || got.TradeDate.Format("2006-01-02") != tradeDate2.Format("2006-01-02") {
-		t.Fatalf("expected GetByID() to return the newest row for shared ID, got %+v", got)
+		t.Fatalf("expected Get() to return the requested composite row, got %+v", got)
 	}
 }
 
@@ -633,21 +652,21 @@ func TestPipelineRunRepoIntegration_NotFound(t *testing.T) {
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	missingID := uuid.New()
 
 	missingTradeDate := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
-	_, err := repo.GetByID(ctx, missingID)
-	if !errors.Is(err, ErrNotFound) {
-		t.Fatalf("expected GetByID() ErrNotFound, got %v", err)
-	}
-
-	_, err = repo.Get(ctx, missingID, missingTradeDate)
+	_, err := repo.Get(ctx, domain.PipelineRunRef{ID: missingID, TradeDate: missingTradeDate})
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected Get() ErrNotFound, got %v", err)
 	}
 
-	_, err = repo.Finalize(ctx, missingID, missingTradeDate, repository.PipelineRunFinalization{
+	_, err = repo.Get(ctx, domain.PipelineRunRef{ID: missingID, TradeDate: missingTradeDate})
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected Get() ErrNotFound, got %v", err)
+	}
+
+	_, err = repo.Finalize(ctx, domain.PipelineRunRef{ID: missingID, TradeDate: missingTradeDate}, repository.PipelineRunFinalization{
 		Status: domain.PipelineStatusFailed, CompletedAt: time.Now().UTC(), ErrorMessage: "failed",
 	})
 	if !errors.Is(err, ErrNotFound) {
@@ -662,7 +681,7 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 	pool, cleanup := newPipelineRunIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewPipelineRunRepo(pool)
+	repo := NewPipelineRunRepo(pool, canonicalRepositoryTestAccountID)
 	sharedID := uuid.New()
 	tradeDate1 := time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC)
 	tradeDate2 := time.Date(2027, time.January, 3, 0, 0, 0, 0, time.UTC)
@@ -670,8 +689,8 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 	startedAt2 := time.Date(2027, time.January, 3, 11, 0, 0, 0, time.UTC)
 
 	insertSQL := `INSERT INTO pipeline_runs (
-		id, strategy_id, ticker, trade_date, status, signal, started_at, error_message
-	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
+		id, strategy_id, ticker, trade_date, status, signal, started_at, error_message, account_id, environment, origin_type, origin_id
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`
 
 	for _, tc := range []struct {
 		tradeDate time.Time
@@ -691,12 +710,13 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 			"",
 			tc.startedAt,
 			"",
+			canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, "strategy_version", "00000000-0000-4000-8000-000000000108",
 		); err != nil {
 			t.Fatalf("failed to seed duplicate id rows: %v", err)
 		}
 	}
 
-	got, err := repo.Get(ctx, sharedID, tradeDate2)
+	got, err := repo.Get(ctx, domain.PipelineRunRef{ID: sharedID, TradeDate: tradeDate2})
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
 	}
@@ -706,7 +726,7 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 	}
 
 	completedAt := startedAt1.Add(time.Hour)
-	if _, err := repo.Finalize(ctx, sharedID, tradeDate1, repository.PipelineRunFinalization{
+	if _, err := repo.Finalize(ctx, domain.PipelineRunRef{ID: sharedID, TradeDate: tradeDate1}, repository.PipelineRunFinalization{
 		Status:       domain.PipelineStatusCompleted,
 		CompletedAt:  completedAt,
 		ErrorMessage: "",
@@ -714,11 +734,11 @@ func TestPipelineRunRepoIntegration_UsesCompositeKey(t *testing.T) {
 		t.Fatalf("Finalize() error = %v", err)
 	}
 
-	firstRun, err := repo.Get(ctx, sharedID, tradeDate1)
+	firstRun, err := repo.Get(ctx, domain.PipelineRunRef{ID: sharedID, TradeDate: tradeDate1})
 	if err != nil {
 		t.Fatalf("Get() for first run error = %v", err)
 	}
-	secondRun, err := repo.Get(ctx, sharedID, tradeDate2)
+	secondRun, err := repo.Get(ctx, domain.PipelineRunRef{ID: sharedID, TradeDate: tradeDate2})
 	if err != nil {
 		t.Fatalf("Get() for second run error = %v", err)
 	}
@@ -751,7 +771,7 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -779,8 +799,14 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 
 	ddl := []string{
 		`CREATE TYPE pipeline_status AS ENUM ('running', 'completed', 'failed', 'cancelled')`,
+		`CREATE TABLE accounts (id UUID PRIMARY KEY)`,
+		`INSERT INTO accounts (id) VALUES ('00000000-0000-4000-8000-000000000064')`,
 		`CREATE TABLE pipeline_runs (
 			id              UUID            NOT NULL DEFAULT gen_random_uuid(),
+			account_id      UUID            REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment     TEXT            CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type     TEXT            CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')),
+			origin_id       TEXT,
 			strategy_id     UUID            NOT NULL,
 			ticker          TEXT            NOT NULL,
 			trade_date      DATE            NOT NULL,
@@ -790,6 +816,7 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			completed_at    TIMESTAMPTZ,
 			error_message   TEXT            NOT NULL DEFAULT '',
 			config_snapshot JSONB,
+			execution_version_id UUID, evaluation_scope_id UUID, manifest_id UUID, quality_result_id UUID, deployment_id UUID, promotion_decision_id UUID, capital_binding_id UUID, risk_policy_version TEXT,
 			phase_timings   JSONB,
 			PRIMARY KEY (id, trade_date)
 		) PARTITION BY RANGE (trade_date)`,
@@ -801,7 +828,10 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		`CREATE INDEX idx_pipeline_runs_status ON pipeline_runs (status)`,
 		`CREATE INDEX idx_pipeline_runs_trade_date ON pipeline_runs (trade_date)`,
 		`CREATE TABLE agent_events (
-			id UUID NOT NULL DEFAULT gen_random_uuid(), pipeline_run_id UUID, strategy_id UUID,
+			id UUID NOT NULL DEFAULT gen_random_uuid(), account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+			environment TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
+			origin_type TEXT CHECK (origin_type IN ('strategy_version','copy_subscription','portfolio_rebalance','risk_reduction','operator','settlement','reconciliation')), origin_id TEXT,
+			pipeline_run_id UUID, pipeline_run_trade_date DATE, strategy_id UUID,
 			agent_role TEXT, event_kind TEXT NOT NULL, title TEXT NOT NULL, summary TEXT,
 			tags TEXT[], metadata JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			PRIMARY KEY (id, created_at)
@@ -825,4 +855,11 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 	}
 
 	return pool, cleanup
+}
+
+func scopePipelineRunTestRow(run *domain.PipelineRun) {
+	run.AccountID = canonicalRepositoryTestAccountID
+	run.Environment = domain.AccountEnvironmentPaperScored
+	run.OriginType = "strategy_version"
+	run.OriginID = "00000000-0000-4000-8000-000000000108"
 }

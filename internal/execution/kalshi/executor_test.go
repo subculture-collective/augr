@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
+	"github.com/google/uuid"
 )
 
 func TestDeterministicNativeExecutor_KalshiBuyYesWhenMetadataValid(t *testing.T) {
@@ -34,7 +37,7 @@ func TestDeterministicNativeExecutor_KalshiBuyYesWhenMetadataValid(t *testing.T)
 		Volume:     1500,
 		CloseTime:  time.Now().UTC().Add(48 * time.Hour),
 		FetchedAt:  time.Now().UTC(),
-	})
+	}, kalshiExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -62,7 +65,7 @@ func TestDeterministicNativeExecutor_KalshiHoldWhenMarketClosed(t *testing.T) {
 		Volume:     1500,
 		CloseTime:  time.Now().UTC().Add(2 * time.Hour),
 		FetchedAt:  time.Now().UTC(),
-	})
+	}, kalshiExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -78,7 +81,7 @@ func TestDeterministicNativeExecutor_KalshiHoldWithoutNetProbabilityEdge(t *test
 		Ticker: strategy.Ticker, Title: "Will test happen?", Status: "active",
 		BestBidYes: 0.69, BestAskYes: 0.70, BestBidNo: 0.29, BestAskNo: 0.30,
 		Volume: 1500, CloseTime: time.Now().UTC().Add(48 * time.Hour), FetchedAt: time.Now().UTC(),
-	})
+	}, kalshiExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -94,7 +97,7 @@ func TestDeterministicNativeExecutor_KalshiHoldWithoutCalibratedFairProbability(
 		Ticker: strategy.Ticker, Title: "Will test happen?", Status: "active",
 		BestBidYes: 0.01, BestAskYes: 0.01, BestBidNo: 0.99, BestAskNo: 0.99,
 		Volume: 355_000_000, CloseTime: time.Now().UTC().Add(365 * 24 * time.Hour), FetchedAt: time.Now().UTC(),
-	})
+	}, kalshiExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -119,7 +122,7 @@ func TestDeterministicNativeExecutor_KalshiHoldWhenMissingNoBook(t *testing.T) {
 		Volume:     1500,
 		CloseTime:  time.Now().UTC().Add(2 * time.Hour),
 		FetchedAt:  time.Now().UTC(),
-	})
+	}, kalshiExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -143,7 +146,7 @@ func TestDeterministicNativeExecutor_KalshiHoldWhenUnknownTemplate(t *testing.T)
 		Volume:     1500,
 		CloseTime:  time.Now().UTC().Add(2 * time.Hour),
 		FetchedAt:  time.Now().UTC(),
-	})
+	}, kalshiExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
@@ -155,13 +158,22 @@ func TestDeterministicNativeExecutor_KalshiHoldWhenUnknownTemplate(t *testing.T)
 func TestDeterministicNativeExecutor_KalshiHoldOnMalformedConfig(t *testing.T) {
 	t.Parallel()
 
-	decision, err := DeterministicNativeExecutor{}.Execute(context.Background(), domain.Strategy{Ticker: "KXTEST-YESNO", Config: json.RawMessage(`{"discovery_meta":`)}, Snapshot{})
+	decision, err := DeterministicNativeExecutor{}.Execute(context.Background(), domain.Strategy{Ticker: "KXTEST-YESNO", Config: json.RawMessage(`{"discovery_meta":`)}, Snapshot{}, kalshiExecutorTestScope(t))
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if decision.Signal != domain.PipelineSignalHold || decision.Action != "hold" {
 		t.Fatalf("decision = %+v", decision)
 	}
+}
+
+func kalshiExecutorTestScope(t *testing.T) execution.ExecutionScope {
+	t.Helper()
+	scope, err := execution.NewNonRunExecutionScope(uuid.New(), domain.AccountEnvironmentPaperScored, ledger.ExecutionOriginOperator, "executor-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
 }
 
 func kalshiStrategyWithMeta(t *testing.T, meta discoveryMeta) domain.Strategy {

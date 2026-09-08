@@ -63,7 +63,7 @@ func TestDiscoveryStrategyDedupMigrationAppliesAndEnforcesUniqueness(t *testing.
 	}
 	t.Cleanup(adminPool.Close)
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := prepareMigrationTestExtensions(ctx, adminPool); err != nil {
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
 
@@ -82,7 +82,7 @@ func TestDiscoveryStrategyDedupMigrationAppliesAndEnforcesUniqueness(t *testing.
 	if err != nil {
 		t.Fatalf("failed to parse database config: %v", err)
 	}
-	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
+	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schemaName)
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)

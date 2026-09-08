@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -516,6 +517,24 @@ func TestBrokerGetOrderStatus_MapsStatuses(t *testing.T) {
 	}
 }
 
+func TestBrokerRichOrderStatusUsesProviderTimestamp(t *testing.T) {
+	filledAt := "2026-08-28T12:34:56.123456Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"order":{"id":"order-1","state":"ORDER_STATE_FILLED","cumQuantity":2,"avgPx":{"value":"0.42"},"lastUpdateTime":"` + filledAt + `"}}`))
+	}))
+	defer server.Close()
+	client := newTestClient()
+	client.SetAPIBaseURL(server.URL)
+	result, err := NewBroker(client).GetOrderStatusResult(context.Background(), "order-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := time.Parse(time.RFC3339Nano, filledAt)
+	if result.FilledAt == nil || !result.FilledAt.Equal(want) {
+		t.Fatalf("FilledAt = %v, want provider timestamp %v", result.FilledAt, want)
+	}
+}
+
 func TestBrokerGetPositions_MapsResponse(t *testing.T) {
 	t.Parallel()
 
@@ -563,6 +582,43 @@ func TestBrokerGetPositions_MapsResponse(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("request details were not captured")
+	}
+}
+
+func TestBrokerGetPositions_PaginatesToExhaustion(t *testing.T) {
+	requests := make(chan int, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		offset, err := strconv.Atoi(r.URL.Query().Get("offset"))
+		if err != nil {
+			t.Errorf("invalid offset: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		requests <- offset
+		count := 500
+		if offset == 500 {
+			count = 1
+		}
+		page := make([]dataAPIPosition, count)
+		for i := range page {
+			page[i] = dataAPIPosition{Slug: fmt.Sprintf("market-%d", offset+i), Outcome: "YES", Size: 1, AvgPrice: 0.5, CurPrice: 0.5}
+		}
+		_ = json.NewEncoder(w).Encode(page)
+	}))
+	defer server.Close()
+	oldDataAPIBaseURL := dataAPIBaseURL
+	dataAPIBaseURL = server.URL
+	t.Cleanup(func() { dataAPIBaseURL = oldDataAPIBaseURL })
+
+	positions, err := NewBroker(newTestClient()).GetPositions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(positions) != 501 {
+		t.Fatalf("positions = %d, want 501", len(positions))
+	}
+	if first, second := <-requests, <-requests; first != 0 || second != 500 {
+		t.Fatalf("offsets = [%d %d], want [0 500]", first, second)
 	}
 }
 

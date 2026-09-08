@@ -24,11 +24,12 @@ type ReconcilerMetrics interface {
 }
 
 type ReconcilerDeps struct {
-	Broker       execution.Broker
-	PositionRepo repository.PositionRepository
-	AuditLogRepo repository.AuditLogRepository
-	Metrics      ReconcilerMetrics
-	Logger       *slog.Logger
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           execution.Broker
+	PositionRepo     repository.PositionRepository
+	AuditLogRepo     repository.AuditLogRepository
+	Metrics          ReconcilerMetrics
+	Logger           *slog.Logger
 }
 
 type ReconcileSummary struct {
@@ -55,11 +56,12 @@ type reconciledPosition struct {
 }
 
 type Reconciler struct {
-	broker       execution.Broker
-	positionRepo repository.PositionRepository
-	auditLogRepo repository.AuditLogRepository
-	metrics      ReconcilerMetrics
-	logger       *slog.Logger
+	executionAccount domain.ExecutionAccountBinding
+	broker           execution.Broker
+	positionRepo     repository.PositionRepository
+	auditLogRepo     repository.AuditLogRepository
+	metrics          ReconcilerMetrics
+	logger           *slog.Logger
 
 	mu   sync.Mutex
 	seen map[string]struct{}
@@ -71,12 +73,13 @@ func NewReconciler(deps ReconcilerDeps) *Reconciler {
 		logger = slog.Default()
 	}
 	return &Reconciler{
-		broker:       deps.Broker,
-		positionRepo: deps.PositionRepo,
-		auditLogRepo: deps.AuditLogRepo,
-		metrics:      deps.Metrics,
-		logger:       logger,
-		seen:         make(map[string]struct{}),
+		executionAccount: deps.ExecutionAccount,
+		broker:           deps.Broker,
+		positionRepo:     deps.PositionRepo,
+		auditLogRepo:     deps.AuditLogRepo,
+		metrics:          deps.Metrics,
+		logger:           logger,
+		seen:             make(map[string]struct{}),
 	}
 }
 
@@ -132,11 +135,23 @@ func (r *Reconciler) Reconcile(ctx context.Context) (ReconcileSummary, error) {
 }
 
 func (r *Reconciler) fetchAllOpenPositions(ctx context.Context) ([]domain.Position, error) {
+	scoped, ok := r.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("account-scoped position repository is required")
+	}
+	if err := r.executionAccount.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid execution account: %w", err)
+	}
 	var all []domain.Position
 	for offset := 0; ; offset += reconcilePositionPageSize {
-		page, err := r.positionRepo.GetOpen(ctx, repository.PositionFilter{}, reconcilePositionPageSize, offset)
+		page, err := scoped.GetOpenByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{}, reconcilePositionPageSize, offset)
 		if err != nil {
 			return nil, err
+		}
+		for i := range page {
+			if page[i].AccountID != r.executionAccount.AccountID() || page[i].Environment != r.executionAccount.Environment() {
+				return nil, fmt.Errorf("position %s belongs to a foreign execution account", page[i].ID)
+			}
 		}
 		all = append(all, page...)
 		if len(page) < reconcilePositionPageSize {
@@ -185,11 +200,7 @@ func aggregateLocalPolymarketPositions(positions []domain.Position) map[string]r
 }
 
 func isLocalPolymarketPosition(position domain.Position) bool {
-	if position.MarketType.Normalize() == domain.MarketTypePolymarket {
-		return true
-	}
-	_, _, ok := sideQualifiedPolymarketTicker(position.Ticker)
-	return ok
+	return position.MarketType == domain.MarketTypePolymarket
 }
 
 func polymarketPositionKey(position domain.Position) (key, slug, side string, ok bool) {
@@ -201,6 +212,9 @@ func polymarketPositionKey(position domain.Position) (key, slug, side string, ok
 }
 
 func polymarketPositionIdentity(position domain.Position) (slug, side string, ok bool) {
+	if position.MarketType != domain.MarketTypePolymarket {
+		return "", "", false
+	}
 	ticker := strings.TrimSpace(position.Ticker)
 	if ticker == "" {
 		return "", "", false

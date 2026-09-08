@@ -122,6 +122,7 @@ type MissingFactInput struct {
 type SnapshotInput struct {
 	Source                   SnapshotSource
 	AccountID                uuid.UUID
+	ThroughTransactionID     uuid.UUID
 	AsOf                     time.Time
 	ObservedAt               time.Time
 	Currency                 string
@@ -163,6 +164,7 @@ type Snapshot struct {
 	Version                  string
 	Source                   SnapshotSource
 	AccountID                uuid.UUID
+	ThroughTransactionID     uuid.UUID
 	AsOf                     time.Time
 	ObservedAt               time.Time
 	Currency                 string
@@ -196,6 +198,9 @@ func NewSnapshot(input SnapshotInput) (*Snapshot, error) {
 	if input.AccountID == uuid.Nil {
 		return nil, fmt.Errorf("accounting snapshot account ID is required")
 	}
+	if input.ThroughTransactionID == uuid.Nil {
+		return nil, fmt.Errorf("accounting snapshot transaction frontier is required")
+	}
 	if err := requireUTCMicrosecond("as_of", input.AsOf); err != nil {
 		return nil, err
 	}
@@ -222,7 +227,7 @@ func NewSnapshot(input SnapshotInput) (*Snapshot, error) {
 	}
 
 	snapshot := &Snapshot{
-		Version: SnapshotVersion, Source: input.Source, AccountID: input.AccountID,
+		Version: SnapshotVersion, Source: input.Source, AccountID: input.AccountID, ThroughTransactionID: input.ThroughTransactionID,
 		AsOf: input.AsOf, ObservedAt: input.ObservedAt, Currency: input.Currency,
 		ProjectionVersion: input.ProjectionVersion, MarkSource: input.MarkSource,
 		MarkNamespace: input.MarkNamespace, MaxMarkAge: input.MaxMarkAge,
@@ -306,7 +311,7 @@ func (snapshot *Snapshot) Validate() error {
 		return fmt.Errorf("accounting snapshot mutable fields differ from canonical bytes")
 	}
 	input := SnapshotInput{
-		Source: snapshot.Source, AccountID: snapshot.AccountID, AsOf: snapshot.AsOf,
+		Source: snapshot.Source, AccountID: snapshot.AccountID, ThroughTransactionID: snapshot.ThroughTransactionID, AsOf: snapshot.AsOf,
 		ObservedAt: snapshot.ObservedAt, Currency: snapshot.Currency,
 		ProjectionVersion: snapshot.ProjectionVersion, MarkSource: snapshot.MarkSource,
 		MarkNamespace: snapshot.MarkNamespace, MaxMarkAge: snapshot.MaxMarkAge,
@@ -353,6 +358,7 @@ func (snapshot *Snapshot) canonicalPayload() ([]byte, error) {
 		Version                  string            `json:"version"`
 		Source                   string            `json:"source"`
 		AccountID                string            `json:"account_id"`
+		ThroughTransactionID     string            `json:"through_transaction_id"`
 		AsOf                     string            `json:"as_of"`
 		ObservedAt               string            `json:"observed_at"`
 		Currency                 string            `json:"currency"`
@@ -370,7 +376,7 @@ func (snapshot *Snapshot) canonicalPayload() ([]byte, error) {
 		Positions                []positionPayload `json:"positions"`
 		Missing                  []missingPayload  `json:"missing"`
 	}{
-		Version: snapshot.Version, Source: snapshot.Source.String(), AccountID: snapshot.AccountID.String(),
+		Version: snapshot.Version, Source: snapshot.Source.String(), AccountID: snapshot.AccountID.String(), ThroughTransactionID: snapshot.ThroughTransactionID.String(),
 		AsOf: snapshot.AsOf.Format(timestampLayout), ObservedAt: snapshot.ObservedAt.Format(timestampLayout), Currency: snapshot.Currency,
 		ProjectionVersion: snapshot.ProjectionVersion, MarkSource: snapshot.MarkSource, MarkNamespace: snapshot.MarkNamespace,
 		MaxMarkAgeMicroseconds: snapshot.MaxMarkAge.Microseconds(), CaptureFenceID: snapshot.CaptureFenceID,

@@ -51,6 +51,16 @@ type mockStrategyRepo struct {
 }
 
 func (m *mockStrategyRepo) Create(context.Context, *domain.Strategy) error { return nil }
+func (m *mockStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := m.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+
+func (*mockStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
 
 func (m *mockStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {
 	m.mu.Lock()

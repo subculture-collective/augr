@@ -27,6 +27,11 @@ func (s *Server) handleGetReplayDecision(w http.ResponseWriter, r *http.Request)
 		respondError(w, http.StatusInternalServerError, "failed to get trade decision", ErrCodeInternal)
 		return
 	}
+	accountID, _ := canonicalAccountIDFromPath(r)
+	if decision == nil || decision.AccountID != accountID {
+		respondError(w, http.StatusNotFound, "trade decision not found", ErrCodeNotFound)
+		return
+	}
 
 	events, err := s.replayEvents.ListReplayEvents(r.Context(), id)
 	if err != nil {

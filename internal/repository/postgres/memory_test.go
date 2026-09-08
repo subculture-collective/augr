@@ -20,42 +20,42 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestBuildSearchQuery_NoFTS_NoFilters(t *testing.T) {
-	query, args := buildSearchQuery("", repository.MemorySearchFilter{}, 10, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "", repository.MemorySearchFilter{}, 10, 0)
 
 	// limit + offset = 2 args
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
-	if args[0] != 10 {
+	if args[1] != 10 {
 		t.Errorf("expected limit=10, got %v", args[0])
 	}
-	if args[1] != 0 {
+	if args[2] != 0 {
 		t.Errorf("expected offset=0, got %v", args[1])
 	}
 
 	assertContains(t, query, "FROM agent_memories")
 	assertContains(t, query, "ORDER BY created_at DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 	assertNotContains(t, query, "situation_tsv")
 	assertNotContains(t, query, "agent_role =")
 	assertNotContains(t, query, "rank")
 }
 
 func TestBuildSearchQuery_FTS_NoFilters(t *testing.T) {
-	query, args := buildSearchQuery("bullish trend", repository.MemorySearchFilter{}, 5, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "bullish trend", repository.MemorySearchFilter{}, 5, 0)
 
 	// fts_query + limit + offset = 3 args
-	if len(args) != 3 {
+	if len(args) != 4 {
 		t.Fatalf("expected 3 args, got %d: %v", len(args), args)
 	}
-	if args[0] != "bullish trend" {
+	if args[1] != "bullish trend" {
 		t.Errorf("expected args[0] = FTS query, got %v", args[0])
 	}
 
-	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $1)")
-	assertContains(t, query, "ts_rank(situation_tsv, plainto_tsquery('english', $1)) AS rank")
+	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $2)")
+	assertContains(t, query, "ts_rank(situation_tsv, plainto_tsquery('english', $2)) AS rank")
 	assertContains(t, query, "ORDER BY rank DESC, created_at DESC")
-	assertContains(t, query, "LIMIT $2 OFFSET $3")
+	assertContains(t, query, "LIMIT $3 OFFSET $4")
 }
 
 func TestBuildSearchQuery_FTS_WithRoleFilter(t *testing.T) {
@@ -63,18 +63,18 @@ func TestBuildSearchQuery_FTS_WithRoleFilter(t *testing.T) {
 		AgentRole: domain.AgentRoleTrader,
 	}
 
-	query, args := buildSearchQuery("market downturn", filter, 5, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "market downturn", filter, 5, 0)
 
 	// fts_query + role + limit + offset = 4 args
-	if len(args) != 4 {
+	if len(args) != 5 {
 		t.Fatalf("expected 4 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $1)")
-	assertContains(t, query, "agent_role = $2")
-	assertContains(t, query, "LIMIT $3 OFFSET $4")
+	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $2)")
+	assertContains(t, query, "agent_role = $3")
+	assertContains(t, query, "LIMIT $4 OFFSET $5")
 
-	if args[1] != domain.AgentRoleTrader {
+	if args[2] != domain.AgentRoleTrader {
 		t.Errorf("expected args[1] = trader role, got %v", args[1])
 	}
 }
@@ -86,25 +86,25 @@ func TestBuildSearchQuery_NoFTS_AllFilters(t *testing.T) {
 	before := now.Add(time.Hour)
 	filter := repository.MemorySearchFilter{
 		AgentRole:         domain.AgentRoleMarketAnalyst,
-		PipelineRunID:     &runID,
+		PipelineRunRef:    &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
 		MinRelevanceScore: &minScore,
 		CreatedAfter:      &now,
 		CreatedBefore:     &before,
 	}
 
-	query, args := buildSearchQuery("", filter, 10, 20)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "", filter, 10, 20)
 
 	// role + run_id + min_score + after + before + limit + offset = 7 args
-	if len(args) != 7 {
+	if len(args) != 9 {
 		t.Fatalf("expected 7 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "agent_role = $1")
-	assertContains(t, query, "pipeline_run_id = $2")
-	assertContains(t, query, "relevance_score >= $3")
-	assertContains(t, query, "created_at >= $4")
-	assertContains(t, query, "created_at < $5")
-	assertContains(t, query, "LIMIT $6 OFFSET $7")
+	assertContains(t, query, "agent_role = $2")
+	assertContains(t, query, "pipeline_run_id = $3")
+	assertContains(t, query, "relevance_score >= $5")
+	assertContains(t, query, "created_at >= $6")
+	assertContains(t, query, "created_at < $7")
+	assertContains(t, query, "LIMIT $8 OFFSET $9")
 	assertContains(t, query, "ORDER BY created_at DESC")
 	assertNotContains(t, query, "rank")
 }
@@ -116,43 +116,43 @@ func TestBuildSearchQuery_FTS_AllFilters(t *testing.T) {
 	before := now.Add(time.Hour)
 	filter := repository.MemorySearchFilter{
 		AgentRole:         domain.AgentRoleBullResearcher,
-		PipelineRunID:     &runID,
+		PipelineRunRef:    &domain.PipelineRunRef{ID: runID, TradeDate: canonicalRepositoryTestTradeDate},
 		MinRelevanceScore: &minScore,
 		CreatedAfter:      &now,
 		CreatedBefore:     &before,
 	}
 
-	query, args := buildSearchQuery("positive outlook", filter, 3, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "positive outlook", filter, 3, 0)
 
 	// fts_query + role + run_id + min_score + after + before + limit + offset = 8 args
-	if len(args) != 8 {
+	if len(args) != 10 {
 		t.Fatalf("expected 8 args, got %d: %v", len(args), args)
 	}
 
-	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $1)")
-	assertContains(t, query, "agent_role = $2")
-	assertContains(t, query, "pipeline_run_id = $3")
-	assertContains(t, query, "relevance_score >= $4")
-	assertContains(t, query, "created_at >= $5")
-	assertContains(t, query, "created_at < $6")
-	assertContains(t, query, "LIMIT $7 OFFSET $8")
+	assertContains(t, query, "situation_tsv @@ plainto_tsquery('english', $2)")
+	assertContains(t, query, "agent_role = $3")
+	assertContains(t, query, "pipeline_run_id = $4")
+	assertContains(t, query, "relevance_score >= $6")
+	assertContains(t, query, "created_at >= $7")
+	assertContains(t, query, "created_at < $8")
+	assertContains(t, query, "LIMIT $9 OFFSET $10")
 	assertContains(t, query, "ORDER BY rank DESC, created_at DESC")
 }
 
 func TestBuildSearchQuery_WhitespaceOnlyQuery(t *testing.T) {
 	// Search() trims whitespace before calling buildSearchQuery, so
 	// a whitespace-only input arrives here as "".
-	query, args := buildSearchQuery("", repository.MemorySearchFilter{}, 10, 0)
+	query, args := buildSearchQuery(canonicalRepositoryTestAccountID, "", repository.MemorySearchFilter{}, 10, 0)
 
 	// Should behave identically to the no-FTS path.
-	if len(args) != 2 {
+	if len(args) != 3 {
 		t.Fatalf("expected 2 args (limit, offset), got %d", len(args))
 	}
 
 	assertNotContains(t, query, "situation_tsv")
 	assertNotContains(t, query, "rank")
 	assertContains(t, query, "ORDER BY created_at DESC")
-	assertContains(t, query, "LIMIT $1 OFFSET $2")
+	assertContains(t, query, "LIMIT $2 OFFSET $3")
 }
 
 // ---------------------------------------------------------------------------
@@ -179,22 +179,26 @@ func TestMemoryRepoIntegration_CreateAndSearch(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	runID := uuid.New()
 	m1 := &domain.AgentMemory{
-		AgentRole:      domain.AgentRoleMarketAnalyst,
-		Situation:      "AAPL showing a strong bullish reversal with increasing volume",
-		Recommendation: "Consider buying AAPL",
-		Outcome:        "Price increased 5%",
-		PipelineRunID:  &runID,
+		Environment:          domain.AccountEnvironmentPaperScored,
+		AgentRole:            domain.AgentRoleMarketAnalyst,
+		Situation:            "AAPL showing a strong bullish reversal with increasing volume",
+		Recommendation:       "Consider buying AAPL",
+		Outcome:              "Price increased 5%",
+		PipelineRunID:        &runID,
+		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "MSFT earnings beat expectations with cloud revenue growth",
 		Recommendation: "MSFT is a strong hold",
 	}
 	m3 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Market-wide bearish sentiment following interest rate hike",
 		Recommendation: "Reduce exposure to equities",
@@ -244,7 +248,7 @@ func TestMemoryRepoIntegration_CreateAndSearch(t *testing.T) {
 		t.Errorf("Outcome: want %q, got %q", m1.Outcome, got.Outcome)
 	}
 	if got.PipelineRunID == nil || *got.PipelineRunID != runID {
-		t.Errorf("PipelineRunID: want %s, got %v", runID, got.PipelineRunID)
+		t.Errorf("PipelineRunRef: want %s, got %v", runID, got.PipelineRunID)
 	}
 }
 
@@ -253,15 +257,17 @@ func TestMemoryRepoIntegration_SearchWithRoleFilter(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	// Insert memories with different roles but overlapping situation text.
 	m1 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "Stock market experiencing significant volatility",
 		Recommendation: "Wait for clarity",
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Volatility index spiking during market selloff",
 		Recommendation: "Tighten stops",
@@ -293,9 +299,10 @@ func TestMemoryRepoIntegration_Delete(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleRiskManager,
 		Situation:      "Portfolio risk exceeding maximum threshold",
 		Recommendation: "Reduce position sizes",
@@ -324,7 +331,7 @@ func TestMemoryRepoIntegration_DeleteUnknownID(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	err := repo.Delete(ctx, uuid.New())
 	if err == nil {
@@ -340,7 +347,7 @@ func TestMemoryRepoIntegration_SearchEmptyResult(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	results, err := repo.Search(ctx, "nonexistent", repository.MemorySearchFilter{}, 5, 0)
 	if err != nil {
@@ -356,14 +363,16 @@ func TestMemoryRepoIntegration_SearchNoFTS(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m1 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "First memory situation",
 		Recommendation: "First recommendation",
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Second memory situation",
 		Recommendation: "Second recommendation",
@@ -396,10 +405,11 @@ func TestMemoryRepoIntegration_Pagination(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	for i := 0; i < 5; i++ {
 		m := &domain.AgentMemory{
+			Environment:    domain.AccountEnvironmentPaperScored,
 			AgentRole:      domain.AgentRoleMarketAnalyst,
 			Situation:      "Market analysis report number",
 			Recommendation: "Hold positions",
@@ -440,10 +450,11 @@ func TestMemoryRepoIntegration_NullableFieldsRoundTrip(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	// Memory with all optional fields omitted.
 	m := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleInvestJudge,
 		Situation:      "Minimal memory with no optional fields",
 		Recommendation: "No recommendation",
@@ -478,15 +489,17 @@ func TestMemoryRepoIntegration_FTSRelevanceRanking(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	// m1 contains "bullish" once; m2 has a more relevant situation text.
 	m1 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "The technology sector shows mixed signals with some bullish indicators",
 		Recommendation: "Monitor closely",
 	}
 	m2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleMarketAnalyst,
 		Situation:      "Strong bullish reversal pattern with bullish engulfing candle confirmed on daily chart",
 		Recommendation: "Buy signal",
@@ -525,9 +538,10 @@ func TestMemoryRepoIntegration_SearchWithDateFilter(t *testing.T) {
 	pool, cleanup := newMemoryIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewMemoryRepo(pool)
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
 
 	m := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Date filter test memory",
 		Recommendation: "Test",
@@ -560,6 +574,30 @@ func TestMemoryRepoIntegration_SearchWithDateFilter(t *testing.T) {
 	}
 }
 
+func TestMemoryRepoIntegration_SearchExcludesForeignAndLegacyRows(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newMemoryIntegrationPool(t, ctx)
+	defer cleanup()
+
+	repo := NewMemoryRepo(pool, canonicalRepositoryTestAccountID)
+	canonical := &domain.AgentMemory{Environment: domain.AccountEnvironmentPaperScored, AgentRole: domain.AgentRoleTrader, Situation: "canonical memory", Recommendation: "hold"}
+	if err := repo.Create(ctx, canonical); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for _, accountID := range []any{uuid.New(), nil} {
+		if _, err := pool.Exec(ctx, `INSERT INTO agent_memories (account_id, environment, agent_role, situation, recommendation) VALUES ($1,$2,$3,$4,$5)`, accountID, domain.AccountEnvironmentPaperScored, domain.AgentRoleTrader, "noncanonical memory", "ignore"); err != nil {
+			t.Fatalf("insert non-canonical memory: %v", err)
+		}
+	}
+	got, err := repo.Search(ctx, "", repository.MemorySearchFilter{}, 10, 0)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != canonical.ID {
+		t.Fatalf("Search() = %#v, want canonical row only", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Integration test helper
 // ---------------------------------------------------------------------------
@@ -584,7 +622,7 @@ func newMemoryIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool,
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -613,12 +651,15 @@ func newMemoryIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool,
 	ddl := []string{
 		`CREATE TABLE agent_memories (
 			id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id       UUID,
+			environment      TEXT CHECK (environment IN ('paper_scored','paper_stress','shadow','live')),
 			agent_role       TEXT        NOT NULL,
 			situation        TEXT        NOT NULL,
 			situation_tsv    TSVECTOR,
 			recommendation   TEXT        NOT NULL DEFAULT '',
 			outcome          TEXT,
 			pipeline_run_id  UUID,
+			pipeline_run_trade_date DATE,
 			relevance_score  NUMERIC(5, 4),
 			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

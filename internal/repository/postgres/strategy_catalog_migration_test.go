@@ -25,10 +25,11 @@ func newStrategyCatalogMigrationPool(t *testing.T) *pgxpool.Pool {
 		"000074_capital_margin_profiles.up.sql", "000075_venue_reconciliation.up.sql",
 		"000076_dataset_manifests_quality.up.sql", "000077_strategy_catalog_experiments.up.sql",
 	} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migration)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, pool, migration); err != nil {
 			t.Fatalf("apply %s: %v", migration, err)
 		}
 	}
+	applyRepositoryMigrationRange(t, ctx, pool, "000077", "000108")
 	return pool
 }
 

@@ -64,12 +64,13 @@ type amount struct {
 }
 
 type createOrderRequest struct {
-	MarketSlug string  `json:"marketSlug"`
-	Type       string  `json:"type"`
-	Price      *amount `json:"price,omitempty"`
-	Quantity   float64 `json:"quantity,omitempty"`
-	TIF        string  `json:"tif,omitempty"`
-	Intent     string  `json:"intent"`
+	MarketSlug    string  `json:"marketSlug"`
+	Type          string  `json:"type"`
+	Price         *amount `json:"price,omitempty"`
+	Quantity      float64 `json:"quantity,omitempty"`
+	TIF           string  `json:"tif,omitempty"`
+	Intent        string  `json:"intent"`
+	ClientOrderID string  `json:"clientOrderId,omitempty"`
 }
 
 type createOrderResponse struct {
@@ -79,11 +80,13 @@ type createOrderResponse struct {
 type CreateOrderResponse = createOrderResponse
 
 type getOrderResponse struct {
-	Order retailOrder `json:"order"`
+	Order  retailOrder   `json:"order"`
+	Orders []retailOrder `json:"orders"`
 }
 
 type retailOrder struct {
 	ID             string  `json:"id"`
+	ClientOrderID  string  `json:"clientOrderId"`
 	MarketSlug     string  `json:"marketSlug"`
 	State          string  `json:"state"`
 	Intent         string  `json:"intent"`
@@ -92,6 +95,8 @@ type retailOrder struct {
 	LeavesQuantity float64 `json:"leavesQuantity"`
 	Price          *amount `json:"price,omitempty"`
 	AvgPx          *amount `json:"avgPx,omitempty"`
+	LastUpdateTime string  `json:"lastUpdateTime"`
+	UpdatedAt      string  `json:"updatedAt"`
 	MarketMetadata *struct {
 		Slug    string `json:"slug"`
 		Outcome string `json:"outcome"`
@@ -302,31 +307,114 @@ func (b *Broker) CancelOrder(ctx context.Context, externalID string) error {
 
 // GetOrderStatus fetches a Polymarket order by external ID and maps its status.
 func (b *Broker) GetOrderStatus(ctx context.Context, externalID string) (domain.OrderStatus, error) {
+	result, err := b.GetOrderStatusResult(ctx, externalID)
+	return result.Status, err
+}
+
+// GetOrderStatusResult returns authoritative cumulative fill state.
+func (b *Broker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
 	if b == nil || b.client == nil {
-		return "", errors.New("polymarket: broker client is required")
+		return execution.BrokerOrderStatus{}, errors.New("polymarket: broker client is required")
 	}
 
 	orderID := strings.TrimSpace(externalID)
 	if orderID == "" {
-		return "", errors.New("polymarket: external order id is required")
+		return execution.BrokerOrderStatus{}, errors.New("polymarket: external order id is required")
 	}
 
 	responseBody, err := b.client.Get(ctx, "/v1/order/"+url.PathEscape(orderID), nil)
 	if err != nil {
-		return "", fmt.Errorf("polymarket: get order status: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: get order status: %w", err)
 	}
 
 	var response getOrderResponse
 	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return "", fmt.Errorf("polymarket: decode order status response: %w", err)
+		return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode order status response: %w", err)
 	}
 
 	status, err := mapOrderStatus(response.Order.State)
 	if err != nil {
-		return "", err
+		return execution.BrokerOrderStatus{}, err
 	}
+	return richRetailOrderStatus(response.Order, status)
+}
 
-	return status, nil
+// GetOrderByClientOrderID uses the retail API's idempotency lookup and returns
+// the provider-issued order ID. It never treats the client ID as an external ID.
+func (b *Broker) GetOrderByClientOrderID(ctx context.Context, clientOrderID string) (string, domain.OrderStatus, error) {
+	externalID, result, err := b.GetOrderStatusByClientOrderIDResult(ctx, clientOrderID)
+	return externalID, result.Status, err
+}
+
+// GetOrderStatusByClientOrderIDResult returns provider identity and cumulative fill state.
+func (b *Broker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	if b == nil || b.client == nil {
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: broker client is required")
+	}
+	clientOrderID = strings.TrimSpace(clientOrderID)
+	if clientOrderID == "" {
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: client order id is required")
+	}
+	body, err := b.client.Get(ctx, "/v1/orders/by-client-order-id", url.Values{"clientOrderId": []string{clientOrderID}})
+	if err != nil {
+		var providerErr *ErrorResponse
+		if errors.As(err, &providerErr) && providerErr.StatusCode() == http.StatusNotFound {
+			return "", execution.BrokerOrderStatus{}, execution.ErrBrokerOrderNotFound
+		}
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: lookup client order id: %w", err)
+	}
+	var response getOrderResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode client order lookup: %w", err)
+	}
+	matches := response.Orders
+	if strings.TrimSpace(response.Order.ID) != "" {
+		matches = append(matches, response.Order)
+	}
+	if len(matches) == 0 {
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: client order lookup missing provider id")
+	}
+	if len(matches) != 1 {
+		return "", execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: client order lookup returned %d matches", len(matches))
+	}
+	order := matches[0]
+	if strings.TrimSpace(order.ID) == "" || strings.TrimSpace(order.ClientOrderID) != clientOrderID || strings.TrimSpace(order.MarketSlug) == "" || strings.TrimSpace(order.Intent) == "" || order.Quantity <= 0 {
+		return "", execution.BrokerOrderStatus{}, errors.New("polymarket: client order lookup returned conflicting identity")
+	}
+	status, err := mapOrderStatus(order.State)
+	if err != nil {
+		return "", execution.BrokerOrderStatus{}, err
+	}
+	result, err := richRetailOrderStatus(order, status)
+	return strings.TrimSpace(order.ID), result, err
+}
+
+func richRetailOrderStatus(order retailOrder, status domain.OrderStatus) (execution.BrokerOrderStatus, error) {
+	result := execution.BrokerOrderStatus{Status: status, FilledQuantity: order.CumQuantity}
+	if order.AvgPx != nil && strings.TrimSpace(order.AvgPx.Value) != "" {
+		price, err := strconv.ParseFloat(order.AvgPx.Value, 64)
+		if err != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode average fill price: %w", err)
+		}
+		result.FilledAvgPrice = &price
+	}
+	if timestamp := firstRetailTimestamp(strings.TrimSpace(order.LastUpdateTime), strings.TrimSpace(order.UpdatedAt)); timestamp != "" {
+		filledAt, err := time.Parse(time.RFC3339Nano, timestamp)
+		if err != nil {
+			return execution.BrokerOrderStatus{}, fmt.Errorf("polymarket: decode provider order timestamp: %w", err)
+		}
+		result.FilledAt = &filledAt
+	}
+	return result, nil
+}
+
+func firstRetailTimestamp(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // GetPositions returns current Polymarket positions mapped to domain positions.
@@ -338,48 +426,55 @@ func (b *Broker) GetPositions(ctx context.Context) ([]domain.Position, error) {
 	if strings.TrimSpace(b.client.address) == "" {
 		return nil, errors.New("polymarket: address is required for positions")
 	}
-	requestURL, err := url.Parse(strings.TrimRight(dataAPIBaseURL, "/") + "/positions")
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: parse positions url: %w", err)
-	}
-	query := requestURL.Query()
-	query.Set("user", strings.TrimSpace(b.client.address))
-	query.Set("limit", "500")
-	query.Set("sizeThreshold", "0")
-	requestURL.RawQuery = query.Encode()
+	const pageSize = 500
+	var positions []domain.Position
+	for offset := 0; ; offset += pageSize {
+		requestURL, err := url.Parse(strings.TrimRight(dataAPIBaseURL, "/") + "/positions")
+		if err != nil {
+			return nil, fmt.Errorf("polymarket: parse positions url: %w", err)
+		}
+		query := requestURL.Query()
+		query.Set("user", strings.TrimSpace(b.client.address))
+		query.Set("limit", strconv.Itoa(pageSize))
+		query.Set("offset", strconv.Itoa(offset))
+		query.Set("sizeThreshold", "0")
+		requestURL.RawQuery = query.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: create positions request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json")
-	resp, err := b.client.getHTTPClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: get positions: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("polymarket: read positions response: %w", err)
-	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("polymarket: get positions: %w", parseErrorResponse(resp.StatusCode, responseBody))
-	}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL.String(), nil)
+		if err != nil {
+			return nil, fmt.Errorf("polymarket: create positions request: %w", err)
+		}
+		req.Header.Set("Accept", "application/json")
+		resp, err := b.client.getHTTPClient().Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("polymarket: get positions: %w", err)
+		}
+		responseBody, readErr := io.ReadAll(resp.Body)
+		closeErr := resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("polymarket: read positions response: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("polymarket: close positions response: %w", closeErr)
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return nil, fmt.Errorf("polymarket: get positions: %w", parseErrorResponse(resp.StatusCode, responseBody))
+		}
 
-	var response []dataAPIPosition
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return nil, fmt.Errorf("polymarket: decode positions response: %w", err)
-	}
-
-	positions := make([]domain.Position, 0, len(response))
-	for _, apiPosition := range response {
-		position := mapDataAPIPosition(apiPosition)
-		if strings.TrimSpace(position.Ticker) != "" && position.Quantity > 0 {
-			positions = append(positions, position)
+		var response []dataAPIPosition
+		if err := json.Unmarshal(responseBody, &response); err != nil {
+			return nil, fmt.Errorf("polymarket: decode positions response: %w", err)
+		}
+		for _, apiPosition := range response {
+			position := mapDataAPIPosition(apiPosition)
+			if strings.TrimSpace(position.Ticker) != "" && position.Quantity > 0 {
+				positions = append(positions, position)
+			}
+		}
+		if len(response) < pageSize {
+			return positions, nil
 		}
 	}
-
-	return positions, nil
 }
 
 func mapDataAPIPosition(position dataAPIPosition) domain.Position {
@@ -456,8 +551,9 @@ func mapCreateOrderRequest(order *domain.Order) (createOrderRequest, error) {
 	}
 
 	request := createOrderRequest{
-		MarketSlug: marketSlug,
-		Intent:     intent,
+		MarketSlug:    marketSlug,
+		Intent:        intent,
+		ClientOrderID: strings.TrimSpace(order.ClientOrderID),
 	}
 
 	switch order.OrderType {

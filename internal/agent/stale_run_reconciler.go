@@ -161,7 +161,7 @@ func (r *StaleRunReconciler) Reconcile(ctx context.Context) (int, error) {
 		message := "stale run: exceeded TTL"
 		event := &domain.AgentEvent{PipelineRunID: &run.ID, StrategyID: &run.StrategyID, EventKind: AgentEventKindPipelineFailed.String(), Title: "Pipeline failed", Summary: message, Tags: []string{"pipeline", "failed", "stale"}}
 		updateCtx, cancel := context.WithTimeout(ctx, staleRunUpdateTimeout)
-		receipt, err := r.runs.Finalize(updateCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: domain.PipelineStatusFailed, CompletedAt: now, ErrorMessage: message, Event: event})
+		receipt, err := r.runs.Finalize(updateCtx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{Status: domain.PipelineStatusFailed, CompletedAt: now, ErrorMessage: message, Event: event})
 		cancel()
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return reconciled, ctxErr

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -35,7 +36,7 @@ func PrepareResearchIdea(strategy domain.Strategy) (domain.Strategy, error) {
 	}
 	config[researchLifecycleConfigKey] = map[string]any{
 		"stage":                   "idea",
-		"activation":              "manual_promotion_only",
+		"activation":              "promotion_evaluator_v1",
 		"auto_activation_blocked": true,
 	}
 	preparedConfig, err := json.Marshal(config)
@@ -75,7 +76,9 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		return *existing, false, nil
 	}
 
-	if err := repo.Create(ctx, &strategy); err != nil {
+	strategy.ID = uuid.New()
+	versionID, err := repo.CreateWithExecutionVersion(ctx, &strategy)
+	if err != nil {
 		// Handle races where another runner inserted the same strategy between
 		// the List and Create calls.
 		if !isUniqueViolation(err) {
@@ -92,7 +95,29 @@ func CreateOrReusePaperStrategy(ctx context.Context, repo repository.StrategyRep
 		return *existingAfterConflict, false, nil
 	}
 
+	strategy.ExecutionStrategyVersionID = &versionID
 	return strategy, true, nil
+}
+
+func loadValidatedStrategy(ctx context.Context, repo repository.StrategyRepository, strategyID uuid.UUID) (domain.Strategy, error) {
+	for range 3 {
+		versionID, err := repo.ResolveExecutionVersionID(ctx, strategyID)
+		if err != nil {
+			return domain.Strategy{}, err
+		}
+		strategy, err := repo.Get(ctx, strategyID)
+		if err != nil {
+			return domain.Strategy{}, err
+		}
+		validatedID, err := repo.ResolveExecutionVersionID(ctx, strategyID)
+		if err != nil {
+			return domain.Strategy{}, err
+		}
+		if versionID == validatedID && strategy.ExecutionStrategyVersionID != nil && *strategy.ExecutionStrategyVersionID == validatedID {
+			return *strategy, nil
+		}
+	}
+	return domain.Strategy{}, errors.New("strategy snapshot changed while validating execution version")
 }
 
 func findExistingPaperStrategy(ctx context.Context, repo repository.StrategyRepository, strategy domain.Strategy) (*domain.Strategy, error) {
@@ -106,18 +131,22 @@ func findExistingPaperStrategy(ctx context.Context, repo repository.StrategyRepo
 		return nil, fmt.Errorf("list existing strategies for %s: %w", strategy.Ticker, err)
 	}
 
+	var firstValidationErr error
 	for i := range existing {
-		if eventmarkets.ReuseByTickerOnly(strategy.MarketType) {
-			cloned := existing[i]
-			return &cloned, nil
+		candidate := existing[i]
+		if !eventmarkets.ReuseByTickerOnly(strategy.MarketType) && candidate.Name != strategy.Name {
+			continue
 		}
-		if existing[i].Name == strategy.Name {
-			cloned := existing[i]
-			return &cloned, nil
+		validated, validateErr := loadValidatedStrategy(ctx, repo, candidate.ID)
+		if validateErr == nil {
+			return &validated, nil
+		}
+		if firstValidationErr == nil {
+			firstValidationErr = validateErr
 		}
 	}
 
-	return nil, nil
+	return nil, firstValidationErr
 }
 
 func isUniqueViolation(err error) bool {

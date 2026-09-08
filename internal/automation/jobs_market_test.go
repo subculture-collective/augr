@@ -17,6 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
@@ -186,6 +187,35 @@ func TestHotScanRequiresAndConsumesCurrentRefreshState(t *testing.T) {
 	}
 	if repo.limit != 0 {
 		t.Fatalf("hot scan queried watchlist with limit %d", repo.limit)
+	}
+}
+
+func TestHotScanAcceptsOperationalTickerOutsideUniverseCatalog(t *testing.T) {
+	repo := &operationalUniverseRepo{updateScoreErr: repository.ErrNotFound}
+	provider := &timedCurrentScopeProvider{}
+	registry := data.NewProviderRegistry()
+	registry.Yahoo = func(data.ProviderConfig) data.DataProvider { return provider }
+	service := data.NewDataService(
+		config.Config{},
+		registry,
+		&partialResultHistoryRepo{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+	)
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		Universe:    universe.NewUniverse(repo, nil, nil),
+		DataService: service,
+	})
+	orch.now = func() time.Time { return time.Date(2026, time.August, 6, 10, 30, 0, 0, easternTime) }
+	orch.setRefreshedTickers([]string{"SPY"})
+	orch.Register("hot_scan", "test", hotScanSpec, orch.hotScan)
+
+	if err := orch.hotScan(context.Background()); err != nil {
+		t.Fatalf("hotScan() error = %v, want computed score without catalog persistence", err)
+	}
+	got := orch.jobs["hot_scan"].LastSummary
+	if got["scored"] != 0 || got["score_untracked"] != 1 || got["score_errors"] != 0 {
+		t.Fatalf("summary = %#v, want one untracked operational score and no infrastructure error", got)
 	}
 }
 

@@ -57,6 +57,8 @@ var websocketEventTypes = []EventType{
 // WSMessage is the envelope for every WebSocket event sent to clients.
 type WSMessage struct {
 	Type       EventType `json:"type"`
+	AccountID  uuid.UUID `json:"account_id,omitempty"`
+	Scope      string    `json:"scope"`
 	StrategyID uuid.UUID `json:"strategy_id,omitempty"`
 	RunID      uuid.UUID `json:"run_id,omitempty"`
 	Data       any       `json:"data,omitempty"`
@@ -77,6 +79,9 @@ func (m WSMessage) IsPolymarketEvent() bool {
 // bytes so that subscription matching does not re-unmarshal per client.
 type broadcastMessage struct {
 	data       []byte
+	accountID  uuid.UUID
+	scope      string
+	polymarket bool
 	strategyID uuid.UUID
 	runID      uuid.UUID
 }
@@ -90,15 +95,20 @@ type Hub struct {
 	unregister chan *Client
 	broadcast  chan broadcastMessage
 
-	mu     sync.RWMutex // protects clients for ClientCount
-	logger *slog.Logger
-	done   chan struct{}
+	mu        sync.RWMutex // protects clients for ClientCount
+	logger    *slog.Logger
+	done      chan struct{}
+	accountID uuid.UUID
 }
 
 // NewHub creates a ready-to-use Hub. Call Run() in a goroutine to start it.
-func NewHub(logger *slog.Logger) *Hub {
+func NewHub(logger *slog.Logger, accountIDs ...uuid.UUID) *Hub {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	var accountID uuid.UUID
+	if len(accountIDs) > 0 {
+		accountID = accountIDs[0]
 	}
 	return &Hub{
 		clients:    make(map[*Client]bool),
@@ -107,6 +117,7 @@ func NewHub(logger *slog.Logger) *Hub {
 		broadcast:  make(chan broadcastMessage, 256),
 		logger:     logger,
 		done:       make(chan struct{}),
+		accountID:  accountID,
 	}
 }
 
@@ -142,12 +153,15 @@ func (h *Hub) Run() {
 		case bm := <-h.broadcast:
 			h.mu.Lock()
 			for client := range h.clients {
-				if bm.strategyID == uuid.Nil && bm.runID == uuid.Nil {
-					if !client.matchesPolymarket() && !client.matchesParsed(bm.strategyID, bm.runID) {
-						continue
-					}
+				matches := false
+				switch bm.scope {
+				case "account":
+					matches = bm.accountID != uuid.Nil && client.accountID == bm.accountID && client.matchesParsed(bm.strategyID, bm.runID)
+				case "system":
+					matches = (bm.polymarket && client.matchesPolymarket()) ||
+						(!bm.polymarket && client.matchesParsed(bm.strategyID, bm.runID))
 				}
-				if client.matchesParsed(bm.strategyID, bm.runID) || (bm.strategyID == uuid.Nil && bm.runID == uuid.Nil && client.matchesPolymarket()) {
+				if matches {
 					select {
 					case client.send <- bm.data:
 					default:
@@ -163,8 +177,12 @@ func (h *Hub) Run() {
 	}
 }
 
-// BroadcastPolymarket broadcasts a polymarket-scoped event.
-func (h *Hub) BroadcastPolymarket(msg WSMessage) { h.Broadcast(msg) }
+// BroadcastPolymarket broadcasts a system-scoped provider-research event.
+func (h *Hub) BroadcastPolymarket(msg WSMessage) {
+	msg.Scope = "system"
+	msg.AccountID = uuid.Nil
+	h.Broadcast(msg)
+}
 
 // Stop shuts down the hub event loop.
 func (h *Hub) Stop() {
@@ -185,6 +203,9 @@ func (h *Hub) Broadcast(msg WSMessage) {
 	}
 	bm := broadcastMessage{
 		data:       data,
+		accountID:  msg.AccountID,
+		scope:      msg.Scope,
+		polymarket: msg.IsPolymarketEvent(),
 		strategyID: msg.StrategyID,
 		runID:      msg.RunID,
 	}

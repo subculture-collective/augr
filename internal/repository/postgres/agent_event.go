@@ -15,22 +15,30 @@ import (
 
 // AgentEventRepo implements repository.AgentEventRepository using PostgreSQL.
 type AgentEventRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that AgentEventRepo satisfies AgentEventRepository.
 var _ repository.AgentEventRepository = (*AgentEventRepo)(nil)
 
-const agentEventSelectSQL = `SELECT id, pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata, created_at FROM agent_events`
+const agentEventSelectSQL = `SELECT id, account_id, environment, origin_type, origin_id, pipeline_run_trade_date, pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata, created_at FROM agent_events`
 
 // NewAgentEventRepo returns an AgentEventRepo backed by the given connection pool.
-func NewAgentEventRepo(pool *pgxpool.Pool) *AgentEventRepo {
-	return &AgentEventRepo{pool: pool}
+func NewAgentEventRepo(pool *pgxpool.Pool, accountID uuid.UUID) *AgentEventRepo {
+	return &AgentEventRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new agent event and populates the generated ID and CreatedAt
 // on the provided struct.
 func (r *AgentEventRepo) Create(ctx context.Context, event *domain.AgentEvent) error {
+	if err := validateOptionalPipelineRunRef(event.PipelineRunID, event.PipelineRunTradeDate); err != nil {
+		return fmt.Errorf("postgres: create agent event: %w", err)
+	}
+	if event.AccountID != uuid.Nil && event.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create agent event: account mismatch")
+	}
+	event.AccountID = r.accountID
 	metadata, err := marshalAgentEventMetadata(event.Metadata)
 	if err != nil {
 		return err
@@ -38,11 +46,11 @@ func (r *AgentEventRepo) Create(ctx context.Context, event *domain.AgentEvent) e
 
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO agent_events (
-			pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata
+			account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, strategy_id, agent_role, event_kind, title, summary, tags, metadata
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		 RETURNING id, created_at`,
-		event.PipelineRunID,
+		r.accountID, event.Environment, event.OriginType, event.OriginID, event.PipelineRunID, event.PipelineRunTradeDate,
 		event.StrategyID,
 		nullString(event.AgentRole.String()),
 		event.EventKind,
@@ -62,7 +70,7 @@ func (r *AgentEventRepo) Create(ctx context.Context, event *domain.AgentEvent) e
 // List returns agent events that match the provided filter, ordered by
 // created_at descending, then id descending.
 func (r *AgentEventRepo) List(ctx context.Context, filter repository.AgentEventFilter, limit, offset int) ([]domain.AgentEvent, error) {
-	query, args := buildAgentEventListQuery(filter, limit, offset)
+	query, args := buildAgentEventListQuery(r.accountID, filter, limit, offset)
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -88,7 +96,7 @@ func (r *AgentEventRepo) List(ctx context.Context, filter repository.AgentEventF
 
 // Count returns the total number of events matching the filter (ignoring pagination).
 func (r *AgentEventRepo) Count(ctx context.Context, filter repository.AgentEventFilter) (int, error) {
-	query, args := buildAgentEventCountQuery(filter)
+	query, args := buildAgentEventCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count agent events: %w", err)
@@ -96,7 +104,7 @@ func (r *AgentEventRepo) Count(ctx context.Context, filter repository.AgentEvent
 	return total, nil
 }
 
-func buildAgentEventCountQuery(filter repository.AgentEventFilter) (string, []any) {
+func buildAgentEventCountQuery(accountID uuid.UUID, filter repository.AgentEventFilter) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -107,8 +115,9 @@ func buildAgentEventCountQuery(filter repository.AgentEventFilter) (string, []an
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
-	if filter.PipelineRunID != nil {
-		conditions = append(conditions, "pipeline_run_id = "+nextArg(*filter.PipelineRunID))
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
+	if filter.PipelineRunRef != nil {
+		conditions = append(conditions, "pipeline_run_id = "+nextArg(filter.PipelineRunRef.ID), "pipeline_run_trade_date = "+nextArg(filter.PipelineRunRef.TradeDate)+"::date")
 	}
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))
@@ -135,7 +144,7 @@ func buildAgentEventCountQuery(filter repository.AgentEventFilter) (string, []an
 	return query, args
 }
 
-func buildAgentEventListQuery(filter repository.AgentEventFilter, limit, offset int) (string, []any) {
+func buildAgentEventListQuery(accountID uuid.UUID, filter repository.AgentEventFilter, limit, offset int) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -147,9 +156,10 @@ func buildAgentEventListQuery(filter repository.AgentEventFilter, limit, offset 
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
-	if filter.PipelineRunID != nil {
-		conditions = append(conditions, "pipeline_run_id = "+nextArg(*filter.PipelineRunID))
+	if filter.PipelineRunRef != nil {
+		conditions = append(conditions, "pipeline_run_id = "+nextArg(filter.PipelineRunRef.ID), "pipeline_run_trade_date = "+nextArg(filter.PipelineRunRef.TradeDate)+"::date")
 	}
 
 	if filter.StrategyID != nil {
@@ -200,6 +210,7 @@ func scanAgentEvent(sc scanner) (*domain.AgentEvent, error) {
 
 	err := sc.Scan(
 		&event.ID,
+		&event.AccountID, &event.Environment, &event.OriginType, &event.OriginID, &event.PipelineRunTradeDate,
 		&pipelineRunID,
 		&strategyID,
 		&agentRole,

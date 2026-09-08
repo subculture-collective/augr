@@ -218,3 +218,46 @@ func TestValidateOptions_OptionsFieldsInConditions(t *testing.T) {
 		t.Fatalf("options fields should be valid in conditions: %v", err)
 	}
 }
+
+func TestValidateDefinedRiskVerticalAcceptsOnlyExecutableStructures(t *testing.T) {
+	t.Parallel()
+	for _, strategyType := range []domain.OptionStrategyType{
+		domain.StrategyBullCallSpread, domain.StrategyBearCallSpread,
+		domain.StrategyBullPutSpread, domain.StrategyBearPutSpread,
+	} {
+		cfg := validDefinedRiskVertical(strategyType)
+		if err := ValidateDefinedRiskVertical(cfg); err != nil {
+			t.Fatalf("%s rejected: %v", strategyType, err)
+		}
+	}
+	invalid := validDefinedRiskVertical(domain.StrategyBullCallSpread)
+	invalid.StrategyType = domain.StrategyCoveredCall
+	if err := ValidateDefinedRiskVertical(invalid); err == nil {
+		t.Fatal("covered call admitted to vertical runtime")
+	}
+	invalid = validDefinedRiskVertical(domain.StrategyBullCallSpread)
+	leg := invalid.LegSelection["short"]
+	leg.DTEMin++
+	invalid.LegSelection["short"] = leg
+	if err := ValidateDefinedRiskVertical(invalid); err == nil {
+		t.Fatal("mixed expiry windows admitted")
+	}
+}
+
+func validDefinedRiskVertical(strategyType domain.OptionStrategyType) *OptionsRulesConfig {
+	optionType := domain.OptionTypeCall
+	if strategyType == domain.StrategyBullPutSpread || strategyType == domain.StrategyBearPutSpread {
+		optionType = domain.OptionTypePut
+	}
+	return &OptionsRulesConfig{
+		Version: 1, StrategyType: strategyType, Underlying: "SPY",
+		Entry: ConditionGroup{Operator: "AND", Conditions: []Condition{{Field: "iv_rank", Op: "gt", Value: fp(30)}}},
+		Exit:  ConditionGroup{Operator: "OR", Conditions: []Condition{{Field: "pnl_pct", Op: "gt", Value: fp(50)}}},
+		LegSelection: map[string]LegSelector{
+			"long":  {OptionType: optionType, DeltaTarget: .3, DTEMin: 20, DTEMax: 45, Side: domain.OrderSideBuy, Intent: domain.PositionIntentBuyToOpen, Ratio: 1},
+			"short": {OptionType: optionType, DeltaTarget: .15, DTEMin: 20, DTEMax: 45, Side: domain.OrderSideSell, Intent: domain.PositionIntentSellToOpen, Ratio: 1},
+		},
+		PositionSizing: OptionsSizingConfig{Method: "max_risk", MaxRiskUSD: 500},
+		Management:     OptionsManagement{CloseAtProfitPct: 50, CloseAtDTE: 7},
+	}
+}

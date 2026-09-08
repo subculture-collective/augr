@@ -96,6 +96,28 @@ func TestFilingMonitorFailsPartialNonRateLimitedCoverage(t *testing.T) {
 	}
 }
 
+func TestFilingMonitorRetriesOneTransientProviderFailure(t *testing.T) {
+	provider := &filingEventsProviderStub{failAt: 1, err: filingStatusError{status: 503}}
+	orch := NewJobOrchestrator(OrchestratorDeps{
+		EventsProvider: provider,
+		StrategyRepo: &filingStrategyRepo{&kalshiStrategyRepoStub{strategies: []domain.Strategy{
+			{Ticker: "SPY", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive},
+		}}},
+	})
+	orch.Register("filing_monitor", "test", schedulerSpecEveryMinute(), orch.filingMonitor)
+
+	if err := orch.filingMonitor(context.Background()); err != nil {
+		t.Fatalf("filingMonitor() error = %v, want transient recovery", err)
+	}
+	if provider.calls != 3 {
+		t.Fatalf("provider calls = %d, want initial request, retry, and second form", provider.calls)
+	}
+	got := orch.jobs["filing_monitor"].LastSummary
+	if got["request_retries"] != 1 || got["request_errors"] != 0 || got["tickers_checked"] != 1 {
+		t.Fatalf("summary = %#v, want one recovered retry and complete ticker", got)
+	}
+}
+
 func (s *filingEventsProviderStub) GetEconomicCalendar(context.Context) ([]domain.EconomicEvent, error) {
 	return nil, nil
 }
@@ -108,6 +130,11 @@ type filingRateLimitError struct{}
 
 func (filingRateLimitError) Error() string   { return "provider quota exhausted" }
 func (filingRateLimitError) StatusCode() int { return 429 }
+
+type filingStatusError struct{ status int }
+
+func (e filingStatusError) Error() string   { return "provider unavailable" }
+func (e filingStatusError) StatusCode() int { return e.status }
 
 func TestFilingMonitorDistinguishesAttemptedAndCompletedTickers(t *testing.T) {
 	provider := &filingEventsProviderStub{}

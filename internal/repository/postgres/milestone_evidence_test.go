@@ -27,7 +27,7 @@ func newMilestoneEvidenceFixture(t *testing.T) milestoneEvidenceFixture {
 	t.Helper()
 	ctx := context.Background()
 	base := newShadowCampaignFixture(t)
-	if _, err := base.base.evaluation.experiment.strategy.pool.Exec(ctx, repositoryMigrationSQL(t, "000103_milestone_evidence_assessments.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, base.base.evaluation.experiment.strategy.pool, "000103_milestone_evidence_assessments.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -156,7 +156,7 @@ func TestMilestoneEvidenceRepositoryForgeryAppendOnlyAndRollbackRefusal(t *testi
 	if _, err := fixture.repo.GetAssessment(fixture.ctx, fixture.chain[3].ID()); err == nil || !strings.Contains(err.Error(), "parent does not reconstruct") {
 		t.Fatalf("normalized forgery reload=%v", err)
 	}
-	if _, err := pool.Exec(fixture.ctx, repositoryMigrationSQL(t, "000103_milestone_evidence_assessments.down.sql")); err == nil || !strings.Contains(err.Error(), "rollback refused") {
+	if _, err := execRepositoryMigration(t, fixture.ctx, pool, "000103_milestone_evidence_assessments.down.sql"); err == nil || !strings.Contains(err.Error(), "rollback refused") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 }

@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 )
@@ -21,9 +23,17 @@ type ResultStep struct {
 	Transition          *lifecycle.Transition
 }
 
+type ExecutionScope interface {
+	AccountID() uuid.UUID
+	Environment() domain.AccountEnvironment
+	Origin() (ledger.ExecutionOriginType, string)
+	CopyOriginRunID() uuid.UUID
+}
+
 // Result is one ordered provider interpretation plan. Initial is the exact
 // aggregate used by the adapter; Aggregate is the result after every step.
 type Result struct {
+	Scope     ExecutionScope
 	Initial   *lifecycle.Aggregate
 	Aggregate *lifecycle.Aggregate
 	Steps     []ResultStep
@@ -34,7 +44,7 @@ type Result struct {
 type Persistence interface {
 	RecordVenueObservation(context.Context, *Observation) (*Observation, error)
 	RecordEconomicSourceEvent(context.Context, *ledger.EconomicSourceEvent) (*ledger.EconomicSourceEvent, error)
-	ApplyExecutionFill(context.Context, uuid.UUID, *lifecycle.Transition) (*lifecycle.Aggregate, error)
+	ApplyAcceptedFill(context.Context, execution.AcceptedFillInput) (execution.AcceptedFillResult, error)
 	ApplyExecutionTransition(context.Context, uuid.UUID, *lifecycle.Transition) (*lifecycle.Aggregate, error)
 }
 
@@ -94,6 +104,9 @@ func PersistResult(
 	}
 
 	persisted := result.Initial
+	// Keep the validated plan frontier separate from the latest durable aggregate:
+	// a replay can return a lifecycle that already includes subsequent steps.
+	planned := result.Initial
 	for index, step := range result.Steps {
 		observation, err := store.RecordVenueObservation(ctx, step.Observation)
 		if err != nil {
@@ -115,12 +128,25 @@ func PersistResult(
 			continue
 		}
 		if step.Transition.Fill != nil {
-			persisted, err = store.ApplyExecutionFill(ctx, accountID, step.Transition)
+			accepted, applyErr := store.ApplyAcceptedFill(ctx, execution.AcceptedFillInput{
+				Scope: result.Scope, PriorLifecycle: planned, Transition: step.Transition, AcceptedFill: step.Transition.Fill,
+				SourceEvent: step.EconomicSourceEvent, Instrument: step.Transition.Normalization.Instrument,
+				VenueContract: step.Transition.Normalization.VenueContract, Normalization: step.Transition.Normalization,
+				LedgerTransaction: step.Transition.Normalization.Transaction,
+			})
+			if applyErr == nil {
+				persisted = accepted.Lifecycle
+			}
+			err = applyErr
 		} else {
 			persisted, err = store.ApplyExecutionTransition(ctx, accountID, step.Transition)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("persist venue result transition %d/%s: %w", index, step.Transition.Event.ID, err)
+		}
+		planned, err = lifecycle.ApplyTransition(planned, step.Transition)
+		if err != nil {
+			return nil, fmt.Errorf("persist venue result plan frontier: %w", err)
 		}
 	}
 	if !sameAggregateResult(persisted, result.Aggregate) {
@@ -137,6 +163,13 @@ func validateResult(accountID uuid.UUID, result *Result) error {
 		result.Initial.Order.ID != result.Aggregate.Order.ID || result.Initial.Order.PolicyKind != lifecycle.PolicyVenue ||
 		result.Initial.Order.PolicyVersion == "" || len(result.Steps) == 0 {
 		return fmt.Errorf("matching venue lifecycle, account, order, and nonempty steps are required")
+	}
+	if result.Scope == nil || result.Scope.AccountID() == uuid.Nil {
+		return fmt.Errorf("venue result execution scope is required")
+	}
+	originType, originID := result.Scope.Origin()
+	if result.Scope.AccountID() != accountID || result.Scope.Environment() != result.Initial.Intent.Environment || originType != result.Initial.Intent.OriginType || originID != result.Initial.Intent.OriginID || result.Scope.CopyOriginRunID() != result.Initial.Intent.CopyOriginRebalanceRunID {
+		return fmt.Errorf("venue result execution scope does not match persisted intent ownership")
 	}
 
 	current := result.Initial

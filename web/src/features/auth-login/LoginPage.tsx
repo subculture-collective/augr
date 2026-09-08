@@ -6,8 +6,8 @@ import { isApiClientError } from '@/shared/api/errors'
 import { useAuth } from '@/shared/auth/AuthProvider'
 
 function safeNext(value: string | null): string {
-  if (!value || !value.startsWith('/') || value.startsWith('//')) return '/cockpit'
-  if (value === '/login' || value.startsWith('/login?')) return '/cockpit'
+  if (!value || !value.startsWith('/') || value.startsWith('//')) return '/'
+  if (value === '/login' || value.startsWith('/login?')) return '/'
   return value
 }
 

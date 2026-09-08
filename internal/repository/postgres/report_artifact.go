@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -134,18 +135,65 @@ func (r *ReportArtifactRepo) GetLatest(ctx context.Context, accountID, scopeID, 
 	return a, nil
 }
 
-// List returns report artifacts matching the filter, newest first.
-func (r *ReportArtifactRepo) List(ctx context.Context, filter ReportArtifactFilter, limit, offset int) ([]ReportArtifact, error) {
+// List returns canonical report artifacts for one exact account, evidence
+// scope, strategy, and report type, newest first.
+func (r *ReportArtifactRepo) List(ctx context.Context, accountID, scopeID, strategyID uuid.UUID, reportType, status string, limit, offset int) ([]ReportArtifact, error) {
+	if accountID == uuid.Nil || scopeID == uuid.Nil || strategyID == uuid.Nil || strings.TrimSpace(reportType) == "" {
+		return nil, fmt.Errorf("postgres: list canonical report artifacts: account, scope, strategy, and report type are required")
+	}
+	return r.list(ctx, ReportArtifactFilter{
+		AccountID: &accountID, ScopeID: &scopeID, StrategyID: &strategyID, ReportType: reportType, Status: status,
+	}, limit, offset)
+}
+
+// ListFiltered retains explicit legacy evidence inspection for offline tools;
+// canonical HTTP handlers never call it.
+func (r *ReportArtifactRepo) ListFiltered(ctx context.Context, filter ReportArtifactFilter, limit, offset int) ([]ReportArtifact, error) {
+	return r.list(ctx, filter, limit, offset)
+}
+
+func (r *ReportArtifactRepo) list(ctx context.Context, filter ReportArtifactFilter, limit, offset int) ([]ReportArtifact, error) {
 	if filter.ScopeID == nil && !filter.IncludeLegacy {
 		return nil, fmt.Errorf("postgres: list report artifacts: scope_id required unless legacy is explicit")
 	}
 	if filter.ScopeID != nil && filter.AccountID == nil {
 		return nil, fmt.Errorf("postgres: list report artifacts: account_id required for scoped read")
 	}
+	if filter.ScopeID != nil {
+		var owned bool
+		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM paper_evaluation_scopes WHERE id=$1 AND account_id=$2)`, *filter.ScopeID, *filter.AccountID).Scan(&owned); err != nil {
+			return nil, fmt.Errorf("postgres: validate report scope ownership: %w", err)
+		}
+		if !owned {
+			return nil, fmt.Errorf("postgres: report scope: %w", repository.ErrNotFound)
+		}
+	}
 	if limit <= 0 {
 		limit = 50
 	}
+	query, args := buildReportArtifactListQuery(filter, limit, offset)
 
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list report artifacts: %w", err)
+	}
+	defer rows.Close()
+
+	var artifacts []ReportArtifact
+	for rows.Next() {
+		a, err := scanReportArtifact(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: scan report artifact: %w", err)
+		}
+		artifacts = append(artifacts, *a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list report artifacts rows: %w", err)
+	}
+	return artifacts, nil
+}
+
+func buildReportArtifactListQuery(filter ReportArtifactFilter, limit, offset int) (string, []any) {
 	query := reportArtifactSelectSQL + ` WHERE 1=1`
 	var args []any
 	argN := 0
@@ -173,25 +221,7 @@ func (r *ReportArtifactRepo) List(ctx context.Context, filter ReportArtifactFilt
 
 	query += " ORDER BY a.time_bucket DESC"
 	query += fmt.Sprintf(" LIMIT %s OFFSET %s", nextArg(limit), nextArg(offset))
-
-	rows, err := r.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("postgres: list report artifacts: %w", err)
-	}
-	defer rows.Close()
-
-	var artifacts []ReportArtifact
-	for rows.Next() {
-		a, err := scanReportArtifact(rows)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: scan report artifact: %w", err)
-		}
-		artifacts = append(artifacts, *a)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("postgres: list report artifacts rows: %w", err)
-	}
-	return artifacts, nil
+	return query, args
 }
 
 const reportArtifactSelectSQL = `SELECT a.id, a.strategy_id, a.scope_id, s.account_id, a.backtest_run_id,

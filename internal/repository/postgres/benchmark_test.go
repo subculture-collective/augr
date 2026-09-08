@@ -26,7 +26,7 @@ func newBenchmarkFixture(t *testing.T) benchmarkFixture {
 	t.Helper()
 	fixture := newEvaluationFixture(t)
 	ctx := fixture.experiment.strategy.ctx
-	if _, err := fixture.experiment.strategy.pool.Exec(ctx, repositoryMigrationSQL(t, "000082_passive_benchmark_control.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, fixture.experiment.strategy.pool, "000082_passive_benchmark_control.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fixture.repo.RegisterPolicy(ctx, fixture.policy); err != nil {
@@ -167,7 +167,7 @@ func TestBenchmarkRepositoryRollbackForgeryAndAppendOnly(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE passive_benchmark_observations SET benchmark_value='999' WHERE declaration_id=$1 AND sequence=1`, fixture.declaration.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("mutation error=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000082_passive_benchmark_control.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000082_passive_benchmark_control.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 }

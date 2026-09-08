@@ -102,8 +102,8 @@ func (c *GammaHTTPClient) GetMarket(ctx context.Context, slug string) (GammaMark
 	}
 
 	market := normalizeGammaMarket(markets[0])
-	if market.Slug == "" {
-		market.Slug = slug
+	if market.Slug != slug {
+		return GammaMarket{}, fmt.Errorf("polymarket: gamma market identity mismatch: requested %q, got %q", slug, market.Slug)
 	}
 	return market, nil
 }

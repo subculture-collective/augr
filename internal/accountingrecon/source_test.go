@@ -25,7 +25,7 @@ func TestLegacyPaperSourceRetainsFloatProvenanceSignedPositionsAndMissingMetrics
 	resolver := legacyResolverStub{id: instrumentID}
 	source := NewLegacyPaperSource(reader, resolver, false)
 	snapshot, err := source.Capture(context.Background(), SourceRequest{
-		AccountID: uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), AsOf: asOf,
+		AccountID: uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), ThroughTransactionID: uuid.New(), AsOf: asOf,
 		ProjectionVersion: "ledger_fifo_v1", MarkSource: "polygon", MarkNamespace: "quotes/scored", MaxMarkAge: 5 * time.Minute,
 	}, staticLease{accountID: uuid.MustParse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), asOf: asOf, acquiredAt: asOf, id: "fence:test", epoch: 7, active: true, verified: true})
 	if err != nil {
@@ -56,7 +56,7 @@ func TestLegacyPaperSourceRetainsUnresolvedPositionAsCoverageGap(t *testing.T) {
 		Balance:   LegacyBalance{Currency: "USD", Cash: 1, BuyingPower: 1, Equity: 1},
 		Positions: []domain.Position{{Ticker: "UNKNOWN", Side: domain.PositionSideLong, Quantity: 1}}, CapturedAt: asOf.Add(time.Second),
 	}}, legacyResolverStub{err: errors.New("ambiguous")}, false)
-	snapshot, err := source.Capture(context.Background(), SourceRequest{AccountID: accountID, AsOf: asOf, ProjectionVersion: "ledger_fifo_v1", MarkSource: "polygon", MarkNamespace: "quotes/scored", MaxMarkAge: time.Minute}, staticLease{accountID: accountID, asOf: asOf, acquiredAt: asOf, id: "fence:test", epoch: 1, active: true, verified: true})
+	snapshot, err := source.Capture(context.Background(), SourceRequest{AccountID: accountID, ThroughTransactionID: uuid.New(), AsOf: asOf, ProjectionVersion: "ledger_fifo_v1", MarkSource: "polygon", MarkNamespace: "quotes/scored", MaxMarkAge: time.Minute}, staticLease{accountID: accountID, asOf: asOf, acquiredAt: asOf, id: "fence:test", epoch: 1, active: true, verified: true})
 	if err != nil {
 		t.Fatal(err)
 	}

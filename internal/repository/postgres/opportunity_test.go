@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,7 +22,7 @@ func TestBuildOpportunityQuery(t *testing.T) {
 	createdAfter := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
 	expiresBefore := time.Date(2026, 6, 19, 9, 0, 0, 0, time.UTC)
 
-	query, args := buildOpportunityListQuery(repository.OpportunityFilter{
+	query, args := buildOpportunityListQuery(canonicalRepositoryTestAccountID, repository.OpportunityFilter{
 		Status:        domain.OpportunityStatusQueued,
 		MarketType:    domain.MarketTypeStock,
 		StrategyID:    &strategyID,
@@ -30,21 +31,21 @@ func TestBuildOpportunityQuery(t *testing.T) {
 		CreatedAfter:  &createdAfter,
 	}, 25, 50)
 
-	if len(args) != 8 {
+	if len(args) != 9 {
 		t.Fatalf("expected 8 args, got %d: %#v", len(args), args)
 	}
-	assertContains(t, query, "status = $1")
-	assertContains(t, query, "market_type = $2")
-	assertContains(t, query, "strategy_id = $3")
-	assertContains(t, query, "ticker = $4")
-	assertContains(t, query, "expires_at <= $5")
-	assertContains(t, query, "created_at >= $6")
-	assertContains(t, query, "LIMIT $7 OFFSET $8")
+	assertContains(t, query, "status = $2")
+	assertContains(t, query, "market_type = $3")
+	assertContains(t, query, "strategy_id = $4")
+	assertContains(t, query, "ticker = $5")
+	assertContains(t, query, "expires_at <= $6")
+	assertContains(t, query, "created_at >= $7")
+	assertContains(t, query, "LIMIT $8 OFFSET $9")
 }
 
 func TestBuildQueuedForAllocationQuery(t *testing.T) {
-	query := opportunitySelectSQL + ` WHERE status = $1 AND expires_at > $2 ORDER BY expires_at ASC, created_at ASC, id ASC`
-	assertContains(t, query, "WHERE status = $1 AND expires_at > $2")
+	query := opportunitySelectSQL + ` WHERE status = $2 AND expires_at > $3 ORDER BY expires_at ASC, created_at ASC, id ASC`
+	assertContains(t, query, "WHERE status = $2 AND expires_at > $3")
 	assertContains(t, query, "ORDER BY expires_at ASC, created_at ASC, id ASC")
 	_ = fmt.Sprintf
 }
@@ -54,7 +55,7 @@ func TestOpportunityRepoIntegration_CRUDAndUpsert(t *testing.T) {
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	runID := uuid.New()
 	expiresAt := time.Date(2026, 6, 20, 15, 0, 0, 0, time.UTC)
@@ -62,30 +63,35 @@ func TestOpportunityRepoIntegration_CRUDAndUpsert(t *testing.T) {
 	evidence := json.RawMessage(`{"signals":["momentum"]}`)
 
 	opportunity := &domain.Opportunity{
-		StrategyID:        strategyID,
-		PipelineRunID:     &runID,
-		MarketType:        domain.MarketTypeStock,
-		Ticker:            "AAPL",
-		Side:              domain.OrderSideBuy,
-		PredictionSide:    "YES",
-		Signal:            domain.PipelineSignalBuy,
-		Status:            domain.OpportunityStatusQueued,
-		Score:             &initialScore,
-		Confidence:        0.87,
-		EdgePct:           2.5,
-		ExpectedReturnPct: 4.5,
-		MaxLossPct:        1.0,
-		EntryPrice:        150.25,
-		LiquidityUSD:      1250000,
-		MarketCapUSD:      3000000000000,
-		SpreadPct:         0.15,
-		ProposedNotional:  2500,
-		SelectedNotional:  0,
-		Reason:            "strong setup",
-		RejectReason:      "",
-		Evidence:          evidence,
-		ExpiresAt:         expiresAt,
-		DedupeKey:         "AAPL|stock|buy|buy|2026-06-20",
+		AccountID:            canonicalRepositoryTestAccountID,
+		Environment:          domain.AccountEnvironmentPaperScored,
+		OriginType:           "strategy_version",
+		OriginID:             uuid.NewString(),
+		StrategyID:           strategyID,
+		PipelineRunID:        &runID,
+		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		MarketType:           domain.MarketTypeStock,
+		Ticker:               "AAPL",
+		Side:                 domain.OrderSideBuy,
+		PredictionSide:       "YES",
+		Signal:               domain.PipelineSignalBuy,
+		Status:               domain.OpportunityStatusQueued,
+		Score:                &initialScore,
+		Confidence:           0.87,
+		EdgePct:              2.5,
+		ExpectedReturnPct:    4.5,
+		MaxLossPct:           1.0,
+		EntryPrice:           150.25,
+		LiquidityUSD:         1250000,
+		MarketCapUSD:         3000000000000,
+		SpreadPct:            0.15,
+		ProposedNotional:     2500,
+		SelectedNotional:     0,
+		Reason:               "strong setup",
+		RejectReason:         "",
+		Evidence:             evidence,
+		ExpiresAt:            expiresAt,
+		DedupeKey:            "AAPL|stock|buy|buy|2026-06-20",
 	}
 	if err := repo.Create(ctx, opportunity); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -194,11 +200,14 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
+	runID, versionID := uuid.New(), uuid.New()
 	expiresAt := time.Date(2026, 6, 20, 15, 0, 0, 0, time.UTC)
 	score := 1.0
 	opportunity := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID:     strategyID,
 		MarketType:     domain.MarketTypeStock,
 		Ticker:         "AAPL",
@@ -235,6 +244,8 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 	}
 
 	queued := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID:     strategyID,
 		MarketType:     domain.MarketTypeStock,
 		Ticker:         "MSFT",
@@ -264,12 +275,124 @@ func TestOpportunityRepoIntegration_UpsertQueuedByDedupeKeyDoesNotRequeueSelecte
 	}
 }
 
+func TestOpportunityRepoIntegration_TakesOverLegacySelectedNullClaim(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	opportunity := &domain.Opportunity{
+		StrategyID: createTestStrategy(t, ctx, pool), MarketType: domain.MarketTypeStock,
+		Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy,
+		Status: domain.OpportunityStatusSelected, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: "legacy-null-claim",
+	}
+	if err := repo.Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	now, claimID := time.Now().UTC(), uuid.New()
+	selected, err := repo.ListSelectedForAllocation(ctx, claimID, now)
+	if err != nil || len(selected) != 1 || selected[0].ID != opportunity.ID {
+		t.Fatalf("ListSelectedForAllocation() = %+v, %v", selected, err)
+	}
+	staleRunStart := now.Add(-time.Hour)
+	won, err := repo.TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, staleRunStart, staleRunStart.Add(time.Minute))
+	if err != nil || !won {
+		t.Fatalf("TakeOverExpiredAllocationClaim() = %v, %v", won, err)
+	}
+	var storedClaim uuid.UUID
+	var claimExpiresAt time.Time
+	if err := pool.QueryRow(ctx, `SELECT allocation_claim_id,allocation_claim_expires_at FROM portfolio_opportunities WHERE id=$1`, opportunity.ID).Scan(&storedClaim, &claimExpiresAt); err != nil || storedClaim != claimID {
+		t.Fatalf("stored claim = %s, %v; want %s", storedClaim, err, claimID)
+	}
+	if !claimExpiresAt.After(time.Now().Add(50 * time.Second)) {
+		t.Fatalf("claim expiry = %s, want DB-current lease despite stale run start", claimExpiresAt)
+	}
+}
+
+func TestOpportunityRepoIntegration_UpsertDedupeSeparatesAccountAndLegacyScopes(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+
+	strategyID := createTestStrategy(t, ctx, pool)
+	runID, versionID := uuid.New(), uuid.New()
+	ownerRepo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	foreignRepo := NewOpportunityRepo(pool, uuid.New())
+	owned := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		StrategyID: strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL",
+		Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued,
+		Confidence: 0.4, ExpiresAt: time.Now().UTC().Add(time.Hour), DedupeKey: "account-fenced-dedupe",
+	}
+	if err := ownerRepo.Create(ctx, owned); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	incoming := &domain.Opportunity{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		StrategyID: strategyID, MarketType: domain.MarketTypeStock, Ticker: "AAPL",
+		Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued,
+		Confidence: 0.9, ExpiresAt: time.Now().UTC().Add(2 * time.Hour), DedupeKey: owned.DedupeKey,
+	}
+	if err := foreignRepo.UpsertQueuedByDedupeKey(ctx, incoming); err != nil {
+		t.Fatalf("foreign scoped upsert: %v", err)
+	}
+	got, err := ownerRepo.Get(ctx, owned.ID)
+	if err != nil || got.AccountID != canonicalRepositoryTestAccountID || got.Confidence != 0.4 {
+		t.Fatalf("foreign upsert changed owned row: got=%+v err=%v", got, err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE portfolio_opportunities SET account_id = NULL WHERE id = $1`, owned.ID); err != nil {
+		t.Fatalf("make legacy row: %v", err)
+	}
+	incoming.AccountID = uuid.Nil
+	if err := ownerRepo.UpsertQueuedByDedupeKey(ctx, incoming); err != nil {
+		t.Fatalf("canonical upsert beside legacy row: %v", err)
+	}
+	var accountID *uuid.UUID
+	var confidence float64
+	if err := pool.QueryRow(ctx, `SELECT account_id, confidence::double precision FROM portfolio_opportunities WHERE id = $1`, owned.ID).Scan(&accountID, &confidence); err != nil {
+		t.Fatalf("read legacy row: %v", err)
+	}
+	if accountID != nil || confidence != 0.4 {
+		t.Fatalf("legacy row was claimed or changed: account_id=%v confidence=%v", accountID, confidence)
+	}
+}
+
+func TestOpportunityRepoIntegration_QueuedDedupeSeparatesRunLineage(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	opportunity := &domain.Opportunity{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued, Confidence: .4, Evidence: json.RawMessage(`{"source":"original"}`), ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := repo.Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	conflicting := *opportunity
+	secondRunID := uuid.New()
+	conflicting.PipelineRunID = &secondRunID
+	conflicting.Confidence = .9
+	conflicting.Evidence = json.RawMessage(`{"source":"foreign"}`)
+	if err := repo.UpsertQueuedByDedupeKey(ctx, &conflicting); err != nil {
+		t.Fatalf("second run graph upsert: %v", err)
+	}
+	stored, err := repo.Get(ctx, opportunity.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.OriginID != versionID.String() || stored.Confidence != .4 || !jsonBytesEqual(stored.Evidence, opportunity.Evidence) || conflicting.ID == opportunity.ID {
+		t.Fatalf("second run graph conflicted with original: original=%+v second=%+v", stored, conflicting)
+	}
+}
+
 func TestOpportunityRepo_ExpireQueuedBefore(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	now := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	seedOpportunity := func(status domain.OpportunityStatus, expiresAt time.Time, dedupe string) uuid.UUID {
@@ -305,7 +428,7 @@ func TestOpportunityRepo_ListQueuedForAllocation(t *testing.T) {
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewOpportunityRepo(pool)
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
 	asOf := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	for i := 0; i < 205; i++ {
@@ -339,6 +462,43 @@ func TestOpportunityRepo_ListQueuedForAllocation(t *testing.T) {
 	}
 }
 
+func TestOpportunityRepo_TransitionStatusConcurrentClaimHasOneWinner(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	repo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
+	op := &domain.Opportunity{StrategyID: createTestStrategy(t, ctx, pool), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusQueued, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := repo.Create(ctx, op); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 16
+	results := make(chan bool, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			now := time.Now().UTC()
+			claimed, err := repo.ClaimQueuedForAllocation(ctx, op.ID, uuid.New(), now, now.Add(time.Minute))
+			if err != nil {
+				t.Errorf("TransitionStatus: %v", err)
+			}
+			results <- claimed
+		}()
+	}
+	wg.Wait()
+	close(results)
+	winners := 0
+	for claimed := range results {
+		if claimed {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("claim winners = %d, want 1", winners)
+	}
+}
+
 func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Pool, func()) {
 	t.Helper()
 
@@ -359,7 +519,7 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		t.Fatalf("failed to create admin pool: %v", err)
 	}
 
-	if _, err := adminPool.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
+	if err := preparePostgresTestExtensions(ctx, adminPool); err != nil {
 		adminPool.Close()
 		t.Fatalf("failed to ensure pgcrypto extension: %v", err)
 	}
@@ -391,11 +551,19 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 		`CREATE TYPE pipeline_signal AS ENUM ('buy', 'sell', 'hold')`,
 		`CREATE TABLE strategies (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
 		`CREATE TABLE pipeline_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
-		`CREATE TABLE orders (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
+		`CREATE TABLE orders (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), account_id UUID, environment TEXT, origin_type TEXT, origin_id TEXT, pipeline_run_id UUID, pipeline_run_trade_date DATE, strategy_id UUID, allocation_opportunity_id UUID)`,
 		`CREATE TABLE portfolio_opportunities (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
 			strategy_id UUID NOT NULL REFERENCES strategies (id),
 			pipeline_run_id UUID,
+			pipeline_run_trade_date DATE,
+			allocation_claim_id UUID,
+			allocation_claimed_at TIMESTAMPTZ,
+			allocation_claim_expires_at TIMESTAMPTZ,
 			market_type market_type NOT NULL,
 			ticker TEXT NOT NULL,
 			side order_side NOT NULL,
@@ -419,13 +587,49 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			expires_at TIMESTAMPTZ NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			dedupe_key TEXT NOT NULL UNIQUE
+			dedupe_key TEXT NOT NULL,
+			execution_version_id UUID,
+			evaluation_scope_id UUID,
+			manifest_id UUID,
+			quality_result_id UUID,
+			deployment_id UUID,
+			promotion_decision_id UUID,
+			capital_binding_id UUID,
+			risk_policy_id UUID,
+			risk_policy_version TEXT,
+			deployment_budget_usd NUMERIC,
+			expected_loss_usd NUMERIC,
+			max_loss_per_unit NUMERIC,
+			required_capital_per_unit NUMERIC,
+			quote_observed_at TIMESTAMPTZ,
+			delta NUMERIC,
+			gamma NUMERIC,
+			theta NUMERIC,
+			vega NUMERIC,
+			intent_sha256 TEXT,
+			intent_bytes BYTEA
 		)`,
+		`CREATE TABLE portfolio_opportunity_option_legs (
+			opportunity_id UUID NOT NULL REFERENCES portfolio_opportunities(id), sequence INTEGER NOT NULL,
+			contract_id UUID NOT NULL, occ_symbol TEXT NOT NULL, underlying TEXT NOT NULL, expiry TIMESTAMPTZ NOT NULL,
+			option_type TEXT NOT NULL, strike NUMERIC NOT NULL, ratio INTEGER NOT NULL, side TEXT NOT NULL,
+			position_intent TEXT NOT NULL, bid NUMERIC NOT NULL, ask NUMERIC NOT NULL, multiplier INTEGER NOT NULL,
+			PRIMARY KEY(opportunity_id,sequence)
+		)`,
+		`CREATE UNIQUE INDEX uq_portfolio_opportunities_execution_dedupe ON portfolio_opportunities(account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,dedupe_key)`,
 		`CREATE INDEX idx_portfolio_opportunities_status_expires_at ON portfolio_opportunities (status, expires_at)`,
 		`CREATE INDEX idx_portfolio_opportunities_strategy_id ON portfolio_opportunities (strategy_id)`,
 		`CREATE INDEX idx_portfolio_opportunities_market_type_ticker ON portfolio_opportunities (market_type, ticker)`,
+		`CREATE TABLE portfolio_risk_policy_artifacts (id UUID PRIMARY KEY DEFAULT gen_random_uuid(),schema_name TEXT NOT NULL,sha256 TEXT NOT NULL)`,
+		`CREATE TABLE portfolio_account_snapshots (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
 		`CREATE TABLE allocation_decisions (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID,
+			environment TEXT,
+			origin_type TEXT,
+			origin_id TEXT,
+			pipeline_run_id UUID,
+			pipeline_run_trade_date DATE,
 			opportunity_id UUID REFERENCES portfolio_opportunities (id),
 			strategy_id UUID REFERENCES strategies (id),
 			mode TEXT NOT NULL CHECK (mode IN ('shadow', 'paper')),
@@ -435,8 +639,23 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			quantity NUMERIC NOT NULL DEFAULT 0,
 			reasons TEXT[] NOT NULL DEFAULT '{}',
 			created_order_id UUID REFERENCES orders (id),
+			risk_policy_id UUID REFERENCES portfolio_risk_policy_artifacts(id),
+			risk_policy_version TEXT,
+			account_snapshot_id UUID REFERENCES portfolio_account_snapshots(id),
+			proposed_quantity NUMERIC,
+			max_loss_per_unit NUMERIC,
+			reserved_risk_usd NUMERIC,
+			reserved_capital_usd NUMERIC,
+			exposure_before_usd NUMERIC,
+			exposure_after_usd NUMERIC,
+			binding_constraint TEXT,
+			risk_state_sha256 TEXT,
+			risk_state_bytes BYTEA,
+			execution_route TEXT,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		`CREATE UNIQUE INDEX uq_allocation_decisions_opportunity ON allocation_decisions(opportunity_id) WHERE opportunity_id IS NOT NULL`,
+		`CREATE TABLE allocation_risk_caps (decision_id UUID NOT NULL REFERENCES allocation_decisions(id),sequence INTEGER NOT NULL,name TEXT NOT NULL,available_amount NUMERIC NOT NULL,unit_amount NUMERIC NOT NULL,quantity_cap NUMERIC NOT NULL,binding BOOLEAN NOT NULL,PRIMARY KEY(decision_id,sequence))`,
 	}
 
 	for _, stmt := range ddl {

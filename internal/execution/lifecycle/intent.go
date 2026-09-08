@@ -19,36 +19,38 @@ import (
 // Intent is the immutable desired economic change and decision evidence. It is
 // deliberately not a broker order.
 type Intent struct {
-	ID                      uuid.UUID
-	AccountID               uuid.UUID
-	Environment             domain.AccountEnvironment
-	InstrumentID            uuid.UUID
-	IdempotencyKey          string
-	DesiredQuantityDelta    decimal.Decimal
-	DecisionQuoteSnapshotID uuid.UUID
-	DecisionAt              time.Time
-	OriginType              ledger.ExecutionOriginType
-	OriginID                string
-	StrategyVersionID       string
-	Metadata                json.RawMessage
-	CreatedAt               time.Time
+	ID                       uuid.UUID
+	AccountID                uuid.UUID
+	Environment              domain.AccountEnvironment
+	InstrumentID             uuid.UUID
+	IdempotencyKey           string
+	DesiredQuantityDelta     decimal.Decimal
+	DecisionQuoteSnapshotID  uuid.UUID
+	DecisionAt               time.Time
+	OriginType               ledger.ExecutionOriginType
+	OriginID                 string
+	CopyOriginRebalanceRunID uuid.UUID
+	StrategyVersionID        string
+	Metadata                 json.RawMessage
+	CreatedAt                time.Time
 }
 
 // ProposeInput contains canonical reference facts and exact source evidence for
 // the initial lifecycle proposal.
 type ProposeInput struct {
-	Account              domain.Account
-	Instrument           instrument.Instrument
-	DecisionSnapshot     marketdata.QuoteSnapshot
-	IdempotencyKey       string
-	DesiredQuantityDelta decimal.Decimal
-	DecisionAt           time.Time
-	OriginType           ledger.ExecutionOriginType
-	OriginID             string
-	StrategyVersionID    string
-	Metadata             json.RawMessage
-	Event                EventInput
-	CreatedAt            time.Time
+	Account                  domain.Account
+	Instrument               instrument.Instrument
+	DecisionSnapshot         marketdata.QuoteSnapshot
+	IdempotencyKey           string
+	DesiredQuantityDelta     decimal.Decimal
+	DecisionAt               time.Time
+	OriginType               ledger.ExecutionOriginType
+	OriginID                 string
+	CopyOriginRebalanceRunID uuid.UUID
+	StrategyVersionID        string
+	Metadata                 json.RawMessage
+	Event                    EventInput
+	CreatedAt                time.Time
 }
 
 // Propose creates one deterministic intent and its required initial event.
@@ -99,6 +101,12 @@ func Propose(input ProposeInput) (*Aggregate, error) {
 	if input.OriginType == ledger.ExecutionOriginStrategyVersion && strategyVersionID != originID {
 		return nil, fmt.Errorf("propose execution intent: strategy origin must match strategy version")
 	}
+	if input.OriginType == ledger.ExecutionOriginCopySubscription && input.CopyOriginRebalanceRunID == uuid.Nil {
+		return nil, fmt.Errorf("propose execution intent: copy origin rebalance run is required")
+	}
+	if input.OriginType != ledger.ExecutionOriginCopySubscription && input.CopyOriginRebalanceRunID != uuid.Nil {
+		return nil, fmt.Errorf("propose execution intent: copy origin rebalance run requires copy origin")
+	}
 	if err := validateJSONObject(input.Metadata, "execution intent metadata"); err != nil {
 		return nil, err
 	}
@@ -107,18 +115,19 @@ func Propose(input ProposeInput) (*Aggregate, error) {
 		createdAt = time.Now().UTC().Truncate(time.Microsecond)
 	}
 	intent := Intent{
-		AccountID:               input.Account.ID,
-		Environment:             input.Account.Environment,
-		InstrumentID:            input.Instrument.ID,
-		IdempotencyKey:          idempotencyKey,
-		DesiredQuantityDelta:    input.DesiredQuantityDelta,
-		DecisionQuoteSnapshotID: input.DecisionSnapshot.ID,
-		DecisionAt:              decisionAt,
-		OriginType:              input.OriginType,
-		OriginID:                originID,
-		StrategyVersionID:       strategyVersionID,
-		Metadata:                append(json.RawMessage(nil), input.Metadata...),
-		CreatedAt:               createdAt,
+		AccountID:                input.Account.ID,
+		Environment:              input.Account.Environment,
+		InstrumentID:             input.Instrument.ID,
+		IdempotencyKey:           idempotencyKey,
+		DesiredQuantityDelta:     input.DesiredQuantityDelta,
+		DecisionQuoteSnapshotID:  input.DecisionSnapshot.ID,
+		DecisionAt:               decisionAt,
+		OriginType:               input.OriginType,
+		OriginID:                 originID,
+		CopyOriginRebalanceRunID: input.CopyOriginRebalanceRunID,
+		StrategyVersionID:        strategyVersionID,
+		Metadata:                 append(json.RawMessage(nil), input.Metadata...),
+		CreatedAt:                createdAt,
 	}
 	intent.ID = economicid.DeterministicUUID(intentIDDomain, intent.AccountID.String(), intent.IdempotencyKey)
 	if err := intent.Validate(); err != nil {
@@ -165,6 +174,9 @@ func (intent Intent) Validate() error {
 		(intent.OriginType == ledger.ExecutionOriginStrategyVersion && intent.StrategyVersionID != intent.OriginID) {
 		return fmt.Errorf("execution intent strategy version is invalid")
 	}
+	if (intent.OriginType == ledger.ExecutionOriginCopySubscription) != (intent.CopyOriginRebalanceRunID != uuid.Nil) {
+		return fmt.Errorf("execution intent copy origin rebalance run is invalid")
+	}
 	if err := validateJSONObject(intent.Metadata, "execution intent metadata"); err != nil {
 		return err
 	}
@@ -194,6 +206,7 @@ func SameIntentPayload(left, right *Intent) bool {
 		left.DecisionAt.Equal(right.DecisionAt) &&
 		left.OriginType == right.OriginType &&
 		left.OriginID == right.OriginID &&
+		left.CopyOriginRebalanceRunID == right.CopyOriginRebalanceRunID &&
 		left.StrategyVersionID == right.StrategyVersionID &&
 		jsonObjectEqual(left.Metadata, right.Metadata)
 }

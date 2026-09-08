@@ -320,51 +320,6 @@ func TestPositionSideIsValid(t *testing.T) {
 	}
 }
 
-func TestNewPosition(t *testing.T) {
-	t.Run("valid construction", func(t *testing.T) {
-		p, err := NewPosition("AAPL", PositionSideLong, 10, 150.0)
-		if err != nil {
-			t.Fatalf("NewPosition() unexpected error: %v", err)
-		}
-		if p.Ticker != "AAPL" {
-			t.Errorf("Ticker = %q, want %q", p.Ticker, "AAPL")
-		}
-		if p.Side != PositionSideLong {
-			t.Errorf("Side = %q, want %q", p.Side, PositionSideLong)
-		}
-		if p.Quantity != 10 {
-			t.Errorf("Quantity = %v, want %v", p.Quantity, 10.0)
-		}
-		if p.AvgEntry != 150.0 {
-			t.Errorf("AvgEntry = %v, want %v", p.AvgEntry, 150.0)
-		}
-	})
-	t.Run("empty ticker error", func(t *testing.T) {
-		_, err := NewPosition("", PositionSideLong, 10, 150.0)
-		if err == nil {
-			t.Fatal("NewPosition() expected error for empty ticker")
-		}
-	})
-	t.Run("invalid side error", func(t *testing.T) {
-		_, err := NewPosition("AAPL", PositionSide("bad"), 10, 150.0)
-		if err == nil {
-			t.Fatal("NewPosition() expected error for invalid side")
-		}
-	})
-	t.Run("zero quantity error", func(t *testing.T) {
-		_, err := NewPosition("AAPL", PositionSideLong, 0, 150.0)
-		if err == nil {
-			t.Fatal("NewPosition() expected error for zero quantity")
-		}
-	})
-	t.Run("negative avgEntry error", func(t *testing.T) {
-		_, err := NewPosition("AAPL", PositionSideLong, 10, -1.0)
-		if err == nil {
-			t.Fatal("NewPosition() expected error for negative avgEntry")
-		}
-	})
-}
-
 func TestMarketTypeIsValid(t *testing.T) {
 	for _, m := range []MarketType{MarketTypeStock, MarketTypeCrypto, MarketTypePolymarket, MarketTypeKalshi} {
 		if !m.IsValid() {

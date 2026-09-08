@@ -11,4 +11,6 @@ import (
 type Store interface {
 	RegisterCompilation(context.Context, *Spec, *strategycatalog.Version, *Receipt) (*Spec, *strategycatalog.Version, *Receipt, error)
 	GetCompilation(context.Context, uuid.UUID) (*Spec, *strategycatalog.Version, *Receipt, error)
+	RegisterScenario(context.Context, *Scenario) (*Scenario, error)
+	GetScenario(context.Context, uuid.UUID) (*Scenario, error)
 }

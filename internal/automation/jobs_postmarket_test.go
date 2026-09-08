@@ -208,11 +208,7 @@ type dailyReviewRunRepo struct {
 }
 
 func (r *dailyReviewRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
-func (r *dailyReviewRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
-	return nil, repository.ErrNotFound
-}
-
-func (r *dailyReviewRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
+func (r *dailyReviewRunRepo) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	return nil, repository.ErrNotFound
 }
 
@@ -237,11 +233,11 @@ func (r *dailyReviewRunRepo) List(_ context.Context, filter repository.PipelineR
 	return append([]domain.PipelineRun(nil), runs[offset:end]...), nil
 }
 
-func (r *dailyReviewRunRepo) Finalize(context.Context, uuid.UUID, time.Time, repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *dailyReviewRunRepo) Finalize(context.Context, domain.PipelineRunRef, repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, errors.New("not implemented")
 }
 
-func (r *dailyReviewRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *dailyReviewRunRepo) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, errors.New("not implemented")
 }
 

@@ -89,34 +89,44 @@ func (p Phase) IsValid() bool {
 
 // AgentDecision stores the output of an agent during a pipeline run.
 type AgentDecision struct {
-	ID               uuid.UUID       `json:"id"`
-	PipelineRunID    uuid.UUID       `json:"pipeline_run_id"`
-	AgentRole        AgentRole       `json:"agent_role"`
-	Phase            Phase           `json:"phase"`
-	RoundNumber      *int            `json:"round_number,omitempty"`
-	InputSummary     string          `json:"input_summary,omitempty"`
-	OutputText       string          `json:"output_text"`
-	OutputStructured json.RawMessage `json:"output_structured,omitempty"`
-	LLMProvider      string          `json:"llm_provider,omitempty"`
-	LLMModel         string          `json:"llm_model,omitempty"`
-	PromptText       string          `json:"-"`
-	PromptTokens     int             `json:"prompt_tokens,omitempty"`
-	CompletionTokens int             `json:"completion_tokens,omitempty"`
-	LatencyMS        int             `json:"latency_ms,omitempty"`
-	CostUSD          float64         `json:"cost_usd,omitempty"`
-	CreatedAt        time.Time       `json:"created_at"`
+	ID                   uuid.UUID          `json:"id"`
+	AccountID            uuid.UUID          `json:"account_id,omitzero"`
+	Environment          AccountEnvironment `json:"environment,omitempty"`
+	OriginType           string             `json:"origin_type,omitempty"`
+	OriginID             string             `json:"origin_id,omitempty"`
+	PipelineRunID        uuid.UUID          `json:"pipeline_run_id"`
+	PipelineRunTradeDate time.Time          `json:"pipeline_run_trade_date,omitzero"`
+	AgentRole            AgentRole          `json:"agent_role"`
+	Phase                Phase              `json:"phase"`
+	RoundNumber          *int               `json:"round_number,omitempty"`
+	InputSummary         string             `json:"input_summary,omitempty"`
+	OutputText           string             `json:"output_text"`
+	OutputStructured     json.RawMessage    `json:"output_structured,omitempty"`
+	LLMProvider          string             `json:"llm_provider,omitempty"`
+	LLMModel             string             `json:"llm_model,omitempty"`
+	PromptText           string             `json:"-"`
+	PromptTokens         int                `json:"prompt_tokens,omitempty"`
+	CompletionTokens     int                `json:"completion_tokens,omitempty"`
+	LatencyMS            int                `json:"latency_ms,omitempty"`
+	CostUSD              float64            `json:"cost_usd,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
 }
 
 // AgentEvent stores a structured event emitted by agents or the pipeline.
 type AgentEvent struct {
-	ID            uuid.UUID       `json:"id"`
-	PipelineRunID *uuid.UUID      `json:"pipeline_run_id,omitempty"`
-	StrategyID    *uuid.UUID      `json:"strategy_id,omitempty"`
-	AgentRole     AgentRole       `json:"agent_role,omitempty"`
-	EventKind     string          `json:"event_kind"`
-	Title         string          `json:"title"`
-	Summary       string          `json:"summary,omitempty"`
-	Tags          []string        `json:"tags,omitempty"`
-	Metadata      json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt     time.Time       `json:"created_at"`
+	ID                   uuid.UUID          `json:"id"`
+	AccountID            uuid.UUID          `json:"account_id,omitzero"`
+	Environment          AccountEnvironment `json:"environment,omitempty"`
+	OriginType           string             `json:"origin_type,omitempty"`
+	OriginID             string             `json:"origin_id,omitempty"`
+	PipelineRunID        *uuid.UUID         `json:"pipeline_run_id,omitempty"`
+	PipelineRunTradeDate *time.Time         `json:"pipeline_run_trade_date,omitempty"`
+	StrategyID           *uuid.UUID         `json:"strategy_id,omitempty"`
+	AgentRole            AgentRole          `json:"agent_role,omitempty"`
+	EventKind            string             `json:"event_kind"`
+	Title                string             `json:"title"`
+	Summary              string             `json:"summary,omitempty"`
+	Tags                 []string           `json:"tags,omitempty"`
+	Metadata             json.RawMessage    `json:"metadata,omitempty"`
+	CreatedAt            time.Time          `json:"created_at"`
 }

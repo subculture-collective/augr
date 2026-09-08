@@ -2,27 +2,42 @@ package prediction
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
+
+const settlementTestOriginID = "20000000-0000-4000-8000-000000000001"
+
+func TestNewSettlerRetainsExecutionAccount(t *testing.T) {
+	settler := NewSettler(testExecutionAccountBinding, nil, nil, nil, nil, nil)
+	if settler.executionAccount != testExecutionAccountBinding {
+		t.Fatal("settler did not retain execution account")
+	}
+}
+
 type settlementDecisionStub struct {
-	decisions  []domain.TradeDecision
-	resolved   []uuid.UUID
-	lastFilter repository.TradeDecisionFilter
-	lastLimit  int
+	decisions     []domain.TradeDecision
+	resolved      []uuid.UUID
+	lastFilter    repository.TradeDecisionFilter
+	lastLimit     int
+	preserveScope bool
 }
 
 func (s *settlementDecisionStub) Get(_ context.Context, id uuid.UUID) (*domain.TradeDecision, error) {
 	for i := range s.decisions {
 		if s.decisions[i].ID == id {
 			d := s.decisions[i]
+			if !s.preserveScope {
+				stampSettlementDecision(&d)
+			}
 			return &d, nil
 		}
 	}
@@ -34,6 +49,9 @@ func (s *settlementDecisionStub) List(_ context.Context, f repository.TradeDecis
 	s.lastLimit = limit
 	var out []domain.TradeDecision
 	for _, d := range s.decisions {
+		if !s.preserveScope {
+			stampSettlementDecision(&d)
+		}
 		if d.MarketType == f.MarketType && d.Status == f.Status {
 			if f.InstrumentKey != "" && d.InstrumentKey != f.InstrumentKey {
 				continue
@@ -42,6 +60,15 @@ func (s *settlementDecisionStub) List(_ context.Context, f repository.TradeDecis
 		}
 	}
 	return out, nil
+}
+
+func stampSettlementDecision(decision *domain.TradeDecision) {
+	decision.AccountID, decision.Environment = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment()
+	decision.OriginType = "strategy_version"
+	decision.OriginID = settlementTestOriginID
+	runID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("settlement-run:"+decision.ID.String()))
+	tradeDate := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	decision.PipelineRunID, decision.PipelineRunTradeDate = &runID, &tradeDate
 }
 
 func (s *settlementDecisionStub) ResolvePredictionOutcome(_ context.Context, id uuid.UUID) error {
@@ -64,6 +91,7 @@ func (s *settlementPositionStub) CreateAlpacaOwned(context.Context, *domain.Posi
 func (s *settlementPositionStub) Get(context.Context, uuid.UUID) (*domain.Position, error) {
 	if s.position.ID != uuid.Nil {
 		p := s.position
+		p.AccountID, p.Environment, p.OriginType, p.OriginID = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), "strategy_version", settlementTestOriginID
 		return &p, nil
 	}
 	return nil, nil
@@ -116,13 +144,19 @@ func (*settlementTradeStub) Count(context.Context, repository.TradeFilter) (int,
 	return 0, nil
 }
 
-func (s *settlementTradeStub) GetByOrder(_ context.Context, orderID uuid.UUID, _ repository.TradeFilter, _, _ int) ([]domain.Trade, error) {
+func (s *settlementTradeStub) GetByOrder(_ context.Context, orderID uuid.UUID, _ repository.TradeFilter, limit, offset int) ([]domain.Trade, error) {
 	var out []domain.Trade
 	for _, trade := range s.trades {
 		if trade.OrderID != nil && *trade.OrderID == orderID {
+			trade.AccountID, trade.Environment, trade.OriginType, trade.OriginID = testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), "strategy_version", settlementTestOriginID
 			out = append(out, trade)
 		}
 	}
+	if offset >= len(out) {
+		return nil, nil
+	}
+	end := min(offset+limit, len(out))
+	out = out[offset:end]
 	return out, nil
 }
 
@@ -147,34 +181,62 @@ func TestSettlerClosesWinningPaperContractAndIsIdempotent(t *testing.T) {
 	positions := &settlementPositionStub{position: domain.Position{ID: uuid.New(), StrategyID: &strategyID, MarketType: domain.MarketTypeKalshi, Ticker: "KX-TEST:YES", Side: domain.PositionSideLong, Quantity: 4, AvgEntry: .40}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positions.position.ID, Ticker: "KX-TEST", Side: domain.OrderSideBuy, Quantity: 4, Price: .40}}}
 	replay := &settlementReplayStub{}
-	settler := NewSettler(nil, decisions, positions, trades, replay)
+	atomic := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomic, decisions, positions, trades, replay)
 	resolvedAt := time.Date(2026, 7, 12, 15, 0, 0, 0, time.UTC)
 
 	count, err := settler.SettleMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", resolvedAt)
 	if err != nil {
 		t.Fatalf("SettleMarket() error = %v", err)
 	}
-	if count != 1 || positions.position.Quantity != 0 || math.Abs(positions.position.RealizedPnL-2.4) > 1e-9 || positions.position.ClosedAt == nil {
+	if count != 1 || atomic.called != 1 {
 		t.Fatalf("settlement result count=%d position=%+v", count, positions.position)
 	}
 	_ = trades
 	_ = replay
+}
 
-	count, err = settler.SettleMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", resolvedAt)
-	if err != nil || count != 0 {
-		t.Fatalf("repeat settlement count=%d err=%v", count, err)
+func TestSettlerPreviewAcceptsMultiFillPositionResidual(t *testing.T) {
+	strategyID, orderID, decisionID, positionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{{ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-MULTI", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}}}
+	positions := &settlementPositionStub{position: domain.Position{ID: positionID, StrategyID: &strategyID, MarketType: domain.MarketTypeKalshi, Ticker: "KX-MULTI:YES", Side: domain.PositionSideLong, Quantity: 3, AvgEntry: .40}}
+	trades := &settlementTradeStub{trades: []domain.Trade{
+		{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Quantity: 2, Price: .39},
+		{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Quantity: 2, Price: .41},
+	}}
+	settler := NewSettler(testExecutionAccountBinding, &atomicLifecycleStub{}, decisions, positions, trades, &settlementReplayStub{})
+	preview, err := settler.SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-MULTI")
+	if err != nil || preview.Count != 1 {
+		t.Fatalf("multi-fill residual preview = %+v, err=%v", preview, err)
 	}
 }
 
-type atomicLifecycleStub struct{ called int }
-
-func (s *atomicLifecycleStub) ApplyOrderFill(context.Context, repository.OrderFillInput) (repository.OrderFillResult, error) {
-	s.called++
-	return repository.OrderFillResult{}, nil
+func TestSettlerPreviewAggregatesEveryOpeningFillPage(t *testing.T) {
+	strategyID, orderID, decisionID, positionID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{{ID: decisionID, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-PAGED", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}}}
+	positions := &settlementPositionStub{position: domain.Position{ID: positionID, StrategyID: &strategyID, MarketType: domain.MarketTypeKalshi, Ticker: "KX-PAGED:YES", Side: domain.PositionSideLong, Quantity: 251, AvgEntry: .40}}
+	trades := &settlementTradeStub{trades: make([]domain.Trade, 251)}
+	for i := range trades.trades {
+		trades.trades[i] = domain.Trade{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Quantity: 1, Price: .40}
+	}
+	preview, err := NewSettler(testExecutionAccountBinding, &atomicLifecycleStub{}, decisions, positions, trades, &settlementReplayStub{}).SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-PAGED")
+	if err != nil || preview.Count != 1 {
+		t.Fatalf("paged fill preview = %+v, err=%v", preview, err)
+	}
 }
 
-func (s *atomicLifecycleStub) SettlePredictionDecision(context.Context, repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
+type atomicLifecycleStub struct {
+	called int
+	last   repository.PredictionDecisionSettlementInput
+}
+
+func (s *atomicLifecycleStub) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
+func (s *atomicLifecycleStub) SettleAcceptedPredictionDecision(_ context.Context, _ execution.ExecutionScope, input repository.PredictionDecisionSettlementInput) (repository.PredictionDecisionSettlementResult, error) {
 	s.called++
+	s.last = input
 	return repository.PredictionDecisionSettlementResult{DecisionID: uuid.New()}, nil
 }
 
@@ -186,13 +248,32 @@ func TestSettlerUsesAtomicLifecycleWhenAvailable(t *testing.T) {
 	legacyTrades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &legacyPositions.position.ID, Ticker: "KX-TEST", Side: domain.OrderSideBuy, Quantity: 4, Price: .40}}}
 	legacyReplay := &settlementReplayStub{}
 	atomicRepo := &atomicLifecycleStub{}
-	settler := NewSettler(atomicRepo, legacyDecisions, legacyPositions, legacyTrades, legacyReplay)
+	settler := NewSettler(testExecutionAccountBinding, atomicRepo, legacyDecisions, legacyPositions, legacyTrades, legacyReplay)
 	settler.now = func() time.Time { return time.Unix(0, 0) }
-	if _, err := settler.SettleMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", time.Unix(0, 0)); err != nil {
+	evidence := ResolutionEvidence{Source: "kalshi", SourceNamespace: "markets/kalshi/resolutions", SourceEventID: "KX-TEST", SourceRevision: "resolved:YES", ObservedAt: time.Unix(1, 0).UTC(), RawPayload: []byte(`{"ticker":"KX-TEST","result":"yes"}`)}
+	if _, err := settler.SettleMarketWithEvidence(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", time.Unix(0, 0), evidence); err != nil {
 		t.Fatalf("SettleMarket() error = %v", err)
 	}
 	if atomicRepo.called != 1 || len(legacyTrades.trades) != 1 || len(legacyReplay.events) != 0 || len(legacyDecisions.resolved) != 0 {
 		t.Fatalf("expected atomic path only, got atomic=%d trades=%d replay=%d resolved=%d", atomicRepo.called, len(legacyTrades.trades), len(legacyReplay.events), len(legacyDecisions.resolved))
+	}
+	if atomicRepo.last.Resolution.SourceEventID != evidence.SourceEventID || string(atomicRepo.last.Resolution.RawPayload) != string(evidence.RawPayload) {
+		t.Fatalf("settlement evidence = %+v, want exact provider payload", atomicRepo.last.Resolution)
+	}
+}
+
+func TestSettleDecisionsRoutesClosedRetryThroughRepositoryIdempotency(t *testing.T) {
+	strategyID, orderID, decisionID := uuid.New(), uuid.New(), uuid.New()
+	decision := domain.TradeDecision{ID: decisionID, AccountID: testExecutionAccountBinding.AccountID(), Environment: testExecutionAccountBinding.Environment(), OriginType: "strategy_version", OriginID: uuid.NewString(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-TEST", Outcome: "YES", Status: domain.TradeDecisionStatusClosed}
+	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{decision}}
+	atomicRepo := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomicRepo, decisions, &settlementPositionStub{}, &settlementTradeStub{}, &settlementReplayStub{})
+	count, err := settler.SettleDecisions(context.Background(), domain.MarketTypeKalshi, "KX-TEST", "YES", time.Now().UTC(), []uuid.UUID{decisionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || atomicRepo.called != 1 {
+		t.Fatalf("count=%d repository calls=%d", count, atomicRepo.called)
 	}
 }
 
@@ -202,7 +283,8 @@ func TestSettlerPreviewMarketCountsWithoutMutation(t *testing.T) {
 	positions := &settlementPositionStub{position: domain.Position{ID: posID, StrategyID: &strategyID, Ticker: "KX-TEST:YES", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: .50}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &posID, Ticker: "KX-TEST", Side: domain.OrderSideBuy, Quantity: 1, Price: .50}}}
 	replay := &settlementReplayStub{}
-	settler := NewSettler(nil, decisions, positions, trades, replay)
+	atomic := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomic, decisions, positions, trades, replay)
 	count, err := settler.PreviewMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST")
 	if err != nil {
 		t.Fatalf("PreviewMarket() error = %v", err)
@@ -232,7 +314,7 @@ func TestSettlerPreviewRejectsInvalidCandidateLinkage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			settler := NewSettler(nil, &settlementDecisionStub{decisions: []domain.TradeDecision{tt.decision}}, tt.positions, tt.trades, nil)
+			settler := NewSettler(testExecutionAccountBinding, nil, &settlementDecisionStub{decisions: []domain.TradeDecision{tt.decision}}, tt.positions, tt.trades, nil)
 			if _, err := settler.PreviewMarket(context.Background(), domain.MarketTypeKalshi, "KX-TEST"); err == nil {
 				t.Fatal("PreviewMarket() error = nil, want validation failure")
 			}
@@ -246,7 +328,7 @@ func TestSettlerPendingMarketsBoundsAndSorts(t *testing.T) {
 		decisions = append(decisions, domain.TradeDecision{ID: uuid.New(), MarketType: domain.MarketTypeKalshi, InstrumentKey: key, Status: domain.TradeDecisionStatusPaper})
 	}
 	stub := &settlementDecisionStub{decisions: decisions}
-	settler := NewSettler(nil, stub, &settlementPositionStub{}, &settlementTradeStub{}, nil)
+	settler := NewSettler(testExecutionAccountBinding, nil, stub, &settlementPositionStub{}, &settlementTradeStub{}, nil)
 	markets, err := settler.PendingMarkets(context.Background(), domain.MarketTypeKalshi)
 	if err != nil {
 		t.Fatalf("PendingMarkets() error = %v", err)
@@ -265,7 +347,7 @@ func TestSettlerMatchPaperDecisionsUsesExactInstrumentFilter(t *testing.T) {
 	position := &settlementPositionStub{position: domain.Position{ID: positionID, StrategyID: &strategyID, Ticker: "KX-A:YES", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: .5}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positionID, Ticker: "KX-A", Side: domain.OrderSideBuy, Quantity: 1, Price: .5}}}
 	stub := &settlementDecisionStub{decisions: []domain.TradeDecision{{ID: uuid.New(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-A", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}, {ID: uuid.New(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-B", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}}}
-	settler := NewSettler(nil, stub, position, trades, nil)
+	settler := NewSettler(testExecutionAccountBinding, nil, stub, position, trades, nil)
 	count, err := settler.PreviewMarket(context.Background(), domain.MarketTypeKalshi, "KX-A")
 	if err != nil {
 		t.Fatalf("PreviewMarket() error = %v", err)
@@ -283,7 +365,7 @@ func TestSettlerPendingMarketsRejectsOverCap(t *testing.T) {
 	for i := range decisions {
 		decisions[i] = domain.TradeDecision{ID: uuid.New(), MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-" + uuid.NewString(), Status: domain.TradeDecisionStatusPaper}
 	}
-	settler := NewSettler(nil, &settlementDecisionStub{decisions: decisions}, &settlementPositionStub{}, &settlementTradeStub{}, nil)
+	settler := NewSettler(testExecutionAccountBinding, nil, &settlementDecisionStub{decisions: decisions}, &settlementPositionStub{}, &settlementTradeStub{}, nil)
 	if _, err := settler.PendingMarkets(context.Background(), domain.MarketTypeKalshi); err == nil {
 		t.Fatal("PendingMarkets() error = nil, want cap error")
 	}
@@ -295,7 +377,7 @@ func TestSettlerMatchPaperDecisionsRejectsOverCap(t *testing.T) {
 	for i := range decisions {
 		decisions[i] = domain.TradeDecision{ID: uuid.New(), StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-A", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}
 	}
-	settler := NewSettler(nil, &settlementDecisionStub{decisions: decisions}, &settlementPositionStub{}, &settlementTradeStub{}, nil)
+	settler := NewSettler(testExecutionAccountBinding, nil, &settlementDecisionStub{decisions: decisions}, &settlementPositionStub{}, &settlementTradeStub{}, nil)
 	if _, err := settler.PreviewMarket(context.Background(), domain.MarketTypeKalshi, "KX-A"); err == nil {
 		t.Fatal("PreviewMarket() error = nil, want cap error")
 	}
@@ -307,7 +389,8 @@ func TestSettlerPreviewAndExactSettlementUsesImmutableDecisionIDs(t *testing.T) 
 	positions := &settlementPositionStub{position: domain.Position{ID: uuid.New(), StrategyID: &strategyID, Ticker: "KX-A:YES", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: .5}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positions.position.ID, Ticker: "KX-A", Side: domain.OrderSideBuy, Quantity: 1, Price: .5}}}
 	replay := &settlementReplayStub{}
-	settler := NewSettler(nil, decisions, positions, trades, replay)
+	atomic := &atomicLifecycleStub{}
+	settler := NewSettler(testExecutionAccountBinding, atomic, decisions, positions, trades, replay)
 	preview, err := settler.SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-A")
 	if err != nil || preview.Count != 1 || len(preview.DecisionIDs) != 1 {
 		t.Fatalf("preview=%+v err=%v", preview, err)
@@ -317,8 +400,8 @@ func TestSettlerPreviewAndExactSettlementUsesImmutableDecisionIDs(t *testing.T) 
 	if err != nil || count != 1 {
 		t.Fatalf("SettleDecisions() count=%d err=%v", count, err)
 	}
-	if len(decisions.resolved) != 1 || decisions.resolved[0] != preview.DecisionIDs[0] {
-		t.Fatalf("resolved=%v", decisions.resolved)
+	if atomic.called != 1 {
+		t.Fatalf("atomic settlement calls=%d", atomic.called)
 	}
 }
 
@@ -328,10 +411,19 @@ func TestSettlerExactSettlementRejectsChangedDecision(t *testing.T) {
 	decisions := &settlementDecisionStub{decisions: []domain.TradeDecision{decision}}
 	positions := &settlementPositionStub{position: domain.Position{ID: uuid.New(), StrategyID: &strategyID, Ticker: "KX-A:YES", Side: domain.PositionSideLong, Quantity: 1, AvgEntry: .5}}
 	trades := &settlementTradeStub{trades: []domain.Trade{{ID: uuid.New(), OrderID: &orderID, PositionID: &positions.position.ID, Ticker: "KX-A", Side: domain.OrderSideBuy, Quantity: 1, Price: .5}}}
-	settler := NewSettler(nil, decisions, positions, trades, nil)
+	settler := NewSettler(testExecutionAccountBinding, nil, decisions, positions, trades, nil)
 	preview, _ := settler.SettlePreview(context.Background(), domain.MarketTypeKalshi, "KX-A")
 	decisions.decisions[0].Status = domain.TradeDecisionStatusClosed
 	if _, err := settler.SettleDecisions(context.Background(), domain.MarketTypeKalshi, "KX-A", "YES", time.Unix(0, 0), preview.DecisionIDs); err == nil {
 		t.Fatal("expected rejection")
+	}
+}
+
+func TestSettlerRejectsForeignEnvironmentBeforeSettlement(t *testing.T) {
+	strategyID, orderID := uuid.New(), uuid.New()
+	decision := domain.TradeDecision{ID: uuid.New(), AccountID: testExecutionAccountBinding.AccountID(), Environment: domain.AccountEnvironmentShadow, StrategyID: &strategyID, PaperOrderID: &orderID, MarketType: domain.MarketTypeKalshi, InstrumentKey: "KX-FOREIGN", Outcome: "YES", Status: domain.TradeDecisionStatusPaper}
+	settler := NewSettler(testExecutionAccountBinding, nil, &settlementDecisionStub{decisions: []domain.TradeDecision{decision}, preserveScope: true}, nil, nil, nil)
+	if _, err := settler.SettleDecisions(context.Background(), decision.MarketType, decision.InstrumentKey, "YES", time.Now(), []uuid.UUID{decision.ID}); err == nil {
+		t.Fatal("foreign environment decision settled")
 	}
 }

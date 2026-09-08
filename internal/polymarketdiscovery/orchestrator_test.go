@@ -40,6 +40,17 @@ func (f *fakeStrategyRepo) Create(_ context.Context, s *domain.Strategy) error {
 	return nil
 }
 
+func (f *fakeStrategyRepo) CreateWithExecutionVersion(ctx context.Context, s *domain.Strategy) (uuid.UUID, error) {
+	if err := f.Create(ctx, s); err != nil {
+		return uuid.Nil, err
+	}
+	return uuid.New(), nil
+}
+
+func (*fakeStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return uuid.New(), nil
+}
+
 func (f *fakeStrategyRepo) Get(_ context.Context, _ uuid.UUID) (*domain.Strategy, error) {
 	return nil, repository.ErrNotFound
 }

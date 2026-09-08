@@ -311,6 +311,44 @@ func (policy *Policy) AssetPolicy(assetClass instrument.AssetClass) (AssetPolicy
 	return AssetPolicy{}, false
 }
 
+func (policy *Policy) AssetPolicies() []AssetPolicy {
+	if policy == nil {
+		return nil
+	}
+	return cloneAssetPolicies(policy.assets)
+}
+
+// DoubledFeePolicy derives the cost-up perturbation without changing routing,
+// liquidity, latency, calendar, or quote requirements. Every fee component is
+// doubled and the resulting content-addressed policy must be distinct.
+func DoubledFeePolicy(policy *Policy) (*Policy, error) {
+	if policy == nil {
+		return nil, fmt.Errorf("simulation cost-up policy requires a baseline")
+	}
+	assets := policy.AssetPolicies()
+	changed := false
+	for index := range assets {
+		fees := &assets[index].Fees
+		if !fees.PerOrder.IsZero() || !fees.PerUnit.IsZero() || !fees.NotionalBPS.IsZero() {
+			changed = true
+		}
+		fees.PerOrder = fees.PerOrder.Mul(decimal.NewFromInt(2))
+		fees.PerUnit = fees.PerUnit.Mul(decimal.NewFromInt(2))
+		fees.NotionalBPS = fees.NotionalBPS.Mul(decimal.NewFromInt(2))
+	}
+	if !changed {
+		return nil, fmt.Errorf("simulation cost-up policy cannot double an all-zero fee policy")
+	}
+	result, err := NewPolicy(PolicyInput{Schema: PolicySchemaV1, Assets: assets})
+	if err != nil {
+		return nil, fmt.Errorf("simulation cost-up policy: %w", err)
+	}
+	if result.Version() == policy.Version() {
+		return nil, fmt.Errorf("simulation cost-up policy did not change identity")
+	}
+	return result, nil
+}
+
 // RouteSession resolves the explicit half-open session containing routedAt.
 // A continuous 24/7 policy returns nil because it has no close boundary.
 func (policy *Policy) RouteSession(assetClass instrument.AssetClass, routedAt time.Time) (*SessionWindow, error) {

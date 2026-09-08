@@ -477,6 +477,13 @@ func (repo *InstrumentRepo) getVenueContractByID(ctx context.Context, id uuid.UU
 	return scanVenueContract(repo.pool.QueryRow(ctx, venueContractSelectSQL+` WHERE id = $1`, id))
 }
 
+func (repo *InstrumentRepo) GetVenueContractByID(ctx context.Context, id uuid.UUID) (*instrument.VenueContract, error) {
+	if repo == nil || repo.pool == nil || id == uuid.Nil {
+		return nil, fmt.Errorf("postgres: get venue contract: repository pool and identity are required")
+	}
+	return repo.getVenueContractByID(ctx, id)
+}
+
 const optionContractTermsSelectSQL = `SELECT
 	id, option_instrument_id, underlying_instrument_id, contract_type,
 	strike_price::TEXT, strike_currency, deliverable_quantity::TEXT,

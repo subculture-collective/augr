@@ -102,25 +102,37 @@ func (t OrderType) IsValid() bool {
 
 // Order represents a trading order sent to a broker.
 type Order struct {
-	ID             uuid.UUID   `json:"id"`
-	StrategyID     *uuid.UUID  `json:"strategy_id,omitempty"`
-	PipelineRunID  *uuid.UUID  `json:"pipeline_run_id,omitempty"`
-	ExternalID     string      `json:"external_id,omitempty"`
-	Ticker         string      `json:"ticker"`
-	MarketType     MarketType  `json:"market_type,omitempty"`
-	Side           OrderSide   `json:"side"`
-	OrderType      OrderType   `json:"order_type"`
-	Quantity       float64     `json:"quantity"`
-	LimitPrice     *float64    `json:"limit_price,omitempty"`
-	StopPrice      *float64    `json:"stop_price,omitempty"`
-	ReferencePrice *float64    `json:"-"`
-	FilledQuantity float64     `json:"filled_quantity"`
-	FilledAvgPrice *float64    `json:"filled_avg_price,omitempty"`
-	Status         OrderStatus `json:"status"`
-	Broker         string      `json:"broker"`
-	SubmittedAt    *time.Time  `json:"submitted_at,omitempty"`
-	FilledAt       *time.Time  `json:"filled_at,omitempty"`
-	CreatedAt      time.Time   `json:"created_at"`
+	ID                       uuid.UUID          `json:"id"`
+	AccountID                uuid.UUID          `json:"account_id,omitzero"`
+	Environment              AccountEnvironment `json:"environment,omitempty"`
+	OriginType               string             `json:"origin_type,omitempty"`
+	OriginID                 string             `json:"origin_id,omitempty"`
+	StrategyID               *uuid.UUID         `json:"strategy_id,omitempty"`
+	PipelineRunID            *uuid.UUID         `json:"pipeline_run_id,omitempty"`
+	PipelineRunTradeDate     *time.Time         `json:"pipeline_run_trade_date,omitempty"`
+	CopyOriginRebalanceRunID uuid.UUID          `json:"copy_origin_rebalance_run_id,omitzero"`
+	AllocationOpportunityID  *uuid.UUID         `json:"-"`
+	AllocationClaimID        *uuid.UUID         `json:"-"`
+	ClosePositionIDs         []uuid.UUID        `json:"-"`
+	CopyIntentID             *uuid.UUID         `json:"-"`
+	CopyExecutionClaimID     *uuid.UUID         `json:"-"`
+	ClientOrderID            string             `json:"client_order_id,omitempty"`
+	ExternalID               string             `json:"external_id,omitempty"`
+	Ticker                   string             `json:"ticker"`
+	MarketType               MarketType         `json:"market_type,omitempty"`
+	Side                     OrderSide          `json:"side"`
+	OrderType                OrderType          `json:"order_type"`
+	Quantity                 float64            `json:"quantity"`
+	LimitPrice               *float64           `json:"limit_price,omitempty"`
+	StopPrice                *float64           `json:"stop_price,omitempty"`
+	ReferencePrice           *float64           `json:"-"`
+	FilledQuantity           float64            `json:"filled_quantity"`
+	FilledAvgPrice           *float64           `json:"filled_avg_price,omitempty"`
+	Status                   OrderStatus        `json:"status"`
+	Broker                   string             `json:"broker"`
+	SubmittedAt              *time.Time         `json:"submitted_at,omitempty"`
+	FilledAt                 *time.Time         `json:"filled_at,omitempty"`
+	CreatedAt                time.Time          `json:"created_at"`
 
 	// Options fields (nil/zero for equity orders).
 	AssetClass         AssetClass      `json:"asset_class,omitempty"`
@@ -132,6 +144,8 @@ type Order struct {
 	PositionIntent     *PositionIntent `json:"position_intent,omitempty"`
 	LegGroupID         *uuid.UUID      `json:"leg_group_id,omitempty"`
 	OptionGreeks       *OptionGreeks   `json:"option_greeks,omitempty"`
+	SpreadMaxRisk      float64         `json:"-"`
+	SpreadMaxReward    float64         `json:"-"`
 
 	// Prediction market fields (empty for non-prediction orders).
 	PredictionSide   string `json:"prediction_side,omitempty"`

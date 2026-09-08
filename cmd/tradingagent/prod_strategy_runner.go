@@ -31,6 +31,8 @@ import (
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/paper"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
+	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	polymarketdata "github.com/PatrickFanella/get-rich-quick/internal/marketdata/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
@@ -83,6 +85,7 @@ type polymarketTickFeed interface {
 }
 
 type realStrategyRunner struct {
+	executionAccount       domain.ExecutionAccountBinding
 	runGroupMu             sync.Mutex
 	runGroup               *runcontrol.Group
 	cfg                    config.Config
@@ -98,7 +101,7 @@ type realStrategyRunner struct {
 	tradeRepo              repository.TradeRepository
 	opportunityRepo        repository.OpportunityRepository
 	auditLogRepo           repository.AuditLogRepository
-	financialRepo          repository.FinancialLifecycleRepository
+	economicWriter         execution.AcceptedEconomicWriter
 	riskEngine             risk.RiskEngine
 	tradeDecisionRecorder  execution.DecisionRecorder
 	metrics                *metrics.Metrics
@@ -125,6 +128,7 @@ type realStrategyRunner struct {
 }
 
 func newRealStrategyRunner(
+	executionAccount domain.ExecutionAccountBinding,
 	cfg config.Config,
 	dataService marketDataService,
 	runRepo repository.PipelineRunRepository,
@@ -135,7 +139,7 @@ func newRealStrategyRunner(
 	positionRepo repository.PositionRepository,
 	tradeRepo repository.TradeRepository,
 	auditLogRepo repository.AuditLogRepository,
-	financialRepo repository.FinancialLifecycleRepository,
+	economicWriter execution.AcceptedEconomicWriter,
 	riskEngine risk.RiskEngine,
 	appMetrics *metrics.Metrics,
 	notificationManager *notification.Manager,
@@ -154,6 +158,7 @@ func newRealStrategyRunner(
 
 	workerCtx, workerStop := context.WithCancel(context.Background())
 	runner := &realStrategyRunner{
+		executionAccount:      executionAccount,
 		runGroup:              runcontrol.NewGroup(),
 		cfg:                   cfg,
 		globals:               globalSettingsFromConfig(cfg),
@@ -166,7 +171,7 @@ func newRealStrategyRunner(
 		positionRepo:          positionRepo,
 		tradeRepo:             tradeRepo,
 		auditLogRepo:          auditLogRepo,
-		financialRepo:         financialRepo,
+		economicWriter:        economicWriter,
 		riskEngine:            riskEngine,
 		tradeDecisionRecorder: tradeDecisionRecorder,
 		metrics:               appMetrics,
@@ -188,13 +193,17 @@ func newRealStrategyRunner(
 	pm := cfg.Brokers.Polymarket
 	if cfg.Features.EnablePolymarketAutomation && strings.TrimSpace(pm.KeyID) != "" {
 		client := polymarketexecution.NewClient(pm.KeyID, pm.SecretKey, logger)
-		client.SetL2Auth(pm.Address, pm.KeyID, pm.SecretKey, pm.Passphrase)
+		liveAuthorized := polymarketLiveExecutionAuthorized(cfg, executionAccount)
+		if liveAuthorized {
+			client.SetL2Auth(pm.Address, pm.KeyID, pm.SecretKey, pm.Passphrase)
+		}
 		client.SetAPIBaseURL(pm.APIBaseURL)
 		client.SetGatewayBaseURL(pm.GatewayBaseURL)
 		runner.polymarketClient = client
 		runner.polymarketMarketData = client
-		if strings.TrimSpace(pm.SecretKey) != "" {
-			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client), Logger: logger, Metrics: appMetrics}); err == nil {
+		if liveAuthorized && strings.TrimSpace(pm.SecretKey) != "" {
+			exitRepo, _ := orderRepo.(repository.AtomicPredictionExitRepository)
+			if guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: executionAccount, Broker: polymarketexecution.NewBroker(client), ExitRepo: exitRepo, EconomicWriter: runner.economicWriter, Logger: logger, Metrics: appMetrics}); err == nil {
 				runner.polymarketStopGuard = guard
 			} else {
 				logger.Warn("polymarket stop guard disabled", slog.String("error", err.Error()))
@@ -213,7 +222,22 @@ func newRealStrategyRunner(
 	return runner
 }
 
-func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+func polymarketLiveExecutionAuthorized(cfg config.Config, account domain.ExecutionAccountBinding) bool {
+	if !cfg.Features.EnableLiveTrading || account.Environment() != domain.AccountEnvironmentLive {
+		return false
+	}
+	for _, broker := range cfg.LiveTradingAllowedBrokers {
+		if strings.EqualFold(strings.TrimSpace(broker), "polymarket") {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
+	if executionVersionID == uuid.Nil {
+		return nil, errors.New("strategy execution version ID is required")
+	}
 	group := r.strategyRunGroup()
 	if !group.HasLease(ctx) {
 		admittedCtx, lease, err := group.Admit(ctx)
@@ -224,18 +248,21 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		defer lease.Done()
 	}
 	if strategy.MarketType.Normalize() == domain.MarketTypeKalshi {
-		return r.runKalshiNative(ctx, strategy)
+		return r.runKalshiNative(ctx, strategy, executionVersionID)
 	}
 	if strategy.MarketType.Normalize() == domain.MarketTypePolymarket {
 		if !r.cfg.Features.EnablePolymarketAutomation {
 			return nil, errors.New("polymarket execution is retired; use a Kalshi strategy")
 		}
-		return r.runPolymarketNative(ctx, strategy)
+		return r.runPolymarketNative(ctx, strategy, executionVersionID)
+	}
+	if generativestrategy.HasRuntimeBinding(strategy.Config) {
+		return r.runGeneratedStrategyNative(ctx, strategy, executionVersionID)
 	}
 
-	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy)
+	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy, executionVersionID)
 	if err != nil {
-		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, err); persistErr != nil {
+		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, executionVersionID, err); persistErr != nil {
 			return nil, recognizedRunControlError(ctx, errors.Join(err, persistErr))
 		}
 		return nil, recognizedRunControlError(ctx, err)
@@ -284,7 +311,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	}
 	r.recordAgentTerminalMetrics(result)
 
-	run, err := r.findRun(ctx, result.Run.ID)
+	run, err := r.findRun(ctx, domain.PipelineRunRef{ID: result.Run.ID, TradeDate: result.Run.TradeDate})
 	if err != nil {
 		return canonical, err
 	}
@@ -297,7 +324,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		planTicker = strategy.Ticker
 	}
 
-	receipt, err := r.runRepo.RefineCompletedSignal(ctx, run.ID, run.TradeDate, run.Signal, signal)
+	receipt, err := r.runRepo.RefineCompletedSignal(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, run.Signal, signal)
 	if err != nil {
 		return canonical, err
 	}
@@ -320,7 +347,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		}
 	}
 
-	decisionMetadata := r.executionDecisionMetadata(ctx, run.ID)
+	decisionMetadata := r.executionDecisionMetadata(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 
 	finalSignal := execution.FinalSignal{Signal: signal, Confidence: result.State.FinalSignal.Confidence}
 	tradingPlan := execution.TradingPlan{
@@ -339,20 +366,38 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		Side:             result.State.TradingPlan.Side,
 		DecisionMetadata: decisionMetadata,
 	}
+	var opportunitySpread *domain.OptionSpread
 	if strategy.MarketType.Normalize() == domain.MarketTypeOptions {
-		if err := r.executeOptionsSignal(ctx, strategy, run.ID, finalSignal); err != nil {
-			return canonical, err
-		}
-	} else if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		orderManager, err := r.newOrderManager(ctx, strategy, prepared.Config, strategyConfig)
+		scope, err := executionScopeFromPersistedRun(run, strategy)
 		if err != nil {
 			return canonical, err
 		}
-		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
+		if r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
+			opportunitySpread, err = r.buildAllocatorOptionsOpportunity(ctx, strategy, finalSignal)
+			if err != nil {
+				return canonical, err
+			}
+			tradingPlan.Depth = opportunitySpread.LiquidityUSD
+			tradingPlan.Spread = opportunitySpread.SpreadPct
+		} else {
+			if err := r.executeOptionsSignal(ctx, scope, strategy, finalSignal); err != nil {
+				return canonical, err
+			}
+		}
+	} else if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
+		scope, err := executionScopeFromPersistedRun(run, strategy)
+		if err != nil {
+			return canonical, err
+		}
+		orderManager, err := r.newOrderManager(ctx, strategy, prepared.Config, strategyConfig, scope)
+		if err != nil {
+			return canonical, err
+		}
+		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, run, finalSignal, tradingPlan); err != nil {
+	if err := r.recordPortfolioOpportunity(ctx, strategy, run, finalSignal, tradingPlan, opportunitySpread); err != nil {
 		return canonical, err
 	}
 
@@ -364,11 +409,14 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		r.logger.WarnContext(ctx, "notification dispatch failed (non-fatal)", "error", err, "run_id", run.ID)
 	}
 
-	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+	orders, err := loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	if err = validateResultOrders(orders, r.executionAccount, executionVersionID, run.ID, run.TradeDate); err != nil {
+		return canonical, err
+	}
+	positions, err := loadResultPositions(ctx, r.positionRepo, r.executionAccount, executionVersionID)
 	if err != nil {
 		return canonical, err
 	}
@@ -381,6 +429,161 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	}, nil
 }
 
+func (r *realStrategyRunner) runGeneratedStrategyNative(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
+	binding, err := generativestrategy.ParseRuntimeBinding(strategy.Config)
+	if err != nil {
+		return nil, recognizedRunControlError(ctx, err)
+	}
+	lineage, err := domain.ParseActivePromotionExecutionLineage(strategy.Config, r.executionAccount.AccountID())
+	if err != nil {
+		return nil, recognizedRunControlError(ctx, err)
+	}
+	if strategy.MarketType.Normalize() != domain.MarketTypeStock || !strategy.IsPaper || strategy.Status != domain.StrategyStatusActive {
+		return nil, errors.New("generated runtime requires an active paper stock strategy")
+	}
+	now := time.Now().UTC()
+	run := domain.PipelineRun{
+		ID: uuid.New(), StrategyID: strategy.ID, Ticker: strategy.Ticker, TradeDate: now.Truncate(24 * time.Hour),
+		Status: domain.PipelineStatusRunning, StartedAt: now, ConfigSnapshot: strategy.Config,
+	}
+	if err := bindStrategyRunScope(&run, r.executionAccount, executionVersionID); err != nil {
+		return nil, err
+	}
+	bindPromotionRunLineage(&run, executionVersionID, lineage)
+	if err := r.startNativeRun(ctx, "generated_strategy", &run); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	completeRun := func(status domain.PipelineStatus, signal domain.PipelineSignal, message string) error {
+		return r.completeNativeRun(ctx, "generated_strategy", &run, status, signal, message)
+	}
+	failRun := func(runErr error) (*api.StrategyRunResult, error) {
+		status, message := nativeFailure(ctx, runErr)
+		if updateErr := completeRun(status, domain.PipelineSignalHold, message); updateErr != nil {
+			runErr = errors.Join(runErr, updateErr)
+		}
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, recognizedRunControlError(ctx, runErr)
+	}
+	if r.dataService == nil {
+		return failRun(errors.New("generated runtime market data service is required"))
+	}
+	bars, err := r.dataService.GetOHLCV(ctx, domain.MarketTypeStock, strategy.Ticker, data.Timeframe1d, now.Add(-strategyMarketLookback), now)
+	if err != nil || len(bars) == 0 {
+		if err == nil {
+			err = errors.New("no bars returned")
+		}
+		return failRun(fmt.Errorf("generated runtime load ohlcv for %s: %w", strategy.Ticker, err))
+	}
+	latest := bars[len(bars)-1]
+	holding, err := r.generatedStrategyHolding(ctx, strategy, executionVersionID)
+	if err != nil {
+		return failRun(err)
+	}
+	decision, err := binding.EvaluateBar(now, generativestrategy.RuntimeBar{
+		Timestamp: latest.Timestamp, Open: latest.Open, High: latest.High, Low: latest.Low, Close: latest.Close, Volume: latest.Volume,
+	}, holding, lineage.DeploymentBudgetUSD)
+	if err != nil {
+		return failRun(err)
+	}
+	signal := domain.PipelineSignalHold
+	switch decision.Action {
+	case "buy":
+		signal = domain.PipelineSignalBuy
+	case "sell":
+		signal = domain.PipelineSignalSell
+	}
+	scope, err := executionScopeFromPersistedRun(&run, strategy)
+	if err != nil {
+		return failRun(err)
+	}
+	snapshotPayload, err := json.Marshal(map[string]any{
+		"schema": "typed-generative-runtime-decision-v1", "source_version_id": binding.SourceVersionID(), "source_version_sha256": binding.SourceVersionDigest(),
+		"spec_id": binding.Spec().ID(), "spec_sha256": binding.Spec().Digest(), "ticker": strategy.Ticker, "bar": latest,
+		"holding": holding, "action": decision.Action, "execution_price": decision.ExecutionPrice, "proposed_notional": decision.ProposedNotional,
+	})
+	if err != nil {
+		return failRun(err)
+	}
+	snapshot, err := pipelineSnapshotFromScope(scope, "generated_strategy_decision", snapshotPayload)
+	if err != nil {
+		return failRun(err)
+	}
+	if r.snapshotRepo == nil {
+		return failRun(errors.New("generated runtime snapshot repository is required"))
+	}
+	if err := r.snapshotRepo.Create(ctx, snapshot); err != nil {
+		return failRun(fmt.Errorf("generated runtime persist decision snapshot: %w", err))
+	}
+	if err := completeRun(domain.PipelineStatusCompleted, signal, ""); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	plan := execution.TradingPlan{
+		Action: signal, MarketType: domain.MarketTypeStock, Ticker: strategy.Ticker, EntryType: "market", EntryPrice: decision.ExecutionPrice,
+		PositionSize: decision.ProposedNotional / decision.ExecutionPrice, StopLoss: decision.ExecutionPrice * 0.01,
+		Confidence: binding.Confidence(), Rationale: "Approved typed strategy evaluated against the latest complete canonical OHLCV bar.",
+		NetEV: binding.ExpectedEdge(), Depth: decision.LiquidityUSD, Spread: decision.SpreadPct,
+	}
+	finalSignal := execution.FinalSignal{Signal: signal, Confidence: binding.Confidence()}
+	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, plan, nil); err != nil {
+		return &api.StrategyRunResult{Run: run, Signal: run.Signal}, err
+	}
+	return &api.StrategyRunResult{Run: run, Signal: run.Signal}, nil
+}
+
+func (r *realStrategyRunner) generatedStrategyHolding(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (bool, error) {
+	repo, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
+	if !ok || repo == nil {
+		return false, errors.New("generated runtime requires execution-scoped position reads")
+	}
+	positions, err := repo.GetByExecutionScope(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(),
+		string(ledger.ExecutionOriginStrategyVersion), executionVersionID.String(), repository.PositionFilter{Ticker: strategy.Ticker}, 100, 0)
+	if err != nil {
+		return false, fmt.Errorf("generated runtime load positions: %w", err)
+	}
+	holding := false
+	for _, position := range positions {
+		if position.ClosedAt != nil || position.Quantity <= 0 {
+			continue
+		}
+		if position.StrategyID == nil || *position.StrategyID != strategy.ID || position.Ticker != strategy.Ticker || position.Side != domain.PositionSideLong {
+			return false, errors.New("generated runtime position ownership is ambiguous")
+		}
+		if holding {
+			return false, errors.New("generated runtime has multiple open target positions")
+		}
+		holding = true
+	}
+	return holding, nil
+}
+
+func (r *realStrategyRunner) buildAllocatorOptionsOpportunity(ctx context.Context, strategy domain.Strategy, signal execution.FinalSignal) (*domain.OptionSpread, error) {
+	if signal.Signal != domain.PipelineSignalBuy {
+		return nil, errors.New("options allocator: only new defined-risk opening packages are eligible")
+	}
+	if r.optionsProvider == nil {
+		return nil, errors.New("options allocator: manifest-bound options provider is required")
+	}
+	var sections map[string]json.RawMessage
+	if err := json.Unmarshal(strategy.Config, &sections); err != nil {
+		return nil, fmt.Errorf("options allocator: parse strategy config: %w", err)
+	}
+	cfg, err := rules.ParseOptions(sections["options_rules"])
+	if err != nil || cfg == nil || len(cfg.LegSelection) != 2 {
+		return nil, errors.New("options allocator: exactly two vertical legs are required")
+	}
+	chain, err := r.optionsProvider.GetOptionsChain(ctx, cfg.Underlying, time.Time{}, "")
+	if err != nil {
+		return nil, fmt.Errorf("options allocator: load immutable option chain: %w", err)
+	}
+	spread, _, err := buildPaperDebitSpreadPlan(cfg, chain, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if spread.QuoteObservedAt.IsZero() {
+		return nil, errors.New("options allocator: immutable quote observation time is required")
+	}
+	return spread, nil
+}
+
 func (r *realStrategyRunner) strategyRunGroup() *runcontrol.Group {
 	r.runGroupMu.Lock()
 	defer r.runGroupMu.Unlock()
@@ -390,7 +593,7 @@ func (r *realStrategyRunner) strategyRunGroup() *runcontrol.Group {
 	return r.runGroup
 }
 
-func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy domain.Strategy, runID uuid.UUID, signal execution.FinalSignal) error {
+func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, scope execution.ExecutionScope, strategy domain.Strategy, signal execution.FinalSignal) error {
 	if signal.Signal == domain.PipelineSignalHold {
 		return nil
 	}
@@ -402,17 +605,22 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy 
 	}
 	manager := execution.NewOptionsOrderManager(r.localPaperBroker, r.orderRepo, r.positionRepo, r.tradeRepo, r.riskEngine, r.logger).
 		WithBrokerName("paper").WithLiveTrading(false)
-	if optionFillRepo, ok := r.financialRepo.(repository.OptionFillRepository); ok {
-		manager.WithOptionFillRepo(optionFillRepo)
+	if r.economicWriter != nil {
+		manager.WithAcceptedOptionFillWriter(r.economicWriter)
 	}
 	if signal.Signal == domain.PipelineSignalSell {
-		positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 100, 0)
+		scoped, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
+		if !ok {
+			return errors.New("options runtime: execution-scoped position repository is required")
+		}
+		originType, originID := scope.Origin()
+		positions, err := scoped.GetByExecutionScope(ctx, scope.AccountID(), scope.Environment(), string(originType), originID, repository.PositionFilter{}, 100, 0)
 		if err != nil {
 			return fmt.Errorf("options runtime: load positions for close: %w", err)
 		}
 		var open []*domain.Position
 		for index := range positions {
-			if positions[index].AssetClass == domain.AssetClassOption && positions[index].ClosedAt == nil && positions[index].Quantity > 0 {
+			if positions[index].StrategyID != nil && *positions[index].StrategyID == strategy.ID && positions[index].AssetClass == domain.AssetClassOption && positions[index].ClosedAt == nil && positions[index].Quantity > 0 {
 				open = append(open, &positions[index])
 			}
 		}
@@ -432,13 +640,13 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy 
 			if err != nil {
 				return err
 			}
-			return manager.ProcessSpreadSignal(ctx, spread, quantity, strategy.ID, runID)
+			return manager.ProcessSpreadSignal(ctx, scope, spread, quantity)
 		}
 		closePrice, err := executableOptionClosePrice(position, chain)
 		if err != nil {
 			return err
 		}
-		return manager.CloseOptionPosition(ctx, position, closePrice, runID, "strategy sell signal")
+		return manager.CloseOptionPosition(ctx, scope, position, closePrice, "strategy sell signal")
 	}
 	if signal.Signal != domain.PipelineSignalBuy {
 		return fmt.Errorf("options runtime: unsupported signal %q", signal.Signal)
@@ -467,19 +675,19 @@ func (r *realStrategyRunner) executeOptionsSignal(ctx context.Context, strategy 
 		for _, leg := range spread.Legs {
 			legs = append(legs, risk.OptionLegExposure{Greeks: leg.Greeks, Side: leg.Side, Quantity: quantity * float64(leg.Ratio), Multiplier: leg.Contract.Multiplier})
 		}
-		if err := r.enforceOptionsGreekRisk(ctx, cfg.Underlying, legs); err != nil {
+		if err := r.enforceOptionsGreekRisk(ctx, scope, cfg.Underlying, legs); err != nil {
 			return err
 		}
-		return manager.ProcessSpreadSignal(ctx, spread, quantity, strategy.ID, runID)
+		return manager.ProcessSpreadSignal(ctx, scope, spread, quantity)
 	}
 	plan, err := buildPaperSingleLegPlan(cfg, chain, time.Now().UTC())
 	if err != nil {
 		return err
 	}
-	if err := r.enforceOptionsGreekRisk(ctx, cfg.Underlying, []risk.OptionLegExposure{{Greeks: *plan.OptionGreeks, Side: domain.OrderSideBuy, Quantity: plan.PositionSize, Multiplier: 100}}); err != nil {
+	if err := r.enforceOptionsGreekRisk(ctx, scope, cfg.Underlying, []risk.OptionLegExposure{{Greeks: *plan.OptionGreeks, Side: domain.OrderSideBuy, Quantity: plan.PositionSize, Multiplier: 100}}); err != nil {
 		return err
 	}
-	return manager.ProcessOptionSignal(ctx, signal, plan, strategy.ID, runID)
+	return manager.ProcessOptionSignal(ctx, scope, signal, plan)
 }
 
 func buildPaperSpreadClosePlan(positions []*domain.Position, chain []domain.OptionSnapshot) (*domain.OptionSpread, float64, error) {
@@ -527,7 +735,7 @@ func buildPaperSpreadClosePlan(positions []*domain.Position, chain []domain.Opti
 	return spread, quantity, nil
 }
 
-func (r *realStrategyRunner) enforceOptionsGreekRisk(ctx context.Context, underlying string, proposed []risk.OptionLegExposure) error {
+func (r *realStrategyRunner) enforceOptionsGreekRisk(ctx context.Context, scope execution.ExecutionScope, underlying string, proposed []risk.OptionLegExposure) error {
 	to := time.Now().UTC()
 	bars, err := r.dataService.GetOHLCV(ctx, domain.MarketTypeStock, underlying, data.Timeframe1d, to.Add(-7*24*time.Hour), to)
 	if err != nil || len(bars) == 0 || bars[len(bars)-1].Close <= 0 {
@@ -537,9 +745,20 @@ func (r *realStrategyRunner) enforceOptionsGreekRisk(ctx context.Context, underl
 	if err != nil {
 		return fmt.Errorf("options runtime: paper balance for Greek risk: %w", err)
 	}
-	positions, err := r.positionRepo.GetOpen(ctx, repository.PositionFilter{}, 1000, 0)
-	if err != nil {
-		return fmt.Errorf("options runtime: open positions for Greek risk: %w", err)
+	scoped, ok := r.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return errors.New("options runtime: account-scoped position repository is required for Greek risk")
+	}
+	var positions []domain.Position
+	for offset := 0; ; offset += 1000 {
+		page, err := scoped.GetOpenByAccount(ctx, scope.AccountID(), scope.Environment(), repository.PositionFilter{}, 1000, offset)
+		if err != nil {
+			return fmt.Errorf("options runtime: open positions for Greek risk: %w", err)
+		}
+		positions = append(positions, page...)
+		if len(page) < 1000 {
+			break
+		}
 	}
 	_, allowed, reason := risk.CheckOptionsExposure(risk.DefaultOptionsLimits(), balance.Equity, bars[len(bars)-1].Close, positions, proposed)
 	if !allowed {
@@ -575,18 +794,43 @@ func buildPaperDebitSpreadPlan(cfg *rules.OptionsRulesConfig, chain []domain.Opt
 			leg.ExecutablePrice = snapshot.Bid
 			netDebit -= snapshot.Bid * float64(leg.Ratio)
 		}
+		leg.Bid = snapshot.Bid
+		leg.Ask = snapshot.Ask
+		leg.BidSize = snapshot.BidSize
+		leg.AskSize = snapshot.AskSize
+		leg.ContractPayloadID = snapshot.ContractPayloadID
+		leg.ContractSHA256 = snapshot.ContractSHA256
+		leg.QuotePayloadID = snapshot.QuotePayloadID
+		leg.QuoteSHA256 = snapshot.QuoteSHA256
+		leg.SnapshotPayloadID = snapshot.SnapshotPayloadID
+		leg.SnapshotSHA256 = snapshot.SnapshotSHA256
+		leg.QuoteObservedAt = snapshot.QuoteObservedAt
+		if spread.QuoteObservedAt.IsZero() || (!snapshot.QuoteObservedAt.IsZero() && snapshot.QuoteObservedAt.Before(spread.QuoteObservedAt)) {
+			spread.QuoteObservedAt = snapshot.QuoteObservedAt
+		}
 		leg.Greeks = snapshot.Greeks
 		minStrike = math.Min(minStrike, leg.Contract.Strike)
 		maxStrike = math.Max(maxStrike, leg.Contract.Strike)
 	}
-	if netDebit <= 0 || len(spread.Legs) == 0 {
-		return nil, 0, errors.New("options runtime: only net-debit verticals are enabled")
+	if netDebit == 0 || len(spread.Legs) == 0 {
+		return nil, 0, errors.New("options runtime: vertical package must have a finite nonzero debit or credit")
 	}
 	multiplier := spread.Legs[0].Contract.Multiplier
-	spread.MaxRisk = netDebit * multiplier
-	spread.MaxReward = ((maxStrike - minStrike) - netDebit) * multiplier
+	width := maxStrike - minStrike
+	if netDebit > 0 {
+		spread.MaxRisk = netDebit * multiplier
+		spread.MaxReward = (width - netDebit) * multiplier
+	} else {
+		credit := -netDebit
+		spread.MaxRisk = (width - credit) * multiplier
+		spread.MaxReward = credit * multiplier
+	}
 	if spread.MaxReward <= 0 {
 		return nil, 0, errors.New("options runtime: debit vertical has no finite positive max reward")
+	}
+	spread.LiquidityUSD, spread.SpreadPct = optionSpreadLiquidity(spread)
+	if spread.LiquidityUSD <= 0 || spread.SpreadPct <= 0 || math.IsNaN(spread.SpreadPct) || math.IsInf(spread.SpreadPct, 0) {
+		return nil, 0, errors.New("options runtime: vertical lacks executable quote depth or spread evidence")
 	}
 	quantity := 0.0
 	switch cfg.PositionSizing.Method {
@@ -601,6 +845,31 @@ func buildPaperDebitSpreadPlan(cfg *rules.OptionsRulesConfig, chain []domain.Opt
 		return nil, 0, errors.New("options runtime: sizing budget cannot purchase one spread")
 	}
 	return spread, quantity, nil
+}
+
+func optionSpreadLiquidity(spread *domain.OptionSpread) (float64, float64) {
+	if spread == nil || len(spread.Legs) != 2 || spread.MaxRisk <= 0 {
+		return 0, 0
+	}
+	availableContracts := math.Inf(1)
+	var netMid, quoteWidth float64
+	for _, leg := range spread.Legs {
+		size := leg.AskSize
+		sign := 1.0
+		if leg.Side == domain.OrderSideSell {
+			size, sign = leg.BidSize, -1
+		}
+		if size <= 0 || leg.Bid <= 0 || leg.Ask < leg.Bid {
+			return 0, 0
+		}
+		availableContracts = math.Min(availableContracts, size/float64(leg.Ratio))
+		netMid += sign * ((leg.Bid + leg.Ask) / 2) * float64(leg.Ratio)
+		quoteWidth += (leg.Ask - leg.Bid) * float64(leg.Ratio)
+	}
+	if availableContracts <= 0 || math.IsInf(availableContracts, 1) || netMid == 0 || quoteWidth <= 0 {
+		return 0, 0
+	}
+	return math.Floor(availableContracts) * spread.MaxRisk, quoteWidth / math.Abs(netMid)
 }
 
 func selectedLegSnapshot(selected map[string]*domain.OptionSnapshot, symbol string) *domain.OptionSnapshot {
@@ -666,7 +935,7 @@ func buildPaperSingleLegPlan(cfg *rules.OptionsRulesConfig, chain []domain.Optio
 	return execution.TradingPlan{Action: domain.PipelineSignalBuy, MarketType: domain.MarketTypeOptions, Ticker: snapshot.Contract.OCCSymbol, EntryType: "limit", EntryPrice: snapshot.Ask, PositionSize: quantity, OptionGreeks: &greeks}, nil
 }
 
-func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
 	executionStrategy := r.effectivePolymarketExecutionStrategy(strategy)
 
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
@@ -679,10 +948,17 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		ID:             uuid.New(),
 		StrategyID:     strategy.ID,
 		Ticker:         strategy.Ticker,
-		TradeDate:      now,
+		TradeDate:      now.Truncate(24 * time.Hour),
 		Status:         domain.PipelineStatusRunning,
 		StartedAt:      now,
 		ConfigSnapshot: strategy.Config,
+		AccountID:      r.executionAccount.AccountID(),
+		Environment:    r.executionAccount.Environment(),
+		OriginType:     "strategy_version",
+		OriginID:       executionVersionID.String(),
+	}
+	if err := bindStrategyRunScope(&run, r.executionAccount, executionVersionID); err != nil {
+		return nil, err
 	}
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
@@ -716,12 +992,16 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		return failRun(fmt.Errorf("polymarket native: fetch market data for %s: %w", strategy.Ticker, err))
 	}
 	snapshot := polymarketexecution.SnapshotFromPredictionMarketData(marketData, time.Now().UTC())
-	if err := r.persistPolymarketNativeSnapshot(ctx, run.ID, snapshot); err != nil {
+	scope, err := executionScopeFromPersistedRun(&run, strategy)
+	if err != nil {
+		return failRun(err)
+	}
+	if err := r.persistPolymarketNativeSnapshot(ctx, scope, snapshot); err != nil {
 		return failRun(err)
 	}
 
 	executor := polymarketexecution.NewDeterministicNativeExecutor()
-	decision, err := executor.Execute(ctx, strategy, snapshot)
+	decision, err := executor.Execute(ctx, strategy, snapshot, scope)
 	if err != nil {
 		return failRun(fmt.Errorf("polymarket native: execute strategy %s: %w", strategy.Name, err))
 	}
@@ -730,7 +1010,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		signal = domain.PipelineSignalHold
 	}
 	if signal == domain.PipelineSignalBuy {
-		sizingConfig := applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger), r.cfg.Risk.Polymarket.MaxPositionUSDC)
+		sizingConfig := applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope), r.cfg.Risk.Polymarket.MaxPositionUSDC)
 		plannedNotional, err := r.plannedPolymarketNotional(ctx, executionStrategy, sizingConfig, decision)
 		if err != nil {
 			return failRun(err)
@@ -740,7 +1020,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 		}
 	}
 
-	orderManager, err := r.newOrderManager(ctx, executionStrategy, resolved, strategyConfig)
+	orderManager, err := r.newOrderManager(ctx, executionStrategy, resolved, strategyConfig, scope)
 	if err != nil {
 		return failRun(err)
 	}
@@ -776,18 +1056,21 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
+		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
+	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan, nil); err != nil {
 		return canonical, err
 	}
-	orders, err := r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+	orders, err := loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {
 		return canonical, err
 	}
-	positions, err := r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+	if err = validateResultOrders(orders, r.executionAccount, executionVersionID, run.ID, run.TradeDate); err != nil {
+		return canonical, err
+	}
+	positions, err := loadResultPositions(ctx, r.positionRepo, r.executionAccount, executionVersionID)
 	if err != nil {
 		return canonical, err
 	}
@@ -799,16 +1082,23 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 	return &api.StrategyRunResult{Run: run, Signal: run.Signal, Orders: orders, Positions: positions}, nil
 }
 
-func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domain.Strategy) (*api.StrategyRunResult, error) {
+func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
 	now := time.Now().UTC()
 	run := domain.PipelineRun{
 		ID:             uuid.New(),
 		StrategyID:     strategy.ID,
 		Ticker:         strategy.Ticker,
-		TradeDate:      now,
+		TradeDate:      now.Truncate(24 * time.Hour),
 		Status:         domain.PipelineStatusRunning,
 		StartedAt:      now,
 		ConfigSnapshot: strategy.Config,
+		AccountID:      r.executionAccount.AccountID(),
+		Environment:    r.executionAccount.Environment(),
+		OriginType:     "strategy_version",
+		OriginID:       executionVersionID.String(),
+	}
+	if err := bindStrategyRunScope(&run, r.executionAccount, executionVersionID); err != nil {
+		return nil, err
 	}
 	runCtx, cancelRun := context.WithCancelCause(ctx)
 	defer cancelRun(nil)
@@ -841,13 +1131,6 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 		return failRun(errors.New("kalshi native: market data client is required"))
 	}
 	if !strategy.IsPaper {
-		gate, err := r.liveGateForStrategy(strategy)
-		if err != nil {
-			return failRun(err)
-		}
-		if allowed, denial := gate.Allows(&strategy.ID, brokerNameForStrategy(strategy)); !allowed {
-			return failRun(fmt.Errorf("order_manager: live execution denied for kalshi: %s", denial.Message))
-		}
 		if _, _, err := r.newBrokerForStrategy(strategy); err != nil {
 			return failRun(err)
 		}
@@ -856,13 +1139,21 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	if err != nil {
 		return failRun(fmt.Errorf("kalshi native: fetch snapshot for %s: %w", strategy.Ticker, err))
 	}
-	if err := r.persistKalshiNativeSnapshot(ctx, run.ID, snapshot); err != nil {
+	scope, err := executionScopeFromPersistedRun(&run, strategy)
+	if err != nil {
+		return failRun(err)
+	}
+	if err := r.persistKalshiNativeSnapshot(ctx, scope, snapshot); err != nil {
 		return failRun(err)
 	}
 
 	var openPositions []domain.Position
 	if r.cfg.Brokers.Kalshi.AutoExitsEnabled && r.positionRepo != nil {
-		openPositions, err = r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10_000, 0)
+		scopedPositions, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
+		if !ok {
+			return failRun(errors.New("kalshi native: canonical execution-scoped position repository is required"))
+		}
+		openPositions, err = scopedPositions.GetByExecutionScope(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), string(ledger.ExecutionOriginStrategyVersion), executionVersionID.String(), repository.PositionFilter{}, 10_000, 0)
 		if err != nil {
 			return failRun(fmt.Errorf("kalshi native: load positions for exit evaluation: %w", err))
 		}
@@ -870,7 +1161,9 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 
 	decision, exit := kalshiexecution.EvaluateExit(strategy, snapshot, openPositions, now)
 	if !exit {
-		decision, err = kalshiexecution.DeterministicNativeExecutor{}.Execute(ctx, strategy, snapshot)
+		decision, err = kalshiexecution.DeterministicNativeExecutor{}.Execute(ctx, strategy, snapshot, scope)
+	} else {
+		decision.Scope = scope
 	}
 	if err != nil {
 		return failRun(fmt.Errorf("kalshi native: execute strategy %s: %w", strategy.Name, err))
@@ -898,7 +1191,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 		return failRun(fmt.Errorf("kalshi native: parse strategy config: %w", err))
 	}
 	resolved := agent.ResolveConfig(strategyConfig, r.globals)
-	orderManager, err := r.newOrderManager(ctx, strategy, resolved, strategyConfig)
+	orderManager, err := r.newOrderManager(ctx, strategy, resolved, strategyConfig, scope)
 	if err != nil {
 		return failRun(err)
 	}
@@ -915,24 +1208,27 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 	}
 	canonical := &api.StrategyRunResult{Run: run, Signal: run.Signal}
 	if !r.portfolioAllocatorOwnsPaperExecution(strategy, signal) {
-		if err := orderManager.ProcessSignal(ctx, finalSignal, tradingPlan, strategy.ID, run.ID); err != nil {
+		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan); err != nil {
+	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan, nil); err != nil {
 		return canonical, err
 	}
 
 	var orders []domain.Order
 	if r.orderRepo != nil {
-		orders, err = r.orderRepo.GetByRun(ctx, run.ID, repository.OrderFilter{}, 10, 0)
+		orders, err = loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 		if err != nil {
+			return canonical, err
+		}
+		if err = validateResultOrders(orders, r.executionAccount, executionVersionID, run.ID, run.TradeDate); err != nil {
 			return canonical, err
 		}
 	}
 	var positions []domain.Position
 	if r.positionRepo != nil {
-		positions, err = r.positionRepo.GetByStrategy(ctx, strategy.ID, repository.PositionFilter{}, 10, 0)
+		positions, err = loadResultPositions(ctx, r.positionRepo, r.executionAccount, executionVersionID)
 		if err != nil {
 			return canonical, err
 		}
@@ -968,6 +1264,22 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 	if r.eventRepo == nil {
 		return fmt.Errorf("%s native: agent event repository is required", source)
 	}
+	scope, err := persistenceScopeFromRun(run)
+	if err != nil {
+		return fmt.Errorf("%s native: validate run scope: %w", source, err)
+	}
+	event := &domain.AgentEvent{
+		PipelineRunID:        &run.ID,
+		PipelineRunTradeDate: &run.TradeDate,
+		StrategyID:           &run.StrategyID,
+		EventKind:            agent.AgentEventKindPipelineStarted.String(),
+		Title:                "Pipeline started",
+		Summary:              "Native deterministic pipeline admitted for evaluation.",
+		Tags:                 []string{"pipeline", "native", source},
+	}
+	if err := applyEventPersistenceScope(event, scope); err != nil {
+		return fmt.Errorf("%s native: scope start event: %w", source, err)
+	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	if err := r.runRepo.Create(persistCtx, run); err != nil {
 		cancel()
@@ -979,15 +1291,7 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 	if err != nil {
 		return fmt.Errorf("%s native: marshal start event: %w", source, err)
 	}
-	event := &domain.AgentEvent{
-		PipelineRunID: &run.ID,
-		StrategyID:    &run.StrategyID,
-		EventKind:     agent.AgentEventKindPipelineStarted.String(),
-		Title:         "Pipeline started",
-		Summary:       "Native deterministic pipeline admitted for evaluation.",
-		Tags:          []string{"pipeline", "native", source},
-		Metadata:      metadata,
-	}
+	event.Metadata = metadata
 	eventCtx, eventCancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	eventErr := r.eventRepo.Create(eventCtx, event)
 	eventCancel()
@@ -1003,7 +1307,7 @@ func (r *realStrategyRunner) startNativeRun(ctx context.Context, source string, 
 		return recognizedRunControlError(ctx, errors.Join(fmt.Errorf("%s native: persist start event: %w", source, eventErr), terminalEventErr))
 	}
 	updateCtx, updateCancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-	receipt, updateErr := r.runRepo.Finalize(updateCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: status, Signal: &fallbackSignal, CompletedAt: completedAt, ErrorMessage: message, Event: terminalEvent})
+	receipt, updateErr := r.runRepo.Finalize(updateCtx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{Status: status, Signal: &fallbackSignal, CompletedAt: completedAt, ErrorMessage: message, Event: terminalEvent})
 	updateCancel()
 	if updateErr != nil {
 		return recognizedRunControlError(ctx, errors.Join(
@@ -1051,7 +1355,7 @@ func (r *realStrategyRunner) completeNativeRun(
 		persistParent = ctx
 	}
 	persistCtx, cancel := context.WithTimeout(persistParent, nativeTerminalTimeout)
-	receipt, err := r.runRepo.Finalize(persistCtx, run.ID, run.TradeDate, finalization)
+	receipt, err := r.runRepo.Finalize(persistCtx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, finalization)
 	cancel()
 	if err != nil && status == domain.PipelineStatusCompleted && ctx.Err() != nil {
 		fallbackStatus, fallbackMessage := nativeFailure(ctx, ctx.Err())
@@ -1061,7 +1365,7 @@ func (r *realStrategyRunner) completeNativeRun(
 			return recognizedRunControlError(ctx, errors.Join(fmt.Errorf("%s native: finalize run: %w", source, err), eventErr))
 		}
 		fallbackCtx, fallbackCancel := context.WithTimeout(context.WithoutCancel(ctx), nativeTerminalTimeout)
-		receipt, err = r.runRepo.Finalize(fallbackCtx, run.ID, run.TradeDate, repository.PipelineRunFinalization{Status: fallbackStatus, Signal: &fallbackSignal, CompletedAt: time.Now().UTC(), ErrorMessage: fallbackMessage, Event: fallbackEvent})
+		receipt, err = r.runRepo.Finalize(fallbackCtx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.PipelineRunFinalization{Status: fallbackStatus, Signal: &fallbackSignal, CompletedAt: time.Now().UTC(), ErrorMessage: fallbackMessage, Event: fallbackEvent})
 		fallbackCancel()
 	}
 	if err != nil {
@@ -1090,6 +1394,10 @@ func nativeTerminalEvent(
 	status domain.PipelineStatus,
 	signal domain.PipelineSignal,
 ) (*domain.AgentEvent, error) {
+	scope, err := persistenceScopeFromRun(run)
+	if err != nil {
+		return nil, fmt.Errorf("%s native: validate terminal scope: %w", source, err)
+	}
 	eventKind := agent.AgentEventKindPipelineFailed.String()
 	title := "Pipeline failed"
 	tags := []string{"pipeline", "failed", "native", source}
@@ -1112,13 +1420,17 @@ func nativeTerminalEvent(
 		return nil, fmt.Errorf("%s native: marshal terminal event: %w", source, err)
 	}
 	event := &domain.AgentEvent{
-		PipelineRunID: &run.ID,
-		StrategyID:    &run.StrategyID,
-		EventKind:     eventKind,
-		Title:         title,
-		Summary:       "Native deterministic pipeline reached a terminal state.",
-		Tags:          tags,
-		Metadata:      metadata,
+		PipelineRunID:        &run.ID,
+		PipelineRunTradeDate: &run.TradeDate,
+		StrategyID:           &run.StrategyID,
+		EventKind:            eventKind,
+		Title:                title,
+		Summary:              "Native deterministic pipeline reached a terminal state.",
+		Tags:                 tags,
+		Metadata:             metadata,
+	}
+	if err := applyEventPersistenceScope(event, scope); err != nil {
+		return nil, fmt.Errorf("%s native: scope terminal event: %w", source, err)
 	}
 	return event, nil
 }
@@ -1171,7 +1483,7 @@ func predictionNativeFeatures(decision any) json.RawMessage {
 	return raw
 }
 
-func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context, runID uuid.UUID, snapshot polymarketexecution.Snapshot) error {
+func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context, scope execution.ExecutionScope, snapshot polymarketexecution.Snapshot) error {
 	if r.snapshotRepo == nil {
 		return errors.New("polymarket native: snapshot repository is required")
 	}
@@ -1181,13 +1493,17 @@ func (r *realStrategyRunner) persistPolymarketNativeSnapshot(ctx context.Context
 	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	defer cancel()
-	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: runID, DataType: "polymarket_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
+	item, err := pipelineSnapshotFromScope(scope, "polymarket_native_snapshot", payload)
+	if err != nil {
+		return err
+	}
+	if err := r.snapshotRepo.Create(persistCtx, item); err != nil {
 		return fmt.Errorf("polymarket native: persist snapshot: %w", err)
 	}
 	return nil
 }
 
-func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, runID uuid.UUID, snapshot kalshiexecution.Snapshot) error {
+func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, scope execution.ExecutionScope, snapshot kalshiexecution.Snapshot) error {
 	if r.snapshotRepo == nil {
 		return errors.New("kalshi native: snapshot repository is required")
 	}
@@ -1197,7 +1513,11 @@ func (r *realStrategyRunner) persistKalshiNativeSnapshot(ctx context.Context, ru
 	}
 	persistCtx, cancel := context.WithTimeout(ctx, nativeTerminalTimeout)
 	defer cancel()
-	if err := r.snapshotRepo.Create(persistCtx, &domain.PipelineRunSnapshot{ID: uuid.New(), PipelineRunID: runID, DataType: "kalshi_native_snapshot", Payload: payload, CreatedAt: time.Now().UTC()}); err != nil {
+	item, err := pipelineSnapshotFromScope(scope, "kalshi_native_snapshot", payload)
+	if err != nil {
+		return err
+	}
+	if err := r.snapshotRepo.Create(persistCtx, item); err != nil {
 		return fmt.Errorf("kalshi native: persist snapshot: %w", err)
 	}
 	return nil
@@ -1270,28 +1590,32 @@ func (r *realStrategyRunner) effectivePolymarketExecutionStrategy(strategy domai
 		effective.IsPaper = true
 		return effective
 	}
-	if allowed, _ := gate.Allows(&strategy.ID, "polymarket"); !allowed {
+	if strategy.ExecutionStrategyVersionID == nil {
+		effective.IsPaper = true
+		return effective
+	}
+	if allowed, _ := gate.Allows(strategy.ExecutionStrategyVersionID, "polymarket"); !allowed {
 		effective.IsPaper = true
 	}
 	return effective
 }
 
-func (r *realStrategyRunner) executionDecisionMetadata(ctx context.Context, runID uuid.UUID) *execution.DecisionMetadata {
-	return executionDecisionMetadata(ctx, r.decisionRepo, r.logger, runID)
+func (r *realStrategyRunner) executionDecisionMetadata(ctx context.Context, ref domain.PipelineRunRef) *execution.DecisionMetadata {
+	return executionDecisionMetadata(ctx, r.decisionRepo, r.logger, ref)
 }
 
-func executionDecisionMetadata(ctx context.Context, decisionRepo repository.AgentDecisionRepository, logger *slog.Logger, runID uuid.UUID) *execution.DecisionMetadata {
-	if decisionRepo == nil || runID == uuid.Nil {
+func executionDecisionMetadata(ctx context.Context, decisionRepo repository.AgentDecisionRepository, logger *slog.Logger, ref domain.PipelineRunRef) *execution.DecisionMetadata {
+	if decisionRepo == nil || ref.ID == uuid.Nil || ref.TradeDate.IsZero() {
 		return nil
 	}
 
-	decisions, err := decisionRepo.GetByRun(ctx, runID, repository.AgentDecisionFilter{
+	decisions, err := decisionRepo.GetByRun(ctx, ref, repository.AgentDecisionFilter{
 		AgentRole: domain.AgentRoleTrader,
 		Phase:     domain.PhaseTrading,
 	}, 1, 0)
 	if err != nil || len(decisions) == 0 {
 		if err != nil && logger != nil {
-			logger.WarnContext(ctx, "load trader decision metadata", "error", err, "run_id", runID)
+			logger.WarnContext(ctx, "load trader decision metadata", "error", err, "run_id", ref.ID)
 		}
 		return nil
 	}
@@ -1431,7 +1755,7 @@ func normalizePolymarketStrategySide(side string) (string, error) {
 	}
 }
 
-func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Context, strategy domain.Strategy, preparationErr error) error {
+func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID, preparationErr error) error {
 	if r.eventRepo == nil {
 		return errors.New("record strategy preparation failure: agent event repository is required")
 	}
@@ -1446,12 +1770,16 @@ func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Contex
 	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	event := &domain.AgentEvent{
-		StrategyID: &strategy.ID,
-		EventKind:  "strategy.preparation_rejected",
-		Title:      "Strategy preparation rejected",
-		Summary:    "Required strategy inputs or runtime preparation did not pass preflight.",
-		Tags:       []string{"strategy", "preflight", "rejected"},
-		Metadata:   metadata,
+		AccountID:   r.executionAccount.AccountID(),
+		Environment: r.executionAccount.Environment(),
+		OriginType:  "strategy_version",
+		OriginID:    executionVersionID.String(),
+		StrategyID:  &strategy.ID,
+		EventKind:   "strategy.preparation_rejected",
+		Title:       "Strategy preparation rejected",
+		Summary:     "Required strategy inputs or runtime preparation did not pass preflight.",
+		Tags:        []string{"strategy", "preflight", "rejected"},
+		Metadata:    metadata,
 	}
 	if err := r.eventRepo.Create(persistCtx, event); err != nil {
 		return fmt.Errorf("record strategy preparation failure: persist event: %w", err)
@@ -1486,7 +1814,7 @@ func strategyPreparationFailureReason(err error) string {
 	}
 }
 
-func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy domain.Strategy) (*agent.Runner, agent.PreparedRun, *agent.StrategyConfig, chan agent.PipelineEvent, error) {
+func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*agent.Runner, agent.PreparedRun, *agent.StrategyConfig, chan agent.PipelineEvent, error) {
 	strategyConfig, err := parseStrategyConfig(strategy.Config)
 	if err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, err
@@ -1512,8 +1840,13 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 	if r.hub != nil {
 		eventsCh = make(chan agent.PipelineEvent, 64)
 	}
+	lineage, err := optionalActivePromotionLineage(strategy.Config, r.executionAccount.AccountID())
+	if err != nil {
+		return nil, agent.PreparedRun{}, nil, nil, err
+	}
+	persister := &strategyVersionPersister{delegate: agent.NewRepoPersister(r.runRepo, r.snapshotRepo, r.decisionRepo, r.eventRepo, r.logger), executionAccount: r.executionAccount, versionID: executionVersionID, promotionLineage: lineage}
 	runner := agent.NewRunner(definition, agent.Dependencies{
-		Persister:   agent.NewRepoPersister(r.runRepo, r.snapshotRepo, r.decisionRepo, r.eventRepo, r.logger),
+		Persister:   persister,
 		Events:      eventsCh,
 		Logger:      r.logger,
 		RunRegistry: r.runRegistry,
@@ -1531,6 +1864,265 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 
 	r.logger.Debug("prepareStrategyRun returning successfully")
 	return runner, prepared, strategyConfig, eventsCh, nil
+}
+
+type strategyVersionPersister struct {
+	delegate         agent.DecisionPersister
+	executionAccount domain.ExecutionAccountBinding
+	versionID        uuid.UUID
+	promotionLineage *domain.PromotionExecutionLineage
+	mu               sync.RWMutex
+	scopes           map[pipelineRunScopeKey]persistedRunScope
+}
+
+type pipelineRunScopeKey struct {
+	id        uuid.UUID
+	tradeDate string
+}
+
+type persistedRunScope struct {
+	scope       agent.PersistenceScope
+	finalizedAt time.Time
+}
+
+func (p *strategyVersionPersister) RecordRunStart(ctx context.Context, run *domain.PipelineRun) error {
+	if p.versionID != uuid.Nil {
+		if err := bindStrategyRunScope(run, p.executionAccount, p.versionID); err != nil {
+			return err
+		}
+		if p.promotionLineage != nil {
+			bindPromotionRunLineage(run, p.versionID, *p.promotionLineage)
+		}
+	}
+	scope, err := persistenceScopeFromRun(run)
+	if err != nil {
+		return err
+	}
+	key := scopeKey(scope.Run)
+	p.mu.Lock()
+	if p.scopes == nil {
+		p.scopes = make(map[pipelineRunScopeKey]persistedRunScope)
+	}
+	cutoff := time.Now().Add(-time.Minute)
+	for stale, stored := range p.scopes {
+		if !stored.finalizedAt.IsZero() && stored.finalizedAt.Before(cutoff) {
+			delete(p.scopes, stale)
+		}
+	}
+	p.scopes[key] = persistedRunScope{scope: scope}
+	p.mu.Unlock()
+	if err := p.delegate.RecordRunStart(ctx, run); err != nil {
+		p.mu.Lock()
+		delete(p.scopes, key)
+		p.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func optionalActivePromotionLineage(config json.RawMessage, accountID uuid.UUID) (*domain.PromotionExecutionLineage, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(config, &envelope); err != nil {
+		return nil, fmt.Errorf("parse strategy config for promotion lineage: %w", err)
+	}
+	if _, exists := envelope["research_lifecycle"]; !exists {
+		return nil, nil
+	}
+	lineage, err := domain.ParseActivePromotionExecutionLineage(config, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return &lineage, nil
+}
+
+func bindPromotionRunLineage(run *domain.PipelineRun, versionID uuid.UUID, lineage domain.PromotionExecutionLineage) {
+	run.ExecutionVersionID = versionID
+	run.EvaluationScopeID = lineage.EvaluationScopeID
+	run.ManifestID = lineage.ManifestID
+	run.QualityResultID = lineage.QualityResultID
+	run.DeploymentID = lineage.DeploymentID
+	run.PromotionDecisionID = lineage.PromotionDecisionID
+	run.CapitalBindingID = lineage.CapitalBindingID
+	run.RiskPolicyVersion = lineage.RiskPolicyVersion
+}
+
+func (p *strategyVersionPersister) FinalizeRun(ctx context.Context, runID uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	scope, err := p.scope(domain.PipelineRunRef{ID: runID, TradeDate: tradeDate})
+	if err != nil {
+		return repository.PipelineRunFinalizationReceipt{}, err
+	}
+	if finalization.Event != nil {
+		if err := applyEventPersistenceScope(finalization.Event, scope); err != nil {
+			return repository.PipelineRunFinalizationReceipt{}, err
+		}
+	}
+	receipt, err := p.delegate.FinalizeRun(ctx, runID, tradeDate, finalization)
+	if err == nil {
+		p.mu.Lock()
+		stored := p.scopes[scopeKey(scope.Run)]
+		stored.finalizedAt = time.Now()
+		p.scopes[scopeKey(scope.Run)] = stored
+		p.mu.Unlock()
+	}
+	return receipt, err
+}
+
+func (p *strategyVersionPersister) SupportsSnapshots() bool { return p.delegate.SupportsSnapshots() }
+func (p *strategyVersionPersister) PersistSnapshot(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error {
+	scope, err := p.scope(domain.PipelineRunRef{ID: snapshot.PipelineRunID, TradeDate: snapshot.PipelineRunTradeDate})
+	if err != nil {
+		return err
+	}
+	if err := rejectPersistenceScopeConflict(snapshot.AccountID, snapshot.Environment, snapshot.OriginType, snapshot.OriginID, scope); err != nil {
+		return fmt.Errorf("strategy version snapshot: %w", err)
+	}
+	snapshot.AccountID = scope.AccountID
+	snapshot.Environment = scope.Environment
+	snapshot.OriginType = scope.OriginType
+	snapshot.OriginID = scope.OriginID
+	snapshot.PipelineRunID = scope.Run.ID
+	snapshot.PipelineRunTradeDate = scope.Run.TradeDate
+	return p.delegate.PersistSnapshot(ctx, snapshot)
+}
+
+func (p *strategyVersionPersister) PersistDecision(ctx context.Context, ref domain.PipelineRunRef, node agent.Node, roundNumber *int, output string, response *agent.DecisionLLMResponse) error {
+	scope, err := p.scope(ref)
+	if err != nil {
+		return err
+	}
+	delegate, ok := p.delegate.(agent.ScopedDecisionPersister)
+	if !ok {
+		return errors.New("strategy version persister requires scoped decision persistence")
+	}
+	return delegate.PersistDecisionScoped(ctx, scope, node, roundNumber, output, response)
+}
+
+func (p *strategyVersionPersister) PersistEvent(ctx context.Context, event *domain.AgentEvent) error {
+	if event.PipelineRunID == nil || event.PipelineRunTradeDate == nil {
+		return errors.New("strategy version event requires complete pipeline run identity")
+	}
+	scope, err := p.scope(domain.PipelineRunRef{ID: *event.PipelineRunID, TradeDate: *event.PipelineRunTradeDate})
+	if err != nil {
+		return err
+	}
+	if err := applyEventPersistenceScope(event, scope); err != nil {
+		return err
+	}
+	return p.delegate.PersistEvent(ctx, event)
+}
+
+func persistenceScopeFromRun(run *domain.PipelineRun) (agent.PersistenceScope, error) {
+	if run == nil || run.AccountID == uuid.Nil || run.Environment == "" || run.OriginType != "strategy_version" || strings.TrimSpace(run.OriginID) == "" {
+		return agent.PersistenceScope{}, errors.New("pipeline run has incomplete strategy ownership")
+	}
+	versionID, err := uuid.Parse(run.OriginID)
+	if err != nil || versionID == uuid.Nil {
+		return agent.PersistenceScope{}, errors.New("pipeline run has invalid strategy version origin")
+	}
+	executionScope, err := execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	if err != nil {
+		return agent.PersistenceScope{}, err
+	}
+	originType, originID := executionScope.Origin()
+	return agent.PersistenceScope{AccountID: executionScope.AccountID(), Environment: executionScope.Environment(), OriginType: string(originType), OriginID: originID, Run: domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}}, nil
+}
+
+func scopeKey(ref domain.PipelineRunRef) pipelineRunScopeKey {
+	return pipelineRunScopeKey{id: ref.ID, tradeDate: ref.TradeDate.Format("2006-01-02")}
+}
+
+func (p *strategyVersionPersister) scope(ref domain.PipelineRunRef) (agent.PersistenceScope, error) {
+	p.mu.RLock()
+	stored, ok := p.scopes[scopeKey(ref)]
+	p.mu.RUnlock()
+	scope := stored.scope
+	if !ok || scope.Run.ID != ref.ID || !scope.Run.TradeDate.Equal(ref.TradeDate) {
+		return agent.PersistenceScope{}, errors.New("untrusted or incomplete pipeline run scope")
+	}
+	return scope, nil
+}
+
+func applyEventPersistenceScope(event *domain.AgentEvent, scope agent.PersistenceScope) error {
+	if err := rejectPersistenceScopeConflict(event.AccountID, event.Environment, event.OriginType, event.OriginID, scope); err != nil {
+		return fmt.Errorf("strategy version event: %w", err)
+	}
+	if event.PipelineRunID != nil && *event.PipelineRunID != scope.Run.ID {
+		return errors.New("strategy version event has conflicting pipeline run ID")
+	}
+	if event.PipelineRunTradeDate != nil && !event.PipelineRunTradeDate.Equal(scope.Run.TradeDate) {
+		return errors.New("strategy version event has conflicting pipeline run trade date")
+	}
+	event.AccountID = scope.AccountID
+	event.Environment = scope.Environment
+	event.OriginType = scope.OriginType
+	event.OriginID = scope.OriginID
+	runID := scope.Run.ID
+	tradeDate := scope.Run.TradeDate
+	event.PipelineRunID = &runID
+	event.PipelineRunTradeDate = &tradeDate
+	return nil
+}
+
+func rejectPersistenceScopeConflict(accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, scope agent.PersistenceScope) error {
+	if accountID != uuid.Nil && accountID != scope.AccountID {
+		return errors.New("conflicting account ownership")
+	}
+	if environment != "" && environment != scope.Environment {
+		return errors.New("conflicting environment ownership")
+	}
+	if originType != "" && originType != scope.OriginType {
+		return errors.New("conflicting origin type ownership")
+	}
+	if originID != "" && originID != scope.OriginID {
+		return errors.New("conflicting origin ID ownership")
+	}
+	return nil
+}
+
+func bindStrategyRunScope(run *domain.PipelineRun, executionAccount domain.ExecutionAccountBinding, versionID uuid.UUID) error {
+	if err := executionAccount.Validate(); err != nil {
+		return err
+	}
+	scope, err := execution.NewStrategyExecutionScope(executionAccount.AccountID(), executionAccount.Environment(), versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	if err != nil {
+		return err
+	}
+	originType, originID := scope.Origin()
+	run.AccountID = scope.AccountID()
+	run.Environment = scope.Environment()
+	run.OriginType = string(originType)
+	run.OriginID = originID
+	return nil
+}
+
+func executionScopeFromPersistedRun(run *domain.PipelineRun, strategy domain.Strategy) (execution.ExecutionScope, error) {
+	if run == nil {
+		return execution.ExecutionScope{}, errors.New("persisted run is required")
+	}
+	versionID, err := uuid.Parse(run.OriginID)
+	if err != nil || versionID == uuid.Nil || run.StrategyID != strategy.ID || run.OriginType != string(ledger.ExecutionOriginStrategyVersion) {
+		return execution.ExecutionScope{}, errors.New("persisted run ownership does not match strategy")
+	}
+	if strategy.ExecutionStrategyVersionID != nil && *strategy.ExecutionStrategyVersionID != versionID {
+		return execution.ExecutionScope{}, errors.New("persisted run version does not match strategy binding")
+	}
+	if strategy.ID == uuid.Nil {
+		return execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
+	}
+	return execution.NewStrategyExecutionScope(run.AccountID, run.Environment, versionID, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, strategy.ID)
+}
+
+func pipelineSnapshotFromScope(scope execution.ExecutionScope, dataType string, payload json.RawMessage) (*domain.PipelineRunSnapshot, error) {
+	run, ok := scope.PipelineRun()
+	if !ok {
+		return nil, errors.New("pipeline snapshot requires run-scoped execution ownership")
+	}
+	originType, originID := scope.Origin()
+	return &domain.PipelineRunSnapshot{
+		ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(),
+		OriginType: string(originType), OriginID: originID, PipelineRunID: run.ID,
+		PipelineRunTradeDate: run.TradeDate, DataType: dataType, Payload: payload, CreatedAt: time.Now().UTC(),
+	}, nil
 }
 
 func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig) (agent.InitialStateSeed, error) {
@@ -2036,18 +2628,11 @@ func globalSettingsFromConfig(cfg config.Config) agent.GlobalSettings {
 	}
 }
 
-func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig, strategyConfig *agent.StrategyConfig) (*execution.OrderManager, error) {
+func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig, strategyConfig *agent.StrategyConfig, scope execution.ExecutionScope) (*execution.OrderManager, error) {
 	gate, err := r.liveGateForStrategy(strategy)
 	if err != nil {
 		return nil, err
 	}
-	if !strategy.IsPaper {
-		brokerName := brokerNameForStrategy(strategy)
-		if allowed, denial := gate.Allows(&strategy.ID, brokerName); !allowed {
-			return nil, fmt.Errorf("order_manager: live execution denied for %s: %s", brokerName, denial.Message)
-		}
-	}
-
 	broker, brokerName, err := r.newBrokerForStrategy(strategy)
 	if err != nil {
 		return nil, err
@@ -2063,17 +2648,12 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 		r.tradeRepo,
 		r.auditLogRepo,
 		r.eventRepo,
-		applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger), r.cfg.Risk.Polymarket.MaxPositionUSDC),
+		applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope), r.cfg.Risk.Polymarket.MaxPositionUSDC),
 		r.logger,
-	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper).WithFinancialLifecycleRepo(func() repository.FinancialLifecycleRepository {
-		if strategy.IsPaper {
-			return r.financialRepo
-		}
-		return nil
-	}()), nil
+	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper).WithAcceptedOrderFillWriter(r.economicWriter), nil
 }
 
-func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, finalSignal execution.FinalSignal, plan execution.TradingPlan) error {
+func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, finalSignal execution.FinalSignal, plan execution.TradingPlan, optionSpread *domain.OptionSpread) error {
 	if r == nil {
 		return nil
 	}
@@ -2091,19 +2671,34 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 	}
 	maxLossPct := opportunityMaxLossPct(finalSignal.Signal, plan.EntryPrice, plan.StopLoss)
 	proposedNotional := plan.PositionSize * plan.EntryPrice
+	scope, err := executionScopeFromPersistedRun(run, strategy)
+	if err != nil {
+		return fmt.Errorf("portfolio opportunity: derive source scope: %w", err)
+	}
 	opportunity, reason, err := portfolio.BuildOpportunity(portfolio.OpportunityBuildInput{
+		Scope:             scope,
 		Strategy:          strategy,
 		Run:               run,
 		Signal:            finalSignal.Signal,
 		PredictionSide:    plan.Side,
 		Confidence:        firstPositive(finalSignal.Confidence, plan.Confidence),
-		EdgePct:           positiveEdgeFromRiskReward(plan.RiskReward),
-		ExpectedReturnPct: positiveEdgeFromRiskReward(plan.RiskReward),
+		EdgePct:           firstPositive(plan.NetEV, positiveEdgeFromRiskReward(plan.RiskReward)),
+		ExpectedReturnPct: firstPositive(plan.NetEV, positiveEdgeFromRiskReward(plan.RiskReward)),
 		MaxLossPct:        maxLossPct,
 		EntryPrice:        plan.EntryPrice,
+		LiquidityUSD:      plan.Depth,
+		SpreadPct:         plan.Spread,
 		ProposedNotional:  proposedNotional,
 		Reason:            plan.Rationale,
 		Evidence:          opportunityEvidence(plan),
+		OptionSpread:      optionSpread,
+		QuoteObservedAt: func() *time.Time {
+			if optionSpread == nil || optionSpread.QuoteObservedAt.IsZero() {
+				return nil
+			}
+			value := optionSpread.QuoteObservedAt
+			return &value
+		}(),
 	}, portfolio.OpportunityBuilderConfig{})
 	if err != nil {
 		return fmt.Errorf("portfolio opportunity: build (%s): %w", reason, err)
@@ -2118,8 +2713,17 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 }
 
 func (r *realStrategyRunner) portfolioAllocatorOwnsPaperExecution(strategy domain.Strategy, signal domain.PipelineSignal) bool {
-	if r == nil || r.portfolioAllocatorMode != portfolio.AllocatorModePaper || !strategy.IsPaper {
+	if r == nil || !strategy.IsPaper || r.portfolioAllocatorMode != portfolio.AllocatorModePaper && r.portfolioAllocatorMode != portfolio.AllocatorModeShadow {
 		return false
+	}
+	// Promoted paper strategies always route through the allocator. In shadow
+	// mode that authority records replayable decisions and makes no broker call;
+	// in paper mode it owns the one approved submission path.
+	if _, err := domain.ParseActivePromotionExecutionLineage(strategy.Config, r.executionAccount.AccountID()); err != nil {
+		return false
+	}
+	if strategy.MarketType.Normalize() == domain.MarketTypeOptions {
+		return signal == domain.PipelineSignalBuy
 	}
 	return signal == domain.PipelineSignalBuy || signal == domain.PipelineSignalSell
 }
@@ -2178,6 +2782,9 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 	if r == nil || strategy.IsPaper || !r.cfg.Features.EnableLiveTrading {
 		return execution.LiveGateConfig{}, nil
 	}
+	if strategy.ExecutionStrategyVersionID == nil || *strategy.ExecutionStrategyVersionID == uuid.Nil {
+		return execution.LiveGateConfig{}, fmt.Errorf("live trading requires an immutable strategy-version binding")
+	}
 
 	allowedStrategies := make(map[uuid.UUID]bool, len(r.cfg.LiveTradingAllowedStrategies))
 	for _, raw := range r.cfg.LiveTradingAllowedStrategies {
@@ -2188,6 +2795,9 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 		strategyID, err := uuid.Parse(raw)
 		if err != nil {
 			return execution.LiveGateConfig{}, fmt.Errorf("parse LIVE_TRADING_ALLOWED_STRATEGIES value %q: %w", raw, err)
+		}
+		if strategyID == strategy.ID {
+			return execution.LiveGateConfig{}, fmt.Errorf("LIVE_TRADING_ALLOWED_STRATEGIES must contain immutable strategy-version UUIDs, not legacy strategy ID %s", strategyID)
 		}
 		allowedStrategies[strategyID] = true
 	}
@@ -2202,6 +2812,59 @@ func (r *realStrategyRunner) liveGateForStrategy(strategy domain.Strategy) (exec
 	}
 
 	return execution.LiveGateConfig{EnableLiveTrading: true, AllowedStrategies: allowedStrategies, AllowedBrokers: allowedBrokers}, nil
+}
+
+func validatePositionOrigins(positions []domain.Position, binding domain.ExecutionAccountBinding, versionID uuid.UUID) error {
+	for _, position := range positions {
+		if position.AccountID != binding.AccountID() || position.Environment != binding.Environment() || position.OriginType != "strategy_version" || position.OriginID != versionID.String() {
+			return fmt.Errorf("position %s has mismatched execution origin", position.ID)
+		}
+	}
+	return nil
+}
+
+func loadResultPositions(ctx context.Context, repo repository.PositionRepository, binding domain.ExecutionAccountBinding, versionID uuid.UUID) ([]domain.Position, error) {
+	scoped, ok := repo.(repository.ExecutionScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("canonical execution-scoped position repository is required")
+	}
+	const pageSize = 100
+	positions := make([]domain.Position, 0)
+	for offset := 0; ; offset += pageSize {
+		page, err := scoped.GetByExecutionScope(ctx, binding.AccountID(), binding.Environment(), string(ledger.ExecutionOriginStrategyVersion), versionID.String(), repository.PositionFilter{}, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		positions = append(positions, page...)
+		if len(page) < pageSize {
+			break
+		}
+	}
+	return positions, validatePositionOrigins(positions, binding, versionID)
+}
+
+func loadResultOrders(ctx context.Context, repo repository.OrderRepository, ref domain.PipelineRunRef) ([]domain.Order, error) {
+	const pageSize = 100
+	orders := make([]domain.Order, 0)
+	for offset := 0; ; offset += pageSize {
+		page, err := repo.GetByRun(ctx, ref, repository.OrderFilter{}, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		orders = append(orders, page...)
+		if len(page) < pageSize {
+			return orders, nil
+		}
+	}
+}
+
+func validateResultOrders(orders []domain.Order, binding domain.ExecutionAccountBinding, versionID, runID uuid.UUID, tradeDate time.Time) error {
+	for _, order := range orders {
+		if order.AccountID != binding.AccountID() || order.Environment != binding.Environment() || order.OriginType != string(ledger.ExecutionOriginStrategyVersion) || order.OriginID != versionID.String() || order.PipelineRunID == nil || *order.PipelineRunID != runID || order.PipelineRunTradeDate == nil || !order.PipelineRunTradeDate.Equal(tradeDate) {
+			return fmt.Errorf("order %s has mismatched account, environment, origin, or pipeline identity", order.ID)
+		}
+	}
+	return nil
 }
 
 func (r *realStrategyRunner) recordPipelineMetrics(run domain.PipelineRun) {
@@ -2386,7 +3049,7 @@ func (r *realStrategyRunner) setRiskPortfolioSnapshotSource(broker execution.Bro
 	}
 
 	engineImpl.SetPortfolioSnapshotFunc(func(ctx context.Context) (risk.Portfolio, error) {
-		return execution.BuildRiskPortfolioSnapshot(ctx, broker, r.positionRepo)
+		return execution.BuildRiskPortfolioSnapshot(ctx, r.executionAccount, broker, r.positionRepo)
 	})
 }
 
@@ -2413,7 +3076,7 @@ func latestSocialSnapshot(snapshots []data.SocialSentiment) *data.SocialSentimen
 // broadcasts them to the WebSocket hub. It exits when the channel is closed.
 func (r *realStrategyRunner) drainPipelineEvents(events <-chan agent.PipelineEvent) {
 	for e := range events {
-		msg := pipelineEventToWSMessage(e)
+		msg := pipelineEventToWSMessage(e, r.executionAccount.AccountID())
 		if msg.Type == "" {
 			continue // unmapped event type — skip
 		}
@@ -2423,11 +3086,13 @@ func (r *realStrategyRunner) drainPipelineEvents(events <-chan agent.PipelineEve
 
 // pipelineEventToWSMessage converts an agent.PipelineEvent to an api.WSMessage
 // using the event-type vocabulary defined in internal/api/hub.go.
-func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
+func pipelineEventToWSMessage(e agent.PipelineEvent, accountID uuid.UUID) api.WSMessage {
 	switch e.Type {
 	case agent.PipelineStarted:
 		return api.WSMessage{
 			Type:       api.EventPipelineStart,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"phase": e.Phase, "ticker": e.Ticker},
@@ -2436,6 +3101,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 	case agent.AgentDecisionMade:
 		return api.WSMessage{
 			Type:       api.EventAgentDecision,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"agent_role": e.AgentRole, "phase": e.Phase},
@@ -2444,6 +3111,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 	case agent.DebateRoundCompleted:
 		return api.WSMessage{
 			Type:       api.EventDebateRound,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"phase": e.Phase, "round": e.Round},
@@ -2452,6 +3121,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 	case agent.PipelineError:
 		return api.WSMessage{
 			Type:       api.EventError,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"error": e.Error, "timed_out": e.TimedOut, "used_fallback": e.UsedFallback},
@@ -2463,6 +3134,8 @@ func pipelineEventToWSMessage(e agent.PipelineEvent) api.WSMessage {
 		}
 		return api.WSMessage{
 			Type:       api.EventPipelineHealth,
+			AccountID:  accountID,
+			Scope:      "account",
 			StrategyID: e.StrategyID,
 			RunID:      e.PipelineRunID,
 			Data:       map[string]any{"timed_out": e.TimedOut, "used_fallback": e.UsedFallback},
@@ -2520,7 +3193,7 @@ func (r *realStrategyRunner) dispatchNotifications(ctx context.Context, strategy
 		return fmt.Errorf("dispatch signal notification: %w", err)
 	}
 
-	decisions, err := r.decisionRepo.GetByRun(ctx, run.ID, repository.AgentDecisionFilter{}, 100, 0)
+	decisions, err := r.decisionRepo.GetByRun(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}, repository.AgentDecisionFilter{}, 100, 0)
 	if err != nil {
 		return fmt.Errorf("load run decisions: %w", err)
 	}
@@ -2543,13 +3216,13 @@ func (r *realStrategyRunner) dispatchNotifications(ctx context.Context, strategy
 	return nil
 }
 
-func (r *realStrategyRunner) findRun(ctx context.Context, runID uuid.UUID) (*domain.PipelineRun, error) {
-	run, err := r.runRepo.GetByID(ctx, runID)
+func (r *realStrategyRunner) findRun(ctx context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
+	run, err := r.runRepo.Get(ctx, ref)
 	if err == nil {
 		return run, nil
 	}
 	if errors.Is(err, repository.ErrNotFound) {
-		return nil, fmt.Errorf("run %s: %w", runID, repository.ErrNotFound)
+		return nil, fmt.Errorf("run %s: %w", ref.ID, repository.ErrNotFound)
 	}
 	return nil, err
 }

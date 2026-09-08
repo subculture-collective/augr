@@ -236,7 +236,7 @@ func (o *JobOrchestrator) completeCurrentDataRefresh(summary map[string]int, fre
 
 // hotScan scores the exact fresh intraday output from current_data_refresh.
 func (o *JobOrchestrator) hotScan(ctx context.Context) error {
-	summary := map[string]int{"selected": 0, "scored": 0, "fetch_errors": 0, "insufficient": 0, "stale": 0, "score_errors": 0, "significant_tickers": 0, "trigger_requests": 0, "strategy_list_failed": 0}
+	summary := map[string]int{"selected": 0, "scored": 0, "fetch_errors": 0, "insufficient": 0, "stale": 0, "score_untracked": 0, "score_errors": 0, "significant_tickers": 0, "trigger_requests": 0, "strategy_list_failed": 0}
 	defer func() { o.SetLastSummary("hot_scan", summary) }()
 	if o.deps.Universe == nil || o.deps.DataService == nil {
 		return fmt.Errorf("hot_scan: universe and data service are required")
@@ -279,7 +279,12 @@ func (o *JobOrchestrator) hotScan(ctx context.Context) error {
 		}
 
 		score := scoreFromSnapshot(changePct, lastBar.Volume, prevBar.Volume, lastBar.Close) * universe.IndexBoost(ticker)
-		if err := o.deps.Universe.UpdateScore(ctx, ticker, score); err != nil {
+		if err := o.deps.Universe.UpdateScore(ctx, ticker, score); errors.Is(err, repository.ErrNotFound) {
+			summary["score_untracked"]++
+			o.logger.Debug("hot_scan: score computed for operational ticker outside universe catalog",
+				slog.String("ticker", ticker),
+			)
+		} else if err != nil {
 			summary["score_errors"]++
 			o.logger.Warn("hot_scan: update score failed",
 				slog.String("ticker", ticker),
@@ -380,7 +385,7 @@ func canonicalTriggeredStrategies(strategies []domain.Strategy) []domain.Strateg
 
 // deepScan scores operational stock tickers using locally stored daily OHLCV.
 func (o *JobOrchestrator) deepScan(ctx context.Context) error {
-	summary := map[string]int{"selected": 0, "positions": 0, "strategies": 0, "watchlist": 0, "scored": 0, "fetch_errors": 0, "insufficient": 0, "stale": 0, "score_errors": 0}
+	summary := map[string]int{"selected": 0, "positions": 0, "strategies": 0, "watchlist": 0, "scored": 0, "fetch_errors": 0, "insufficient": 0, "stale": 0, "score_untracked": 0, "score_errors": 0}
 	defer func() { o.SetLastSummary("deep_scan", summary) }()
 	if o.deps.Universe == nil || o.deps.DataService == nil {
 		return fmt.Errorf("deep_scan: universe and data service are required")
@@ -435,7 +440,12 @@ func (o *JobOrchestrator) deepScan(ctx context.Context) error {
 		}
 
 		score := scoreFromSnapshot(changePct, lastBar.Volume, prevBar.Volume, lastBar.Close) * universe.IndexBoost(ticker)
-		if err := o.deps.Universe.UpdateScore(ctx, ticker, score); err != nil {
+		if err := o.deps.Universe.UpdateScore(ctx, ticker, score); errors.Is(err, repository.ErrNotFound) {
+			summary["score_untracked"]++
+			o.logger.Debug("deep_scan: score computed for operational ticker outside universe catalog",
+				slog.String("ticker", ticker),
+			)
+		} else if err != nil {
 			summary["score_errors"]++
 			o.logger.Warn("deep_scan: update score failed",
 				slog.String("ticker", ticker),
@@ -559,22 +569,24 @@ func closingDailyProviderProven(admittedStart time.Time, providerRequests, fresh
 func marketScanCompletionError(job string, summary map[string]int, minimumCoveragePercent int) error {
 	selected := summary["selected"]
 	scored := summary["scored"]
+	untracked := summary["score_untracked"]
+	covered := scored + untracked
 	coverage := 0
 	if selected > 0 {
-		coverage = scored * 100 / selected
+		coverage = covered * 100 / selected
 	}
 	if summary["score_errors"] > 0 || summary["strategy_list_failed"] > 0 {
 		return fmt.Errorf("%s: infrastructure failure: score_errors=%d strategy_list_failed=%d", job, summary["score_errors"], summary["strategy_list_failed"])
 	}
-	if selected == 0 || scored == 0 || scored*100 < selected*minimumCoveragePercent {
-		return fmt.Errorf("%s: unusable coverage: scored=%d selected=%d coverage=%d%% minimum=%d%%", job, scored, selected, coverage, minimumCoveragePercent)
+	if selected == 0 || covered == 0 || covered*100 < selected*minimumCoveragePercent {
+		return fmt.Errorf("%s: unusable coverage: scored=%d score_untracked=%d selected=%d coverage=%d%% minimum=%d%%", job, scored, untracked, selected, coverage, minimumCoveragePercent)
 	}
 	incomplete := summary["fetch_errors"] + summary["insufficient"] + summary["stale"]
-	if incomplete == 0 && scored == selected {
+	if incomplete == 0 && covered == selected {
 		return nil
 	}
-	return Degradedf("%s: partial coverage: scored=%d selected=%d coverage=%d%% fetch_errors=%d insufficient=%d stale=%d", job,
-		scored, selected, coverage, summary["fetch_errors"], summary["insufficient"], summary["stale"])
+	return Degradedf("%s: partial coverage: scored=%d score_untracked=%d selected=%d coverage=%d%% fetch_errors=%d insufficient=%d stale=%d", job,
+		scored, untracked, selected, coverage, summary["fetch_errors"], summary["insufficient"], summary["stale"])
 }
 
 func intradayBarFresh(now, latest time.Time) bool {

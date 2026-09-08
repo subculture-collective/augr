@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -18,23 +17,33 @@ import (
 
 // PipelineRunRepo implements repository.PipelineRunRepository using PostgreSQL.
 type PipelineRunRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that PipelineRunRepo satisfies PipelineRunRepository.
 var _ repository.PipelineRunRepository = (*PipelineRunRepo)(nil)
 
-const pipelineRunSelectColumns = `id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings`
+const pipelineRunSelectColumns = `id, account_id, environment, origin_type, origin_id,
+	execution_version_id,evaluation_scope_id,manifest_id,quality_result_id,deployment_id,promotion_decision_id,capital_binding_id,risk_policy_version,
+	strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings`
 
 // NewPipelineRunRepo returns a PipelineRunRepo backed by the given connection
 // pool.
-func NewPipelineRunRepo(pool *pgxpool.Pool) *PipelineRunRepo {
-	return &PipelineRunRepo{pool: pool}
+func NewPipelineRunRepo(pool *pgxpool.Pool, accountID uuid.UUID) *PipelineRunRepo {
+	return &PipelineRunRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new pipeline run, generating an ID only when one was not
 // supplied by the caller.
 func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) error {
+	if run.AccountID != uuid.Nil && run.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create pipeline run: account mismatch")
+	}
+	run.AccountID = r.accountID
+	if err := validatePipelineRunPromotionLineage(run); err != nil {
+		return fmt.Errorf("postgres: create pipeline run: %w", err)
+	}
 	configSnapshot, err := marshalConfigSnapshot(run.ConfigSnapshot)
 	if err != nil {
 		return err
@@ -44,11 +53,12 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 		run.ID = uuid.New()
 	}
 
-	_, err = r.pool.Exec(ctx,
-		`INSERT INTO pipeline_runs (
-			id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings
-		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+	query := `INSERT INTO pipeline_runs (
+			id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings,
+			account_id, environment, origin_type, origin_id, execution_version_id,evaluation_scope_id,manifest_id,quality_result_id,
+			deployment_id,promotion_decision_id,capital_binding_id,risk_policy_version
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,$16,$17,$18,$19,$20,$21,$22,$23)`
+	args := []any{
 		run.ID,
 		run.StrategyID,
 		run.Ticker,
@@ -60,7 +70,11 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 		run.ErrorMessage,
 		configSnapshot,
 		run.PhaseTimings,
-	)
+		r.accountID, run.Environment, run.OriginType, run.OriginID,
+		nullableUUID(run.ExecutionVersionID), nullableUUID(run.EvaluationScopeID), nullableUUID(run.ManifestID), nullableUUID(run.QualityResultID),
+		nullableUUID(run.DeploymentID), nullableUUID(run.PromotionDecisionID), nullableUUID(run.CapitalBindingID), nullString(run.RiskPolicyVersion),
+	}
+	_, err = r.pool.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("postgres: create pipeline run: %w", err)
 	}
@@ -68,45 +82,41 @@ func (r *PipelineRunRepo) Create(ctx context.Context, run *domain.PipelineRun) e
 	return nil
 }
 
-// GetByID retrieves a pipeline run by its ID without requiring the caller to
-// know the storage partition trade date. It returns ErrNotFound when no row
-// matches.
-func (r *PipelineRunRepo) GetByID(ctx context.Context, id uuid.UUID) (*domain.PipelineRun, error) {
-	row := r.pool.QueryRow(ctx,
-		`SELECT id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings
-		 FROM pipeline_runs
-		 WHERE id = $1
-		 ORDER BY trade_date DESC, started_at DESC, id DESC
-		 LIMIT 1`,
-		id,
-	)
-
-	run, err := scanPipelineRun(row)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: get pipeline run %s: %w", id, ErrNotFound)
-		}
-		return nil, fmt.Errorf("postgres: get pipeline run: %w", err)
+func validatePipelineRunPromotionLineage(run *domain.PipelineRun) error {
+	if run == nil {
+		return errors.New("pipeline run is required")
 	}
-
-	return run, nil
+	ids := []uuid.UUID{run.ExecutionVersionID, run.EvaluationScopeID, run.ManifestID, run.QualityResultID, run.DeploymentID, run.PromotionDecisionID, run.CapitalBindingID}
+	nonzero := 0
+	for _, id := range ids {
+		if id != uuid.Nil {
+			nonzero++
+		}
+	}
+	if nonzero == 0 && run.RiskPolicyVersion == "" {
+		return nil
+	}
+	if nonzero != len(ids) || strings.TrimSpace(run.RiskPolicyVersion) == "" || run.Environment != domain.AccountEnvironmentPaperScored ||
+		run.OriginType != "strategy_version" || run.OriginID != run.ExecutionVersionID.String() {
+		return errors.New("promotion lineage is incomplete or conflicts with execution scope")
+	}
+	return nil
 }
 
 // Get retrieves a pipeline run by its composite key. It returns ErrNotFound
 // when no row matches.
-func (r *PipelineRunRepo) Get(ctx context.Context, id uuid.UUID, tradeDate time.Time) (*domain.PipelineRun, error) {
+func (r *PipelineRunRepo) Get(ctx context.Context, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	row := r.pool.QueryRow(ctx,
-		`SELECT id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings
+		`SELECT `+pipelineRunSelectColumns+`
 		 FROM pipeline_runs
-		 WHERE id = $1 AND trade_date = $2::date`,
-		id,
-		tradeDate,
+		 WHERE id = $1 AND trade_date = $2::date AND account_id = $3`,
+		ref.ID, ref.TradeDate, r.accountID,
 	)
 
 	run, err := scanPipelineRun(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("postgres: get pipeline run %s on %s: %w", id, tradeDate.Format("2006-01-02"), ErrNotFound)
+			return nil, fmt.Errorf("postgres: get pipeline run %s on %s: %w", ref.ID, ref.TradeDate.Format("2006-01-02"), ErrNotFound)
 		}
 		return nil, fmt.Errorf("postgres: get pipeline run: %w", err)
 	}
@@ -116,7 +126,7 @@ func (r *PipelineRunRepo) Get(ctx context.Context, id uuid.UUID, tradeDate time.
 
 // List returns pipeline runs matching the provided filter with pagination.
 func (r *PipelineRunRepo) List(ctx context.Context, filter repository.PipelineRunFilter, limit, offset int) ([]domain.PipelineRun, error) {
-	query, args := buildPipelineRunListQuery(filter, limit, offset)
+	query, args := buildPipelineRunListQuery(r.accountID, filter, limit, offset)
 
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -143,7 +153,7 @@ func (r *PipelineRunRepo) List(ctx context.Context, filter repository.PipelineRu
 // Count returns the total number of pipeline runs matching the filter,
 // ignoring any pagination (limit/offset).
 func (r *PipelineRunRepo) Count(ctx context.Context, filter repository.PipelineRunFilter) (int, error) {
-	query, args := buildPipelineRunCountQuery(filter)
+	query, args := buildPipelineRunCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count pipeline runs: %w", err)
@@ -152,7 +162,7 @@ func (r *PipelineRunRepo) Count(ctx context.Context, filter repository.PipelineR
 }
 
 func (r *PipelineRunRepo) CountBySignal(ctx context.Context, filter repository.PipelineRunFilter) (map[domain.PipelineSignal]int, error) {
-	query, args := buildPipelineRunGroupedCountQuery("signal", filter)
+	query, args := buildPipelineRunGroupedCountQuery("signal", r.accountID, filter)
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: count pipeline runs by signal: %w", err)
@@ -171,7 +181,7 @@ func (r *PipelineRunRepo) CountBySignal(ctx context.Context, filter repository.P
 }
 
 func (r *PipelineRunRepo) CountByStatus(ctx context.Context, filter repository.PipelineRunFilter) (map[domain.PipelineStatus]int, error) {
-	query, args := buildPipelineRunGroupedCountQuery("status", filter)
+	query, args := buildPipelineRunGroupedCountQuery("status", r.accountID, filter)
 	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: count pipeline runs by status: %w", err)
@@ -191,7 +201,7 @@ func (r *PipelineRunRepo) CountByStatus(ctx context.Context, filter repository.P
 
 // buildPipelineRunCountQuery constructs a SELECT COUNT(*) query for pipeline runs
 // with the same filter conditions used by buildPipelineRunListQuery.
-func buildPipelineRunCountQuery(filter repository.PipelineRunFilter) (string, []any) {
+func buildPipelineRunCountQuery(accountID uuid.UUID, filter repository.PipelineRunFilter) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -203,6 +213,7 @@ func buildPipelineRunCountQuery(filter repository.PipelineRunFilter) (string, []
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))
@@ -230,15 +241,15 @@ func buildPipelineRunCountQuery(filter repository.PipelineRunFilter) (string, []
 	return base, args
 }
 
-func buildPipelineRunGroupedCountQuery(column string, filter repository.PipelineRunFilter) (string, []any) {
-	base, args := buildPipelineRunCountQuery(filter)
+func buildPipelineRunGroupedCountQuery(column string, accountID uuid.UUID, filter repository.PipelineRunFilter) (string, []any) {
+	base, args := buildPipelineRunCountQuery(accountID, filter)
 	return strings.Replace(base, "SELECT COUNT(*) FROM pipeline_runs", fmt.Sprintf("SELECT %s, COUNT(*) FROM pipeline_runs", column), 1) + " GROUP BY " + column + " ORDER BY " + column, args
 }
 
 // Finalize atomically changes a running pipeline run to a terminal state and,
 // when provided, inserts its terminal audit event in the same transaction.
-func (r *PipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
-	if err := validatePipelineRunFinalization(id, finalization); err != nil {
+func (r *PipelineRunRepo) Finalize(ctx context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	if err := validatePipelineRunFinalization(ref.ID, finalization); err != nil {
 		return repository.PipelineRunFinalizationReceipt{}, err
 	}
 
@@ -249,12 +260,12 @@ func (r *PipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate 
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	run, err := scanPipelineRun(tx.QueryRow(ctx,
-		`SELECT `+pipelineRunSelectColumns+` FROM pipeline_runs WHERE id = $1 AND trade_date = $2::date FOR UPDATE`,
-		id, tradeDate,
+		`SELECT `+pipelineRunSelectColumns+` FROM pipeline_runs WHERE id = $1 AND trade_date = $2::date AND account_id = $3 FOR UPDATE`,
+		ref.ID, ref.TradeDate, r.accountID,
 	))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: finalize pipeline run %s on %s: %w", id, tradeDate.Format("2006-01-02"), ErrNotFound)
+			return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: finalize pipeline run %s on %s: %w", ref.ID, ref.TradeDate.Format("2006-01-02"), ErrNotFound)
 		}
 		return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: lock pipeline run for finalization: %w", err)
 	}
@@ -273,16 +284,19 @@ func (r *PipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate 
 		`UPDATE pipeline_runs
 		 SET status = $1, completed_at = $2, error_message = $3,
 		     signal = COALESCE($4, signal), phase_timings = COALESCE($5, phase_timings)
-		 WHERE id = $6 AND trade_date = $7::date AND status = $8
+		 WHERE id = $6 AND trade_date = $7::date AND status = $8 AND account_id = $9
 		 RETURNING `+pipelineRunSelectColumns,
 		finalization.Status, finalization.CompletedAt, finalization.ErrorMessage,
-		finalization.Signal, nullableJSON(finalization.PhaseTimings), id, tradeDate, domain.PipelineStatusRunning,
+		finalization.Signal, nullableJSON(finalization.PhaseTimings), ref.ID, ref.TradeDate, domain.PipelineStatusRunning, r.accountID,
 	))
 	if err != nil {
 		return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: update pipeline run finalization: %w", err)
 	}
 
 	if finalization.Event != nil {
+		finalization.Event.AccountID, finalization.Event.Environment = run.AccountID, run.Environment
+		finalization.Event.OriginType, finalization.Event.OriginID = run.OriginType, run.OriginID
+		finalization.Event.PipelineRunTradeDate = &run.TradeDate
 		if err := insertTerminalAgentEvent(ctx, tx, finalization.Event); err != nil {
 			return repository.PipelineRunFinalizationReceipt{}, err
 		}
@@ -294,7 +308,7 @@ func (r *PipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate 
 }
 
 // RefineCompletedSignal atomically replaces only the signal of a completed run.
-func (r *PipelineRunRepo) RefineCompletedSignal(ctx context.Context, id uuid.UUID, tradeDate time.Time, expected, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *PipelineRunRepo) RefineCompletedSignal(ctx context.Context, ref domain.PipelineRunRef, expected, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	if expected != "" && !expected.IsValid() {
 		return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: expected pipeline signal %q is invalid", expected)
 	}
@@ -309,12 +323,12 @@ func (r *PipelineRunRepo) RefineCompletedSignal(ctx context.Context, id uuid.UUI
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	run, err := scanPipelineRun(tx.QueryRow(ctx,
-		`SELECT `+pipelineRunSelectColumns+` FROM pipeline_runs WHERE id = $1 AND trade_date = $2::date FOR UPDATE`,
-		id, tradeDate,
+		`SELECT `+pipelineRunSelectColumns+` FROM pipeline_runs WHERE id = $1 AND trade_date = $2::date AND account_id = $3 FOR UPDATE`,
+		ref.ID, ref.TradeDate, r.accountID,
 	))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: refine pipeline run signal %s on %s: %w", id, tradeDate.Format("2006-01-02"), ErrNotFound)
+			return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: refine pipeline run signal %s on %s: %w", ref.ID, ref.TradeDate.Format("2006-01-02"), ErrNotFound)
 		}
 		return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: lock pipeline run for signal refinement: %w", err)
 	}
@@ -325,9 +339,9 @@ func (r *PipelineRunRepo) RefineCompletedSignal(ctx context.Context, id uuid.UUI
 	} else if run.Status == domain.PipelineStatusCompleted && run.Signal == expected {
 		run, err = scanPipelineRun(tx.QueryRow(ctx,
 			`UPDATE pipeline_runs SET signal = $1
-			 WHERE id = $2 AND trade_date = $3::date AND status = $4 AND signal = $5
+			 WHERE id = $2 AND trade_date = $3::date AND status = $4 AND signal = $5 AND account_id = $6
 			 RETURNING `+pipelineRunSelectColumns,
-			signal, id, tradeDate, domain.PipelineStatusCompleted, expected,
+			signal, ref.ID, ref.TradeDate, domain.PipelineStatusCompleted, expected, r.accountID,
 		))
 		if err != nil {
 			return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("postgres: refine completed pipeline run signal: %w", err)
@@ -395,9 +409,9 @@ func insertTerminalAgentEvent(ctx context.Context, tx pgx.Tx, event *domain.Agen
 		return err
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO agent_events (pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		event.PipelineRunID, event.StrategyID, nullString(event.AgentRole.String()), event.EventKind,
+		`INSERT INTO agent_events (account_id, environment, origin_type, origin_id, pipeline_run_id, pipeline_run_trade_date, strategy_id, agent_role, event_kind, title, summary, tags, metadata)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		event.AccountID, event.Environment, event.OriginType, event.OriginID, event.PipelineRunID, event.PipelineRunTradeDate, event.StrategyID, nullString(event.AgentRole.String()), event.EventKind,
 		event.Title, nullString(event.Summary), event.Tags, metadata,
 	)
 	if err != nil {
@@ -409,14 +423,20 @@ func insertTerminalAgentEvent(ctx context.Context, tx pgx.Tx, event *domain.Agen
 // scanPipelineRun scans a single row (pgx.Row or pgx.Rows) into a PipelineRun.
 func scanPipelineRun(sc scanner) (*domain.PipelineRun, error) {
 	var (
-		run                domain.PipelineRun
-		signal             string
-		configSnapshotJSON []byte
-		phaseTimingsJSON   []byte
+		run                                                                domain.PipelineRun
+		signal                                                             string
+		configSnapshotJSON                                                 []byte
+		phaseTimingsJSON                                                   []byte
+		executionVersionID, evaluationScopeID, manifestID, qualityResultID *uuid.UUID
+		deploymentID, promotionDecisionID, capitalBindingID                *uuid.UUID
+		riskPolicyVersion                                                  *string
 	)
 
 	err := sc.Scan(
 		&run.ID,
+		&run.AccountID, &run.Environment, &run.OriginType, &run.OriginID,
+		&executionVersionID, &evaluationScopeID, &manifestID, &qualityResultID,
+		&deploymentID, &promotionDecisionID, &capitalBindingID, &riskPolicyVersion,
 		&run.StrategyID,
 		&run.Ticker,
 		&run.TradeDate,
@@ -433,6 +453,30 @@ func scanPipelineRun(sc scanner) (*domain.PipelineRun, error) {
 	}
 
 	run.Signal = domain.PipelineSignal(signal)
+	if executionVersionID != nil {
+		run.ExecutionVersionID = *executionVersionID
+	}
+	if evaluationScopeID != nil {
+		run.EvaluationScopeID = *evaluationScopeID
+	}
+	if manifestID != nil {
+		run.ManifestID = *manifestID
+	}
+	if qualityResultID != nil {
+		run.QualityResultID = *qualityResultID
+	}
+	if deploymentID != nil {
+		run.DeploymentID = *deploymentID
+	}
+	if promotionDecisionID != nil {
+		run.PromotionDecisionID = *promotionDecisionID
+	}
+	if capitalBindingID != nil {
+		run.CapitalBindingID = *capitalBindingID
+	}
+	if riskPolicyVersion != nil {
+		run.RiskPolicyVersion = *riskPolicyVersion
+	}
 	if configSnapshotJSON != nil {
 		run.ConfigSnapshot = json.RawMessage(configSnapshotJSON)
 	}
@@ -445,7 +489,7 @@ func scanPipelineRun(sc scanner) (*domain.PipelineRun, error) {
 
 // buildPipelineRunListQuery constructs the SELECT query and arguments for List
 // with dynamic WHERE conditions. All values are parameterized.
-func buildPipelineRunListQuery(filter repository.PipelineRunFilter, limit, offset int) (string, []any) {
+func buildPipelineRunListQuery(accountID uuid.UUID, filter repository.PipelineRunFilter, limit, offset int) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -457,6 +501,7 @@ func buildPipelineRunListQuery(filter repository.PipelineRunFilter, limit, offse
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 
 	if filter.StrategyID != nil {
 		conditions = append(conditions, "strategy_id = "+nextArg(*filter.StrategyID))
@@ -482,7 +527,7 @@ func buildPipelineRunListQuery(filter repository.PipelineRunFilter, limit, offse
 		conditions = append(conditions, "started_at <= "+nextArg(*filter.StartedBefore))
 	}
 
-	base := `SELECT id, strategy_id, ticker, trade_date, status, signal, started_at, completed_at, error_message, config_snapshot, phase_timings
+	base := `SELECT ` + pipelineRunSelectColumns + `
 		 FROM pipeline_runs`
 
 	if len(conditions) > 0 {

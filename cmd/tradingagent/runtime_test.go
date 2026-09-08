@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,16 +43,78 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/shopspring/decimal"
 )
+
+var testExecutionAccountBinding, _ = domain.NewExecutionAccountBinding(uuid.MustParse("10000000-0000-4000-8000-000000000001"), domain.AccountEnvironmentPaperScored)
+
+type recordingScheduledStrategyRunner struct{ calls atomic.Int32 }
+
+func (r *recordingScheduledStrategyRunner) RunStrategy(context.Context, domain.Strategy, uuid.UUID) (*api.StrategyRunResult, error) {
+	r.calls.Add(1)
+	return nil, nil
+}
+
+type resolvedVersionStrategyRepo struct {
+	repository.StrategyRepository
+	versionID uuid.UUID
+}
+
+func (r resolvedVersionStrategyRepo) ResolveExecutionVersionID(context.Context, uuid.UUID) (uuid.UUID, error) {
+	return r.versionID, nil
+}
+
+func TestRunScheduledStrategyRejectsChangedExecutionVersionBeforeRunner(t *testing.T) {
+	loadedVersionID := uuid.New()
+	strategy := domain.Strategy{ID: uuid.New(), ExecutionStrategyVersionID: &loadedVersionID}
+	runner := &recordingScheduledStrategyRunner{}
+
+	_, err := runScheduledStrategy(context.Background(), resolvedVersionStrategyRepo{versionID: uuid.New()}, runner, strategy)
+	if err == nil || !strings.Contains(err.Error(), "changed after snapshot") {
+		t.Fatalf("runScheduledStrategy() error = %v, want changed snapshot error", err)
+	}
+	if runner.calls.Load() != 0 {
+		t.Fatalf("runner calls = %d, want 0", runner.calls.Load())
+	}
+}
 
 func TestMain(m *testing.M) {
 	original := runtimeDiscoveryDeploymentReadiness
-	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
-		return true, "", nil
+	originalAccountLoader := runtimeLoadCanonicalAccount
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
+		return &pgrepo.DiscoveryDeploymentReadinessReport{Ready: true, Stock: pgrepo.DatasetCapabilityReadiness{Ready: true}, Options: pgrepo.DatasetCapabilityReadiness{Ready: true}}, nil
+	}
+	runtimeLoadCanonicalAccount = func(_ context.Context, _ *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
+		account := validRuntimeAccount(accountID)
+		return &account, nil
 	}
 	code := m.Run()
 	runtimeDiscoveryDeploymentReadiness = original
+	runtimeLoadCanonicalAccount = originalAccountLoader
 	os.Exit(code)
+}
+
+func validRuntimeAccount(accountID uuid.UUID) domain.Account {
+	return domain.Account{
+		ID: accountID, Name: "canonical paper", Environment: domain.AccountEnvironmentPaperScored,
+		Venue: "alpaca", BaseCurrency: "USD", StorageNamespace: "paper_scored/default",
+		EvidenceClass: domain.PaperEvidenceClassPromotion, StartingCapital: decimal.NewFromInt(100_000),
+		BuyingPowerMultiplier: decimal.NewFromInt(2), MarginProfile: domain.MarginProfileRegT,
+		Status: domain.AccountStatusActive, CreatedBy: "migration", CreationMetadata: []byte(`{}`),
+		CreatedAt: time.Date(2026, 8, 27, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+func runtimeTestConfig(cfg config.Config) config.Config {
+	cfg.CanonicalAccountID = "00000000-0000-4000-8000-000000000064"
+	cfg.Paper = config.PaperConfig{
+		EvaluationMode:        domain.PaperEvaluationModeScored,
+		InitialCapital:        config.DefaultPaperInitialCapital,
+		BuyingPowerMultiplier: config.DefaultPaperBuyingPowerMultiplier,
+		SlippageBPS:           config.DefaultPaperSlippageBPS,
+		FeePct:                config.DefaultPaperFeePct,
+	}
+	return cfg
 }
 
 func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *testing.T) {
@@ -64,9 +127,9 @@ func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *tes
 	readinessCalls := 0
 	reconcileCalls := 0
 	completedAt := time.Date(2026, 8, 26, 4, 5, 6, 0, time.FixedZone("offset", 3600))
-	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
 		readinessCalls++
-		return false, pgrepo.DiscoveryDeploymentUnavailableReason, pgrepo.ErrDiscoveryDeploymentImmutableBinding
+		return &pgrepo.DiscoveryDeploymentReadinessReport{Reason: pgrepo.DiscoveryDeploymentUnavailableReason, Stock: pgrepo.DatasetCapabilityReadiness{Reason: pgrepo.DiscoveryDeploymentUnavailableReason}}, pgrepo.ErrDiscoveryDeploymentImmutableBinding
 	}
 	runtimeReconcileOvernightBacktests = func(_ context.Context, _ *pgrepo.OvernightBacktestRunRepo, at time.Time, reason string) (int, error) {
 		reconcileCalls++
@@ -76,9 +139,31 @@ func TestEvaluateRuntimeDiscoveryReadinessOnceAndReconcilesBeforeOmission(t *tes
 		return 1, nil
 	}
 
-	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, completedAt, slogDiscardLogger())
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, uuid.New(), uuid.New(), completedAt, slogDiscardLogger())
 	if err != nil || readiness.Ready || !errors.Is(readiness.Err, pgrepo.ErrDiscoveryDeploymentImmutableBinding) || readinessCalls != 1 || reconcileCalls != 1 {
 		t.Fatalf("evaluation = %+v, %v; calls readiness=%d reconcile=%d", readiness, err, readinessCalls, reconcileCalls)
+	}
+}
+
+func TestEvaluateRuntimeDiscoveryReadinessCarriesCanonicalEvaluationInterval(t *testing.T) {
+	originalReadiness := runtimeDiscoveryDeploymentReadiness
+	t.Cleanup(func() { runtimeDiscoveryDeploymentReadiness = originalReadiness })
+	start := time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
+		return &pgrepo.DiscoveryDeploymentReadinessReport{
+			Ready: true, EvaluationStart: start, EvaluationEnd: end,
+			Stock:   pgrepo.DatasetCapabilityReadiness{Ready: true},
+			Options: pgrepo.DatasetCapabilityReadiness{Ready: true},
+		}, nil
+	}
+
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, uuid.New(), uuid.New(), end, slogDiscardLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !readiness.EvaluationStart.Equal(start) || !readiness.EvaluationEnd.Equal(end) {
+		t.Fatalf("evaluation interval = %v..%v, want %v..%v", readiness.EvaluationStart, readiness.EvaluationEnd, start, end)
 	}
 }
 
@@ -90,8 +175,8 @@ func TestEvaluateRuntimeDiscoveryReadinessErrorRemainsDistinct(t *testing.T) {
 		runtimeReconcileOvernightBacktests = originalReconcile
 	})
 	wantErr := errors.New("readiness store unavailable")
-	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo) (bool, string, error) {
-		return false, "", wantErr
+	runtimeDiscoveryDeploymentReadiness = func(context.Context, *pgrepo.ReportArtifactRepo, uuid.UUID, uuid.UUID) (*pgrepo.DiscoveryDeploymentReadinessReport, error) {
+		return nil, wantErr
 	}
 	runtimeReconcileOvernightBacktests = func(_ context.Context, _ *pgrepo.OvernightBacktestRunRepo, _ time.Time, reason string) (int, error) {
 		if reason != automation.DiscoveryReadinessEvaluationErrorReason {
@@ -99,7 +184,7 @@ func TestEvaluateRuntimeDiscoveryReadinessErrorRemainsDistinct(t *testing.T) {
 		}
 		return 0, nil
 	}
-	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, time.Now(), slogDiscardLogger())
+	readiness, err := evaluateRuntimeDiscoveryReadiness(context.Background(), &pgrepo.ReportArtifactRepo{}, &pgrepo.OvernightBacktestRunRepo{}, uuid.New(), uuid.New(), time.Now(), slogDiscardLogger())
 	if err != nil || !errors.Is(readiness.Err, wantErr) || readiness.Ready {
 		t.Fatalf("evaluation = %+v, %v", readiness, err)
 	}
@@ -108,6 +193,30 @@ func TestEvaluateRuntimeDiscoveryReadinessErrorRemainsDistinct(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRuntimeSchemaVersionAcceptsExpansionAndEnforcement(t *testing.T) {
+	for _, tt := range []struct {
+		version int
+		want    bool
+	}{{109, false}, {110, false}, {111, true}, {112, false}} {
+		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
+			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
+		}
+	}
+}
+
+func TestParseOptionalDiscoveryScopeID(t *testing.T) {
+	if id, err := parseOptionalDiscoveryScopeID(""); err != nil || id != uuid.Nil {
+		t.Fatalf("empty scope = %s, %v", id, err)
+	}
+	want := uuid.New()
+	if id, err := parseOptionalDiscoveryScopeID(want.String()); err != nil || id != want {
+		t.Fatalf("scope = %s, %v, want %s", id, err, want)
+	}
+	if _, err := parseOptionalDiscoveryScopeID("latest"); err == nil {
+		t.Fatal("parseOptionalDiscoveryScopeID() accepted latest selector")
+	}
+}
 
 func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 	origNewDB := runtimeNewDB
@@ -129,13 +238,13 @@ func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 		return &pgrepo.DB{}, nil
 	}
 	runtimeCurrentSchemaVersion = func(context.Context, *pgxpool.Pool) (int, error) {
-		return pgrepo.RequiredSchemaVersion - 1, nil
+		return pgrepo.MinimumSupportedSchemaVersion - 1, nil
 	}
 	runtimeNewPaperAccountRepo = func(*pgrepo.DB) repository.PaperAccountRepository { return stubPaperAccountRepo{} }
 	runtimeAfterSchemaGate = func() { proceeded.Store(true) }
 	runtimeCloseDB = func(*pgrepo.DB) { closed.Store(true) }
 
-	_, _, _, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if err == nil {
 		t.Fatal("newAPIServer() error = nil, want schema mismatch")
 	}
@@ -146,14 +255,14 @@ func TestNewAPIServerSchemaBehindFailsFast(t *testing.T) {
 	if mismatchErr.State != "behind" {
 		t.Fatalf("mismatchErr.State = %q, want behind", mismatchErr.State)
 	}
-	if mismatchErr.Current != pgrepo.RequiredSchemaVersion-1 {
-		t.Fatalf("mismatchErr.Current = %d, want %d", mismatchErr.Current, pgrepo.RequiredSchemaVersion-1)
+	if mismatchErr.Current != pgrepo.MinimumSupportedSchemaVersion-1 {
+		t.Fatalf("mismatchErr.Current = %d, want %d", mismatchErr.Current, pgrepo.MinimumSupportedSchemaVersion-1)
 	}
 	if mismatchErr.Required != pgrepo.RequiredSchemaVersion {
 		t.Fatalf("mismatchErr.Required = %d, want %d", mismatchErr.Required, pgrepo.RequiredSchemaVersion)
 	}
 	for _, want := range []string{
-		fmt.Sprintf("current version %d", pgrepo.RequiredSchemaVersion-1),
+		fmt.Sprintf("current version %d", pgrepo.MinimumSupportedSchemaVersion-1),
 		fmt.Sprintf("required version %d", pgrepo.RequiredSchemaVersion),
 		"run migrations, then restart the process",
 		"fresh process restart",
@@ -195,7 +304,7 @@ func TestNewAPIServerSchemaAheadFailsFast(t *testing.T) {
 	runtimeAfterSchemaGate = func() { proceeded.Store(true) }
 	runtimeCloseDB = func(*pgrepo.DB) { closed.Store(true) }
 
-	_, _, _, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if err == nil {
 		t.Fatal("newAPIServer() error = nil, want schema mismatch")
 	}
@@ -231,7 +340,7 @@ func TestNewAPIServerSchemaAheadFailsFast(t *testing.T) {
 }
 
 func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
-	t.Setenv("OVERHAUL_ACCOUNTS_READ_ENABLED", "true")
+	t.Setenv("OVERHAUL_ACCOUNTS_READ_ENABLED", "false")
 	origNewDB := runtimeNewDB
 	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
 	origNewPaperAccountRepo := runtimeNewPaperAccountRepo
@@ -276,7 +385,7 @@ func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
 		return &api.Server{}, nil
 	}
 
-	server, sched, cleanup, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	server, sched, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -287,7 +396,7 @@ func TestNewAPIServerSchemaMatchSucceeds(t *testing.T) {
 		t.Fatal("newAPIServer() lifecycle = nil, want composite lifecycle when scheduler disabled")
 	}
 	smokeServer, smokeSched, smokeCleanup, err := newAPIServer(
-		context.Background(), config.Config{Environment: "smoke"}, slogDiscardLogger(),
+		context.Background(), runtimeTestConfig(config.Config{Environment: "smoke"}), slogDiscardLogger(),
 	)
 	if err != nil {
 		t.Fatalf("newAPIServer(smoke) error = %v", err)
@@ -356,7 +465,7 @@ func TestNewAPIServerSchemaDBUnreachableFailsBeforeSchemaGate(t *testing.T) {
 	runtimeAfterSchemaGate = func() { proceeded.Store(true) }
 	runtimeCloseDB = func(*pgrepo.DB) { closed.Store(true) }
 
-	_, _, _, err := newAPIServer(context.Background(), config.Config{}, slogDiscardLogger())
+	_, _, _, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{}), slogDiscardLogger())
 	if !errors.Is(err, startupErr) {
 		t.Fatalf("newAPIServer() error = %v, want %v", err, startupErr)
 	}
@@ -417,6 +526,31 @@ func TestRuntimeTeardownStopsAndJoinsBeforeClosingDBOnce(t *testing.T) {
 	if _, _, err := runs.Admit(context.Background()); !errors.Is(err, runcontrol.ErrDraining) {
 		t.Fatalf("post-teardown admission error = %v, want %v", err, runcontrol.ErrDraining)
 	}
+}
+
+func TestRuntimeTeardownLeavesNoRunningOrProcessingWorkAtPoolClose(t *testing.T) {
+	runs := runcontrol.NewGroup()
+	var pipelineRunning, automationRunning, projectionProcessing atomic.Int32
+	pipelineRunning.Store(1)
+	automationRunning.Store(1)
+	projectionProcessing.Store(1)
+	if err := runs.Go(context.Background(), func(ctx context.Context) {
+		<-ctx.Done()
+		pipelineRunning.Store(0) // terminal pipeline write
+	}); err != nil {
+		t.Fatal(err)
+	}
+	teardown := &runtimeTeardown{
+		runs:           runs,
+		stopAutomation: func() { automationRunning.Store(0) },
+		stopWorkers:    func() { projectionProcessing.Store(0) },
+		closePrimaryDB: func() {
+			if pipelineRunning.Load() != 0 || automationRunning.Load() != 0 || projectionProcessing.Load() != 0 {
+				t.Fatalf("pool closed with running pipeline=%d automation=%d projection=%d", pipelineRunning.Load(), automationRunning.Load(), projectionProcessing.Load())
+			}
+		},
+	}
+	teardown.Stop()
 }
 
 func TestRuntimeLifecycleWorkerStartFailureTearsDown(t *testing.T) {
@@ -535,7 +669,7 @@ func TestNewAPIServerInvalidProjectionAccountFailsBeforeDBAllocation(t *testing.
 		return nil, errors.New("unexpected DB allocation")
 	}
 
-	cfg := config.Config{Server: config.ServerConfig{ProjectionAccountID: "not-a-uuid"}}
+	cfg := config.Config{CanonicalAccountID: "not-a-uuid"}
 	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
 	if err == nil || !strings.Contains(err.Error(), "PROJECTION_ACCOUNT_ID") {
 		t.Fatalf("newAPIServer() error = %v, want projection account validation error", err)
@@ -545,6 +679,159 @@ func TestNewAPIServerInvalidProjectionAccountFailsBeforeDBAllocation(t *testing.
 	}
 	if allocations.Load() != 0 {
 		t.Fatalf("DB allocations = %d, want 0", allocations.Load())
+	}
+}
+
+func TestBindExecutionAccount(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	validProfile := config.PaperConfig{
+		EvaluationMode:        domain.PaperEvaluationModeScored,
+		InitialCapital:        config.DefaultPaperInitialCapital,
+		BuyingPowerMultiplier: config.DefaultPaperBuyingPowerMultiplier,
+		SlippageBPS:           config.DefaultPaperSlippageBPS,
+		FeePct:                config.DefaultPaperFeePct,
+	}
+	validAccount := validRuntimeAccount(accountID)
+
+	tests := []struct {
+		name    string
+		account string
+		loaded  domain.Account
+		profile config.PaperConfig
+		wantErr string
+	}{
+		{name: "missing", profile: validProfile, loaded: validAccount, wantErr: "PROJECTION_ACCOUNT_ID is required"},
+		{name: "malformed", account: "not-a-uuid", profile: validProfile, loaded: validAccount, wantErr: "valid non-zero UUID"},
+		{name: "inactive", account: accountID.String(), profile: validProfile, loaded: func() domain.Account { a := validAccount; a.Status = domain.AccountStatusPaused; return a }(), wantErr: "must be active"},
+		{name: "live", account: accountID.String(), profile: validProfile, loaded: func() domain.Account {
+			a := validAccount
+			a.Environment = domain.AccountEnvironmentLive
+			a.EvidenceClass = "non_promotion"
+			return a
+		}(), wantErr: "paper_scored or paper_stress"},
+		{name: "environment mismatch", account: accountID.String(), profile: validProfile, loaded: func() domain.Account {
+			a := validAccount
+			a.Environment = domain.AccountEnvironmentPaperStress
+			a.EvidenceClass = domain.PaperEvidenceClassSynthetic
+			a.StorageNamespace = "paper_stress/default"
+			return a
+		}(), wantErr: "does not match"},
+		{name: "missing account name", account: accountID.String(), profile: validProfile, loaded: func() domain.Account { a := validAccount; a.Name = ""; return a }(), wantErr: "account name and venue are required"},
+		{name: "stress zero buying power with cash margin", account: accountID.String(), profile: config.PaperConfig{
+			EvaluationMode: domain.PaperEvaluationModeStress, InitialCapital: 100_000, BuyingPowerMultiplier: 0,
+		}, loaded: func() domain.Account {
+			a := validAccount
+			a.Environment = domain.AccountEnvironmentPaperStress
+			a.StorageNamespace = "paper_stress/default"
+			a.EvidenceClass = domain.PaperEvidenceClassSynthetic
+			a.BuyingPowerMultiplier = decimal.Zero
+			a.MarginProfile = domain.MarginProfileCash
+			return a
+		}(), wantErr: "zero buying-power multiplier requires the stress-unlimited margin profile"},
+		{name: "valid", account: accountID.String(), profile: validProfile, loaded: validAccount},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			loads := 0
+			parsedID, err := parseCanonicalAccountID(test.account)
+			var deps runtimeDependencies
+			if err == nil {
+				loads++
+				account := test.loaded
+				deps, err = validateExecutionAccountBinding(config.Config{CanonicalAccountID: test.account, Paper: test.profile}, parsedID, &account)
+			}
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("bindExecutionAccount() error = %v, want %q", err, test.wantErr)
+				}
+				if test.name == "missing" || test.name == "malformed" {
+					if loads != 0 {
+						t.Fatalf("account loads = %d, want 0", loads)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bindExecutionAccount() error = %v", err)
+			}
+			if deps.AccountID() != accountID || deps.Environment() != domain.AccountEnvironmentPaperScored {
+				t.Fatalf("runtime binding = %s/%s", deps.AccountID(), deps.Environment())
+			}
+		})
+	}
+}
+
+func TestExecutionAccountRejectsNonFinitePaperValuesWithoutPanic(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	account := validRuntimeAccount(accountID)
+	for _, test := range []struct {
+		name   string
+		mutate func(*config.PaperConfig)
+	}{
+		{name: "NaN initial capital", mutate: func(c *config.PaperConfig) { c.InitialCapital = math.NaN() }},
+		{name: "infinite initial capital", mutate: func(c *config.PaperConfig) { c.InitialCapital = math.Inf(1) }},
+		{name: "NaN buying power", mutate: func(c *config.PaperConfig) { c.BuyingPowerMultiplier = math.NaN() }},
+		{name: "infinite buying power", mutate: func(c *config.PaperConfig) { c.BuyingPowerMultiplier = math.Inf(1) }},
+		{name: "NaN slippage", mutate: func(c *config.PaperConfig) { c.SlippageBPS = math.NaN() }},
+		{name: "infinite slippage", mutate: func(c *config.PaperConfig) { c.SlippageBPS = math.Inf(1) }},
+		{name: "NaN fee", mutate: func(c *config.PaperConfig) { c.FeePct = math.NaN() }},
+		{name: "infinite fee", mutate: func(c *config.PaperConfig) { c.FeePct = math.Inf(1) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := runtimeTestConfig(config.Config{})
+			test.mutate(&cfg.Paper)
+			if _, err := validateExecutionAccountBinding(cfg, accountID, &account); err == nil || !strings.Contains(err.Error(), "finite") {
+				t.Fatalf("validateExecutionAccountBinding() error = %v, want finite-value error", err)
+			}
+		})
+	}
+}
+
+func TestRuntimeConstructBoundValidatesAndPassesBinding(t *testing.T) {
+	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
+	binding, err := domain.NewExecutionAccountBinding(accountID, domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := runtimeDependencies{executionAccount: binding}
+	called := false
+	if err := runtimeConstructBound(deps, func(got domain.ExecutionAccountBinding) error {
+		called = true
+		if got.AccountID() != accountID || got.Environment() != domain.AccountEnvironmentPaperScored {
+			t.Fatalf("binding = %s/%s", got.AccountID(), got.Environment())
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("runtimeConstructBound() error = %v", err)
+	}
+	if !called {
+		t.Fatal("callback was not called")
+	}
+}
+
+func TestRuntimeConstructBoundRejectsInvalidBindingBeforeCallback(t *testing.T) {
+	called := false
+	err := runtimeConstructBound(runtimeDependencies{}, func(domain.ExecutionAccountBinding) error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("runtimeConstructBound() error = nil")
+	}
+	if called {
+		t.Fatal("callback called for invalid binding")
+	}
+}
+
+func TestNewSmokeStrategyRunnerRetainsExecutionAccount(t *testing.T) {
+	runner := newSmokeStrategyRunner(testExecutionAccountBinding, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, slogDiscardLogger())
+	smoke, ok := runner.(*smokeStrategyRunner)
+	if !ok {
+		t.Fatalf("runner type = %T", runner)
+	}
+	if smoke.executionAccount != testExecutionAccountBinding {
+		t.Fatal("smoke runner did not retain execution account")
 	}
 }
 
@@ -574,7 +861,7 @@ func TestNewAPIServerPaperBootstrapFailureClosesDBExactlyOnce(t *testing.T) {
 	}
 	runtimeCloseDB = func(*pgrepo.DB) { closes.Add(1) }
 
-	_, _, cleanup, err := newAPIServer(context.Background(), config.Config{Environment: "development"}, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(config.Config{Environment: "development"}), slogDiscardLogger())
 	if !errors.Is(err, startupErr) {
 		t.Fatalf("newAPIServer() error = %v, want %v", err, startupErr)
 	}
@@ -624,7 +911,7 @@ func TestNewAPIServerPolymarketResolutionFailureIsNonFatal(t *testing.T) {
 	t.Setenv("POLYMARKET_WS_ENABLED", "true")
 	t.Setenv("POLYMARKET_WS_SLUGS", "slug-a")
 
-	server, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	server, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -692,7 +979,7 @@ func TestNewAPIServerWiresAlpacaReconcileAutomationJob(t *testing.T) {
 		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434", APIKey: "test-key"}}},
 	}
 
-	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -793,7 +1080,7 @@ func TestNewAPIServerWiresPolymarketReconcileAutomationJob(t *testing.T) {
 		LLM:       config.LLMConfig{Providers: config.LLMProviderConfigs{Ollama: config.OllamaConfig{BaseURL: "http://localhost:11434", APIKey: "test-key"}}},
 	}
 
-	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -878,7 +1165,7 @@ func TestNewAPIServerWiresKalshiDiscoveryAndMarkingAutomationJobs(t *testing.T) 
 		}},
 	}
 
-	_, _, cleanup, err := newAPIServer(context.Background(), cfg, slogDiscardLogger())
+	_, _, cleanup, err := newAPIServer(context.Background(), runtimeTestConfig(cfg), slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("newAPIServer() error = %v", err)
 	}
@@ -947,6 +1234,24 @@ func TestNewRuntimeKalshiProjectionRepoRejectsGeneralDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestRuntimeProjectionAttestorRequiresCompleteDecodedSecret(t *testing.T) {
+	valid := config.KalshiConfig{ProjectionKeyID: " canonical-key ", ProjectionSecretB64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}
+	attestor, configured := runtimeProjectionAttestor(valid)
+	if !configured || attestor.KeyID != "canonical-key" || len(attestor.Secret) != 32 {
+		t.Fatalf("runtimeProjectionAttestor(valid) = %+v/%v", attestor, configured)
+	}
+	for _, invalid := range []config.KalshiConfig{
+		{},
+		{ProjectionKeyID: "key"},
+		{ProjectionSecretB64: valid.ProjectionSecretB64},
+		{ProjectionKeyID: "key", ProjectionSecretB64: "invalid"},
+	} {
+		if got, ok := runtimeProjectionAttestor(invalid); ok || got.KeyID != "" || len(got.Secret) != 0 {
+			t.Fatalf("runtimeProjectionAttestor(invalid) = %+v/%v", got, ok)
+		}
+	}
+}
+
 func TestNewRuntimeKalshiClientsShareGovernorAndSeparateLabels(t *testing.T) {
 	t.Parallel()
 
@@ -1000,24 +1305,71 @@ func TestNewRuntimeKalshiClientsPublicCatalogWithoutLiveCredentials(t *testing.T
 	}
 }
 
+type runtimeStopExitRepo struct{}
+
+type runtimeStopEconomicWriter struct{}
+
+func (runtimeStopEconomicWriter) ResolvePositionExecutionScope(_ context.Context, position domain.Position) (execution.ExecutionScope, error) {
+	strategyVersionID, err := uuid.Parse(position.OriginID)
+	if err != nil {
+		return execution.ExecutionScope{}, err
+	}
+	return execution.NewStrategyExecutionScope(position.AccountID, position.Environment, strategyVersionID, domain.PipelineRunRef{
+		ID:        uuid.MustParse("20000000-0000-4000-8000-000000000001"),
+		TradeDate: time.Date(2026, time.August, 28, 0, 0, 0, 0, time.UTC),
+	})
+}
+
+func (runtimeStopEconomicWriter) ApplyAcceptedOrderFill(_ context.Context, _ execution.ExecutionScope, input repository.OrderFillInput) (repository.OrderFillResult, error) {
+	return repository.OrderFillResult{OrderID: input.Order.ID, TradeID: input.Trade.ID}, nil
+}
+
+func (runtimeStopExitRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
+func (runtimeStopExitRepo) CreatePredictionExitOrderAndReserve(context.Context, uuid.UUID, domain.AccountEnvironment, string, string, uuid.UUID, *domain.Order) error {
+	return nil
+}
+
+func (runtimeStopExitRepo) ReleasePredictionExitPosition(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
+func (runtimeStopExitRepo) MarkPredictionExitSubmitted(context.Context, uuid.UUID, uuid.UUID, string, time.Time) error {
+	return nil
+}
+
+func (runtimeStopExitRepo) ReconcilePredictionExitReservations(context.Context, uuid.UUID, domain.AccountEnvironment) error {
+	return nil
+}
+
+func scopedRuntimeStopPosition(position domain.Position) domain.Position {
+	position.AccountID = testExecutionAccountBinding.AccountID()
+	position.Environment = testExecutionAccountBinding.Environment()
+	position.OriginType = "strategy_version"
+	position.OriginID = uuid.MustParse("10000000-0000-4000-8000-000000000001").String()
+	return position
+}
+
 func TestBootstrapPolymarketStopGuardsFiltersAndPaginates(t *testing.T) {
 	t.Parallel()
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client)})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}, EconomicWriter: runtimeStopEconomicWriter{}})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}
-	runner := &realStrategyRunner{polymarketStopGuard: guard, logger: slogDiscardLogger()}
+	runner := &realStrategyRunner{executionAccount: testExecutionAccountBinding, polymarketStopGuard: guard, logger: slogDiscardLogger()}
 	firstPage := make([]domain.Position, 0, polymarketBootstrapPageSize)
 	for i := 0; i < polymarketBootstrapPageSize-1; i++ {
 		firstPage = append(firstPage, domain.Position{MarketType: domain.MarketTypePolymarket, Ticker: fmt.Sprintf("ignore-%d", i), Quantity: 1})
 	}
-	firstPage = append(firstPage, domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)})
+	firstPage = append(firstPage, scopedRuntimeStopPosition(domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)}))
 	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{
 		firstPage,
-		{{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-three:NO", Side: domain.PositionSideShort, Quantity: 7, TakeProfit: floatPtr(0.6)}},
+		{scopedRuntimeStopPosition(domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-three:NO", Side: domain.PositionSideShort, Quantity: 7, TakeProfit: floatPtr(0.6)})},
 	}}
 
 	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
@@ -1036,12 +1388,13 @@ func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
 
 	secret := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32)))
 	client := polymarketexecution.NewClient("kid", secret, slogDiscardLogger())
-	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{Broker: polymarketexecution.NewBroker(client)})
+	guard, err := polymarketexecution.NewStopGuard(polymarketexecution.StopGuardConfig{ExecutionAccount: testExecutionAccountBinding, Broker: polymarketexecution.NewBroker(client), ExitRepo: runtimeStopExitRepo{}, EconomicWriter: runtimeStopEconomicWriter{}})
 	if err != nil {
 		t.Fatalf("NewStopGuard() error = %v", err)
 	}
 	workerCtx, stopWorkers := context.WithCancel(context.Background())
 	runner := &realStrategyRunner{
+		executionAccount:     testExecutionAccountBinding,
 		polymarketStopGuard:  guard,
 		polymarketWorkerCtx:  workerCtx,
 		polymarketWorkerStop: stopWorkers,
@@ -1049,7 +1402,7 @@ func TestStartDelayedPolymarketFeedReplaysBootstrappedStopGuards(t *testing.T) {
 	}
 	defer runner.stopPolymarketTickWorkers()
 
-	position := domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)}
+	position := scopedRuntimeStopPosition(domain.Position{ID: uuid.New(), MarketType: domain.MarketTypePolymarket, Ticker: "market-one:YES", Side: domain.PositionSideLong, Quantity: 5, StopLoss: floatPtr(0.4)})
 	repo := &bootstrapPolymarketPositionRepoStub{pages: [][]domain.Position{{position}}}
 	if err := bootstrapPolymarketStopGuards(context.Background(), runner, repo, slogDiscardLogger()); err != nil {
 		t.Fatalf("initial bootstrapPolymarketStopGuards() error = %v", err)
@@ -1229,11 +1582,11 @@ func (captureProvider) Complete(_ context.Context, request llm.CompletionRequest
 
 func (s *stubDecisionRepo) Create(context.Context, *domain.AgentDecision) error { return nil }
 
-func (s *stubDecisionRepo) GetByRun(context.Context, uuid.UUID, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
+func (s *stubDecisionRepo) GetByRun(context.Context, domain.PipelineRunRef, repository.AgentDecisionFilter, int, int) ([]domain.AgentDecision, error) {
 	return s.decisions, nil
 }
 
-func (s *stubDecisionRepo) CountByRun(_ context.Context, _ uuid.UUID, _ repository.AgentDecisionFilter) (int, error) {
+func (s *stubDecisionRepo) CountByRun(_ context.Context, _ domain.PipelineRunRef, _ repository.AgentDecisionFilter) (int, error) {
 	return len(s.decisions), nil
 }
 
@@ -1267,14 +1620,9 @@ func (r *stubPipelineRunRepo) Create(_ context.Context, run *domain.PipelineRun)
 	return nil
 }
 
-func (r *stubPipelineRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
+func (r *stubPipelineRunRepo) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	r.getByID = true
 	return r.run, r.err
-}
-
-func (r *stubPipelineRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
-	r.getCalled = true
-	panic("unexpected Get call")
 }
 
 func (r *stubPipelineRunRepo) List(context.Context, repository.PipelineRunFilter, int, int) ([]domain.PipelineRun, error) {
@@ -1295,7 +1643,7 @@ func (r *stubPipelineRunRepo) CountByStatus(context.Context, repository.Pipeline
 	return map[domain.PipelineStatus]int{}, nil
 }
 
-func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeDate time.Time, update repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *stubPipelineRunRepo) Finalize(ctx context.Context, ref domain.PipelineRunRef, update repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	r.updateCalled = true
 	r.updates = append(r.updates, update)
 	if r.finalizeHook != nil {
@@ -1309,7 +1657,11 @@ func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeD
 	if r.receipt != nil {
 		return *r.receipt, nil
 	}
-	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: update.Status, CompletedAt: &update.CompletedAt, ErrorMessage: update.ErrorMessage}
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate}
+	if r.created != nil && r.created.ID == ref.ID && r.created.TradeDate.Equal(ref.TradeDate) {
+		run = *r.created
+	}
+	run.Status, run.CompletedAt, run.ErrorMessage = update.Status, &update.CompletedAt, update.ErrorMessage
 	if update.Signal != nil {
 		run.Signal = *update.Signal
 	}
@@ -1317,13 +1669,13 @@ func (r *stubPipelineRunRepo) Finalize(ctx context.Context, id uuid.UUID, tradeD
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
 }
 
-func (r *stubPipelineRunRepo) RefineCompletedSignal(_ context.Context, id uuid.UUID, tradeDate time.Time, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (r *stubPipelineRunRepo) RefineCompletedSignal(_ context.Context, ref domain.PipelineRunRef, _, signal domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	r.refineCalled = true
 	r.updateCalled = true
 	if r.updateErr != nil {
 		return repository.PipelineRunFinalizationReceipt{}, r.updateErr
 	}
-	run := domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}
+	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: domain.PipelineStatusCompleted, Signal: signal}
 	if r.run != nil {
 		run = *r.run
 		run.Signal = signal
@@ -1348,8 +1700,8 @@ func TestSmokeStrategyRunnerReturnsCanonicalTerminalResultAndBlocksDownstream(t 
 			winner := domain.PipelineRun{ID: uuid.New(), TradeDate: time.Now().UTC(), Status: tc.status, Signal: domain.PipelineSignalHold, ErrorMessage: "canonical winner"}
 			repo := &stubPipelineRunRepo{panicCreate: tc.panicCreate, receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
 			core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
-			runner := &smokeStrategyRunner{runner: core, runRepo: repo, logger: slogDiscardLogger()}
-			result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true})
+			runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
+			result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, uuid.New())
 			if err == nil {
 				t.Fatal("RunStrategy() error = nil, want terminal authority error")
 			}
@@ -1366,14 +1718,36 @@ func TestSmokeStrategyRunnerReturnsCanonicalTerminalResultAndBlocksDownstream(t 
 func TestSmokeStrategyRunnerPostTerminalReadErrorReturnsCanonicalResult(t *testing.T) {
 	repo := &stubPipelineRunRepo{err: errors.New("run read unavailable")}
 	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
-	runner := &smokeStrategyRunner{runner: core, runRepo: repo, logger: slogDiscardLogger()}
+	runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
 
-	result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true})
+	result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, uuid.New())
 	if err == nil || !strings.Contains(err.Error(), "run read unavailable") {
 		t.Fatalf("RunStrategy() error = %v, want post-terminal read error", err)
 	}
 	if result == nil || result.Run.Status != domain.PipelineStatusCompleted || result.Signal != result.Run.Signal {
 		t.Fatalf("RunStrategy() result = %+v, want canonical completed result", result)
+	}
+}
+
+func TestSmokeStrategyRunnerPersistsResolvedVersionOrigin(t *testing.T) {
+	repo := &stubPipelineRunRepo{err: errors.New("stop after run persistence")}
+	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
+	runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
+	versionID := uuid.New()
+	strategyID := uuid.New()
+
+	_, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: strategyID, Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, versionID)
+	if err == nil || !strings.Contains(err.Error(), "stop after run persistence") {
+		t.Fatalf("RunStrategy() error = %v", err)
+	}
+	if repo.created == nil {
+		t.Fatal("RunStrategy() did not persist a run")
+	}
+	if repo.created.OriginType != "strategy_version" || repo.created.OriginID != versionID.String() || repo.created.OriginID == strategyID.String() {
+		t.Fatalf("persisted run origin = %q/%q, want strategy_version/%s", repo.created.OriginType, repo.created.OriginID, versionID)
+	}
+	if repo.created.AccountID != testExecutionAccountBinding.AccountID() || repo.created.Environment != testExecutionAccountBinding.Environment() {
+		t.Fatalf("persisted run account scope = %s/%s", repo.created.AccountID, repo.created.Environment)
 	}
 }
 
@@ -1442,7 +1816,7 @@ func TestSmokeStrategyRunnerDispatchNotifications_RoutesSignalAndDecisionsToN8NA
 	}
 }
 
-func TestSmokeStrategyRunnerFindRunUsesGetByID(t *testing.T) {
+func TestSmokeStrategyRunnerFindRunUsesCompositeRef(t *testing.T) {
 	t.Parallel()
 
 	runID := uuid.New()
@@ -1450,7 +1824,7 @@ func TestSmokeStrategyRunnerFindRunUsesGetByID(t *testing.T) {
 	repo := &stubPipelineRunRepo{run: expected}
 	runner := &smokeStrategyRunner{runRepo: repo}
 
-	got, err := runner.findRun(context.Background(), runID)
+	got, err := runner.findRun(context.Background(), domain.PipelineRunRef{ID: runID, TradeDate: repo.run.TradeDate})
 	if err != nil {
 		t.Fatalf("findRun() error = %v", err)
 	}
@@ -1465,7 +1839,7 @@ func TestSmokeStrategyRunnerFindRunUsesGetByID(t *testing.T) {
 	}
 }
 
-func TestRealStrategyRunnerFindRunUsesGetByID(t *testing.T) {
+func TestRealStrategyRunnerFindRunUsesCompositeRef(t *testing.T) {
 	t.Parallel()
 
 	runID := uuid.New()
@@ -1473,7 +1847,7 @@ func TestRealStrategyRunnerFindRunUsesGetByID(t *testing.T) {
 	repo := &stubPipelineRunRepo{run: expected}
 	runner := &realStrategyRunner{runRepo: repo}
 
-	got, err := runner.findRun(context.Background(), runID)
+	got, err := runner.findRun(context.Background(), domain.PipelineRunRef{ID: runID, TradeDate: repo.run.TradeDate})
 	if err != nil {
 		t.Fatalf("findRun() error = %v", err)
 	}
@@ -1494,7 +1868,7 @@ func TestSmokeStrategyRunnerFindRunNotFoundWrapsErrNotFound(t *testing.T) {
 	runID := uuid.New()
 	runner := &smokeStrategyRunner{runRepo: &stubPipelineRunRepo{err: repository.ErrNotFound}}
 
-	got, err := runner.findRun(context.Background(), runID)
+	got, err := runner.findRun(context.Background(), domain.PipelineRunRef{ID: runID, TradeDate: time.Now()})
 	if got != nil {
 		t.Fatalf("findRun() run = %+v, want nil", got)
 	}
@@ -1562,6 +1936,10 @@ func (stubPositionRepo) GetOpen(context.Context, repository.PositionFilter, int,
 	return nil, nil
 }
 
+func (stubPositionRepo) GetOpenByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return nil, nil
+}
+
 func (stubPositionRepo) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {
 	return nil, nil
 }
@@ -1588,34 +1966,47 @@ func (stubPositionRepo) GrossExposureOpen(context.Context, repository.PositionFi
 
 type stubPaperAccountRepo struct{}
 
+func (stubPaperAccountRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
+	return fn()
+}
+
 type failingPaperAccountRepo struct {
 	stubPaperAccountRepo
 	err error
 }
 
-func (r failingPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context) (uint64, error) {
+func (r failingPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context, uuid.UUID, domain.AccountEnvironment) (uint64, error) {
 	return 0, r.err
 }
 
-func (stubPaperAccountRepo) ListPaperTrades(context.Context, int, int) ([]domain.Trade, error) {
+func (stubPaperAccountRepo) ListPaperTrades(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Trade, error) {
 	return nil, nil
 }
 
-func (stubPaperAccountRepo) GetOpenPaperPositions(context.Context, int, int) ([]domain.Position, error) {
+func (stubPaperAccountRepo) GetOpenPaperPositions(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Position, error) {
 	return nil, nil
 }
 
-func (stubPaperAccountRepo) ListOpenPaperOrders(context.Context, int, int) ([]domain.Order, error) {
+func (stubPaperAccountRepo) ListOpenPaperOrders(context.Context, uuid.UUID, domain.AccountEnvironment, int, int) ([]domain.Order, error) {
 	return nil, nil
 }
 
-func (stubPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context) (uint64, error) {
+func (stubPaperAccountRepo) GetMaxPaperExternalIDSequence(context.Context, uuid.UUID, domain.AccountEnvironment) (uint64, error) {
 	return 0, nil
 }
 
 type historyPositionRepo struct {
 	stubPositionRepo
 	positions []domain.Position
+}
+
+func (r historyPositionRepo) GetByExecutionScope(_ context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, _ repository.PositionFilter, _, _ int) ([]domain.Position, error) {
+	positions := append([]domain.Position(nil), r.positions...)
+	for i := range positions {
+		positions[i].AccountID, positions[i].Environment = accountID, environment
+		positions[i].OriginType, positions[i].OriginID = originType, originID
+	}
+	return positions, nil
 }
 
 func (r historyPositionRepo) GetByStrategy(context.Context, uuid.UUID, repository.PositionFilter, int, int) ([]domain.Position, error) {
@@ -1701,6 +2092,10 @@ func (r *bootstrapPolymarketPositionRepoStub) GetOpen(context.Context, repositor
 		return nil, nil
 	}
 	return append([]domain.Position(nil), r.pages[idx]...), nil
+}
+
+func (r *bootstrapPolymarketPositionRepoStub) GetOpenByAccount(ctx context.Context, _ uuid.UUID, _ domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	return r.GetOpen(ctx, filter, limit, offset)
 }
 
 func (r *bootstrapPolymarketPositionRepoStub) ListOpenAlpacaOwned(context.Context, int, int) ([]domain.Position, error) {
@@ -1865,11 +2260,12 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 	t.Parallel()
 
 	positionRepo := stubPositionRepo{}
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
 	runner := &realStrategyRunner{
-		positionRepo: positionRepo,
-		riskEngine:   engine,
-		logger:       slogDiscardLogger(),
+		executionAccount: testExecutionAccountBinding,
+		positionRepo:     positionRepo,
+		riskEngine:       engine,
+		logger:           slogDiscardLogger(),
 	}
 
 	_, err := runner.newOrderManager(
@@ -1877,6 +2273,7 @@ func TestRealStrategyRunnerNewOrderManager_WiresRiskPortfolioSnapshot(t *testing
 		domain.Strategy{ID: uuid.New(), Ticker: "AAPL", MarketType: domain.MarketTypeStock, IsPaper: true},
 		agent.ResolvedConfig{RiskConfig: agent.ResolvedRiskConfig{PositionSizePct: 10}},
 		nil,
+		testStrategyScope(t, uuid.New()),
 	)
 	if err != nil {
 		t.Fatalf("newOrderManager() error = %v", err)
@@ -1912,7 +2309,8 @@ func TestSizingConfigForStrategy_UsesMarketDefaults(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: uuid.New(), MarketType: tc.market}, nil, resolved, stubPositionRepo{}, slogDiscardLogger())
+			strategyID := uuid.New()
+			got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: strategyID, MarketType: tc.market}, nil, resolved, stubPositionRepo{}, slogDiscardLogger(), testStrategyScope(t, strategyID))
 			if got != tc.want {
 				t.Fatalf("sizingConfigForStrategy() = %+v, want %+v", got, tc.want)
 			}
@@ -1927,11 +2325,11 @@ func TestSizingConfigForStrategy_UsesHalfKellyWhenExplicitlyOptedInAndEligible(t
 	positions := make([]domain.Position, 0, 100)
 	for i := 0; i < 60; i++ {
 		closedAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
-		positions = append(positions, domain.Position{ID: uuid.New(), Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: 2, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
+		positions = append(positions, domain.Position{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: 2, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
 	}
 	for i := 0; i < 40; i++ {
 		closedAt := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
-		positions = append(positions, domain.Position{ID: uuid.New(), Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: -1, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
+		positions = append(positions, domain.Position{ID: uuid.New(), StrategyID: &strategyID, Ticker: "AAPL", Quantity: 1, AvgEntry: 100, RealizedPnL: -1, OpenedAt: closedAt.Add(-time.Hour), ClosedAt: &closedAt})
 	}
 
 	runner := &realStrategyRunner{
@@ -1942,13 +2340,23 @@ func TestSizingConfigForStrategy_UsesHalfKellyWhenExplicitlyOptedInAndEligible(t
 	strategyConfig := &agent.StrategyConfig{RiskConfig: &agent.StrategyRiskConfig{UseKellySizing: &useKelly}}
 	resolved := agent.ResolvedConfig{RiskConfig: agent.ResolvedRiskConfig{PositionSizePct: 8, StopLossMultiplier: 1.75}}
 
-	got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock}, strategyConfig, resolved, runner.positionRepo, slogDiscardLogger())
+	got := sizingConfigForStrategy(context.Background(), domain.Strategy{ID: strategyID, MarketType: domain.MarketTypeStock}, strategyConfig, resolved, runner.positionRepo, slogDiscardLogger(), testStrategyScope(t, strategyID))
 	if got.Method != execution.PositionSizingMethodKelly || !got.HalfKelly {
 		t.Fatalf("sizingConfigForStrategy() = %+v, want half-Kelly", got)
 	}
 	if got.WinRate != 0.6 || got.WinLossRatio != 2 {
 		t.Fatalf("Kelly stats = %+v, want win rate 0.6 and win/loss ratio 2", got)
 	}
+}
+
+func testStrategyScope(t *testing.T, strategyID uuid.UUID) execution.ExecutionScope {
+	t.Helper()
+	run := domain.PipelineRunRef{ID: uuid.New(), TradeDate: time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)}
+	scope, err := execution.NewStrategyExecutionScope(testExecutionAccountBinding.AccountID(), testExecutionAccountBinding.Environment(), strategyID, run, strategyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
 }
 
 func TestApplyPolymarketSizingCapOnlyAppliesToPolymarket(t *testing.T) {
@@ -1973,22 +2381,23 @@ func TestRuntimeLiveGateForStrategyParsesAllowlists(t *testing.T) {
 	t.Parallel()
 
 	strategyID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	versionID := uuid.MustParse("22222222-2222-4222-8222-222222222222")
 	runner := &realStrategyRunner{
 		cfg: config.Config{
 			Features:                     config.FeatureFlags{EnableLiveTrading: true},
-			LiveTradingAllowedStrategies: []string{strategyID.String()},
+			LiveTradingAllowedStrategies: []string{versionID.String()},
 			LiveTradingAllowedBrokers:    []string{"Alpaca", "Binance"},
 		},
 	}
 
-	gate, err := runner.liveGateForStrategy(domain.Strategy{ID: strategyID, IsPaper: false})
+	gate, err := runner.liveGateForStrategy(domain.Strategy{ID: strategyID, ExecutionStrategyVersionID: &versionID, IsPaper: false})
 	if err != nil {
 		t.Fatalf("liveGateForStrategy() error = %v", err)
 	}
 	if !gate.EnableLiveTrading {
 		t.Fatal("gate.EnableLiveTrading = false, want true")
 	}
-	if !gate.AllowedStrategies[strategyID] {
+	if !gate.AllowedStrategies[versionID] {
 		t.Fatal("strategy ID not allowlisted")
 	}
 	if !gate.AllowedBrokers["alpaca"] || !gate.AllowedBrokers["binance"] {
@@ -2037,7 +2446,7 @@ func TestRealStrategyRunnerExecutionMetricsHelpers(t *testing.T) {
 	t.Parallel()
 
 	positionRepo := metricPositionRepo{count: 2}
-	engine := risk.NewRiskEngine(risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
+	engine := risk.NewRiskEngine(testExecutionAccountBinding, risk.DefaultPositionLimits(), risk.DefaultCircuitBreakerConfig(), positionRepo, slogDiscardLogger())
 	if err := engine.ActivateKillSwitch(context.Background(), "test"); err != nil {
 		t.Fatalf("ActivateKillSwitch() error = %v", err)
 	}

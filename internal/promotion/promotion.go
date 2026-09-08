@@ -54,6 +54,20 @@ type Policy struct {
 	id        uuid.UUID
 }
 
+// ReviewedPolicyV1Input returns the fixed fail-closed promotion gates. Failed
+// evidence is held for review; it is never activated and is not silently
+// retired or deleted.
+func ReviewedPolicyV1Input() PolicyInput {
+	return PolicyInput{
+		Version:       "promotion-policy-v1@reviewed",
+		RequiredGates: []string{"multiple_testing_adjustment", "overall_robustness"},
+		FailureAction: ActionHold,
+	}
+}
+
+// ReviewedPolicyV1 constructs a fresh immutable reviewed policy artifact.
+func ReviewedPolicyV1() (*Policy, error) { return NewPolicy(ReviewedPolicyV1Input()) }
+
 func NewPolicy(input PolicyInput) (*Policy, error) {
 	gates := append([]string(nil), input.RequiredGates...)
 	sort.Strings(gates)

@@ -17,9 +17,10 @@ const kalshiReconcilePageSize = 1000
 
 // ReconcilerDeps configures the read-only Kalshi reconciliation check.
 type ReconcilerDeps struct {
-	Broker       execution.Broker
-	PositionRepo repository.PositionRepository
-	Logger       *slog.Logger
+	ExecutionAccount domain.ExecutionAccountBinding
+	Broker           execution.Broker
+	PositionRepo     repository.PositionRepository
+	Logger           *slog.Logger
 }
 
 // DriftRecord describes one read-only reconciliation mismatch.
@@ -44,9 +45,10 @@ type Result struct {
 
 // Reconciler compares live broker positions to local open Kalshi positions.
 type Reconciler struct {
-	broker       execution.Broker
-	positionRepo repository.PositionRepository
-	logger       *slog.Logger
+	executionAccount domain.ExecutionAccountBinding
+	broker           execution.Broker
+	positionRepo     repository.PositionRepository
+	logger           *slog.Logger
 }
 
 // NewReconciler constructs a read-only Kalshi reconciler.
@@ -55,7 +57,7 @@ func NewReconciler(deps ReconcilerDeps) *Reconciler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Reconciler{broker: deps.Broker, positionRepo: deps.PositionRepo, logger: logger}
+	return &Reconciler{executionAccount: deps.ExecutionAccount, broker: deps.Broker, positionRepo: deps.PositionRepo, logger: logger}
 }
 
 // Check compares broker and local Kalshi positions without mutating state.
@@ -150,11 +152,23 @@ func (r *Result) addDrift(record DriftRecord) {
 }
 
 func (r *Reconciler) fetchOpenKalshiPositions(ctx context.Context) ([]domain.Position, error) {
+	scoped, ok := r.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok {
+		return nil, fmt.Errorf("account-scoped position repository is required")
+	}
+	if err := r.executionAccount.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid execution account: %w", err)
+	}
 	var all []domain.Position
 	for offset := 0; ; offset += kalshiReconcilePageSize {
-		page, err := r.positionRepo.GetOpen(ctx, repository.PositionFilter{}, kalshiReconcilePageSize, offset)
+		page, err := scoped.GetOpenByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{}, kalshiReconcilePageSize, offset)
 		if err != nil {
 			return nil, err
+		}
+		for i := range page {
+			if page[i].AccountID != r.executionAccount.AccountID() || page[i].Environment != r.executionAccount.Environment() {
+				return nil, fmt.Errorf("position %s belongs to a foreign execution account", page[i].ID)
+			}
 		}
 		if len(page) == 0 {
 			break

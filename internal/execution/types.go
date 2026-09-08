@@ -4,10 +4,11 @@ import "github.com/PatrickFanella/get-rich-quick/internal/domain"
 
 // Balance captures the common account balance fields shared across markets.
 type Balance struct {
-	Currency    string  `json:"currency"`
-	Cash        float64 `json:"cash"`
-	BuyingPower float64 `json:"buying_power"`
-	Equity      float64 `json:"equity"`
+	Currency           string  `json:"currency"`
+	Cash               float64 `json:"cash"`
+	BuyingPower        float64 `json:"buying_power"`
+	OptionsBuyingPower float64 `json:"options_buying_power"`
+	Equity             float64 `json:"equity"`
 }
 
 // AccountInfo captures shared broker account metadata.

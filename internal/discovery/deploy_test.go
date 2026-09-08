@@ -50,6 +50,17 @@ func TestCreateOrReusePaperStrategyCreatesThenReuses(t *testing.T) {
 	if len(config[researchLifecycleConfigKey]) == 0 {
 		t.Fatalf("created config = %s, want %q metadata", created.Config, researchLifecycleConfigKey)
 	}
+	var lifecycle struct {
+		Stage                 string `json:"stage"`
+		Activation            string `json:"activation"`
+		AutoActivationBlocked bool   `json:"auto_activation_blocked"`
+	}
+	if err := json.Unmarshal(config[researchLifecycleConfigKey], &lifecycle); err != nil {
+		t.Fatalf("research lifecycle is invalid: %v", err)
+	}
+	if lifecycle.Stage != "idea" || lifecycle.Activation != "promotion_evaluator_v1" || !lifecycle.AutoActivationBlocked {
+		t.Fatalf("research lifecycle = %+v, want evaluator-controlled inactive idea", lifecycle)
+	}
 
 	reused, didCreate, err := CreateOrReusePaperStrategy(ctx, repo, strategy)
 	if err != nil {
@@ -210,16 +221,41 @@ func TestCreateOrReusePaperStrategyReusesKalshiTickerDespiteDifferentName(t *tes
 	}
 }
 
+func TestCreateOrReusePaperStrategyPrefersValidBoundEventDuplicate(t *testing.T) {
+	t.Parallel()
+
+	repo := newInMemoryStrategyRepo()
+	ticker := "KX-LEGACY-DUPLICATE"
+	unbound := domain.Strategy{ID: uuid.New(), Name: "aaa legacy", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true}
+	bound := domain.Strategy{ID: uuid.New(), Name: "zzz valid", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true}
+	versionID := uuid.New()
+	bound.ExecutionStrategyVersionID = &versionID
+	repo.strategies = append(repo.strategies, unbound, bound)
+	repo.invalidBindings[unbound.ID] = true
+
+	reused, created, err := CreateOrReusePaperStrategy(context.Background(), repo, domain.Strategy{
+		Name: "new name", Ticker: ticker, MarketType: domain.MarketTypeKalshi, IsPaper: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created || reused.ID != bound.ID || reused.ExecutionStrategyVersionID == nil || *reused.ExecutionStrategyVersionID != versionID {
+		t.Fatalf("reuse = %+v, created = %v; want valid bound duplicate %s", reused, created, bound.ID)
+	}
+}
+
 type inMemoryStrategyRepo struct {
 	strategies         []domain.Strategy
 	injectConflictOnce bool
 	conflictTriggered  bool
 	createStatuses     []string
 	updateStatuses     []string
+	mutateOnResolve    func(*inMemoryStrategyRepo, uuid.UUID)
+	invalidBindings    map[uuid.UUID]bool
 }
 
 func newInMemoryStrategyRepo() *inMemoryStrategyRepo {
-	return &inMemoryStrategyRepo{strategies: make([]domain.Strategy, 0)}
+	return &inMemoryStrategyRepo{strategies: make([]domain.Strategy, 0), invalidBindings: make(map[uuid.UUID]bool)}
 }
 
 func (r *inMemoryStrategyRepo) Create(_ context.Context, strategy *domain.Strategy) error {
@@ -233,12 +269,76 @@ func (r *inMemoryStrategyRepo) Create(_ context.Context, strategy *domain.Strate
 
 		existing := *strategy
 		existing.ID = uuid.New()
+		versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+existing.ID.String()))
+		existing.ExecutionStrategyVersionID = &versionID
 		r.strategies = append(r.strategies, existing)
 		return errors.New("ERROR: duplicate key value violates unique constraint \"idx_strategies_discovery_unique\" (SQLSTATE 23505)")
 	}
 
 	r.strategies = append(r.strategies, *strategy)
 	return nil
+}
+
+func (r *inMemoryStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
+	if err := r.Create(ctx, strategy); err != nil {
+		return uuid.Nil, err
+	}
+	versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategy.ID.String()))
+	strategy.ExecutionStrategyVersionID = &versionID
+	for i := range r.strategies {
+		if r.strategies[i].ID == strategy.ID {
+			r.strategies[i].ExecutionStrategyVersionID = &versionID
+		}
+	}
+	return versionID, nil
+}
+
+func (r *inMemoryStrategyRepo) ResolveExecutionVersionID(_ context.Context, strategyID uuid.UUID) (uuid.UUID, error) {
+	if r.mutateOnResolve != nil {
+		mutate := r.mutateOnResolve
+		r.mutateOnResolve = nil
+		mutate(r, strategyID)
+	}
+	for i := range r.strategies {
+		strategy := &r.strategies[i]
+		if strategy.ID == strategyID {
+			if strategy.ExecutionStrategyVersionID == nil {
+				if r.invalidBindings[strategyID] {
+					return uuid.Nil, errors.New("execution version binding is missing")
+				}
+				versionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("version-"+strategyID.String()))
+				strategy.ExecutionStrategyVersionID = &versionID
+			}
+			return *strategy.ExecutionStrategyVersionID, nil
+		}
+	}
+	return uuid.Nil, repository.ErrNotFound
+}
+
+func TestCreateOrReusePaperStrategyReturnsSnapshotMatchingValidatedBinding(t *testing.T) {
+	t.Parallel()
+	repo := newInMemoryStrategyRepo()
+	strategy := domain.Strategy{Name: "old", Ticker: "SNAP", MarketType: domain.MarketTypeStock, IsPaper: true, Config: json.RawMessage(`{"revision":1}`)}
+	created, _, err := CreateOrReusePaperStrategy(context.Background(), repo, strategy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newVersionID := uuid.New()
+	repo.mutateOnResolve = func(repo *inMemoryStrategyRepo, id uuid.UUID) {
+		for i := range repo.strategies {
+			if repo.strategies[i].ID == id {
+				repo.strategies[i].Description = "new snapshot"
+				repo.strategies[i].ExecutionStrategyVersionID = &newVersionID
+			}
+		}
+	}
+	reused, didCreate, err := CreateOrReusePaperStrategy(context.Background(), repo, strategy)
+	if err != nil || didCreate {
+		t.Fatalf("reuse = %v, %v", didCreate, err)
+	}
+	if reused.ID != created.ID || reused.Description != "new snapshot" || reused.ExecutionStrategyVersionID == nil || *reused.ExecutionStrategyVersionID != newVersionID {
+		t.Fatalf("reused stale snapshot: %+v", reused)
+	}
 }
 
 func (r *inMemoryStrategyRepo) Get(_ context.Context, id uuid.UUID) (*domain.Strategy, error) {

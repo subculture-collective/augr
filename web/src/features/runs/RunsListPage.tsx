@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/ui/page-header'
 import { StatusBadge } from '@/components/ui/status-badge'
 import { getRuns, type RunListParams } from '@/shared/api/endpoints'
 import { EntityLink } from '@/shared/components/EntityLinks'
+import { useAccount } from '@/shared/account/AccountProvider'
 import { EmptyState, ErrorState, LastUpdated, LoadingState, StaleBanner } from '@/shared/components/QueryStates'
 import { queryKeys } from '@/shared/query/keys'
 import type { PipelineRun } from '@/shared/types/domain'
@@ -63,11 +64,12 @@ function SignalValue({ value }: { value?: string }) {
   return <span>{titleCase(value)}</span>
 }
 
-function RunCard({ run }: { run: PipelineRun }) {
+function RunCard({ accountId, run }: { accountId: string; run: PipelineRun }) {
+  const href = `/accounts/${accountId}/runs/${run.id}?trade_date=${run.trade_date.slice(0, 10)}`
   return (
     <article className="strategy-card">
       <div className="panel-header">
-        <h2><Link to={`/runs/${run.id}`}>{run.ticker}</Link></h2>
+        <h2><Link to={href}>{run.ticker}</Link></h2>
         <RunStatusPill value={run.status} />
       </div>
       <p><EntityLink kind="strategy" id={run.strategy_id} label="Open strategy" copy={false} /></p>
@@ -78,6 +80,7 @@ function RunCard({ run }: { run: PipelineRun }) {
 }
 
 export function RunsListPage() {
+  const { account } = useAccount()
   const [searchParams, setSearchParams] = useSearchParams()
   const navigate = useNavigate()
   const realtime = useRealtime()
@@ -85,8 +88,8 @@ export function RunsListPage() {
   const [realtimeStale, setRealtimeStale] = useState(false)
   const lastEventKey = useRef<string | null>(null)
   const query = useQuery({
-    queryKey: queryKeys.runsListFiltered(params),
-    queryFn: ({ signal }) => getRuns(params, signal),
+    queryKey: queryKeys.runsListFiltered(account.id, params),
+    queryFn: ({ signal }) => getRuns(account.id, params, signal),
   })
 
   const rows = query.data?.data ?? []
@@ -116,8 +119,8 @@ export function RunsListPage() {
     setSearchParams(next)
   }
 
-  function onRowKeyDown(event: KeyboardEvent<HTMLTableRowElement>, id: string) {
-    if (event.key === 'Enter') navigate(`/runs/${id}`)
+  function onRowKeyDown(event: KeyboardEvent<HTMLTableRowElement>, run: PipelineRun) {
+    if (event.key === 'Enter') navigate(`/accounts/${account.id}/runs/${run.id}?trade_date=${run.trade_date.slice(0, 10)}`)
   }
 
   return (
@@ -181,8 +184,8 @@ export function RunsListPage() {
                 </thead>
                 <tbody>
                   {rows.map((run) => (
-                    <tr key={run.id} tabIndex={0} onKeyDown={(event) => onRowKeyDown(event, run.id)}>
-                      <th scope="row"><Link to={`/runs/${run.id}`}>{run.id}</Link></th>
+                    <tr key={`${run.id}-${run.trade_date}`} tabIndex={0} onKeyDown={(event) => onRowKeyDown(event, run)}>
+                      <th scope="row"><Link to={`/accounts/${account.id}/runs/${run.id}?trade_date=${run.trade_date.slice(0, 10)}`}>{run.id}</Link></th>
                       <td><EntityLink kind="strategy" id={run.strategy_id} copy={false} /></td>
                       <td>{run.ticker}</td>
                       <td><RunStatusPill value={run.status} /></td>
@@ -196,7 +199,7 @@ export function RunsListPage() {
               </table>
             </div>
             <div className="card-list" aria-label="Runs cards">
-              {rows.map((run) => <RunCard key={run.id} run={run} />)}
+              {rows.map((run) => <RunCard key={`${run.id}-${run.trade_date}`} accountId={account.id} run={run} />)}
             </div>
             <nav className="pagination-controls" aria-label="Run pagination">
               <button type="button" disabled={!hasPrevious} onClick={() => setOffset(Math.max(0, offset - pageSize))}>Previous</button>

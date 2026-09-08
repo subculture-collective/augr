@@ -13,22 +13,27 @@ import (
 	"github.com/google/uuid"
 	"github.com/robfig/cron/v3"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/polygon"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/rss"
 	"github.com/PatrickFanella/get-rich-quick/internal/discovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	kalshiexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	prediction "github.com/PatrickFanella/get-rich-quick/internal/execution/prediction"
+	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	kalshidiscovery "github.com/PatrickFanella/get-rich-quick/internal/kalshidiscovery"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/embedding"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
+	"github.com/PatrickFanella/get-rich-quick/internal/promotion"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
+	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
 
@@ -60,9 +65,63 @@ const DiscoveryReadinessEvaluationErrorReason = "discovery deployment readiness 
 
 // DiscoveryReadiness is the single startup evaluation shared by automation and API.
 type DiscoveryReadiness struct {
-	Ready  bool
-	Reason string
-	Err    error
+	Ready                 bool      `json:"ready"`
+	Reason                string    `json:"reason,omitempty"`
+	Err                   error     `json:"-"`
+	CapabilitiesEvaluated bool      `json:"capabilities_evaluated"`
+	StockReady            bool      `json:"stock_ready"`
+	StockReason           string    `json:"stock_reason,omitempty"`
+	OptionsReady          bool      `json:"options_ready"`
+	OptionsReason         string    `json:"options_reason,omitempty"`
+	ScopeID               string    `json:"scope_id,omitempty"`
+	ManifestID            string    `json:"manifest_id,omitempty"`
+	ManifestSHA256        string    `json:"manifest_sha256,omitempty"`
+	QualityResultID       string    `json:"quality_result_id,omitempty"`
+	QualitySHA256         string    `json:"quality_sha256,omitempty"`
+	ObservationCount      int       `json:"observation_count"`
+	BindingCount          int       `json:"binding_count"`
+	StockPayloadCount     int       `json:"stock_payload_count"`
+	OptionsPayloadCount   int       `json:"options_payload_count"`
+	OptionBarCount        int       `json:"option_bar_count"`
+	OptionContractCount   int       `json:"option_contract_count"`
+	OptionQuoteCount      int       `json:"option_quote_count"`
+	OptionTradeCount      int       `json:"option_trade_count"`
+	OptionSnapshotCount   int       `json:"option_snapshot_count"`
+	EvaluationStart       time.Time `json:"evaluation_start,omitempty"`
+	EvaluationEnd         time.Time `json:"evaluation_end,omitempty"`
+	StockEffectiveStart   time.Time `json:"stock_effective_start,omitempty"`
+	StockEffectiveEnd     time.Time `json:"stock_effective_end,omitempty"`
+	OptionsEffectiveStart time.Time `json:"options_effective_start,omitempty"`
+	OptionsEffectiveEnd   time.Time `json:"options_effective_end,omitempty"`
+	DecisionCutoff        time.Time `json:"decision_cutoff,omitempty"`
+}
+
+func (o *JobOrchestrator) DiscoveryReadiness() *DiscoveryReadiness {
+	if o == nil || o.deps.DiscoveryReadiness == nil {
+		return nil
+	}
+	copyValue := *o.deps.DiscoveryReadiness
+	return &copyValue
+}
+
+func (readiness *DiscoveryReadiness) StockCapabilityReady() bool {
+	if readiness == nil || readiness.Err != nil {
+		return false
+	}
+	if readiness.CapabilitiesEvaluated {
+		return readiness.StockReady
+	}
+	return readiness.Ready
+}
+
+func (readiness *DiscoveryReadiness) OptionsCapabilityReady() bool {
+	if readiness == nil || readiness.Err != nil {
+		return false
+	}
+	if readiness.CapabilitiesEvaluated {
+		return readiness.OptionsReady
+	}
+	return readiness.Ready
 }
 
 // UnavailableJob describes an intentionally omitted job.
@@ -117,13 +176,17 @@ type TickerDiscoveryJobConfig struct {
 
 // OrchestratorDeps bundles external dependencies required by the orchestrator.
 type OrchestratorDeps struct {
+	ExecutionAccount             domain.ExecutionAccountBinding
+	CanonicalAccountID           uuid.UUID
 	DiscoveryReadiness           *DiscoveryReadiness
 	Universe                     *universe.Universe
 	Polygon                      *polygon.Client
 	PolygonBulkSnapshotsEnabled  bool
 	DataService                  *data.DataService
+	DiscoveryDataService         *data.DataService
 	AlpacaReconciler             *AlpacaReconciler
 	OptionsProvider              data.OptionsDataProvider
+	DiscoveryOptionsProvider     data.OptionsDataProvider
 	LLMProvider                  llm.Provider
 	LLMQuickModel                string
 	GeneratorMetrics             discovery.GeneratorMetrics
@@ -136,6 +199,7 @@ type OrchestratorDeps struct {
 	OrderRepo                    repository.OrderRepository
 	TradeRepo                    repository.TradeRepository
 	OptionSettlementRepo         repository.OptionSettlementRepository
+	OptionSettlementState        execution.OptionSettlementState
 	OpportunityRepo              repository.OpportunityRepository
 	AllocationDecisionRepo       repository.AllocationDecisionRepository
 	RunRepo                      repository.PipelineRunRepository
@@ -151,7 +215,9 @@ type OrchestratorDeps struct {
 		SettlePreview(context.Context, domain.MarketType, string) (*prediction.SettlementPreview, error)
 		PreviewMarket(context.Context, domain.MarketType, string) (int, error)
 		SettleDecisions(context.Context, domain.MarketType, string, string, time.Time, []uuid.UUID) (int, error)
+		SettleDecisionsWithEvidence(context.Context, domain.MarketType, string, string, time.Time, []uuid.UUID, prediction.ResolutionEvidence) (int, error)
 		SettleMarket(context.Context, domain.MarketType, string, string, time.Time) (int, error)
+		SettleMarketWithEvidence(context.Context, domain.MarketType, string, string, time.Time, prediction.ResolutionEvidence) (int, error)
 	} // optional; settles paper event positions from provider outcomes
 	KalshiReconciler            *kalshiexecution.Reconciler // optional; nil = skip live reconciliation job
 	PolymarketResolvedRepo      repository.PolymarketResolvedMarketsRepository
@@ -165,7 +231,10 @@ type OrchestratorDeps struct {
 	}
 	PortfolioAllocatorMode    portfolio.AllocatorMode
 	PortfolioPaperProcessor   portfolio.PaperOrderProcessor
+	PortfolioOptionsProcessor portfolio.PaperOptionsOrderProcessor
 	PortfolioAccountBalance   PortfolioAccountBalanceSource
+	PortfolioAccountSnapshot  PortfolioAccountSnapshotSource
+	PortfolioRiskState        PortfolioRiskStateSource
 	KalshiWatchedRepo         repository.KalshiWatchedMarketsRepository
 	KalshiMarketSnapshotsRepo repository.KalshiMarketSnapshotsRepository
 	KalshiDiscoveryRuns       repository.KalshiDiscoveryRunRepository // optional; nil = skip progress recording
@@ -176,15 +245,52 @@ type OrchestratorDeps struct {
 	KalshiMarkProvider        interface {
 		LoadSnapshot(context.Context, string) (kalshiexecution.Snapshot, error)
 	}
-	KalshiProjectionRepo  repository.ProjectionRepository
-	KalshiMarkMaxAge      time.Duration
-	ReportArtifactRepo    *pgrepo.ReportArtifactRepo          // optional; nil = skip report jobs
-	BacktestConfigRepo    repository.BacktestConfigRepository // optional; needed by report jobs
-	BacktestRunRepo       repository.BacktestRunRepository    // optional; needed by report jobs
-	DiscoveryRunRepo      discovery.RunRepository             // required by stock discovery jobs
-	OvernightBacktestRuns repository.OvernightBacktestRunRepository
-	JobTimeout            time.Duration
-	Logger                *slog.Logger
+	KalshiProjectionRepo   repository.ProjectionRepository
+	KalshiProjectionOutbox repository.ProjectionOutboxRepository
+	KalshiMarkMaxAge       time.Duration
+	ReportArtifactRepo     *pgrepo.ReportArtifactRepo          // optional; nil = skip report jobs
+	BacktestConfigRepo     repository.BacktestConfigRepository // optional; needed by report jobs
+	BacktestRunRepo        repository.BacktestRunRepository    // optional; needed by report jobs
+	DiscoveryRunRepo       discovery.RunRepository             // required by stock discovery jobs
+	OvernightBacktestRuns  repository.OvernightBacktestRunRepository
+	GeneratedResearch      interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int, time.Time) (generativestrategy.BatchSummary, error)
+	}
+	GeneratedProposal interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.ProposalBatchSummary, error)
+	}
+	GeneratedResearchPreparation interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.PreparationBatchSummary, error)
+	}
+	GeneratedEvaluation interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.EvaluationBatchSummary, error)
+	}
+	GeneratedRobustness interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.BatchSummary, error)
+	}
+	GeneratedDeployment interface {
+		RunEligible(context.Context, uuid.UUID, uuid.UUID, int) (generativestrategy.BatchSummary, error)
+	}
+	ObservedOptionsCandidates interface {
+		RegisterCandidate(context.Context, uuid.UUID, uuid.UUID, rules.OptionsRulesConfig, time.Time, time.Time, string, string) (*domain.Strategy, *strategycatalog.Experiment, bool, error)
+	}
+	OptionsSourceCommit     string
+	OptionsSourceTreeSHA256 string
+	PromotionActivation     interface {
+		ProjectEligibleActivations(context.Context, uuid.UUID, uuid.UUID, bool) (pgrepo.PromotionActivationBatch, error)
+	}
+	PromotionEvaluation interface {
+		EvaluateEligiblePromotions(context.Context, uuid.UUID, uuid.UUID, promotion.Readiness) (pgrepo.PromotionEvaluationBatch, error)
+	}
+	PromotionAccountSource interface {
+		GetByID(context.Context, uuid.UUID) (*domain.Account, error)
+	}
+	PromotionProjectionSource repository.ProjectionReader
+	PromotionEvidenceSource   repository.ScopedCutoverEvidenceReader
+	AutomaticShadowPromotion  bool
+	DiscoveryScopeID          uuid.UUID
+	JobTimeout                time.Duration
+	Logger                    *slog.Logger
 }
 
 // RegisteredJob tracks a single automated job and its runtime state.
@@ -296,11 +402,14 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 		now:    time.Now,
 		runs:   runcontrol.NewGroup(),
 	}
-	if deps.DiscoveryReadiness != nil && (!deps.DiscoveryReadiness.Ready || deps.DiscoveryReadiness.Err != nil) {
-		reason := discoveryReadinessUnavailableReason(deps.DiscoveryReadiness)
-		for _, name := range discoveryDeploymentJobNames {
+	if deps.DiscoveryReadiness != nil && !o.stockDiscoveryReady() {
+		reason := stockDiscoveryUnavailableReason(deps.DiscoveryReadiness)
+		for _, name := range stockDiscoveryDeploymentJobNames {
 			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: reason})
 		}
+	}
+	if deps.DiscoveryReadiness != nil && !o.optionsDiscoveryReady() {
+		o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: "options_discovery", Reason: optionsDiscoveryUnavailableReason(deps.DiscoveryReadiness)})
 	}
 	return o
 }
@@ -316,12 +425,61 @@ func discoveryReadinessUnavailableReason(readiness *DiscoveryReadiness) string {
 	return DiscoveryReadinessEvaluationErrorReason
 }
 
+var stockDiscoveryDeploymentJobNames = [...]string{
+	"discovery_run", "overnight_backtest", "overnight_generate", "ticker_discovery",
+}
+
 var discoveryDeploymentJobNames = [...]string{
 	"discovery_run", "options_discovery", "overnight_backtest", "overnight_generate", "ticker_discovery",
 }
 
 func (o *JobOrchestrator) discoveryDeploymentReady() bool {
-	return o.deps.DiscoveryReadiness != nil && o.deps.DiscoveryReadiness.Ready && o.deps.DiscoveryReadiness.Err == nil
+	return o.stockDiscoveryReady()
+}
+
+func (o *JobOrchestrator) discoveryDataService() *data.DataService {
+	if o.deps.DiscoveryDataService != nil {
+		return o.deps.DiscoveryDataService
+	}
+	// Compatibility for callers that predate capability-specific readiness.
+	// Production startup always sets CapabilitiesEvaluated and must supply the
+	// manifest-bound service explicitly.
+	if o.deps.DiscoveryReadiness != nil && !o.deps.DiscoveryReadiness.CapabilitiesEvaluated {
+		return o.deps.DataService
+	}
+	return nil
+}
+
+func (o *JobOrchestrator) discoveryOptionsProvider() data.OptionsDataProvider {
+	if o.deps.DiscoveryOptionsProvider != nil {
+		return o.deps.DiscoveryOptionsProvider
+	}
+	if o.deps.DiscoveryReadiness != nil && !o.deps.DiscoveryReadiness.CapabilitiesEvaluated {
+		return o.deps.OptionsProvider
+	}
+	return nil
+}
+
+func (o *JobOrchestrator) stockDiscoveryReady() bool {
+	return o.deps.DiscoveryReadiness.StockCapabilityReady()
+}
+
+func (o *JobOrchestrator) optionsDiscoveryReady() bool {
+	return o.deps.DiscoveryReadiness.OptionsCapabilityReady()
+}
+
+func stockDiscoveryUnavailableReason(readiness *DiscoveryReadiness) string {
+	if readiness != nil && readiness.CapabilitiesEvaluated && strings.TrimSpace(readiness.StockReason) != "" {
+		return readiness.StockReason
+	}
+	return discoveryReadinessUnavailableReason(readiness)
+}
+
+func optionsDiscoveryUnavailableReason(readiness *DiscoveryReadiness) string {
+	if readiness != nil && readiness.CapabilitiesEvaluated && strings.TrimSpace(readiness.OptionsReason) != "" {
+		return readiness.OptionsReason
+	}
+	return discoveryReadinessUnavailableReason(readiness)
 }
 
 // UnavailableJobs returns sorted diagnostics for jobs omitted at startup.
@@ -431,9 +589,14 @@ func (o *JobOrchestrator) RegisteredJobKeys() []string {
 
 // RegisterAll registers all automated jobs from every job group.
 func (o *JobOrchestrator) RegisterAll() {
-	if !o.discoveryDeploymentReady() && len(o.unavailableJobs) == 0 {
-		for _, name := range discoveryDeploymentJobNames {
-			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: DiscoveryReadinessEvaluationErrorReason})
+	if len(o.unavailableJobs) == 0 {
+		if !o.stockDiscoveryReady() {
+			for _, name := range stockDiscoveryDeploymentJobNames {
+				o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: name, Reason: stockDiscoveryUnavailableReason(o.deps.DiscoveryReadiness)})
+			}
+		}
+		if !o.optionsDiscoveryReady() {
+			o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: "options_discovery", Reason: optionsDiscoveryUnavailableReason(o.deps.DiscoveryReadiness)})
 		}
 	}
 	o.registerBrokerReconciliationJobs()
@@ -458,6 +621,33 @@ func (o *JobOrchestrator) RegisterAll() {
 	o.registerKalshiReconciliationJob()
 	o.registerReportJobs()
 	o.registerPortfolioAllocatorJobs()
+	o.registerGeneratedProposalJob()
+	o.registerGeneratedResearchPreparationJob()
+	o.registerGeneratedResearchJob()
+	o.registerGeneratedEvaluationJob()
+	o.registerGeneratedRobustnessJob()
+	o.registerGeneratedDeploymentJob()
+	o.registerPromotionEvaluationJob()
+	o.registerPromotionActivationJob()
+}
+
+func (o *JobOrchestrator) registerPromotionActivationJob() {
+	if !o.deps.AutomaticShadowPromotion {
+		return
+	}
+	if o.deps.PromotionActivation == nil || o.deps.CanonicalAccountID == uuid.Nil || o.deps.DiscoveryScopeID == uuid.Nil {
+		o.unavailableJobs = append(o.unavailableJobs, UnavailableJob{Name: "promotion_activation", Reason: "automatic promotion requires canonical account, configured scope, and projector"})
+		return
+	}
+	o.Register("promotion_activation", "Project approved promotion heads into paper shadow schedules", scheduler.ScheduleSpec{
+		Type: scheduler.ScheduleTypeCron, Cron: "*/5 * * * *",
+	}, func(ctx context.Context) error {
+		summary, err := o.deps.PromotionActivation.ProjectEligibleActivations(ctx, o.deps.CanonicalAccountID, o.deps.DiscoveryScopeID, true)
+		o.SetLastSummary("promotion_activation", map[string]int{
+			"eligible": summary.Eligible, "activated": summary.Activated, "suspended": summary.Suspended, "noop": summary.Noop,
+		})
+		return err
+	})
 }
 
 // Start starts the cron engine with all registered jobs.

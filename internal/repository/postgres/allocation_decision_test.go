@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ func TestBuildAllocationDecisionQuery(t *testing.T) {
 	opportunityID := uuid.New()
 	createdAfter := time.Date(2026, 6, 18, 12, 0, 0, 0, time.UTC)
 
-	query, args := buildAllocationDecisionListQuery(repository.AllocationDecisionFilter{
+	query, args := buildAllocationDecisionListQuery(canonicalRepositoryTestAccountID, repository.AllocationDecisionFilter{
 		Mode:          domain.AllocationDecisionModeShadow,
 		Action:        domain.AllocationDecisionActionShadowSelected,
 		StrategyID:    &strategyID,
@@ -24,15 +25,15 @@ func TestBuildAllocationDecisionQuery(t *testing.T) {
 		CreatedAfter:  &createdAfter,
 	}, 25, 50)
 
-	if len(args) != 7 {
+	if len(args) != 8 {
 		t.Fatalf("expected 7 args, got %d: %#v", len(args), args)
 	}
-	assertContains(t, query, "mode = $1")
-	assertContains(t, query, "action = $2")
-	assertContains(t, query, "strategy_id = $3")
-	assertContains(t, query, "opportunity_id = $4")
-	assertContains(t, query, "created_at >= $5")
-	assertContains(t, query, "LIMIT $6 OFFSET $7")
+	assertContains(t, query, "mode = $2")
+	assertContains(t, query, "action = $3")
+	assertContains(t, query, "strategy_id = $4")
+	assertContains(t, query, "opportunity_id = $5")
+	assertContains(t, query, "created_at >= $6")
+	assertContains(t, query, "LIMIT $7 OFFSET $8")
 }
 
 func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
@@ -40,10 +41,13 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
 	defer cleanup()
 
-	repo := NewAllocationDecisionRepo(pool)
+	repo := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID)
 	strategyID := createTestStrategy(t, ctx, pool)
-	opportunityRepo := NewOpportunityRepo(pool)
+	runID, versionID := uuid.New(), uuid.New()
+	opportunityRepo := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID)
 	opportunity := &domain.Opportunity{
+		AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored,
+		OriginType: "strategy_version", OriginID: versionID.String(), PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
 		StrategyID:        strategyID,
 		MarketType:        domain.MarketTypeStock,
 		Ticker:            "AAPL",
@@ -66,20 +70,17 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 		t.Fatalf("Create(opportunity) error = %v", err)
 	}
 
-	createdOrderID := uuid.New()
-	if _, err := pool.Exec(ctx, `INSERT INTO orders (id) VALUES ($1)`, createdOrderID); err != nil {
-		t.Fatalf("create order fixture: %v", err)
-	}
 	decision := &domain.AllocationDecision{
-		OpportunityID:  &opportunity.ID,
-		StrategyID:     &strategyID,
-		Mode:           domain.AllocationDecisionModeShadow,
-		Action:         domain.AllocationDecisionActionShadowSelected,
-		Score:          91.5,
-		NotionalUSD:    5000,
-		Quantity:       25,
-		Reasons:        []string{"edge", "liquidity"},
-		CreatedOrderID: &createdOrderID,
+		AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment,
+		OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
+		OpportunityID: &opportunity.ID,
+		StrategyID:    &strategyID,
+		Mode:          domain.AllocationDecisionModeShadow,
+		Action:        domain.AllocationDecisionActionShadowSelected,
+		Score:         91.5,
+		NotionalUSD:   5000,
+		Quantity:      25,
+		Reasons:       []string{"edge", "liquidity"},
 	}
 	if err := repo.Create(ctx, decision); err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -95,7 +96,7 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != decision.ID {
 		t.Fatalf("unexpected list result: %+v", listed)
 	}
-	if listed[0].CreatedOrderID == nil || *listed[0].CreatedOrderID != createdOrderID {
+	if listed[0].CreatedOrderID != nil {
 		t.Fatalf("unexpected created order id: %+v", listed[0])
 	}
 
@@ -105,5 +106,86 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected count 1, got %d", count)
+	}
+}
+
+func TestAllocationDecisionRepoIntegration_ConflictNeverReturnsForeignLineage(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	opportunity := &domain.Opportunity{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusSelected, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	claimID := uuid.New()
+	if claimed, err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, time.Now(), time.Now().Add(time.Minute)); err != nil || !claimed {
+		t.Fatalf("claim opportunity = %t, %v", claimed, err)
+	}
+	decision := &domain.AllocationDecision{AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}
+	if err := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, decision); err != nil {
+		t.Fatal(err)
+	}
+	foreign := *decision
+	foreign.ID, foreign.CreatedAt, foreign.Environment = uuid.Nil, time.Time{}, domain.AccountEnvironmentLive
+	if err := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, &foreign); err == nil {
+		t.Fatal("foreign conflict returned existing allocation decision")
+	}
+	if foreign.ID != uuid.Nil {
+		t.Fatalf("foreign decision received ID %s", foreign.ID)
+	}
+	mutations := map[string]func(*domain.AllocationDecision){
+		"mode":     func(d *domain.AllocationDecision) { d.Mode = domain.AllocationDecisionModeShadow },
+		"action":   func(d *domain.AllocationDecision) { d.Action = domain.AllocationDecisionActionExecuted },
+		"score":    func(d *domain.AllocationDecision) { d.Score = 1 },
+		"notional": func(d *domain.AllocationDecision) { d.NotionalUSD = 10 },
+		"quantity": func(d *domain.AllocationDecision) { d.Quantity = 2 },
+		"reasons":  func(d *domain.AllocationDecision) { d.Reasons = []string{"changed"} },
+		"lineage":  func(d *domain.AllocationDecision) { id := uuid.New(); d.PipelineRunID = &id },
+		"order":    func(d *domain.AllocationDecision) { id := uuid.New(); d.CreatedOrderID = &id },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			retry := *decision
+			retry.ID, retry.CreatedAt = uuid.Nil, time.Time{}
+			mutate(&retry)
+			err := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, &retry)
+			if !errors.Is(err, repository.ErrIdempotencyConflict) {
+				t.Fatalf("Create() error = %v, want ErrIdempotencyConflict", err)
+			}
+		})
+	}
+}
+
+func TestAllocationDecisionRepoIntegration_RecordPaperOrderResultFencesFullLineage(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := newOpportunityIntegrationPool(t, ctx)
+	defer cleanup()
+	strategyID, runID, versionID := createTestStrategy(t, ctx, pool), uuid.New(), uuid.New()
+	opportunity := &domain.Opportunity{AccountID: canonicalRepositoryTestAccountID, Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: versionID.String(), StrategyID: strategyID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), MarketType: domain.MarketTypeStock, Ticker: "AAPL", Side: domain.OrderSideBuy, Signal: domain.PipelineSignalBuy, Status: domain.OpportunityStatusSelected, ExpiresAt: time.Now().Add(time.Hour), DedupeKey: uuid.NewString()}
+	if err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).Create(ctx, opportunity); err != nil {
+		t.Fatal(err)
+	}
+	claimID := uuid.New()
+	if claimed, err := NewOpportunityRepo(pool, canonicalRepositoryTestAccountID).TakeOverExpiredAllocationClaim(ctx, opportunity.ID, claimID, time.Now(), time.Now().Add(time.Minute)); err != nil || !claimed {
+		t.Fatalf("claim opportunity = %t, %v", claimed, err)
+	}
+	decision := &domain.AllocationDecision{AccountID: canonicalRepositoryTestAccountID, Environment: opportunity.Environment, OriginType: opportunity.OriginType, OriginID: opportunity.OriginID, PipelineRunID: &runID, PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate), OpportunityID: &opportunity.ID, StrategyID: &strategyID, Mode: domain.AllocationDecisionModePaper, Action: domain.AllocationDecisionActionPaperOrderIntent}
+	repo := NewAllocationDecisionRepo(pool, canonicalRepositoryTestAccountID)
+	if err := repo.Create(ctx, decision); err != nil {
+		t.Fatal(err)
+	}
+	orderID, wrongStrategyID := uuid.New(), uuid.New()
+	if _, err := pool.Exec(ctx, `INSERT INTO orders(id,account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,strategy_id,allocation_opportunity_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, orderID, canonicalRepositoryTestAccountID, opportunity.Environment, opportunity.OriginType, opportunity.OriginID, runID, canonicalRepositoryTestTradeDate, wrongStrategyID, opportunity.ID); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, claimID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || applied {
+		t.Fatalf("mismatched strategy attachment = %t, %v", applied, err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE orders SET strategy_id=$1 WHERE id=$2`, strategyID, orderID); err != nil {
+		t.Fatal(err)
+	}
+	if applied, err := repo.RecordPaperOrderResult(ctx, decision.ID, claimID, &orderID, domain.AllocationDecisionActionExecuted, nil); err != nil || !applied {
+		t.Fatalf("matching attachment = %t, %v", applied, err)
 	}
 }

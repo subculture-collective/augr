@@ -802,7 +802,6 @@ func newLedgerIntegrationPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 		t.Fatalf("pgxpool.ParseConfig() error = %v", err)
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = schemaName + ",public"
-	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatalf("pgxpool.NewWithConfig() error = %v", err)

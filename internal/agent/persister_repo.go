@@ -56,7 +56,7 @@ func (p *RepoPersister) FinalizeRun(ctx context.Context, runID uuid.UUID, tradeD
 	if p.pipelineRunRepo == nil {
 		return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: runID, TradeDate: tradeDate, Status: finalization.Status, CompletedAt: &finalization.CompletedAt, ErrorMessage: finalization.ErrorMessage}}, nil
 	}
-	receipt, err := p.pipelineRunRepo.Finalize(ctx, runID, tradeDate, finalization)
+	receipt, err := p.pipelineRunRepo.Finalize(ctx, domain.PipelineRunRef{ID: runID, TradeDate: tradeDate}, finalization)
 	if err != nil {
 		return repository.PipelineRunFinalizationReceipt{}, fmt.Errorf("agent/pipeline: finalize run: %w", err)
 	}
@@ -80,7 +80,30 @@ func (p *RepoPersister) PersistSnapshot(ctx context.Context, snapshot *domain.Pi
 
 func (p *RepoPersister) PersistDecision(
 	ctx context.Context,
-	runID uuid.UUID,
+	ref domain.PipelineRunRef,
+	node Node,
+	roundNumber *int,
+	output string,
+	llmResponse *DecisionLLMResponse,
+) error {
+	return p.persistDecision(ctx, PersistenceScope{Run: ref}, node, roundNumber, output, llmResponse)
+}
+
+// PersistDecisionScoped stores a decision with complete canonical ownership.
+func (p *RepoPersister) PersistDecisionScoped(
+	ctx context.Context,
+	scope PersistenceScope,
+	node Node,
+	roundNumber *int,
+	output string,
+	llmResponse *DecisionLLMResponse,
+) error {
+	return p.persistDecision(ctx, scope, node, roundNumber, output, llmResponse)
+}
+
+func (p *RepoPersister) persistDecision(
+	ctx context.Context,
+	scope PersistenceScope,
 	node Node,
 	roundNumber *int,
 	output string,
@@ -91,11 +114,16 @@ func (p *RepoPersister) PersistDecision(
 	}
 
 	decision := &domain.AgentDecision{
-		PipelineRunID: runID,
-		AgentRole:     node.Role(),
-		Phase:         node.Phase(),
-		RoundNumber:   cloneRoundNumber(roundNumber),
-		OutputText:    output,
+		AccountID:            scope.AccountID,
+		Environment:          scope.Environment,
+		OriginType:           scope.OriginType,
+		OriginID:             scope.OriginID,
+		PipelineRunID:        scope.Run.ID,
+		PipelineRunTradeDate: scope.Run.TradeDate,
+		AgentRole:            node.Role(),
+		Phase:                node.Phase(),
+		RoundNumber:          cloneRoundNumber(roundNumber),
+		OutputText:           output,
 	}
 	if llmResponse != nil {
 		decision.LLMProvider = llmResponse.Provider

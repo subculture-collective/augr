@@ -41,6 +41,8 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    allowOnly: false,
+    maxWorkers: 2,
     globals: false,
     testTimeout: 20_000,
     hookTimeout: 20_000,

@@ -31,19 +31,19 @@ var (
 )
 
 type InputField struct {
-	Name             string
-	Type             string
-	DatasetKind      dataset.Kind
-	Field            string
-	FreshnessSeconds int64
-	MissingPolicy    string
+	Name             string       `json:"name"`
+	Type             string       `json:"type"`
+	DatasetKind      dataset.Kind `json:"dataset_kind"`
+	Field            string       `json:"field"`
+	FreshnessSeconds int64        `json:"freshness_seconds"`
+	MissingPolicy    string       `json:"missing_policy"`
 }
 
 type Expr struct {
-	Op    string
-	Ref   string
-	Value string
-	Args  []Expr
+	Op    string `json:"op"`
+	Ref   string `json:"ref"`
+	Value string `json:"value"`
+	Args  []Expr `json:"args"`
 }
 
 type Universe struct {
@@ -53,33 +53,33 @@ type Universe struct {
 }
 
 type Sizing struct {
-	Mode        string
-	Value       string
-	MaxPosition string
+	Mode        string `json:"mode"`
+	Value       string `json:"value"`
+	MaxPosition string `json:"max_position"`
 }
 
 type Costs struct {
-	SpreadBPS   string
-	FeeBPS      string
-	SlippageBPS string
+	SpreadBPS   string `json:"spread_bps"`
+	FeeBPS      string `json:"fee_bps"`
+	SlippageBPS string `json:"slippage_bps"`
 }
 
 type Capacity struct {
-	MaximumDailyTurnover string
-	MaximumParticipation string
+	MaximumDailyTurnover string `json:"maximum_daily_turnover"`
+	MaximumParticipation string `json:"maximum_participation"`
 }
 
 type ExampleTest struct {
-	Key           string
-	Values        map[string]string
-	ExpectedEntry bool
-	ExpectedExit  bool
+	Key           string            `json:"key"`
+	Values        map[string]string `json:"values"`
+	ExpectedEntry bool              `json:"expected_entry"`
+	ExpectedExit  bool              `json:"expected_exit"`
 }
 
 type Retirement struct {
-	MaximumDrawdown     string
-	MinimumSamples      int64
-	MaximumFailedChecks int64
+	MaximumDrawdown     string `json:"maximum_drawdown"`
+	MinimumSamples      int64  `json:"minimum_samples"`
+	MaximumFailedChecks int64  `json:"maximum_failed_checks"`
 }
 
 type Authoring struct {
@@ -246,6 +246,16 @@ func NewSpec(input SpecInput) (*Spec, error) {
 	examples, err := normalizeExamples(input.ExampleTests, types)
 	if err != nil {
 		return nil, err
+	}
+	for _, example := range examples {
+		values := make(map[string]string, len(example.Values))
+		for _, binding := range example.Values {
+			values[binding.Name] = binding.Value
+		}
+		entry, exit, evaluateErr := evaluateExpressions(entry, exit, types, values)
+		if evaluateErr != nil || entry != example.ExpectedEntry || exit != example.ExpectedExit {
+			return nil, fmt.Errorf("generated strategy example %q does not satisfy its expected decisions", example.Key)
+		}
 	}
 	retirement, err := normalizeRetirement(input.Retirement)
 	if err != nil {
@@ -521,6 +531,52 @@ func (s *Spec) FamilyDigest() string {
 	return s.canonical.FamilySHA256
 }
 
+func (s *Spec) SpecKey() string {
+	if s == nil {
+		return ""
+	}
+	return s.canonical.SpecKey
+}
+
+func (s *Spec) Inputs() []InputField {
+	if s == nil {
+		return nil
+	}
+	values := make([]InputField, len(s.canonical.Inputs))
+	for index, input := range s.canonical.Inputs {
+		values[index] = InputField(input)
+	}
+	return values
+}
+
+func (s *Spec) Universe() Universe {
+	if s == nil {
+		return Universe{}
+	}
+	value := Universe{AssetClass: s.canonical.Universe.AssetClass, Benchmark: uuid.MustParse(s.canonical.Universe.Benchmark)}
+	value.Instruments = make([]uuid.UUID, len(s.canonical.Universe.Instruments))
+	for index, raw := range s.canonical.Universe.Instruments {
+		value.Instruments[index] = uuid.MustParse(raw)
+	}
+	return value
+}
+
+// PreferredExecutionInput selects a declared executable mark without inventing
+// a field or deriving a price outside the immutable strategy specification.
+func (s *Spec) PreferredExecutionInput() (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("generated strategy spec is required")
+	}
+	for _, preferred := range []string{"close", "vwap", "open", "high", "low"} {
+		for _, input := range s.canonical.Inputs {
+			if input.Type == "decimal" && input.DatasetKind == dataset.KindBars && input.Field == preferred {
+				return input.Name, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("generated strategy spec has no declared executable bar price")
+}
+
 func (s *Spec) RequiredDatasetKinds() []dataset.Kind {
 	if s == nil {
 		return nil
@@ -535,6 +591,20 @@ func (s *Spec) RequiredDatasetKinds() []dataset.Kind {
 	}
 	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
 	return values
+}
+
+// Evaluate applies the compiled strategy's deterministic entry and exit
+// expressions to one complete, canonically encoded input row. Provider reads,
+// evidence selection, freshness, and missing-value policy remain caller-owned.
+func (s *Spec) Evaluate(values map[string]string) (bool, bool, error) {
+	if s == nil {
+		return false, false, fmt.Errorf("generated strategy spec is required")
+	}
+	types := make(map[string]string, len(s.canonical.Inputs))
+	for _, input := range s.canonical.Inputs {
+		types[input.Name] = input.Type
+	}
+	return evaluateExpressions(s.canonical.Entry, s.canonical.Exit, types, values)
 }
 
 func SpecFromCanonical(id uuid.UUID, digest string, raw []byte, family *strategycatalog.Family) (*Spec, error) {

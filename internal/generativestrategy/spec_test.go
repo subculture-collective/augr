@@ -69,6 +69,19 @@ func TestSpecCanonicalPermutationRestoreAndCloneSafety(t *testing.T) {
 	if len(kinds) != 3 || kinds[0] != dataset.KindBars || kinds[1] != dataset.KindBenchmarkMembership || kinds[2] != dataset.KindQuotes {
 		t.Fatalf("kinds=%v", kinds)
 	}
+	inputs := first.Inputs()
+	universe := first.Universe()
+	if first.SpecKey() != "momentum_v1" || len(inputs) != 3 || len(universe.Instruments) != 2 || universe.Benchmark != input.Universe.Benchmark {
+		t.Fatalf("public spec projection key=%q inputs=%+v universe=%+v", first.SpecKey(), inputs, universe)
+	}
+	inputs[0].Name = "changed"
+	universe.Instruments[0] = uuid.New()
+	if first.Inputs()[0].Name == "changed" || first.Universe().Instruments[0] == universe.Instruments[0] {
+		t.Fatal("public spec projection aliases immutable state")
+	}
+	if executionInput, err := first.PreferredExecutionInput(); err != nil || executionInput != "average" {
+		t.Fatalf("execution input=%q error=%v", executionInput, err)
+	}
 }
 
 func TestSpecSemanticEditsChangeIdentity(t *testing.T) {

@@ -5,22 +5,117 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 )
 
 // OptionsBroker extends the standard Alpaca broker with options support.
 type OptionsBroker struct {
-	client *Client
+	client                    *Client
+	expectedExternalAccountID string
+}
+
+// PaperOptionsPreflightError exposes a stable, non-sensitive reason code to
+// the allocator while retaining the underlying provider error for diagnosis.
+// Account payloads and credentials are deliberately never included.
+type PaperOptionsPreflightError struct {
+	code string
+	err  error
+}
+
+func (e *PaperOptionsPreflightError) Error() string {
+	if e == nil || e.err == nil {
+		return "alpaca: paper options preflight failed"
+	}
+	return e.err.Error()
+}
+
+func (e *PaperOptionsPreflightError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *PaperOptionsPreflightError) PaperOptionsPreflightReason() string {
+	if e == nil {
+		return "unknown"
+	}
+	return e.code
+}
+
+func paperOptionsPreflightError(code, message string, cause error) error {
+	err := errors.New(message)
+	if cause != nil {
+		err = fmt.Errorf("%s: %w", message, cause)
+	}
+	return &PaperOptionsPreflightError{code: code, err: err}
 }
 
 // NewOptionsBroker constructs an Alpaca options broker adapter.
 func NewOptionsBroker(client *Client) *OptionsBroker {
 	return &OptionsBroker{client: client}
+}
+
+// WithExpectedPaperAccount binds every allocator preflight to one external
+// Alpaca paper account. An empty ID remains fail-closed.
+func (b *OptionsBroker) WithExpectedPaperAccount(externalAccountID string) *OptionsBroker {
+	if b != nil {
+		b.expectedExternalAccountID = strings.TrimSpace(externalAccountID)
+	}
+	return b
+}
+
+func (b *OptionsBroker) GetAccountBalance(ctx context.Context) (execution.Balance, error) {
+	if b == nil {
+		return execution.Balance{}, errors.New("alpaca: options broker is required")
+	}
+	return NewBroker(b.client).GetAccountBalance(ctx)
+}
+
+// PreflightPaperOptions verifies the actual broker account and buying power at
+// the order boundary. Multi-leg opening orders require level 3 eligibility.
+func (b *OptionsBroker) PreflightPaperOptions(ctx context.Context, requiredCapital float64) error {
+	if b == nil || b.client == nil || !b.client.IsPaper() {
+		return paperOptionsPreflightError("paper_endpoint_required", "alpaca: options allocator requires the paper endpoint", nil)
+	}
+	if b.expectedExternalAccountID == "" {
+		return paperOptionsPreflightError("expected_account_required", "alpaca: expected paper account id is required", nil)
+	}
+	if requiredCapital <= 0 || math.IsNaN(requiredCapital) || math.IsInf(requiredCapital, 0) {
+		return paperOptionsPreflightError("invalid_required_capital", "alpaca: required options capital must be finite and positive", nil)
+	}
+	body, err := b.client.Get(ctx, "/v2/account", nil)
+	if err != nil {
+		return paperOptionsPreflightError("account_read_failed", "alpaca: paper options account preflight", err)
+	}
+	var account accountResponse
+	if err := json.Unmarshal(body, &account); err != nil {
+		return paperOptionsPreflightError("account_decode_failed", "alpaca: decode paper options account preflight", err)
+	}
+	if strings.TrimSpace(account.AccountNumber) != b.expectedExternalAccountID {
+		return paperOptionsPreflightError("account_identity_mismatch", "alpaca: paper options account identity mismatch", nil)
+	}
+	if !strings.EqualFold(strings.TrimSpace(account.Status), "ACTIVE") || account.TradingBlocked {
+		return paperOptionsPreflightError("account_not_active", "alpaca: paper options account is not active for trading", nil)
+	}
+	if account.OptionsTradingLevel < 3 || account.OptionsApprovedLevel < 3 {
+		return paperOptionsPreflightError("multileg_level_3_required", "alpaca: paper options account lacks multi-leg level 3 eligibility", nil)
+	}
+	optionsBuyingPower, err := parseRequiredFloat("options_buying_power", account.OptionsBuyingPower)
+	if err != nil {
+		return paperOptionsPreflightError("options_buying_power_invalid", "alpaca: options buying power is invalid", err)
+	}
+	if optionsBuyingPower < requiredCapital {
+		return paperOptionsPreflightError("insufficient_options_buying_power", "alpaca: insufficient verified options buying power", nil)
+	}
+	return nil
 }
 
 // optionOrderRequest is the Alpaca single-leg options order payload.
@@ -33,16 +128,62 @@ type optionOrderRequest struct {
 	LimitPrice     string `json:"limit_price,omitempty"`
 	OrderClass     string `json:"order_class"`
 	PositionIntent string `json:"position_intent"`
+	ClientOrderID  string `json:"client_order_id,omitempty"`
+}
+
+func (b *OptionsBroker) GetOrderStatusResult(ctx context.Context, externalID string) (execution.BrokerOrderStatus, error) {
+	if b == nil {
+		return execution.BrokerOrderStatus{}, errors.New("alpaca: options broker is required")
+	}
+	return NewBroker(b.client).GetOrderStatusResult(ctx, externalID)
+}
+
+func (b *OptionsBroker) GetOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (string, execution.BrokerOrderStatus, error) {
+	if b == nil {
+		return "", execution.BrokerOrderStatus{}, errors.New("alpaca: options broker is required")
+	}
+	return NewBroker(b.client).GetOrderStatusByClientOrderIDResult(ctx, clientOrderID)
+}
+
+func (b *OptionsBroker) GetSpreadOrderStatusByClientOrderIDResult(ctx context.Context, clientOrderID string) (execution.BrokerSpreadOrderStatus, error) {
+	if b == nil || b.client == nil {
+		return execution.BrokerSpreadOrderStatus{}, errors.New("alpaca: options broker is required")
+	}
+	body, err := b.client.Get(ctx, "/v2/orders:by_client_order_id", url.Values{"client_order_id": []string{strings.TrimSpace(clientOrderID)}, "nested": []string{"true"}})
+	if err != nil {
+		var providerErr *ErrorResponse
+		if errors.As(err, &providerErr) && providerErr.StatusCode() == 404 {
+			return execution.BrokerSpreadOrderStatus{}, execution.ErrBrokerOrderNotFound
+		}
+		return execution.BrokerSpreadOrderStatus{}, fmt.Errorf("alpaca: lookup spread client order id: %w", err)
+	}
+	var response orderStatusResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return execution.BrokerSpreadOrderStatus{}, fmt.Errorf("alpaca: decode spread client order lookup: %w", err)
+	}
+	result := execution.BrokerSpreadOrderStatus{ParentExternalID: strings.TrimSpace(response.ID), Legs: make([]execution.BrokerSpreadLegStatus, 0, len(response.Legs))}
+	if result.ParentExternalID == "" {
+		return execution.BrokerSpreadOrderStatus{}, errors.New("alpaca: spread client order lookup missing parent id")
+	}
+	for _, leg := range response.Legs {
+		status, mapErr := mapBrokerOrderStatus(leg)
+		if mapErr != nil {
+			return execution.BrokerSpreadOrderStatus{}, mapErr
+		}
+		result.Legs = append(result.Legs, execution.BrokerSpreadLegStatus{ExternalID: strings.TrimSpace(leg.ID), Ticker: strings.TrimSpace(leg.Symbol), Status: status})
+	}
+	return result, nil
 }
 
 // mlegOrderRequest is the Alpaca multi-leg options order payload.
 type mlegOrderRequest struct {
-	Qty         string    `json:"qty"`
-	Type        string    `json:"type"`
-	TimeInForce string    `json:"time_in_force"`
-	OrderClass  string    `json:"order_class"`
-	Legs        []mlegLeg `json:"legs"`
-	LimitPrice  string    `json:"limit_price,omitempty"`
+	Qty           string    `json:"qty"`
+	Type          string    `json:"type"`
+	TimeInForce   string    `json:"time_in_force"`
+	OrderClass    string    `json:"order_class"`
+	Legs          []mlegLeg `json:"legs"`
+	LimitPrice    string    `json:"limit_price,omitempty"`
+	ClientOrderID string    `json:"client_order_id,omitempty"`
 }
 
 type mlegLeg struct {
@@ -120,6 +261,7 @@ func (b *OptionsBroker) SubmitOptionOrder(ctx context.Context, order *domain.Ord
 		TimeInForce:    defaultTimeInForce,
 		OrderClass:     "simple",
 		PositionIntent: string(*order.PositionIntent),
+		ClientOrderID:  strings.TrimSpace(order.ClientOrderID),
 	}
 
 	if order.LimitPrice != nil {
@@ -144,26 +286,43 @@ func (b *OptionsBroker) SubmitOptionOrder(ctx context.Context, order *domain.Ord
 
 // SubmitSpreadOrder submits a multi-leg options order.
 // Uses POST /v2/orders with order_class "mleg" and a legs array.
-func (b *OptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64) ([]string, error) {
+func (b *OptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.OptionSpread, quantity float64, clientOrderID string) ([]string, error) {
 	if err := b.PreflightSpread(ctx, spread, quantity); err != nil {
 		return nil, err
 	}
 
 	legs := make([]mlegLeg, 0, len(spread.Legs))
+	netLimit := 0.0
 	for _, leg := range spread.Legs {
 		ratio := leg.Ratio
 		if ratio <= 0 {
 			ratio = 1
 		}
 		legs = append(legs, mlegLeg{Symbol: domain.AlpacaSymbol(strings.TrimSpace(leg.Contract.OCCSymbol)), Side: strings.ToLower(leg.Side.String()), PositionIntent: string(leg.PositionIntent), RatioQty: strconv.Itoa(ratio)})
+		if leg.ExecutablePrice <= 0 || math.IsNaN(leg.ExecutablePrice) || math.IsInf(leg.ExecutablePrice, 0) {
+			return nil, errors.New("alpaca: spread requires executable prices for a bounded net limit")
+		}
+		if leg.Side == domain.OrderSideBuy {
+			netLimit += leg.ExecutablePrice * float64(ratio)
+		} else {
+			netLimit -= leg.ExecutablePrice * float64(ratio)
+		}
+	}
+	if netLimit == 0 || math.IsNaN(netLimit) || math.IsInf(netLimit, 0) {
+		return nil, errors.New("alpaca: spread net limit must be finite and nonzero")
 	}
 
 	req := mlegOrderRequest{
-		Qty:         formatFloat(quantity),
-		Type:        "market",
-		TimeInForce: defaultTimeInForce,
-		OrderClass:  "mleg",
-		Legs:        legs,
+		Qty:           formatFloat(quantity),
+		Type:          "limit",
+		TimeInForce:   defaultTimeInForce,
+		OrderClass:    "mleg",
+		Legs:          legs,
+		ClientOrderID: strings.TrimSpace(clientOrderID),
+		LimitPrice:    formatFloat(netLimit),
+	}
+	if req.ClientOrderID == "" {
+		return nil, errors.New("alpaca: spread client order id is required")
 	}
 
 	responseBody, err := b.client.Post(ctx, "/v2/orders", req)

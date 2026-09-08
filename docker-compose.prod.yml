@@ -38,6 +38,7 @@ services:
       args:
         BUILD_VERSION: ${BUILD_VERSION:-development}
         BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
+        BUILD_TREE_SHA256: ${BUILD_TREE_SHA256:-unknown}
         BUILD_TIME: ${BUILD_TIME:-unknown}
     environment:
       APP_ENV: ${APP_ENV:-production}

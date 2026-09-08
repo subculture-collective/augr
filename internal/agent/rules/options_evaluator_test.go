@@ -372,6 +372,28 @@ func TestBuildSpread_EmptyLegs(t *testing.T) {
 	}
 }
 
+func TestBuildSpreadOrdersLegsDeterministically(t *testing.T) {
+	t.Parallel()
+	expiry := time.Now().UTC().AddDate(0, 1, 0)
+	selected := map[string]*domain.OptionSnapshot{
+		"short": {Contract: domain.OptionContract{OCCSymbol: "SPY-SHORT", Expiry: expiry}},
+		"long":  {Contract: domain.OptionContract{OCCSymbol: "SPY-LONG", Expiry: expiry}},
+	}
+	selectors := map[string]LegSelector{
+		"short": {Side: domain.OrderSideSell, Intent: domain.PositionIntentSellToOpen, Ratio: 1},
+		"long":  {Side: domain.OrderSideBuy, Intent: domain.PositionIntentBuyToOpen, Ratio: 1},
+	}
+	for range 20 {
+		spread, err := BuildSpread(domain.StrategyBullCallSpread, "SPY", selected, selectors)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(spread.Legs) != 2 || spread.Legs[0].Contract.OCCSymbol != "SPY-LONG" || spread.Legs[1].Contract.OCCSymbol != "SPY-SHORT" {
+			t.Fatalf("non-deterministic leg order: %+v", spread.Legs)
+		}
+	}
+}
+
 func TestSelectLeg_EmptyChain_ReturnsError(t *testing.T) {
 	t.Parallel()
 	sel := LegSelector{OptionType: domain.OptionTypeCall, DeltaTarget: 0.50, DTEMin: 20, DTEMax: 45}

@@ -11,10 +11,20 @@ import (
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	prediction "github.com/PatrickFanella/get-rich-quick/internal/execution/prediction"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
 var polymarketResolutionsSpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 * * * *"}
+
+type polymarketResolutionMarket struct {
+	Slug          string          `json:"slug"`
+	Outcomes      json.RawMessage `json:"outcomes"`
+	OutcomePrices json.RawMessage `json:"outcomePrices"`
+	EndDate       string          `json:"endDate"`
+	Closed        bool            `json:"closed"`
+	Raw           json.RawMessage `json:"-"`
+}
 
 func (o *JobOrchestrator) registerPolymarketResolutionsJob() {
 	if o.deps.PolymarketAccountRepo == nil || o.deps.PolymarketResolvedRepo == nil {
@@ -35,15 +45,21 @@ func (o *JobOrchestrator) polymarketResolutions(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var markets []struct {
-		Slug          string          `json:"slug"`
-		Outcomes      json.RawMessage `json:"outcomes"`
-		OutcomePrices json.RawMessage `json:"outcomePrices"`
-		EndDate       string          `json:"endDate"`
-		Closed        bool            `json:"closed"`
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("polymarket_resolutions: provider returned HTTP %d", resp.StatusCode)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&markets); err != nil {
+	var rawMarkets []json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&rawMarkets); err != nil {
 		return err
+	}
+	markets := make([]polymarketResolutionMarket, 0, len(rawMarkets))
+	for _, raw := range rawMarkets {
+		var market polymarketResolutionMarket
+		if err := json.Unmarshal(raw, &market); err != nil {
+			return fmt.Errorf("polymarket_resolutions: decode market evidence: %w", err)
+		}
+		market.Raw = append(json.RawMessage(nil), raw...)
+		markets = append(markets, market)
 	}
 	var processedMarkets, updatedAccounts, skippedUnresolved, skippedUnsupported, skippedNoTrades int
 	for _, m := range markets {
@@ -75,12 +91,14 @@ func (o *JobOrchestrator) polymarketResolutions(ctx context.Context) error {
 		if err != nil || processed {
 			continue
 		}
-		resolvedAt := time.Now().UTC()
+		observedAt := time.Now().UTC()
+		resolvedAt := observedAt
 		if parsed, parseErr := time.Parse(time.RFC3339, m.EndDate); parseErr == nil {
 			resolvedAt = parsed
 		}
 		if o.deps.PredictionSettler != nil {
-			if _, err := o.deps.PredictionSettler.SettleMarket(ctx, domain.MarketTypePolymarket, m.Slug, winningSide, resolvedAt); err != nil {
+			evidence := prediction.ResolutionEvidence{Source: "polymarket", SourceNamespace: "markets/polymarket/resolutions", SourceEventID: strings.TrimSpace(m.Slug), SourceRevision: strings.Join([]string{strings.TrimSpace(m.EndDate), winningSide}, ":"), ObservedAt: observedAt, RawPayload: append([]byte(nil), m.Raw...)}
+			if _, err := o.deps.PredictionSettler.SettleMarketWithEvidence(ctx, domain.MarketTypePolymarket, m.Slug, winningSide, resolvedAt, evidence); err != nil {
 				return fmt.Errorf("polymarket_resolutions: settle paper market %s: %w", m.Slug, err)
 			}
 		}

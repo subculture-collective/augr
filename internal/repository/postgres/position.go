@@ -19,31 +19,40 @@ import (
 
 // PositionRepo implements repository.PositionRepository using PostgreSQL.
 type PositionRepo struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	accountID uuid.UUID
 }
 
 // Compile-time check that PositionRepo satisfies PositionRepository.
 var _ repository.PositionRepository = (*PositionRepo)(nil)
 
 // NewPositionRepo returns a PositionRepo backed by the given connection pool.
-func NewPositionRepo(pool *pgxpool.Pool) *PositionRepo {
-	return &PositionRepo{pool: pool}
+func NewPositionRepo(pool *pgxpool.Pool, accountID uuid.UUID) *PositionRepo {
+	return &PositionRepo{pool: pool, accountID: accountID}
 }
 
 // Create inserts a new position and populates the generated ID and OpenedAt on
 // the provided struct.
 func (r *PositionRepo) Create(ctx context.Context, position *domain.Position) error {
+	if position.AccountID != uuid.Nil && position.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create position: account mismatch")
+	}
+	position.AccountID = r.accountID
 	row := r.pool.QueryRow(ctx,
 		`INSERT INTO positions (
-			strategy_id, ticker, side, quantity, avg_entry,
+			strategy_id, account_id, environment, origin_type, origin_id, ticker, side, quantity, avg_entry,
 			current_price, unrealized_pnl, realized_pnl,
 			stop_loss, take_profit, closed_at, asset_class, underlying_ticker,
 			option_type, strike, expiry, contract_multiplier, leg_group_id,
 			delta, gamma, theta, vega
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		 RETURNING id, opened_at`,
 		position.StrategyID,
+		r.accountID,
+		nullString(string(position.Environment)),
+		nullString(position.OriginType),
+		nullString(position.OriginID),
 		position.Ticker,
 		position.Side,
 		position.Quantity,
@@ -71,20 +80,24 @@ func (r *PositionRepo) CreateAlpacaOwned(ctx context.Context, position *domain.P
 	if position == nil {
 		return fmt.Errorf("postgres: create alpaca-owned position: position is nil")
 	}
+	if position.AccountID != uuid.Nil && position.AccountID != r.accountID {
+		return fmt.Errorf("postgres: create alpaca-owned position: account mismatch")
+	}
+	position.AccountID = r.accountID
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("postgres: create alpaca-owned position begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, alpacaOwnedLockKey(position.Ticker, position.Side)); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, alpacaOwnedLockKey(r.accountID, position.Environment, position.Ticker, position.Side)); err != nil {
 		return fmt.Errorf("postgres: create alpaca-owned position advisory lock: %w", err)
 	}
 
-	row := tx.QueryRow(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.ticker = $1 AND p.side = $2 AND (
+	row := tx.QueryRow(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.ticker = $1 AND p.side = $2 AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
-		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND o.broker = 'alpaca')
-	) ORDER BY p.opened_at ASC, p.id ASC LIMIT 1`, position.Ticker, position.Side)
+		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment WHERE t.position_id = p.id AND t.account_id = p.account_id AND t.environment=p.environment AND o.broker = 'alpaca')
+	) AND p.environment=$4 ORDER BY p.opened_at ASC, p.id ASC LIMIT 1`, position.Ticker, position.Side, r.accountID, position.Environment)
 	if existing, err := scanPosition(row); err == nil {
 		*position = *existing
 		return tx.Commit(ctx)
@@ -93,14 +106,14 @@ func (r *PositionRepo) CreateAlpacaOwned(ctx context.Context, position *domain.P
 	}
 
 	insertRow := tx.QueryRow(ctx, `INSERT INTO positions (
-		strategy_id, ticker, side, quantity, avg_entry,
+		account_id, environment, origin_type, origin_id, strategy_id, ticker, side, quantity, avg_entry,
 		current_price, unrealized_pnl, realized_pnl,
 		stop_loss, take_profit, closed_at, asset_class, underlying_ticker,
 		option_type, strike, expiry, contract_multiplier, leg_group_id,
 		delta, gamma, theta, vega
-	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+	) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
 	RETURNING id, opened_at`,
-		position.StrategyID, position.Ticker, position.Side, position.Quantity, position.AvgEntry,
+		r.accountID, position.Environment, position.OriginType, position.OriginID, position.StrategyID, position.Ticker, position.Side, position.Quantity, position.AvgEntry,
 		position.CurrentPrice, position.UnrealizedPnL, position.RealizedPnL, position.StopLoss, position.TakeProfit,
 		position.ClosedAt, position.AssetClass, nullString(position.UnderlyingTicker), position.OptionType,
 		position.Strike, position.Expiry, position.ContractMultiplier, position.LegGroupID,
@@ -120,7 +133,7 @@ func (r *PositionRepo) CreateAlpacaOwned(ctx context.Context, position *domain.P
 
 // Get retrieves a position by ID. It returns ErrNotFound when no row matches.
 func (r *PositionRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Position, error) {
-	row := r.pool.QueryRow(ctx, positionSelectSQL+` WHERE p.id = $1`, id)
+	row := r.pool.QueryRow(ctx, positionSelectSQL+` WHERE p.id = $1 AND p.account_id = $2`, id, r.accountID)
 
 	position, err := scanPosition(row)
 	if err != nil {
@@ -135,8 +148,28 @@ func (r *PositionRepo) Get(ctx context.Context, id uuid.UUID) (*domain.Position,
 
 // List returns positions matching the provided filter with pagination.
 func (r *PositionRepo) List(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
-	query, args := buildPositionListQuery(filter, limit, offset)
+	query, args := buildPositionQuery("account_only", r.accountID, false, filter, limit, offset)
 	return r.list(ctx, query, args, "list positions")
+}
+
+func (r *PositionRepo) ListOptionsLifecyclePositions(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error) {
+	if accountID != r.accountID || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: options lifecycle position scope is invalid")
+	}
+	rows, err := r.pool.Query(ctx, positionSelectSQL+` WHERE p.account_id=$1 AND p.environment=$2 AND p.asset_class='option' ORDER BY p.opened_at,p.id LIMIT $3 OFFSET $4`, accountID, environment, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var positions []domain.Position
+	for rows.Next() {
+		position, scanErr := scanPosition(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		positions = append(positions, *position)
+	}
+	return positions, rows.Err()
 }
 
 // Update persists changes to an existing position. It returns ErrNotFound when
@@ -144,8 +177,7 @@ func (r *PositionRepo) List(ctx context.Context, filter repository.PositionFilte
 func (r *PositionRepo) Update(ctx context.Context, position *domain.Position) error {
 	row := r.pool.QueryRow(ctx,
 		`UPDATE positions
-		 SET strategy_id = $1,
-		     ticker = $2,
+		 SET ticker = $2,
 		     side = $3,
 		     quantity = $4,
 		     avg_entry = $5,
@@ -158,7 +190,7 @@ func (r *PositionRepo) Update(ctx context.Context, position *domain.Position) er
 		     , asset_class = $12, underlying_ticker = $13, option_type = $14
 		     , strike = $15, expiry = $16, contract_multiplier = $17, leg_group_id = $18
 		     , delta = $19, gamma = $20, theta = $21, vega = $22
-		 WHERE id = $23
+		 WHERE id = $23 AND account_id = $24 AND strategy_id IS NOT DISTINCT FROM $1
 		 RETURNING id`,
 		position.StrategyID,
 		position.Ticker,
@@ -174,7 +206,7 @@ func (r *PositionRepo) Update(ctx context.Context, position *domain.Position) er
 		position.AssetClass, nullString(position.UnderlyingTicker), position.OptionType,
 		position.Strike, position.Expiry, position.ContractMultiplier, position.LegGroupID,
 		position.Delta, position.Gamma, position.Theta, position.Vega,
-		position.ID,
+		position.ID, r.accountID,
 	)
 
 	var updatedID uuid.UUID
@@ -190,7 +222,7 @@ func (r *PositionRepo) Update(ctx context.Context, position *domain.Position) er
 
 // Delete removes a position by ID. It returns ErrNotFound when no row matches.
 func (r *PositionRepo) Delete(ctx context.Context, id uuid.UUID) error {
-	tag, err := r.pool.Exec(ctx, `DELETE FROM positions WHERE id = $1`, id)
+	tag, err := r.pool.Exec(ctx, `DELETE FROM positions WHERE id = $1 AND account_id = $2`, id, r.accountID)
 	if err != nil {
 		return fmt.Errorf("postgres: delete position: %w", err)
 	}
@@ -205,17 +237,24 @@ func (r *PositionRepo) Delete(ctx context.Context, id uuid.UUID) error {
 // GetOpen returns positions that have not been closed (closed_at IS NULL),
 // matching the provided filter with pagination.
 func (r *PositionRepo) GetOpen(ctx context.Context, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
-	query, args := buildPositionOpenQuery(filter, limit, offset)
+	query, args := buildPositionQuery("account_only", r.accountID, true, filter, limit, offset)
 	return r.list(ctx, query, args, "get open positions")
 }
 
 // ListOpenAlpacaOwned returns open positions that can be proven Alpaca-owned via
 // linked trades whose orders were recorded with broker='alpaca'.
 func (r *PositionRepo) ListOpenAlpacaOwned(ctx context.Context, limit, offset int) ([]domain.Position, error) {
-	rows, err := r.pool.Query(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND (
+	return r.ListOpenAlpacaOwnedByAccount(ctx, r.accountID, domain.AccountEnvironmentPaperScored, limit, offset)
+}
+
+func (r *PositionRepo) ListOpenAlpacaOwnedByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, limit, offset int) ([]domain.Position, error) {
+	if accountID != r.accountID || !environment.IsValid() {
+		return nil, fmt.Errorf("postgres: scoped alpaca position identity is required")
+	}
+	rows, err := r.pool.Query(ctx, positionSelectSQL+` WHERE p.closed_at IS NULL AND p.account_id=$3 AND (
 		EXISTS (SELECT 1 FROM position_provenance pp WHERE pp.position_id = p.id AND pp.broker = 'alpaca') OR
-		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id WHERE t.position_id = p.id AND o.broker = 'alpaca')
-	) ORDER BY p.opened_at ASC, p.id ASC LIMIT $1 OFFSET $2`, limit, offset)
+		EXISTS (SELECT 1 FROM trades t JOIN orders o ON o.id = t.order_id AND o.account_id=p.account_id AND o.environment=p.environment WHERE t.position_id = p.id AND t.account_id = p.account_id AND t.environment=p.environment AND o.broker = 'alpaca')
+	) AND p.environment=$4 ORDER BY p.opened_at ASC, p.id ASC LIMIT $1 OFFSET $2`, limit, offset, accountID, environment)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list open alpaca-owned positions: %w", err)
 	}
@@ -234,19 +273,35 @@ func (r *PositionRepo) ListOpenAlpacaOwned(ctx context.Context, limit, offset in
 	return positions, nil
 }
 
-func alpacaOwnedLockKey(ticker string, side domain.PositionSide) int64 {
-	h := sha256.Sum256([]byte("alpaca-owned|" + strings.ToUpper(strings.TrimSpace(ticker)) + "|" + string(side)))
+func alpacaOwnedLockKey(accountID uuid.UUID, environment domain.AccountEnvironment, ticker string, side domain.PositionSide) int64 {
+	h := sha256.Sum256([]byte("alpaca-owned|" + accountID.String() + "|" + string(environment) + "|" + strings.ToUpper(strings.TrimSpace(ticker)) + "|" + string(side)))
 	return int64(binary.BigEndian.Uint64(h[:8]) &^ (1 << 63))
 }
 
 // GetByStrategy returns positions for the given strategy with optional
 // filtering and pagination.
 func (r *PositionRepo) GetByStrategy(ctx context.Context, strategyID uuid.UUID, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
-	query, args := buildPositionScopedQuery("p.strategy_id", strategyID, filter, limit, offset)
+	query, args := buildPositionQuery("account_strategy", []any{r.accountID, strategyID}, false, filter, limit, offset)
 	return r.list(ctx, query, args, "get positions by strategy")
 }
 
-const positionSelectSQL = `SELECT p.id, p.strategy_id, s.market_type, p.ticker, p.side,
+func (r *PositionRepo) GetByExecutionScope(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	if accountID != r.accountID {
+		return []domain.Position{}, nil
+	}
+	query, args := buildPositionExecutionScopeQuery(r.accountID, environment, originType, originID, filter, limit, offset)
+	return r.list(ctx, query, args, "get positions by execution scope")
+}
+
+func (r *PositionRepo) GetOpenByAccount(ctx context.Context, accountID uuid.UUID, environment domain.AccountEnvironment, filter repository.PositionFilter, limit, offset int) ([]domain.Position, error) {
+	if accountID != r.accountID {
+		return []domain.Position{}, nil
+	}
+	query, args := buildPositionQuery("account_scope", []any{r.accountID, environment}, true, filter, limit, offset)
+	return r.list(ctx, query, args, "get open positions by account")
+}
+
+const positionSelectSQL = `SELECT p.id, p.strategy_id, p.account_id, p.environment, p.origin_type, p.origin_id, COALESCE(s.market_type, (SELECT o.market_type FROM trades t JOIN orders o ON o.id=t.order_id AND o.account_id=p.account_id AND o.environment=p.environment WHERE t.position_id=p.id AND t.account_id=p.account_id AND t.environment=p.environment ORDER BY t.executed_at ASC,t.id ASC LIMIT 1)), p.ticker, p.side,
 		p.quantity::double precision, p.avg_entry::double precision,
 		p.current_price::double precision, p.unrealized_pnl::double precision,
 		p.realized_pnl::double precision, p.stop_loss::double precision,
@@ -288,6 +343,10 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	var (
 		position      domain.Position
 		strategyID    *uuid.UUID
+		accountID     *uuid.UUID
+		environment   *domain.AccountEnvironment
+		originType    *string
+		originID      *string
 		marketType    *string
 		currentPrice  *float64
 		unrealizedPnL *float64
@@ -300,6 +359,10 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	err := sc.Scan(
 		&position.ID,
 		&strategyID,
+		&accountID,
+		&environment,
+		&originType,
+		&originID,
 		&marketType,
 		&position.Ticker,
 		&position.Side,
@@ -322,6 +385,18 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 	}
 
 	position.StrategyID = strategyID
+	if accountID != nil {
+		position.AccountID = *accountID
+	}
+	if environment != nil {
+		position.Environment = *environment
+	}
+	if originType != nil {
+		position.OriginType = *originType
+	}
+	if originID != nil {
+		position.OriginID = *originID
+	}
 	if marketType != nil {
 		position.MarketType = domain.MarketType(strings.TrimSpace(*marketType)).Normalize()
 	}
@@ -341,7 +416,7 @@ func scanPosition(sc scanner) (*domain.Position, error) {
 // with dynamic WHERE conditions.
 // Count returns the total number of positions matching the filter (ignoring pagination).
 func (r *PositionRepo) Count(ctx context.Context, filter repository.PositionFilter) (int, error) {
-	query, args := buildPositionCountQuery(filter)
+	query, args := buildPositionCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count positions: %w", err)
@@ -349,7 +424,7 @@ func (r *PositionRepo) Count(ctx context.Context, filter repository.PositionFilt
 	return total, nil
 }
 
-func buildPositionCountQuery(filter repository.PositionFilter) (string, []any) {
+func buildPositionCountQuery(accountID uuid.UUID, filter repository.PositionFilter) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -360,6 +435,7 @@ func buildPositionCountQuery(filter repository.PositionFilter) (string, []any) {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
+	conditions = append(conditions, "account_id = "+nextArg(accountID))
 	if filter.Ticker != "" {
 		conditions = append(conditions, "ticker = "+nextArg(filter.Ticker))
 	}
@@ -381,7 +457,7 @@ func buildPositionCountQuery(filter repository.PositionFilter) (string, []any) {
 
 // CountOpen returns the number of open (closed_at IS NULL) positions matching the filter.
 func (r *PositionRepo) CountOpen(ctx context.Context, filter repository.PositionFilter) (int, error) {
-	query, args := buildPositionOpenCountQuery(filter)
+	query, args := buildPositionOpenCountQuery(r.accountID, filter)
 	var total int
 	if err := r.pool.QueryRow(ctx, query, args...).Scan(&total); err != nil {
 		return 0, fmt.Errorf("postgres: count open positions: %w", err)
@@ -400,7 +476,7 @@ func (r *PositionRepo) CountOpenByMarket(ctx context.Context, filter repository.
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
-	conditions = append(conditions, "p.closed_at IS NULL")
+	conditions = append(conditions, "p.account_id = "+nextArg(r.accountID), "p.closed_at IS NULL")
 	if filter.Ticker != "" {
 		conditions = append(conditions, "p.ticker = "+nextArg(filter.Ticker))
 	}
@@ -445,7 +521,7 @@ func (r *PositionRepo) GrossExposureOpen(ctx context.Context, filter repository.
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
-	conditions = append(conditions, "p.closed_at IS NULL")
+	conditions = append(conditions, "p.account_id = "+nextArg(r.accountID), "p.closed_at IS NULL")
 	if filter.Ticker != "" {
 		conditions = append(conditions, "p.ticker = "+nextArg(filter.Ticker))
 	}
@@ -466,7 +542,7 @@ func (r *PositionRepo) GrossExposureOpen(ctx context.Context, filter repository.
 	return total, nil
 }
 
-func buildPositionOpenCountQuery(filter repository.PositionFilter) (string, []any) {
+func buildPositionOpenCountQuery(accountID uuid.UUID, filter repository.PositionFilter) (string, []any) {
 	var (
 		conditions []string
 		args       []any
@@ -477,7 +553,7 @@ func buildPositionOpenCountQuery(filter repository.PositionFilter) (string, []an
 		args = append(args, v)
 		return fmt.Sprintf("$%d", argIdx)
 	}
-	conditions = append(conditions, "closed_at IS NULL")
+	conditions = append(conditions, "account_id = "+nextArg(accountID), "closed_at IS NULL")
 	if filter.Ticker != "" {
 		conditions = append(conditions, "ticker = "+nextArg(filter.Ticker))
 	}
@@ -510,6 +586,10 @@ func buildPositionScopedQuery(scopeColumn string, scopeValue uuid.UUID, filter r
 	return buildPositionQuery(scopeColumn, scopeValue, false, filter, limit, offset)
 }
 
+func buildPositionExecutionScopeQuery(accountID uuid.UUID, environment domain.AccountEnvironment, originType, originID string, filter repository.PositionFilter, limit, offset int) (string, []any) {
+	return buildPositionQuery("execution_scope", []any{accountID, environment, originType, originID}, false, filter, limit, offset)
+}
+
 func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filter repository.PositionFilter, limit, offset int) (string, []any) {
 	var (
 		conditions []string
@@ -523,7 +603,20 @@ func buildPositionQuery(scopeColumn string, scopeValue any, openOnly bool, filte
 		return fmt.Sprintf("$%d", argIdx)
 	}
 
-	if scopeColumn != "" {
+	switch scopeColumn {
+	case "execution_scope":
+		values := scopeValue.([]any)
+		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.environment = "+nextArg(values[1]), "p.origin_type = "+nextArg(values[2]), "p.origin_id = "+nextArg(values[3]))
+	case "account_scope":
+		values := scopeValue.([]any)
+		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.environment = "+nextArg(values[1]))
+	case "account_only":
+		conditions = append(conditions, "p.account_id = "+nextArg(scopeValue))
+	case "account_strategy":
+		values := scopeValue.([]any)
+		conditions = append(conditions, "p.account_id = "+nextArg(values[0]), "p.strategy_id = "+nextArg(values[1]))
+	case "":
+	default:
 		conditions = append(conditions, scopeColumn+" = "+nextArg(scopeValue))
 	}
 

@@ -35,11 +35,7 @@ type portfolioDiagnosticsRunRepo struct {
 
 func (s *portfolioDiagnosticsRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
 
-func (s *portfolioDiagnosticsRunRepo) GetByID(context.Context, uuid.UUID) (*domain.PipelineRun, error) {
-	return nil, repository.ErrNotFound
-}
-
-func (s *portfolioDiagnosticsRunRepo) Get(context.Context, uuid.UUID, time.Time) (*domain.PipelineRun, error) {
+func (s *portfolioDiagnosticsRunRepo) Get(context.Context, domain.PipelineRunRef) (*domain.PipelineRun, error) {
 	return nil, repository.ErrNotFound
 }
 
@@ -70,11 +66,12 @@ func (s *portfolioDiagnosticsRunRepo) CountByStatus(context.Context, repository.
 	return counts, nil
 }
 
-func (s *portfolioDiagnosticsRunRepo) Finalize(_ context.Context, id uuid.UUID, tradeDate time.Time, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+func (s *portfolioDiagnosticsRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, value repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
+	id, tradeDate := ref.ID, ref.TradeDate
 	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: domain.PipelineRun{ID: id, TradeDate: tradeDate, Status: value.Status, CompletedAt: &value.CompletedAt}}, nil
 }
 
-func (s *portfolioDiagnosticsRunRepo) RefineCompletedSignal(context.Context, uuid.UUID, time.Time, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
+func (s *portfolioDiagnosticsRunRepo) RefineCompletedSignal(context.Context, domain.PipelineRunRef, domain.PipelineSignal, domain.PipelineSignal) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }
 
@@ -117,12 +114,12 @@ func (s *portfolioDiagnosticsTradeDecisionRepo) CountByNoActionReason(context.Co
 	return map[string]int{string(portfolio.NoActionReasonRiskRejected): 1}, nil
 }
 
-func (s *portfolioDiagnosticsTradeDecisionRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *portfolioDiagnosticsTradeDecisionRepo) AttachPaperOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
-func (s *portfolioDiagnosticsTradeDecisionRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *portfolioDiagnosticsTradeDecisionRepo) AttachLiveOrder(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 
 type portfolioDiagnosticsStrategyRepo struct {
@@ -296,7 +293,7 @@ func TestPortfolioAllocatorDiagnosticsReturnsSummary(t *testing.T) {
 	deps.PaperEvaluation = &paperProfile
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/diagnostics", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/diagnostics", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -359,7 +356,7 @@ func TestPortfolioAllocatorDiagnosticsWarningsWhenReposMissing(t *testing.T) {
 	srv.strategies = nil
 	srv.positions = nil
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/diagnostics", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/diagnostics", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -425,8 +422,32 @@ func (s *portfolioAllocatorOpportunityRepo) ListQueuedForAllocation(context.Cont
 	return append([]domain.Opportunity(nil), s.items...), nil
 }
 
+func (s *portfolioAllocatorOpportunityRepo) ListSelectedForAllocation(context.Context, uuid.UUID, time.Time) ([]domain.Opportunity, error) {
+	return nil, nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) ClaimQueuedForAllocation(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) TakeOverExpiredAllocationClaim(context.Context, uuid.UUID, uuid.UUID, time.Time, time.Time) (bool, error) {
+	return true, nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) RenewAllocationClaim(context.Context, uuid.UUID, uuid.UUID, time.Duration) (bool, error) {
+	return true, nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) TransitionClaimedStatus(context.Context, uuid.UUID, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
+	return true, nil
+}
+
 func (s *portfolioAllocatorOpportunityRepo) UpdateStatus(context.Context, uuid.UUID, domain.OpportunityStatus, string) error {
 	return nil
+}
+
+func (s *portfolioAllocatorOpportunityRepo) TransitionStatus(context.Context, uuid.UUID, domain.OpportunityStatus, domain.OpportunityStatus, string) (bool, error) {
+	return true, nil
 }
 
 type portfolioAllocatorDecisionRepo struct {
@@ -449,6 +470,10 @@ func (s *portfolioAllocatorDecisionRepo) List(_ context.Context, filter reposito
 
 func (s *portfolioAllocatorDecisionRepo) Count(_ context.Context, filter repository.AllocationDecisionFilter) (int, error) {
 	return len(filterAllocationDecisions(s.items, filter)), nil
+}
+
+func (s *portfolioAllocatorDecisionRepo) RecordPaperOrderResult(context.Context, uuid.UUID, uuid.UUID, *uuid.UUID, domain.AllocationDecisionAction, []string) (bool, error) {
+	return true, nil
 }
 
 type portfolioAllocatorOpportunityListResponse struct {
@@ -483,7 +508,7 @@ func TestPortfolioAllocatorListAndSummaryRoutes(t *testing.T) {
 	deps.AllocationDecisionRepo = decRepo
 	srv := newTestServerWithDeps(t, deps)
 
-	rr := doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/opportunities?status=queued", nil)
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/opportunities?status=queued", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -495,7 +520,7 @@ func TestPortfolioAllocatorListAndSummaryRoutes(t *testing.T) {
 		t.Fatalf("unexpected opportunity list metadata: total=%d filter=%+v", opps.Total, oppRepo.lastFilter)
 	}
 
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/decisions?mode=shadow", nil)
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/decisions?mode=shadow", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
@@ -504,7 +529,7 @@ func TestPortfolioAllocatorListAndSummaryRoutes(t *testing.T) {
 		t.Fatalf("decisions = %+v, filter=%+v", decisions.Data, decRepo.lastFilter)
 	}
 
-	rr = doRequest(t, srv, http.MethodGet, "/api/v1/portfolio/allocator/summary", nil)
+	rr = doRequest(t, srv, http.MethodGet, "/api/v1/accounts/00000000-0000-4000-8000-000000000064/portfolio/allocator/summary", nil)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body: %s", rr.Code, http.StatusOK, rr.Body.String())
 	}
