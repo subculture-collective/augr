@@ -290,7 +290,7 @@ func TestSimulationVenuePersistentRehearsal(t *testing.T) {
 	}
 	assertSimulationVenueGraphCounts(t, fixture, 2, 2, 1, 2, 2)
 
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000072_simulation_policy_artifacts.down.sql")); err == nil ||
+	if _, err := execRepositoryMigration(t, ctx, pool, "000072_simulation_policy_artifacts.down.sql"); err == nil ||
 		!strings.Contains(err.Error(), "cannot roll back migration 72") {
 		t.Fatalf("nonempty simulation rehearsal rollback error = %v", err)
 	}
@@ -314,7 +314,7 @@ func newPostgresSimulationVenueFixture(
 	t.Helper()
 	ctx := context.Background()
 	pool := newExecutionLifecycleIntegrationPool(t, ctx)
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000072_simulation_policy_artifacts.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000072_simulation_policy_artifacts.up.sql"); err != nil {
 		t.Fatalf("apply migration 72: %v", err)
 	}
 	return newPostgresSimulationVenueFixtureWithPool(t, ctx, pool, timeInForce, closeOffset)

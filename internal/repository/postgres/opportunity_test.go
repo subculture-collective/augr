@@ -649,6 +649,8 @@ func newOpportunityIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			exposure_before_usd NUMERIC,
 			exposure_after_usd NUMERIC,
 			binding_constraint TEXT,
+			risk_state_sha256 TEXT,
+			risk_state_bytes BYTEA,
 			execution_route TEXT,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,

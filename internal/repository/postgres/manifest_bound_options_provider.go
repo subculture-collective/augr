@@ -37,8 +37,10 @@ type manifestOptionPayloadEvidence struct {
 }
 
 func (value *manifestOptionPayloadEvidence) scanTargets() []any {
-	return []any{&value.id, &value.digest, &value.raw, &value.partitionSequence, &value.partitionSHA256,
-		&value.observationSequence, &value.sourceKey, &value.effectiveAt, &value.availableAt}
+	return []any{
+		&value.id, &value.digest, &value.raw, &value.partitionSequence, &value.partitionSHA256,
+		&value.observationSequence, &value.sourceKey, &value.effectiveAt, &value.availableAt,
+	}
 }
 
 func (value manifestOptionPayloadEvidence) receipt(kind dataset.MarketPayloadKind, parent data.ManifestOptionChainReceipt) data.ManifestPayloadReceipt {
@@ -343,7 +345,9 @@ func parseDatasetFloat(value string) (float64, error) {
 	return parsed, nil
 }
 
-var _ data.OptionsDataProvider = (*ManifestBoundOptionsProvider)(nil)
-var _ data.ManifestBoundOptionChainReader = (*ManifestBoundOptionsProvider)(nil)
-var _ data.ManifestBoundOptionChainEvidenceReader = (*ManifestBoundOptionsProvider)(nil)
-var _ data.ManifestBoundOptionFrameEvidenceReader = (*ManifestBoundOptionsProvider)(nil)
+var (
+	_ data.OptionsDataProvider                    = (*ManifestBoundOptionsProvider)(nil)
+	_ data.ManifestBoundOptionChainReader         = (*ManifestBoundOptionsProvider)(nil)
+	_ data.ManifestBoundOptionChainEvidenceReader = (*ManifestBoundOptionsProvider)(nil)
+	_ data.ManifestBoundOptionFrameEvidenceReader = (*ManifestBoundOptionsProvider)(nil)
+)

@@ -39,7 +39,7 @@ func newShadowCampaignFixture(t *testing.T) shadowCampaignFixture {
 	if _, err := strategy.repo.RegisterStrategyVersion(ctx, second); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := strategy.pool.Exec(ctx, repositoryMigrationSQL(t, "000102_shadow_campaign_evidence.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, strategy.pool, "000102_shadow_campaign_evidence.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	candidates := []evidenceprogram.ShadowCandidate{
@@ -195,7 +195,7 @@ func TestShadowCampaignRepositoryConflictsAppendOnlyAndRollbackRefusal(t *testin
 	if _, err = pool.Exec(fixture.ctx, `UPDATE shadow_campaign_day_candidates SET critical_defects=1 WHERE day_id=$1`, day.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("mutation error=%v", err)
 	}
-	if _, err = pool.Exec(fixture.ctx, repositoryMigrationSQL(t, "000102_shadow_campaign_evidence.down.sql")); err == nil || !strings.Contains(err.Error(), "rollback refused") {
+	if _, err = execRepositoryMigration(t, fixture.ctx, pool, "000102_shadow_campaign_evidence.down.sql"); err == nil || !strings.Contains(err.Error(), "rollback refused") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 }

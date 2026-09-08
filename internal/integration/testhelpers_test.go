@@ -73,7 +73,6 @@ func newTestDB(t *testing.T) *testDB {
 		t.Fatalf("failed to discover extension schemas: %v", err)
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = searchPath
-	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
@@ -145,7 +144,7 @@ func integrationTestMigrations(t *testing.T) []string {
 	}
 	var paths []string
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") && entry.Name() <= "000108_canonical_account_expansion.up.sql" {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") {
 			paths = append(paths, filepath.Join(dir, entry.Name()))
 		}
 	}
@@ -164,195 +163,6 @@ func newRepos(db *testDB) repos {
 		Position:      postgres.NewPositionRepo(db.Pool, accountID),
 		Trade:         postgres.NewTradeRepo(db.Pool, accountID),
 		Memory:        postgres.NewMemoryRepo(db.Pool, accountID),
-	}
-}
-
-// applyDDL creates all enum types and tables needed for integration tests.
-//
-//nolint:unused // Retained as a complete legacy-schema fixture for focused integration debugging.
-func applyDDL(t *testing.T, pool *pgxpool.Pool) {
-	t.Helper()
-	ctx := context.Background()
-
-	ddl := []string{
-		// Enum types
-		`CREATE TYPE pipeline_status AS ENUM ('running', 'completed', 'failed', 'cancelled')`,
-		`CREATE TYPE order_status AS ENUM ('pending', 'submitted', 'partial', 'filled', 'cancelled', 'rejected')`,
-		`CREATE TYPE trade_side AS ENUM ('buy', 'sell')`,
-		`CREATE TYPE order_type AS ENUM ('market', 'limit', 'stop', 'stop_limit')`,
-		`CREATE TYPE position_side AS ENUM ('long', 'short')`,
-		`CREATE TYPE market_type AS ENUM ('stock', 'crypto', 'polymarket')`,
-
-		// Strategies
-		`CREATE TABLE strategies (
-			id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-			name          TEXT        NOT NULL,
-			description   TEXT        NOT NULL DEFAULT '',
-			ticker        TEXT        NOT NULL,
-			market_type   market_type NOT NULL DEFAULT 'stock',
-			schedule_cron TEXT        NOT NULL DEFAULT '',
-			config        JSONB       NOT NULL DEFAULT '{}',
-			is_active     BOOLEAN     NOT NULL DEFAULT true,
-			status        TEXT        NOT NULL DEFAULT 'active',
-			skip_next_run BOOLEAN     NOT NULL DEFAULT false,
-			is_paper      BOOLEAN     NOT NULL DEFAULT true,
-			created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)`,
-
-		// Pipeline runs (partitioned)
-		`CREATE TABLE pipeline_runs (
-			id              UUID            NOT NULL DEFAULT gen_random_uuid(),
-			strategy_id     UUID            NOT NULL,
-			ticker          TEXT            NOT NULL,
-			trade_date      DATE            NOT NULL,
-			status          pipeline_status NOT NULL DEFAULT 'running',
-			signal          TEXT            NOT NULL DEFAULT '',
-			started_at      TIMESTAMPTZ     NOT NULL,
-			completed_at    TIMESTAMPTZ,
-			error_message   TEXT            NOT NULL DEFAULT '',
-			config_snapshot JSONB,
-			phase_timings   JSONB,
-			PRIMARY KEY (id, trade_date)
-		) PARTITION BY RANGE (trade_date)`,
-		`CREATE TABLE pipeline_runs_2026_q1 PARTITION OF pipeline_runs
-			FOR VALUES FROM ('2026-01-01') TO ('2026-04-01')`,
-		`CREATE TABLE pipeline_runs_default PARTITION OF pipeline_runs DEFAULT`,
-		`CREATE INDEX idx_pipeline_runs_strategy_id ON pipeline_runs (strategy_id)`,
-
-		// Agent decisions (partitioned)
-		`CREATE TABLE agent_decisions (
-			id                UUID        NOT NULL DEFAULT gen_random_uuid(),
-			pipeline_run_id   UUID        NOT NULL,
-			agent_role        TEXT        NOT NULL,
-			phase             TEXT        NOT NULL,
-			round_number      INT,
-			input_summary     TEXT,
-			output_text       TEXT        NOT NULL,
-			output_structured JSONB,
-			llm_provider      TEXT,
-			llm_model         TEXT,
-			prompt_tokens     INT,
-			completion_tokens INT,
-			latency_ms        INT,
-			prompt_text       TEXT,
-			cost_usd          NUMERIC(12, 6) DEFAULT 0,
-			created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (id, created_at)
-		) PARTITION BY RANGE (created_at)`,
-		`CREATE TABLE agent_decisions_2026_q1 PARTITION OF agent_decisions
-			FOR VALUES FROM ('2026-01-01') TO ('2026-04-01')`,
-		`CREATE TABLE agent_decisions_default PARTITION OF agent_decisions DEFAULT`,
-		`CREATE INDEX idx_agent_decisions_pipeline_run_id ON agent_decisions (pipeline_run_id)`,
-
-		// Positions
-		`CREATE TABLE positions (
-			id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-			strategy_id     UUID           REFERENCES strategies (id),
-			ticker          TEXT           NOT NULL,
-			side            position_side  NOT NULL,
-			quantity        NUMERIC(20, 8) NOT NULL,
-			avg_entry       NUMERIC(20, 8) NOT NULL,
-			current_price   NUMERIC(20, 8),
-			unrealized_pnl  NUMERIC(20, 8),
-			realized_pnl    NUMERIC(20, 8) NOT NULL DEFAULT 0,
-			stop_loss       NUMERIC(20, 8),
-			take_profit     NUMERIC(20, 8),
-			opened_at       TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
-			closed_at       TIMESTAMPTZ,
-			asset_class         TEXT           NOT NULL DEFAULT 'equity',
-			underlying_ticker   TEXT,
-			option_type         TEXT,
-			strike              NUMERIC(20, 8),
-			expiry              DATE,
-			contract_multiplier NUMERIC(10, 4) DEFAULT 100,
-			leg_group_id        UUID,
-			delta               NUMERIC(10, 6),
-			gamma               NUMERIC(10, 6),
-			theta               NUMERIC(10, 6),
-			vega                NUMERIC(10, 6)
-		)`,
-
-		// Orders
-		`CREATE TABLE orders (
-			id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-			strategy_id     UUID           REFERENCES strategies (id),
-			pipeline_run_id UUID,
-			external_id     TEXT,
-			ticker          TEXT           NOT NULL,
-			side            trade_side     NOT NULL,
-			order_type      order_type     NOT NULL,
-			quantity        NUMERIC(20, 8) NOT NULL,
-			limit_price     NUMERIC(20, 8),
-			stop_price      NUMERIC(20, 8),
-			filled_quantity NUMERIC(20, 8) NOT NULL DEFAULT 0,
-			filled_avg_price NUMERIC(20, 8),
-			status          order_status   NOT NULL DEFAULT 'pending',
-			broker          TEXT,
-			submitted_at    TIMESTAMPTZ,
-			filled_at       TIMESTAMPTZ,
-			created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
-			asset_class         TEXT           NOT NULL DEFAULT 'equity',
-			underlying_ticker   TEXT,
-			option_type         TEXT,
-			strike              NUMERIC(20, 8),
-			expiry              DATE,
-			contract_multiplier NUMERIC(10, 4) DEFAULT 100,
-			position_intent     TEXT,
-			leg_group_id        UUID,
-			market_type         market_type NOT NULL DEFAULT 'stock',
-			prediction_side     TEXT,
-			polymarket_intent   TEXT
-		)`,
-
-		// Trades
-		`CREATE TABLE trades (
-			id          UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
-			external_id TEXT,
-			order_id    UUID           REFERENCES orders (id),
-			position_id UUID           REFERENCES positions (id),
-			ticker      TEXT           NOT NULL,
-			side        trade_side     NOT NULL,
-			quantity    NUMERIC(20, 8) NOT NULL,
-			price       NUMERIC(20, 8) NOT NULL,
-			fee         NUMERIC(20, 8) NOT NULL DEFAULT 0,
-			executed_at TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
-			created_at  TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
-			asset_class         TEXT           NOT NULL DEFAULT 'equity',
-			open_close          TEXT,
-			contract_multiplier NUMERIC(10, 4) DEFAULT 100,
-			premium             NUMERIC(20, 8),
-			exit_reason         TEXT
-		)`,
-
-		// Agent memories (with FTS)
-		`CREATE TABLE agent_memories (
-			id               UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-			agent_role       TEXT        NOT NULL,
-			situation        TEXT        NOT NULL,
-			situation_tsv    TSVECTOR,
-			recommendation   TEXT        NOT NULL DEFAULT '',
-			outcome          TEXT,
-			pipeline_run_id  UUID,
-			relevance_score  NUMERIC(5, 4),
-			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)`,
-		`CREATE OR REPLACE FUNCTION agent_memories_tsv_trigger() RETURNS trigger AS $$
-		 BEGIN
-			NEW.situation_tsv := to_tsvector('english', NEW.situation);
-			RETURN NEW;
-		 END;
-		 $$ LANGUAGE plpgsql`,
-		`CREATE TRIGGER trg_agent_memories_tsv
-			BEFORE INSERT OR UPDATE OF situation ON agent_memories
-			FOR EACH ROW EXECUTE FUNCTION agent_memories_tsv_trigger()`,
-		`CREATE INDEX idx_agent_memories_situation_tsv ON agent_memories USING GIN (situation_tsv)`,
-	}
-
-	for _, stmt := range ddl {
-		if _, err := pool.Exec(ctx, stmt); err != nil {
-			t.Fatalf("failed to apply DDL: %v\nstatement: %s", err, stmt)
-		}
 	}
 }
 
@@ -382,14 +192,15 @@ func createStrategy(t *testing.T, ctx context.Context, r *postgres.StrategyRepo,
 	return s
 }
 
-func createPipelineRun(t *testing.T, ctx context.Context, r *postgres.PipelineRunRepo, strategyID uuid.UUID, ticker string, tradeDate time.Time) *domain.PipelineRun {
+func createPipelineRun(t *testing.T, ctx context.Context, r *postgres.PipelineRunRepo, strategy *domain.Strategy, ticker string, tradeDate time.Time) *domain.PipelineRun {
 	t.Helper()
 	run := &domain.PipelineRun{
-		StrategyID: strategyID,
-		Ticker:     ticker,
-		TradeDate:  tradeDate,
-		Status:     domain.PipelineStatusRunning,
-		StartedAt:  tradeDate.Add(9*time.Hour + 30*time.Minute),
+		StrategyID:  strategy.ID,
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: strategy.ExecutionStrategyVersionID.String(),
+		Ticker:    ticker,
+		TradeDate: tradeDate,
+		Status:    domain.PipelineStatusRunning,
+		StartedAt: tradeDate.Add(9*time.Hour + 30*time.Minute),
 	}
 	if err := r.Create(ctx, run); err != nil {
 		t.Fatalf("failed to create pipeline run: %v", err)
@@ -397,14 +208,16 @@ func createPipelineRun(t *testing.T, ctx context.Context, r *postgres.PipelineRu
 	return run
 }
 
-func createPosition(t *testing.T, ctx context.Context, r *postgres.PositionRepo, strategyID uuid.UUID, ticker string, side domain.PositionSide, quantity, avgEntry float64) *domain.Position {
+func createPosition(t *testing.T, ctx context.Context, r *postgres.PositionRepo, strategy *domain.Strategy, ticker string, side domain.PositionSide, quantity, avgEntry float64) *domain.Position {
 	t.Helper()
 	pos := &domain.Position{
-		StrategyID: &strategyID,
-		Ticker:     ticker,
-		Side:       side,
-		Quantity:   quantity,
-		AvgEntry:   avgEntry,
+		StrategyID:  &strategy.ID,
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: strategy.ExecutionStrategyVersionID.String(),
+		AssetClass: domain.AssetClassEquity, ContractMultiplier: 1,
+		Ticker:   ticker,
+		Side:     side,
+		Quantity: quantity,
+		AvgEntry: avgEntry,
 	}
 	if err := r.Create(ctx, pos); err != nil {
 		t.Fatalf("failed to create position: %v", err)
@@ -412,17 +225,21 @@ func createPosition(t *testing.T, ctx context.Context, r *postgres.PositionRepo,
 	return pos
 }
 
-func createOrder(t *testing.T, ctx context.Context, r *postgres.OrderRepo, strategyID uuid.UUID, runID *uuid.UUID, ticker string, side domain.OrderSide, orderType domain.OrderType, qty float64) *domain.Order {
+func createOrder(t *testing.T, ctx context.Context, r *postgres.OrderRepo, strategy *domain.Strategy, run *domain.PipelineRun, ticker string, side domain.OrderSide, orderType domain.OrderType, qty float64) *domain.Order {
 	t.Helper()
 	order := &domain.Order{
-		StrategyID:    &strategyID,
-		PipelineRunID: runID,
-		Ticker:        ticker,
-		Side:          side,
-		OrderType:     orderType,
-		Quantity:      qty,
-		Status:        domain.OrderStatusPending,
-		Broker:        "alpaca",
+		StrategyID:  &strategy.ID,
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: strategy.ExecutionStrategyVersionID.String(),
+		AssetClass: domain.AssetClassEquity, MarketType: domain.MarketTypeStock,
+		Ticker:    ticker,
+		Side:      side,
+		OrderType: orderType,
+		Quantity:  qty,
+		Status:    domain.OrderStatusPending,
+		Broker:    "alpaca",
+	}
+	if run != nil {
+		order.PipelineRunID, order.PipelineRunTradeDate = &run.ID, &run.TradeDate
 	}
 	if err := r.Create(ctx, order); err != nil {
 		t.Fatalf("failed to create order: %v", err)

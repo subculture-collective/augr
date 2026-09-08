@@ -44,7 +44,7 @@ type historicalObservedPosition struct {
 
 // EvaluateManifestBoundOptions executes one deterministic vertical strategy
 // over pre-bound historical frames using executable bid/ask observations.
-func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRulesConfig, frames []HistoricalOptionFrame, initialCash float64, feePerContract float64) (*HistoricalOptionsEvaluation, error) {
+func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRulesConfig, frames []HistoricalOptionFrame, initialCash, feePerContract float64) (*HistoricalOptionsEvaluation, error) {
 	if err := rules.ValidateDefinedRiskVertical(&config); err != nil {
 		return nil, fmt.Errorf("options/historical: ineligible strategy: %w", err)
 	}

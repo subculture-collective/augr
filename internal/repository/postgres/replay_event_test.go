@@ -220,6 +220,7 @@ func newReplayEventIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid()
 		)`,
 		`CREATE TABLE replay_events (
+ account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'operator', origin_id TEXT NOT NULL DEFAULT 'fixture',
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			trade_decision_id UUID NOT NULL REFERENCES trade_decisions(id) ON DELETE CASCADE,
 			event_type TEXT NOT NULL CHECK (event_type IN (

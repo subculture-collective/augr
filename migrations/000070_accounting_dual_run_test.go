@@ -185,9 +185,10 @@ func newAccountingDualRunMigrationPool(t *testing.T) (context.Context, *pgxpool.
 func accountingDualRunMigrationFixture(t *testing.T, accountID uuid.UUID) *accountingrecon.Run {
 	t.Helper()
 	asOf := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	frontierID := uuid.New()
 	inputFor := func(source accountingrecon.SnapshotSource) accountingrecon.SnapshotInput {
 		input := accountingrecon.SnapshotInput{
-			Source: source, AccountID: accountID, AsOf: asOf, ObservedAt: asOf.Add(time.Second), Currency: "USD",
+			Source: source, AccountID: accountID, ThroughTransactionID: frontierID, AsOf: asOf, ObservedAt: asOf.Add(time.Second), Currency: "USD",
 			ProjectionVersion: "ledger_fifo_v1", MarkSource: "test-source", MarkNamespace: "marks/test", MaxMarkAge: time.Minute,
 			CaptureFenceID: "migration-fence", CaptureEpoch: 1,
 			EvidenceID: source.String() + ":migration-evidence", EvidenceChecksum: strings.Repeat("a", 64),

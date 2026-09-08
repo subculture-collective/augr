@@ -69,7 +69,7 @@ export function resetApp(path = '/login') {
 
 export function installAppTestHarness() {
   beforeAll(() => {
-    server.listen({ onUnhandledRequest: 'bypass' })
+    server.listen({ onUnhandledRequest: 'error' })
     vi.stubGlobal('WebSocket', FakeWebSocket)
     vi.stubGlobal('ResizeObserver', class ResizeObserver {
       observe() {}

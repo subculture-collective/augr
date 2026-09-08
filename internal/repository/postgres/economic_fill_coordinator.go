@@ -27,6 +27,18 @@ func NewEconomicFillCoordinator(pool *pgxpool.Pool) *EconomicFillCoordinator {
 }
 
 func (coordinator *EconomicFillCoordinator) ApplyAcceptedFill(ctx context.Context, input execution.AcceptedFillInput) (execution.AcceptedFillResult, error) {
+	// A competing writer may commit this exact immutable event between the initial
+	// read and the lock. Release the transaction and revalidate the complete replay.
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := coordinator.applyAcceptedFill(ctx, input)
+		if !errors.Is(err, errAcceptedFillConcurrentReplay) {
+			return result, err
+		}
+	}
+	return execution.AcceptedFillResult{}, errAcceptedFillConcurrentReplay
+}
+
+func (coordinator *EconomicFillCoordinator) applyAcceptedFill(ctx context.Context, input execution.AcceptedFillInput) (execution.AcceptedFillResult, error) {
 	if err := input.Validate(); err != nil {
 		return execution.AcceptedFillResult{}, fmt.Errorf("postgres: validate accepted fill: %w", err)
 	}
@@ -96,6 +108,8 @@ func (coordinator *EconomicFillCoordinator) ApplyAcceptedFill(ctx context.Contex
 	return execution.AcceptedFillResult{Mutation: mutation, Lifecycle: persisted, Replayed: replayed}, nil
 }
 
+var errAcceptedFillConcurrentReplay = errors.New("postgres: accepted fill committed while acquiring lock")
+
 func lockAcceptedFillLifecycle(ctx context.Context, tx pgx.Tx, input execution.AcceptedFillInput, replay bool) error {
 	var accountID uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT account_id FROM execution_intents WHERE id=$1 FOR UPDATE`, input.Transition.Event.IntentID).Scan(&accountID); err != nil {
@@ -122,6 +136,13 @@ func lockAcceptedFillLifecycle(ctx context.Context, tx pgx.Tx, input execution.A
 		return nil
 	}
 	if len(input.PriorLifecycle.Events) == 0 || input.PriorLifecycle.Events[len(input.PriorLifecycle.Events)-1].ID != latestEventID {
+		var applied bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM execution_lifecycle_events WHERE intent_id=$1 AND id=$2)`, input.Transition.Event.IntentID, input.Transition.Event.ID).Scan(&applied); err != nil {
+			return err
+		}
+		if applied {
+			return errAcceptedFillConcurrentReplay
+		}
 		return fmt.Errorf("postgres: accepted fill lifecycle changed before lock")
 	}
 	return nil
@@ -139,6 +160,18 @@ func acceptedEconomicAsOf(values ...time.Time) time.Time {
 }
 
 func (coordinator *EconomicFillCoordinator) ApplyAcceptedOptionFills(ctx context.Context, inputs []execution.AcceptedFillInput) ([]execution.AcceptedFillResult, error) {
+	// A competing writer may commit this exact immutable event between the initial
+	// read and the lock. Release the transaction and revalidate the complete replay.
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := coordinator.applyAcceptedOptionFills(ctx, inputs)
+		if !errors.Is(err, errAcceptedFillConcurrentReplay) {
+			return result, err
+		}
+	}
+	return nil, errAcceptedFillConcurrentReplay
+}
+
+func (coordinator *EconomicFillCoordinator) applyAcceptedOptionFills(ctx context.Context, inputs []execution.AcceptedFillInput) ([]execution.AcceptedFillResult, error) {
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("postgres: accepted option fills are required")
 	}

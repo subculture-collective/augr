@@ -332,7 +332,6 @@ func TestTradeDecisionJournalRepo_InitialReplayRollbackAndRestartRepair(t *testi
 		ADD COLUMN prompt_tokens INTEGER, ADD COLUMN completion_tokens INTEGER, ADD COLUMN latency_ms INTEGER, ADD COLUMN cost_usd NUMERIC,
 		ADD COLUMN paper_order_id UUID, ADD COLUMN live_order_id UUID, ADD COLUMN status TEXT NOT NULL DEFAULT 'candidate',
 		ADD COLUMN created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), ADD COLUMN updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-		ALTER TABLE replay_events ADD COLUMN account_id UUID, ADD COLUMN environment TEXT, ADD COLUMN origin_type TEXT, ADD COLUMN origin_id TEXT;
 		CREATE UNIQUE INDEX uq_replay_events_initial ON replay_events(trade_decision_id,event_type) WHERE event_type IN ('decision_created','risk_reviewed') AND account_id IS NOT NULL AND environment IS NOT NULL AND origin_type IS NOT NULL AND origin_id IS NOT NULL;
 		CREATE FUNCTION fail_risk_replay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='risk_reviewed' THEN RAISE EXCEPTION 'injected replay failure'; END IF; RETURN NEW; END $$;
 		CREATE TRIGGER fail_risk_replay BEFORE INSERT ON replay_events FOR EACH ROW EXECUTE FUNCTION fail_risk_replay()`)
@@ -416,7 +415,7 @@ func newTradeDecisionIntegrationPool(t *testing.T, ctx context.Context) (*pgxpoo
 		`CREATE TYPE market_type AS ENUM ('stock','crypto','kalshi','polymarket')`,
 		`CREATE TYPE order_side AS ENUM ('buy','sell')`,
 		`CREATE TABLE strategies (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), market_type market_type NOT NULL)`,
-		`CREATE TABLE trade_decisions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), strategy_id UUID REFERENCES strategies(id), instrument_key TEXT NOT NULL, market_type market_type NOT NULL, side order_side NOT NULL, status trade_decision_status NOT NULL, risk_reasons TEXT[], evidence JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
+		`CREATE TABLE trade_decisions (account_id UUID DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT DEFAULT 'paper_scored', origin_type TEXT DEFAULT 'operator', origin_id TEXT DEFAULT 'fixture', id UUID PRIMARY KEY DEFAULT gen_random_uuid(), strategy_id UUID REFERENCES strategies(id), instrument_key TEXT NOT NULL, market_type market_type NOT NULL, side order_side NOT NULL, status trade_decision_status NOT NULL, risk_reasons TEXT[], evidence JSONB, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 	}
 	for _, stmt := range ddl {
 		if _, err := pool.Exec(ctx, stmt); err != nil {

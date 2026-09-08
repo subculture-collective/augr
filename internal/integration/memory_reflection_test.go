@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 	"github.com/PatrickFanella/get-rich-quick/internal/memory"
@@ -27,7 +25,7 @@ func TestIntegration_MemoryReflection_EndToEnd(t *testing.T) {
 
 	// 2. Create the position first so its DB opened_at (NOW()) naturally
 	//    precedes the pipeline run's started_at.
-	pos := createPosition(t, ctx, r.Position, strategy.ID, "AAPL", domain.PositionSideLong, 10, 180.00)
+	pos := createPosition(t, ctx, r.Position, strategy, "AAPL", domain.PositionSideLong, 10, 180.00)
 
 	// Reload the position to get the DB-assigned opened_at.
 	pos, err := r.Position.Get(ctx, pos.ID)
@@ -39,6 +37,7 @@ func TestIntegration_MemoryReflection_EndToEnd(t *testing.T) {
 	//    position's opened_at so findPipelineRun can locate it.
 	tradeDate := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
 	run := &domain.PipelineRun{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: strategy.ExecutionStrategyVersionID.String(),
 		StrategyID: strategy.ID,
 		Ticker:     "AAPL",
 		TradeDate:  tradeDate,
@@ -71,10 +70,11 @@ func TestIntegration_MemoryReflection_EndToEnd(t *testing.T) {
 
 	for _, role := range reflectionRoles {
 		d := &domain.AgentDecision{
-			PipelineRunID: run.ID,
-			AgentRole:     role,
-			Phase:         domain.PhaseTrading,
-			OutputText:    string(role) + ": recommends buying AAPL based on technical strength",
+			PipelineRunID:        run.ID,
+			PipelineRunTradeDate: run.TradeDate, Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID,
+			AgentRole:  role,
+			Phase:      domain.PhaseTrading,
+			OutputText: string(role) + ": recommends buying AAPL based on technical strength",
 		}
 		if err := r.AgentDecision.Create(ctx, d); err != nil {
 			t.Fatalf("Create() decision for %s: %v", role, err)
@@ -166,7 +166,7 @@ func TestIntegration_MemoryReflection_OpenPositionFails(t *testing.T) {
 	ctx := context.Background()
 
 	strategy := createStrategy(t, ctx, r.Strategy, "Open Pos Test", "TSLA")
-	pos := createPosition(t, ctx, r.Position, strategy.ID, "TSLA", domain.PositionSideLong, 5, 200.00)
+	pos := createPosition(t, ctx, r.Position, strategy, "TSLA", domain.PositionSideLong, 5, 200.00)
 
 	mockLLM := &mockLLMProvider{
 		response: &llm.CompletionResponse{Content: "unused"},
@@ -195,13 +195,15 @@ func TestIntegration_MemoryReflection_SearchAndDelete(t *testing.T) {
 	ctx := context.Background()
 
 	// Manually create a memory.
-	runID := uuid.New()
+	strategy := createStrategy(t, ctx, r.Strategy, "Memory search", "AAPL")
+	run := createPipelineRun(t, ctx, r.PipelineRun, strategy, "AAPL", time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC))
 	mem := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "AAPL displayed a strong bullish reversal with increasing volume",
 		Recommendation: "Enter long position with stop below support",
 		Outcome:        "profit of 5.00%",
-		PipelineRunID:  &runID,
+		PipelineRunID:  &run.ID, PipelineRunTradeDate: &run.TradeDate,
 	}
 	if err := r.Memory.Create(ctx, mem); err != nil {
 		t.Fatalf("Create() memory: %v", err)
@@ -243,11 +245,13 @@ func TestIntegration_MemoryReflection_RoleFilter(t *testing.T) {
 
 	// Create memories for different roles.
 	mem1 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleTrader,
 		Situation:      "Market volatility spike detected",
 		Recommendation: "Reduce position sizes",
 	}
 	mem2 := &domain.AgentMemory{
+		Environment:    domain.AccountEnvironmentPaperScored,
 		AgentRole:      domain.AgentRoleRiskManager,
 		Situation:      "Market volatility exceeding thresholds",
 		Recommendation: "Tighten stop-losses",
@@ -288,6 +292,7 @@ func TestIntegration_PipelineExecution_PersistRunAndDecisions(t *testing.T) {
 	// 2. Create a pipeline run.
 	tradeDate := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC)
 	run := &domain.PipelineRun{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "strategy_version", OriginID: strategy.ExecutionStrategyVersionID.String(),
 		StrategyID:     strategy.ID,
 		Ticker:         "AAPL",
 		TradeDate:      tradeDate,
@@ -304,30 +309,34 @@ func TestIntegration_PipelineExecution_PersistRunAndDecisions(t *testing.T) {
 	// 3. Persist multiple agent decisions for different phases.
 	decisions := []*domain.AgentDecision{
 		{
-			PipelineRunID: run.ID,
-			AgentRole:     domain.AgentRoleMarketAnalyst,
-			Phase:         domain.PhaseAnalysis,
-			OutputText:    "AAPL shows bullish momentum with RSI at 65",
-			LLMProvider:   "openai",
-			LLMModel:      "gpt-4o",
-			PromptTokens:  200,
+			PipelineRunID:        run.ID,
+			PipelineRunTradeDate: run.TradeDate, Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID,
+			AgentRole:    domain.AgentRoleMarketAnalyst,
+			Phase:        domain.PhaseAnalysis,
+			OutputText:   "AAPL shows bullish momentum with RSI at 65",
+			LLMProvider:  "openai",
+			LLMModel:     "gpt-4o",
+			PromptTokens: 200,
 		},
 		{
-			PipelineRunID: run.ID,
-			AgentRole:     domain.AgentRoleBullResearcher,
-			Phase:         domain.PhaseResearchDebate,
-			RoundNumber:   intPtr(1),
-			OutputText:    "Strong earnings support further upside",
+			PipelineRunID:        run.ID,
+			PipelineRunTradeDate: run.TradeDate, Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID,
+			AgentRole:   domain.AgentRoleBullResearcher,
+			Phase:       domain.PhaseResearchDebate,
+			RoundNumber: intPtr(1),
+			OutputText:  "Strong earnings support further upside",
 		},
 		{
-			PipelineRunID: run.ID,
-			AgentRole:     domain.AgentRoleBearResearcher,
-			Phase:         domain.PhaseResearchDebate,
-			RoundNumber:   intPtr(1),
-			OutputText:    "Valuation is stretched after recent run-up",
+			PipelineRunID:        run.ID,
+			PipelineRunTradeDate: run.TradeDate, Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID,
+			AgentRole:   domain.AgentRoleBearResearcher,
+			Phase:       domain.PhaseResearchDebate,
+			RoundNumber: intPtr(1),
+			OutputText:  "Valuation is stretched after recent run-up",
 		},
 		{
-			PipelineRunID:    run.ID,
+			PipelineRunID:        run.ID,
+			PipelineRunTradeDate: run.TradeDate, Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID,
 			AgentRole:        domain.AgentRoleTrader,
 			Phase:            domain.PhaseTrading,
 			OutputText:       "Execute buy order for 10 shares at market",
@@ -408,7 +417,7 @@ func TestIntegration_PipelineExecution_FailedRun(t *testing.T) {
 
 	strategy := createStrategy(t, ctx, r.Strategy, "Fail Test", "MSFT")
 	tradeDate := time.Date(2026, 3, 21, 0, 0, 0, 0, time.UTC)
-	run := createPipelineRun(t, ctx, r.PipelineRun, strategy.ID, "MSFT", tradeDate)
+	run := createPipelineRun(t, ctx, r.PipelineRun, strategy, "MSFT", tradeDate)
 
 	// Mark as failed.
 	completedAt := run.StartedAt.Add(2 * time.Minute)

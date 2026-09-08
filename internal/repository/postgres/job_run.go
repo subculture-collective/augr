@@ -215,7 +215,7 @@ func (r *JobRunRepo) ListByJob(ctx context.Context, jobName string, limit int) (
 		limit = 50
 	}
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, job_name, status, started_at, completed_at, duration_ns, result, error, last_error_at, consecutive_failures, created_at
+		`SELECT id, job_name, status, started_at, completed_at, COALESCE(duration_ns, 0), result, error, last_error_at, consecutive_failures, created_at
 		 FROM automation_job_runs
 		 WHERE job_name = $1
 		 ORDER BY started_at DESC
@@ -238,7 +238,7 @@ func (r *JobRunRepo) List(ctx context.Context, limit, offset int) ([]JobRun, err
 		offset = 0
 	}
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, job_name, status, started_at, completed_at, duration_ns, result, error, last_error_at, consecutive_failures, created_at
+		`SELECT id, job_name, status, started_at, completed_at, COALESCE(duration_ns, 0), result, error, last_error_at, consecutive_failures, created_at
 		 FROM automation_job_runs
 		 ORDER BY started_at DESC
 		 LIMIT $1 OFFSET $2`,

@@ -104,6 +104,9 @@ func PersistResult(
 	}
 
 	persisted := result.Initial
+	// Keep the validated plan frontier separate from the latest durable aggregate:
+	// a replay can return a lifecycle that already includes subsequent steps.
+	planned := result.Initial
 	for index, step := range result.Steps {
 		observation, err := store.RecordVenueObservation(ctx, step.Observation)
 		if err != nil {
@@ -126,7 +129,7 @@ func PersistResult(
 		}
 		if step.Transition.Fill != nil {
 			accepted, applyErr := store.ApplyAcceptedFill(ctx, execution.AcceptedFillInput{
-				Scope: result.Scope, PriorLifecycle: persisted, Transition: step.Transition, AcceptedFill: step.Transition.Fill,
+				Scope: result.Scope, PriorLifecycle: planned, Transition: step.Transition, AcceptedFill: step.Transition.Fill,
 				SourceEvent: step.EconomicSourceEvent, Instrument: step.Transition.Normalization.Instrument,
 				VenueContract: step.Transition.Normalization.VenueContract, Normalization: step.Transition.Normalization,
 				LedgerTransaction: step.Transition.Normalization.Transaction,
@@ -140,6 +143,10 @@ func PersistResult(
 		}
 		if err != nil {
 			return nil, fmt.Errorf("persist venue result transition %d/%s: %w", index, step.Transition.Event.ID, err)
+		}
+		planned, err = lifecycle.ApplyTransition(planned, step.Transition)
+		if err != nil {
+			return nil, fmt.Errorf("persist venue result plan frontier: %w", err)
 		}
 	}
 	if !sameAggregateResult(persisted, result.Aggregate) {

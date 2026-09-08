@@ -211,7 +211,7 @@ func newSimulationPolicyIntegrationPool(t *testing.T) (context.Context, *pgxpool
 	t.Helper()
 	ctx := context.Background()
 	pool := newExecutionLifecycleIntegrationPool(t, ctx)
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000072_simulation_policy_artifacts.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000072_simulation_policy_artifacts.up.sql"); err != nil {
 		t.Fatalf("apply migration 72: %v", err)
 	}
 	return ctx, pool

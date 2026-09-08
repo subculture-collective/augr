@@ -450,10 +450,10 @@ func TestStrategyRepoIntegration_RejectsLegacyFamilyMismatchAndRollsBack(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, `INSERT INTO strategy_families(id,schema_name,slug,name,thesis,asset_classes,sha256,canonical_bytes,canonical_json,created_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,convert_from($8,'UTF8')::jsonb,date_trunc('microseconds',now()))`, family.ID(), strategycatalog.FamilySchemaV1, family.Slug(), family.Name(), family.Thesis(), `["crypto_spot"]`, family.Digest(), family.CanonicalBytes()); err != nil {
+	if _, err := NewStrategyCatalogRepo(pool).RegisterStrategyFamily(ctx, family); err != nil {
 		t.Fatal(err)
 	}
+
 	strategy := &domain.Strategy{ID: strategyID, Name: "conflict", Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive, IsPaper: true}
 	if _, err := repo.CreateWithExecutionVersion(ctx, strategy); !errors.Is(err, repository.ErrIdempotencyConflict) {
 		t.Fatalf("CreateWithExecutionVersion() error = %v, want ErrIdempotencyConflict", err)
@@ -545,7 +545,6 @@ func newStrategyIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.Poo
 		t.Fatalf("failed to discover extension schemas: %v", err)
 	}
 	config.ConnConfig.RuntimeParams["search_path"] = searchPath
-	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

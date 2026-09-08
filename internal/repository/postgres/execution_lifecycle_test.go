@@ -444,7 +444,7 @@ func TestExecutionLifecyclePersistentRehearsal(t *testing.T) {
 		t.Fatalf("partial rehearsal = state:%s fills:%d", completed.State, len(completed.Fills))
 	}
 
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000071_common_execution_lifecycle.down.sql")); err == nil ||
+	if _, err := execRepositoryMigration(t, ctx, pool, "000071_common_execution_lifecycle.down.sql"); err == nil ||
 		!strings.Contains(err.Error(), "cannot roll back migration 71") {
 		t.Fatalf("nonempty rehearsal rollback error = %v", err)
 	}
@@ -539,10 +539,10 @@ func (fixture executionLifecycleFixture) proposeInput(key string) lifecycle.Prop
 	return lifecycle.ProposeInput{
 		Account: *fixture.account, Instrument: *fixture.instrument, DecisionSnapshot: *fixture.snapshot,
 		IdempotencyKey: key, DesiredQuantityDelta: decimal.NewFromInt(8), DecisionAt: fixture.baseTime,
-		OriginType: ledger.ExecutionOriginStrategyVersion, OriginID: "strategy-version-1",
-		StrategyVersionID: "strategy-version-1", Metadata: json.RawMessage(`{"signal":"entry"}`),
+		OriginType: ledger.ExecutionOriginStrategyVersion, OriginID: "00000000-0000-4000-8000-000000000071",
+		StrategyVersionID: "00000000-0000-4000-8000-000000000071", Metadata: json.RawMessage(`{"signal":"entry"}`),
 		Event: lifecycle.EventInput{
-			Source: "strategy", SourceNamespace: "strategy-version-1", SourceEventID: "proposal-" + key,
+			Source: "strategy", SourceNamespace: "00000000-0000-4000-8000-000000000071", SourceEventID: "proposal-" + key,
 			SourceAt: fixture.baseTime.Add(-time.Millisecond), ReceivedAt: fixture.baseTime,
 			Actor: "strategy-runner", ReasonCode: "signal_proposed", Evidence: json.RawMessage(`{"signal":"entry"}`),
 		},
@@ -600,7 +600,11 @@ func (fixture executionLifecycleFixture) persistRiskApproved(t *testing.T, key s
 
 func (fixture executionLifecycleFixture) routeTransition(t *testing.T, aggregate *lifecycle.Aggregate, key string) *lifecycle.Transition {
 	t.Helper()
-	routeInput := fixture.nextEvent(aggregate, "route-"+key, "router", "simulation-policy-v1", "order_routed", json.RawMessage(`{"route":"simulation"}`))
+	artifact := newSimulationPolicyArtifact(t, "0")
+	if _, err := NewSimulationPolicyRepo(fixture.pool).RegisterSimulationPolicy(fixture.ctx, artifact); err != nil {
+		t.Fatal(err)
+	}
+	routeInput := fixture.nextEvent(aggregate, "route-"+key, "router", artifact.Version, "order_routed", json.RawMessage(`{"route":"simulation"}`))
 	routedAt := routeInput.ReceivedAt
 	route, err := lifecycle.Route(aggregate, lifecycle.RouteInput{
 		OrderIdempotencyKey: "order-" + key, Instrument: *fixture.instrument, VenueContract: *fixture.contract,
@@ -609,7 +613,7 @@ func (fixture executionLifecycleFixture) routeTransition(t *testing.T, aggregate
 		},
 		OrderType: lifecycle.OrderLimit, TimeInForce: lifecycle.TimeInForceDay,
 		LimitPrice: decimalExecutionPointer("10.25"), PolicyKind: lifecycle.PolicySimulation,
-		PolicyVersion: "simulation-policy-v1", Event: routeInput, RoutedAt: routedAt, CreatedAt: routedAt,
+		PolicyVersion: artifact.Version, Event: routeInput, RoutedAt: routedAt, CreatedAt: routedAt,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -766,10 +770,11 @@ func newExecutionLifecycleIntegrationPool(t *testing.T, ctx context.Context) *pg
 		"000070_accounting_dual_run.up.sql",
 		"000071_common_execution_lifecycle.up.sql",
 	} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migrationName)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, pool, migrationName); err != nil {
 			t.Fatalf("apply %s: %v", migrationName, err)
 		}
 	}
+	applyRepositoryMigrationRange(t, ctx, pool, "000071", "000108")
 	return pool
 }
 

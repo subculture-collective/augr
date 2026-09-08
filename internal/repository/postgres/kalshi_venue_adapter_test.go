@@ -7,8 +7,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/shopspring/decimal"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/kalshi"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/lifecycle"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution/venue"
@@ -23,6 +27,7 @@ func TestKalshiVenueAdapterPartialFullConcurrentReplayAndRestartConverge(t *test
 	externalID := "kalshi-v2-" + fixture.aggregate.Order.ID.String()
 	half := fixture.aggregate.Order.Quantity.Div(decimal.NewFromInt(2))
 	context := kalshi.CommonLifecycleContext{
+		Scope:  kalshiRepositoryScope(t, fixture),
 		Policy: policy, Aggregate: fixture.aggregate, Account: fixture.base.account,
 		Instrument: fixture.base.instrument, VenueContract: fixture.base.contract,
 		Route:      kalshi.CommonRouteFacts{Subaccount: 0, ExchangeIndex: 0},
@@ -131,6 +136,7 @@ func TestKalshiVenueAdapterNOFillPreservesBookAndEconomicPriceDomains(t *testing
 	}
 	externalID := "kalshi-v2-" + fixture.aggregate.Order.ID.String()
 	context := kalshi.CommonLifecycleContext{
+		Scope:  kalshiRepositoryScope(t, fixture),
 		Policy: policy, Aggregate: fixture.aggregate, Account: fixture.base.account,
 		Instrument: fixture.base.instrument, VenueContract: fixture.base.contract,
 		Route:      kalshi.CommonRouteFacts{Subaccount: 0, ExchangeIndex: 0},
@@ -228,4 +234,13 @@ func kalshiPostgresOrderFact(t *testing.T, context kalshi.CommonLifecycleContext
 		t.Fatal(err)
 	}
 	return &kalshi.CommonOrderFact{Order: order, RawPayload: raw}
+}
+
+func kalshiRepositoryScope(t *testing.T, fixture venueAdapterRepositoryFixture) execution.ExecutionScope {
+	t.Helper()
+	scope, err := execution.NewStrategyExecutionScope(fixture.aggregate.Intent.AccountID, fixture.aggregate.Intent.Environment, uuid.MustParse(fixture.aggregate.Intent.OriginID), domain.PipelineRunRef{ID: fixture.aggregate.Intent.ID, TradeDate: fixture.base.baseTime.UTC().Truncate(24 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return scope
 }

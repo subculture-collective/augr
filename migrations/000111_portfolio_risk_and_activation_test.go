@@ -1,9 +1,14 @@
 package migrations_test
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestPortfolioRiskAndActivationMigrationContainsFailClosedActivationGraph(t *testing.T) {
@@ -64,5 +69,48 @@ func TestPortfolioRiskAndActivationRollbackRefusesEveryEvidenceClass(t *testing.
 		if !strings.Contains(sql, required) {
 			t.Fatalf("migration 111 rollback missing refusal for %q", required)
 		}
+	}
+}
+
+func TestPortfolioRiskMigrationRejectsForgeryMutationAndRollback(t *testing.T) {
+	ctx, pool := newCanonicalExpansionPool(t)
+	for _, name := range []string{
+		"000108_canonical_account_expansion.up.sql", "000109_enforce_canonical_account.up.sql",
+		"000110_immutable_market_payloads.up.sql", "000111_portfolio_risk_and_activation.up.sql",
+		"000111_portfolio_risk_and_activation.down.sql", "000111_portfolio_risk_and_activation.up.sql",
+	} {
+		if _, err := pool.Exec(ctx, readMigrationFile(t, name)); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	policy, err := portfolio.ReviewedPortfolioRiskPolicyV1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO portfolio_risk_policy_artifacts(id,schema_name,version,sha256,canonical_bytes,canonical_json,created_at)
+        VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)`
+	created := time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC)
+	_, err = pool.Exec(ctx, insert, policy.ID(), policy.Schema, policy.Version, strings.Repeat("f", 64), policy.CanonicalBytes(), string(policy.CanonicalBytes()), created)
+	var constraint *pgconn.PgError
+	if !errors.As(err, &constraint) || constraint.Code != "23514" {
+		t.Fatalf("forged digest must violate a check constraint: %v", err)
+	}
+	if _, err := pool.Exec(ctx, insert, policy.ID(), policy.Schema, policy.Version, policy.Digest(), policy.CanonicalBytes(), string(policy.CanonicalBytes()), created); err != nil {
+		t.Fatalf("valid policy: %v", err)
+	}
+	for _, statement := range []string{
+		`UPDATE portfolio_risk_policy_artifacts SET version=version WHERE id=$1`,
+		`DELETE FROM portfolio_risk_policy_artifacts WHERE id=$1`,
+	} {
+		if _, err := pool.Exec(ctx, statement, policy.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
+			t.Fatalf("policy mutation: %v", err)
+		}
+	}
+	if _, err := pool.Exec(ctx, readMigrationFile(t, "000111_portfolio_risk_and_activation.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 111") {
+		t.Fatalf("nonempty rollback: %v", err)
+	}
+	var digest string
+	if err := pool.QueryRow(ctx, `SELECT sha256 FROM portfolio_risk_policy_artifacts WHERE id=$1`, policy.ID()).Scan(&digest); err != nil || digest != policy.Digest() {
+		t.Fatalf("rollback did not preserve exact policy: %s/%v", digest, err)
 	}
 }

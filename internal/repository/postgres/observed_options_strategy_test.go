@@ -14,9 +14,6 @@ import (
 
 func TestStrategyRepoResolvesNativeObservedOptionsVersion(t *testing.T) {
 	fixture := newStrategyCatalogFixture(t)
-	if _, err := fixture.pool.Exec(fixture.ctx, `ALTER TABLE strategies ADD COLUMN execution_strategy_version_id UUID REFERENCES strategy_versions(id) ON DELETE RESTRICT`); err != nil {
-		t.Fatal(err)
-	}
 	config := observedOptionsConfig()
 	family, version, err := optionsstrategy.Compile(config, strings.Repeat("a", 40), strings.Repeat("b", 64))
 	if err != nil {

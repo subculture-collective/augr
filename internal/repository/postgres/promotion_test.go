@@ -31,7 +31,7 @@ func newPromotionRepositoryFixture(t *testing.T) promotionRepositoryFixture {
 	if _, err := robustnessFixture.repo.RecordAssessment(ctx, robustnessFixture.assessment); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000081_promotion_retirement_evaluator.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000081_promotion_retirement_evaluator.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	strategy := robustnessFixture.evaluation.experiment.strategy
@@ -119,7 +119,7 @@ func TestPromotionRepositoryRoundTripConcurrentConvergenceAndRollbackRefusal(t *
 	if _, err := pool.Exec(ctx, `UPDATE promotion_decision_observed_gates SET state=state WHERE decision_id=$1`, fixture.decision.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("mutation error=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000081_promotion_retirement_evaluator.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 81") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000081_promotion_retirement_evaluator.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 81") {
 		t.Fatalf("nonempty rollback error=%v", err)
 	}
 }

@@ -104,12 +104,13 @@ func TestPipelineRunPhaseTimingsMigrationAppliesAgainstExistingSchema(t *testing
 	}
 
 	// Verify column exists with correct type and nullability.
-	assertTableColumns(t, ctx, pool, "pipeline_runs", map[string]columnInfo{
-		"phase_timings": {
-			dataType: "jsonb",
-			nullable: "YES",
-		},
-	})
+	var columnType, nullable string
+	if err := pool.QueryRow(ctx, `SELECT data_type,is_nullable FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='pipeline_runs' AND column_name='phase_timings'`).Scan(&columnType, &nullable); err != nil {
+		t.Fatal(err)
+	}
+	if columnType != "jsonb" || nullable != "YES" {
+		t.Fatalf("phase_timings type/nullability = %s/%s", columnType, nullable)
+	}
 
 	// Verify existing rows have NULL phase_timings.
 	strategyID := uuid.New()
@@ -122,8 +123,8 @@ VALUES ($1, $2, $3, $4, $5)
 
 	runID := uuid.New()
 	if _, err := pool.Exec(ctx, `
-INSERT INTO pipeline_runs (id, strategy_id, status)
-VALUES ($1, $2, $3)
+INSERT INTO pipeline_runs (id, strategy_id, status, ticker, trade_date, started_at)
+VALUES ($1, $2, $3, 'AAPL', current_date, now())
 `, runID, strategyID, "completed"); err != nil {
 		t.Fatalf("failed to insert pipeline run without phase_timings: %v", err)
 	}
@@ -142,8 +143,8 @@ SELECT phase_timings::text FROM pipeline_runs WHERE id = $1
 	runWithTimingsID := uuid.New()
 	timingsJSON := `{"analysis_ms": 1234, "research_debate_ms": 5678, "trading_ms": 234, "risk_debate_ms": 3456}`
 	if _, err := pool.Exec(ctx, `
-INSERT INTO pipeline_runs (id, strategy_id, status, phase_timings)
-VALUES ($1, $2, $3, $4::jsonb)
+INSERT INTO pipeline_runs (id, strategy_id, status, phase_timings, ticker, trade_date, started_at)
+VALUES ($1, $2, $3, $4::jsonb, 'AAPL', current_date, now())
 `, runWithTimingsID, strategyID, "completed", timingsJSON); err != nil {
 		t.Fatalf("failed to insert pipeline run with phase_timings: %v", err)
 	}
@@ -166,7 +167,7 @@ SELECT phase_timings::text FROM pipeline_runs WHERE id = $1
 	var colCount int
 	if err := pool.QueryRow(ctx, `
 SELECT COUNT(*) FROM information_schema.columns
-WHERE table_name = 'pipeline_runs' AND column_name = 'phase_timings'
+WHERE table_schema=current_schema() AND table_name = 'pipeline_runs' AND column_name = 'phase_timings'
 `).Scan(&colCount); err != nil {
 		t.Fatalf("failed to check column existence after down migration: %v", err)
 	}

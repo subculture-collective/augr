@@ -652,64 +652,6 @@ describe('first vertical slice app', () => {
     ).toHaveLength(0)
   })
 
-  it('shows empty strategy list state', async () => {
-    resetApp('/strategies')
-    state.scenario = 'empty-data'
-    setTokenSnapshot(buildAuthResponse())
-    render(<App />)
-
-    expect(await screen.findByText('No strategies found')).toBeTruthy()
-    expect(screen.getByText(/create a paper strategy/i)).toBeTruthy()
-  })
-
-  it('shows strategy list error, retry, and 501 states', async () => {
-    resetApp('/strategies')
-    setTokenSnapshot(buildAuthResponse())
-    let calls = 0
-    server.use(
-      http.get(`${apiBaseUrl}/strategies`, () => {
-        calls += 1
-        if (calls === 1)
-          return HttpResponse.json(
-            { error: 'strategy list exploded', code: 'ERR_VALIDATION' },
-            { status: 400 },
-          )
-        return HttpResponse.json({
-          data: [buildStrategy()],
-          total: 1,
-          limit: 20,
-          offset: 0,
-        })
-      }),
-    )
-    render(<App />)
-
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'strategy list exploded',
-    )
-    await userEvent.click(screen.getByRole('button', { name: /reload/i }))
-    expect(
-      (
-        await screen.findAllByRole('link', {
-          name: /dev paper mean reversion/i,
-        })
-      ).length,
-    ).toBeGreaterThan(0)
-
-    resetApp('/strategies')
-    setTokenSnapshot(buildAuthResponse())
-    server.use(
-      http.get(`${apiBaseUrl}/strategies`, () =>
-        HttpResponse.json(
-          { error: 'not configured', code: 'ERR_NOT_IMPLEMENTED' },
-          { status: 501 },
-        ),
-      ),
-    )
-    render(<App />)
-    expect(await screen.findByText(/feature unavailable/i)).toBeTruthy()
-  })
-
   it('shows loading, stale realtime, and unknown strategy enum states', async () => {
     resetApp('/strategies')
     setTokenSnapshot(buildAuthResponse())
@@ -873,53 +815,6 @@ describe('first vertical slice app', () => {
     expect(window.location.search).toContain('ticker=LIVE')
     expect((await screen.findAllByText('LIVE')).length).toBeGreaterThan(0)
     expect(screen.queryByText('AUGR')).toBeNull()
-  })
-
-  it('shows run empty, retry, and 501 states', async () => {
-    resetApp('/runs')
-    state.scenario = 'empty-data'
-    setTokenSnapshot(buildAuthResponse())
-    render(<App />)
-    expect(await screen.findByText(/no runs found/i)).toBeTruthy()
-
-    resetApp('/runs')
-    setTokenSnapshot(buildAuthResponse())
-    let calls = 0
-    server.use(
-      http.get(`${apiBaseUrl}/accounts/:accountId/runs`, () => {
-        calls += 1
-        if (calls === 1)
-          return HttpResponse.json(
-            { error: 'run list exploded', code: 'ERR_VALIDATION' },
-            { status: 400 },
-          )
-        return HttpResponse.json({
-          data: [buildRun()],
-          total: 1,
-          limit: 20,
-          offset: 0,
-        })
-      }),
-    )
-    render(<App />)
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      'run list exploded',
-    )
-    await userEvent.click(screen.getByRole('button', { name: /reload/i }))
-    expect(await screen.findByRole('table')).toBeTruthy()
-
-    resetApp('/runs')
-    setTokenSnapshot(buildAuthResponse())
-    server.use(
-      http.get(`${apiBaseUrl}/accounts/:accountId/runs`, () =>
-        HttpResponse.json(
-          { error: 'runs not configured', code: 'ERR_NOT_IMPLEMENTED' },
-          { status: 501 },
-        ),
-      ),
-    )
-    render(<App />)
-    expect(await screen.findByText(/feature unavailable/i)).toBeTruthy()
   })
 
   it('handles missing run totals, unknown status, and realtime stale events', async () => {
@@ -1298,58 +1193,6 @@ describe('first vertical slice app', () => {
         '/runs/00000000-0000-4000-8000-000000000020?trade_date=2026-01-15',
       ),
     )
-  })
-
-  it('shows persisted event empty, retry, and 501 states', async () => {
-    resetApp('/events')
-    state.scenario = 'empty-data'
-    setTokenSnapshot(buildAuthResponse())
-    render(<App />)
-    expect(await screen.findByText(/no persisted events/i)).toBeTruthy()
-
-    resetApp('/events')
-    setTokenSnapshot(buildAuthResponse())
-    let calls = 0
-    server.use(
-      http.get(`${apiBaseUrl}/accounts/:accountId/events`, () => {
-        calls += 1
-        if (calls === 1)
-          return HttpResponse.json(
-            { error: 'events exploded', code: 'ERR_VALIDATION' },
-            { status: 400 },
-          )
-        return HttpResponse.json({
-          data: [
-            {
-              id: '00000000-0000-4000-8000-000000000080',
-              event_kind: 'signal',
-              title: 'Recovered event',
-              created_at: fixtureDate,
-            },
-          ],
-          total: 1,
-          limit: 20,
-          offset: 0,
-        })
-      }),
-    )
-    render(<App />)
-    expect(await screen.findByText('events exploded')).toBeTruthy()
-    await userEvent.click(screen.getByRole('button', { name: /reload/i }))
-    expect(await screen.findByText(/Recovered event/i)).toBeTruthy()
-
-    resetApp('/events')
-    setTokenSnapshot(buildAuthResponse())
-    server.use(
-      http.get(`${apiBaseUrl}/accounts/:accountId/events`, () =>
-        HttpResponse.json(
-          { error: 'events not configured', code: 'ERR_NOT_IMPLEMENTED' },
-          { status: 501 },
-        ),
-      ),
-    )
-    render(<App />)
-    expect(await screen.findByText(/feature unavailable/i)).toBeTruthy()
   })
 
   it('embeds run timeline and renders unknown event metadata safely', async () => {

@@ -362,9 +362,9 @@ func insertAgentEventRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 
 	err = pool.QueryRow(ctx,
 		`INSERT INTO agent_events (
-			account_id, pipeline_run_trade_date, pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata, created_at
+			environment, origin_type, origin_id, account_id, pipeline_run_trade_date, pipeline_run_id, strategy_id, agent_role, event_kind, title, summary, tags, metadata, created_at
 		)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 VALUES ('paper_scored','operator','fixture',$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING id, created_at`,
 		canonicalRepositoryTestAccountID,
 		tradeDate,

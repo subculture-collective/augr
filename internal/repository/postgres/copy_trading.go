@@ -477,7 +477,7 @@ func (r *CopyTradingRepo) ClaimIntentExecution(ctx context.Context, intentID, cl
 			WHERE o.id=i.order_id AND o.account_id=i.account_id AND o.environment=i.environment
 			  AND o.origin_type=i.origin_type AND o.origin_id=i.origin_id::text
 			  AND o.status IN ('pending','submitted','partial','filled','rejected','cancelled')))
-		 AND (i.execution_claim_id IS NULL OR i.execution_claimed_at < $3 - INTERVAL '5 minutes')
+		 AND (i.execution_claim_id IS NULL OR i.execution_claimed_at < $3::timestamptz - INTERVAL '5 minutes')
 		FOR UPDATE OF i,s)
 		UPDATE copy_trade_intents i SET status='received',execution_claim_id=$2,execution_claimed_at=$3,updated_at=$3 FROM locked WHERE i.id=locked.id`, intentID, claimID, now.UTC(), r.accountID, r.environment)
 	if err != nil {

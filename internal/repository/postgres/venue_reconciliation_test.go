@@ -73,7 +73,7 @@ func newVenueReconFixture(t *testing.T) venueReconFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows, err := pool.Query(ctx, `SELECT id FROM ledger_transactions WHERE account_id=$1 AND effective_at <= $2 ORDER BY effective_at,id`, economic.account.ID, asOf)
+	rows, err := pool.Query(ctx, `SELECT id FROM ledger_transactions WHERE account_id=$1 AND effective_at <= $2 AND observed_at <= $2 AND (effective_at,observed_at,id) <= (SELECT effective_at,observed_at,id FROM ledger_transactions WHERE id=$3) ORDER BY effective_at,observed_at,id`, economic.account.ID, asOf, checkpoint.ThroughTransactionID)
 	if err != nil {
 		t.Fatal(err)
 	}

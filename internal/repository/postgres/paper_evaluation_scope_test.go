@@ -19,7 +19,7 @@ import (
 func TestConfiguredScopeEnablesStockAndKeepsOptionsFailClosed(t *testing.T) {
 	fixture := newStrategyCatalogFixture(t)
 	for _, migration := range []string{"000106_paper_evaluation_scopes.up.sql", "000110_immutable_market_payloads.up.sql"} {
-		if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, migration)); err != nil {
+		if _, err := execRepositoryMigration(t, fixture.ctx, fixture.pool, migration); err != nil {
 			t.Fatalf("apply %s: %v", migration, err)
 		}
 	}

@@ -19,14 +19,17 @@ import (
 func TestSignalRecorderCanonicalPostgresGuard(t *testing.T) {
 	dsn := os.Getenv("AUGR_SIGNAL_SCOPE_TEST_DB_URL")
 	if dsn == "" {
+		dsn = os.Getenv("TEST_DATABASE_URL")
+	}
+	if dsn == "" {
 		t.Skip("set AUGR_SIGNAL_SCOPE_TEST_DB_URL to a disposable augr_signal_scope_test database")
 	}
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ConnConfig.Database != "augr_signal_scope_test" {
-		t.Fatal("requires disposable augr_signal_scope_test database")
+	if !strings.HasSuffix(cfg.ConnConfig.Database, "_test") {
+		t.Fatal("requires an explicitly disposable database ending in _test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.NewWithConfig(ctx, cfg.Copy())

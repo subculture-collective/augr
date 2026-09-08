@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +13,6 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data/edgar"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
-	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/google/uuid"
 )
 
@@ -104,6 +101,10 @@ type cancellationRaceCopyRepo struct {
 	intent          *domain.CopyTradeIntent
 	claimedIntentID uuid.UUID
 	stopAfterClaim  bool
+	claimDenied     bool
+	claimErr        error
+	completeErr     error
+	completeLost    bool
 	completed       *domain.CopyTradeIntent
 	listErr         error
 }
@@ -143,7 +144,7 @@ func (r *cancellationRaceCopyRepo) UpdateIntent(context.Context, *domain.CopyTra
 
 func (r *cancellationRaceCopyRepo) ClaimIntentExecution(_ context.Context, intentID, _ uuid.UUID, _ time.Time) (bool, error) {
 	r.claimedIntentID = intentID
-	return true, nil
+	return !r.claimDenied && r.claimErr == nil, r.claimErr
 }
 
 func (r *cancellationRaceCopyRepo) GetClaimedIntentExecution(_ context.Context, _, _ uuid.UUID) (*domain.CopyTradeIntent, *domain.CopySubscription, error) {
@@ -162,6 +163,9 @@ func (r *cancellationRaceCopyRepo) GetClaimedIntentExecution(_ context.Context, 
 }
 
 func (r *cancellationRaceCopyRepo) CompleteIntentExecution(ctx context.Context, intent *domain.CopyTradeIntent, _ uuid.UUID) (bool, error) {
+	if r.completeErr != nil || r.completeLost {
+		return false, r.completeErr
+	}
 	value := *intent
 	r.completed = &value
 	return true, r.UpdateIntent(ctx, intent)
@@ -173,26 +177,6 @@ type cancellationRacePrices struct {
 
 func (p cancellationRacePrices) Snapshots(context.Context, []string, time.Time) (map[string]PriceSnapshot, error) {
 	return map[string]PriceSnapshot{p.snapshot.Ticker: p.snapshot}, nil
-}
-
-type cancellationWinnerRunRepo struct {
-	repository.PipelineRunRepository
-	winner domain.PipelineRun
-	cancel context.CancelCauseFunc
-	calls  int
-}
-
-func (*cancellationWinnerRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
-
-func (r *cancellationWinnerRunRepo) Finalize(ctx context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
-	r.calls++
-	if r.calls == 1 && r.cancel != nil && finalization.Status == domain.PipelineStatusCompleted {
-		r.cancel(runcontrol.Operator)
-		<-ctx.Done()
-		return repository.PipelineRunFinalizationReceipt{}, ctx.Err()
-	}
-	r.winner.ID, r.winner.TradeDate = ref.ID, ref.TradeDate
-	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: r.winner}, nil
 }
 
 type countingCopyExecutor struct {
@@ -221,69 +205,6 @@ func (e *countingCopyExecutor) ExecuteCopyOrder(_ context.Context, request Paper
 	e.request = request
 	id := uuid.New()
 	return PaperOrderResult{Scope: request.Scope, OrderID: &id, Status: domain.OrderStatusSubmitted}, nil
-}
-
-type effectCopyRepo struct {
-	cancellationRaceCopyRepo
-	createErr error
-	updateErr error
-	intents   map[uuid.UUID]domain.CopyTradeIntent
-}
-
-func (r *effectCopyRepo) WithExecutionAccountLock(_ context.Context, _ uuid.UUID, fn func() error) error {
-	return fn()
-}
-
-func (r *effectCopyRepo) CreateIntent(_ context.Context, intent *domain.CopyTradeIntent) (bool, error) {
-	r.intentWrites++
-	if r.createErr != nil {
-		return false, r.createErr
-	}
-	if r.intents == nil {
-		r.intents = make(map[uuid.UUID]domain.CopyTradeIntent)
-	}
-	if _, exists := r.intents[intent.ID]; exists {
-		return false, nil
-	}
-	r.intents[intent.ID] = *intent
-	return true, nil
-}
-
-func (r *effectCopyRepo) UpdateIntent(_ context.Context, intent *domain.CopyTradeIntent) error {
-	if r.updateErr != nil {
-		return r.updateErr
-	}
-	r.intents[intent.ID] = *intent
-	return nil
-}
-
-type authorizedRunRepo struct {
-	repository.PipelineRunRepository
-	finalization repository.PipelineRunFinalization
-	calls        int
-}
-
-func (*authorizedRunRepo) Create(context.Context, *domain.PipelineRun) error { return nil }
-
-func (r *authorizedRunRepo) Finalize(_ context.Context, ref domain.PipelineRunRef, finalization repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
-	r.calls++
-	r.finalization = finalization
-	run := domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, Status: finalization.Status, Signal: *finalization.Signal}
-	return repository.PipelineRunFinalizationReceipt{Applied: true, Run: run}, nil
-}
-
-type effectEventRepo struct {
-	repository.AgentEventRepository
-	events []domain.AgentEvent
-	err    error
-}
-
-func (r *effectEventRepo) Create(_ context.Context, event *domain.AgentEvent) error {
-	if r.err != nil {
-		return r.err
-	}
-	r.events = append(r.events, *event)
-	return nil
 }
 
 type resultCopyExecutor struct {
@@ -407,87 +328,6 @@ func TestSync13FSubscriptionsRefreshesSharedPausedSourceOnce(t *testing.T) {
 	}
 	if fetcher.calls != 1 || repo.saves != 1 || repo.observed != 1 {
 		t.Fatalf("calls fetch=%d save=%d observed=%d", fetcher.calls, repo.saves, repo.observed)
-	}
-}
-
-func TestRebalanceCancellationWinnerPreventsIntentsAndOrders(t *testing.T) {
-	t.Skip("legacy pipeline authority removed; copy-origin run owns execution")
-	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	strategyID := uuid.New()
-	subscription := domain.DefaultCopySubscription()
-	subscription.ID = uuid.New()
-	subscription.SourceID = uuid.New()
-	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
-	subscription.Status = domain.CopySubscriptionPaperActive
-	binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
-	if err != nil {
-		t.Fatal(err)
-	}
-	subscription.AccountID, subscription.Environment = binding.AccountID(), binding.Environment()
-	subscription.LegacyStrategyID = &strategyID
-	observation := domain.CopySourceObservation{ID: uuid.New()}
-	repo := &cancellationRaceCopyRepo{
-		subscription: subscription,
-		observation:  observation,
-		snapshot: domain.CopyPortfolioSnapshot{
-			TotalDisclosedValue: 1000,
-			Holdings:            []domain.CopyPortfolioHolding{{CUSIP: "123456789", DisclosedValue: 1000}},
-		},
-		mapping: domain.CopyInstrumentMapping{IdentifierValue: "123456789", Ticker: "AAPL", Confidence: "provider_verified"},
-	}
-	availableAt := now.Add(-time.Second)
-	prices := cancellationRacePrices{snapshot: PriceSnapshot{
-		Ticker: "AAPL", QuoteSnapshotID: uuid.New(), Bid: "99", Ask: "100", AvailableAt: &availableAt,
-		MarketStatus: "open", SessionStatus: "regular", AvgDollarVolume: 1_000_000_000,
-	}}
-	ctx, cancel := context.WithCancelCause(context.Background())
-	runs := &cancellationWinnerRunRepo{winner: domain.PipelineRun{Status: domain.PipelineStatusCancelled, Signal: domain.PipelineSignalHold, ErrorMessage: "operator cancelled"}, cancel: cancel}
-	executor := &countingCopyExecutor{}
-	service := NewService(ServiceDeps{Repo: repo, OriginRuns: &plannedOriginStore{}, Runs: runs, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
-
-	result, err := service.Rebalance(ctx, subscription.ID)
-	if err == nil {
-		t.Fatal("Rebalance() error = nil, want terminal-authority conflict")
-	}
-	if result == nil || result.Run.Status != domain.PipelineStatusCancelled || result.Run.ErrorMessage != "operator cancelled" {
-		t.Fatalf("Rebalance() result = %+v, want canonical cancellation winner", result)
-	}
-	if repo.intentWrites != 0 || executor.calls != 0 || len(result.Intents) != 0 {
-		t.Fatalf("effects after cancellation: intent writes=%d order calls=%d result intents=%d", repo.intentWrites, executor.calls, len(result.Intents))
-	}
-	if runs.calls != 2 {
-		t.Fatalf("finalize calls=%d, want completed attempt plus detached cancellation", runs.calls)
-	}
-}
-
-func TestRebalanceCompletedWinnerLoserPreventsIntentsAndOrders(t *testing.T) {
-	t.Skip("legacy pipeline authority removed; copy-origin run owns execution")
-	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	strategyID := uuid.New()
-	subscription := domain.DefaultCopySubscription()
-	subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
-	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
-	subscription.Status, subscription.LegacyStrategyID = domain.CopySubscriptionPaperActive, &strategyID
-	repo := &cancellationRaceCopyRepo{
-		subscription: subscription,
-		observation:  domain.CopySourceObservation{ID: uuid.New()},
-		snapshot:     domain.CopyPortfolioSnapshot{TotalDisclosedValue: 1000, Holdings: []domain.CopyPortfolioHolding{{CUSIP: "123456789", DisclosedValue: 1000}}},
-		mapping:      domain.CopyInstrumentMapping{IdentifierValue: "123456789", Ticker: "AAPL", Confidence: "provider_verified"},
-	}
-	availableAt := now.Add(-time.Second)
-	prices := cancellationRacePrices{snapshot: PriceSnapshot{Ticker: "AAPL", QuoteSnapshotID: uuid.New(), Bid: "99", Ask: "100", AvailableAt: &availableAt, MarketStatus: "open", SessionStatus: "regular", AvgDollarVolume: 1_000_000_000}}
-	executor := &countingCopyExecutor{}
-	service := NewService(ServiceDeps{Repo: repo, OriginRuns: &plannedOriginStore{}, Runs: &completedLoserRunRepo{}, Prices: prices, Executor: executor, Now: func() time.Time { return now }})
-
-	result, err := service.Rebalance(context.Background(), subscription.ID)
-	if err == nil || !strings.Contains(err.Error(), "lost terminal authority") {
-		t.Fatalf("Rebalance() error = %v, want lost terminal authority", err)
-	}
-	if result == nil || result.Run.Status != domain.PipelineStatusCompleted {
-		t.Fatalf("Rebalance() result = %+v, want canonical completed winner", result)
-	}
-	if repo.intentWrites != 0 || executor.calls != 0 || len(result.Intents) != 0 {
-		t.Fatalf("loser effects: intent writes=%d order calls=%d result intents=%d", repo.intentWrites, executor.calls, len(result.Intents))
 	}
 }
 
@@ -719,166 +559,65 @@ func TestInactiveSubscriptionRecoversOnlyEffectfulIntents(t *testing.T) {
 	}
 }
 
-func newLegacyEffectService(repo *effectCopyRepo, runs *authorizedRunRepo, events *effectEventRepo, executor PaperOrderExecutor) (*Service, uuid.UUID) {
-	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
-	strategyID := uuid.New()
-	subscription := domain.DefaultCopySubscription()
-	subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
-	subscription.OriginType, subscription.OriginID = "copy_subscription", subscription.ID
-	subscription.Status, subscription.LegacyStrategyID = domain.CopySubscriptionPaperActive, &strategyID
-	subscription.MaxSpreadBPS = 200
-	repo.subscription = subscription
-	repo.observation = domain.CopySourceObservation{ID: uuid.New()}
-	repo.snapshot = domain.CopyPortfolioSnapshot{TotalDisclosedValue: 1000, Holdings: []domain.CopyPortfolioHolding{{CUSIP: "123456789", DisclosedValue: 1000}}}
-	repo.mapping = domain.CopyInstrumentMapping{IdentifierValue: "123456789", Ticker: "AAPL", Confidence: "provider_verified"}
-	availableAt := now.Add(-time.Second)
-	prices := cancellationRacePrices{snapshot: PriceSnapshot{Ticker: "AAPL", QuoteSnapshotID: uuid.New(), Bid: "99", Ask: "100", AvailableAt: &availableAt, MarketStatus: "open", SessionStatus: "regular", AvgDollarVolume: 1_000_000_000}}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewService(ServiceDeps{Repo: repo, OriginRuns: &plannedOriginStore{}, Runs: runs, Events: events, Prices: prices, Executor: executor, Logger: logger, Now: func() time.Time { return now }}), subscription.ID
-}
-
-func decodeEventMetadata(t *testing.T, event domain.AgentEvent) map[string]any {
-	t.Helper()
-	var metadata map[string]any
-	if err := json.Unmarshal(event.Metadata, &metadata); err != nil {
-		t.Fatalf("decode event metadata: %v", err)
-	}
-	return metadata
-}
-
-func TestRecordEffectFailureStoresFullRunRef(t *testing.T) {
-	events := &effectEventRepo{}
-	service := NewService(ServiceDeps{Events: events})
-	run := domain.PipelineRun{ID: uuid.New(), TradeDate: time.Date(2026, 8, 27, 0, 0, 0, 0, time.UTC), StrategyID: uuid.New()}
-	intent := domain.CopyTradeIntent{ID: uuid.New()}
-
-	if err := service.recordEffectFailure(context.Background(), run, intent, effectFailure{stage: "execute_order", err: errors.New("failed")}); err != nil {
-		t.Fatalf("recordEffectFailure() error = %v", err)
-	}
-	if len(events.events) != 1 {
-		t.Fatalf("events = %d, want 1", len(events.events))
-	}
-	event := events.events[0]
-	if event.PipelineRunID == nil || *event.PipelineRunID != run.ID || event.PipelineRunTradeDate == nil || !event.PipelineRunTradeDate.Equal(run.TradeDate) {
-		t.Fatalf("event run ref = (%v, %v), want (%s, %s)", event.PipelineRunID, event.PipelineRunTradeDate, run.ID, run.TradeDate)
-	}
-}
-
-func TestRebalanceCompletedAuthorityCreateIntentFailure(t *testing.T) {
-	t.Skip("legacy post-finalization intent creation removed")
-	createErr := errors.New("intent insert failed")
-	repo := &effectCopyRepo{createErr: createErr}
-	runs, events, executor := &authorizedRunRepo{}, &effectEventRepo{}, &resultCopyExecutor{}
-	service, subscriptionID := newLegacyEffectService(repo, runs, events, executor)
-
-	result, err := service.Rebalance(context.Background(), subscriptionID)
-	if !errors.Is(err, createErr) {
-		t.Fatalf("Rebalance() error = %v, want create error", err)
-	}
-	if result == nil || result.Run.Status != domain.PipelineStatusCompleted || runs.calls != 1 {
-		t.Fatalf("result=%+v finalize calls=%d", result, runs.calls)
-	}
-	if executor.calls != 0 || len(events.events) != 1 {
-		t.Fatalf("executor calls=%d failure events=%d", executor.calls, len(events.events))
-	}
-	failureMetadata := decodeEventMetadata(t, events.events[0])
-	if events.events[0].EventKind != "copy_rebalance_effects_failed" || failureMetadata["stage"] != "create_intent" {
-		t.Fatalf("failure event=%+v metadata=%v", events.events[0], failureMetadata)
-	}
-	if runs.finalization.Event == nil || runs.finalization.Event.Title != "Copy plan authorized" {
-		t.Fatalf("completion event=%+v", runs.finalization.Event)
-	}
-	completionMetadata := decodeEventMetadata(t, *runs.finalization.Event)
-	if completionMetadata["completion_scope"] != "planning_authority" || completionMetadata["source_observation_id"] != repo.observation.ID.String() || completionMetadata["planned_intent_count"] != float64(1) || completionMetadata["approved_intent_count"] != float64(1) {
-		t.Fatalf("completion metadata=%v", completionMetadata)
-	}
-}
-
-func TestRebalanceSuccessfulOrderUpdateFailureIsNotReplayed(t *testing.T) {
-	t.Skip("legacy post-finalization intent creation removed")
-	updateErr := errors.New("intent update failed")
-	orderID := uuid.New()
-	repo := &effectCopyRepo{updateErr: updateErr}
-	runs, events := &authorizedRunRepo{}, &effectEventRepo{}
-	executor := &resultCopyExecutor{result: PaperOrderResult{OrderID: &orderID, Status: domain.OrderStatusFilled}}
-	service, subscriptionID := newLegacyEffectService(repo, runs, events, executor)
-
-	result, err := service.Rebalance(context.Background(), subscriptionID)
-	if !errors.Is(err, updateErr) || result == nil || result.Run.Status != domain.PipelineStatusCompleted {
-		t.Fatalf("Rebalance() = (%+v, %v)", result, err)
-	}
-	if executor.calls != 1 || len(events.events) != 1 {
-		t.Fatalf("executor calls=%d failure events=%d", executor.calls, len(events.events))
-	}
-	metadata := decodeEventMetadata(t, events.events[0])
-	if metadata["stage"] != "update_intent" || metadata["returned_order_id"] != orderID.String() {
-		t.Fatalf("failure metadata=%v", metadata)
-	}
-
-	repo.updateErr = nil
-	if _, retryErr := service.Rebalance(context.Background(), subscriptionID); retryErr != nil {
-		t.Fatalf("retry Rebalance() error = %v", retryErr)
-	}
-	if executor.calls != 1 {
-		t.Fatalf("executor calls after retry=%d, want 1", executor.calls)
-	}
-}
-
-func TestRebalanceExecutionFailurePersistenceOutcomes(t *testing.T) {
-	t.Skip("legacy post-finalization intent creation removed")
-	executeErr := errors.New("risk engine unavailable")
-
-	t.Run("successful update is durable business outcome", func(t *testing.T) {
-		repo := &effectCopyRepo{}
-		runs, events := &authorizedRunRepo{}, &effectEventRepo{}
-		service, subscriptionID := newLegacyEffectService(repo, runs, events, &resultCopyExecutor{err: executeErr})
-
-		result, err := service.Rebalance(context.Background(), subscriptionID)
-		if err != nil || result == nil || result.Run.Status != domain.PipelineStatusCompleted || len(result.Intents) != 1 {
-			t.Fatalf("Rebalance() = (%+v, %v)", result, err)
-		}
-		intent := result.Intents[0]
-		persisted := repo.intents[intent.ID]
-		if persisted.Status != "risk_rejected" || persisted.RiskStatus != "rejected" || len(persisted.RiskReasons) != 1 || persisted.RiskReasons[0] != executeErr.Error() {
-			t.Fatalf("persisted intent=%+v", persisted)
-		}
-		if len(events.events) != 0 {
-			t.Fatalf("failure events=%d, want fully represented durably", len(events.events))
-		}
-	})
-
-	t.Run("update failure event retains execution failure", func(t *testing.T) {
-		updateErr := errors.New("risk rejection update failed")
-		returnedOrderID := uuid.New()
-		repo := &effectCopyRepo{updateErr: updateErr}
-		runs, events := &authorizedRunRepo{}, &effectEventRepo{}
-		executor := &resultCopyExecutor{result: PaperOrderResult{OrderID: &returnedOrderID}, err: executeErr}
-		service, subscriptionID := newLegacyEffectService(repo, runs, events, executor)
-
-		_, err := service.Rebalance(context.Background(), subscriptionID)
-		if !errors.Is(err, updateErr) || len(events.events) != 1 {
-			t.Fatalf("error=%v failure events=%d", err, len(events.events))
-		}
-		metadata := decodeEventMetadata(t, events.events[0])
-		if metadata["stage"] != "update_intent" || metadata["preceding_failure_stage"] != "execute_order" || metadata["preceding_failure_error"] != executeErr.Error() || metadata["returned_order_id"] != returnedOrderID.String() || metadata["observed_intent_status"] != "risk_rejected" {
-			t.Fatalf("failure metadata=%v", metadata)
-		}
-	})
-}
-
-func TestRebalanceFailureEventPersistenceErrorIsJoined(t *testing.T) {
-	t.Skip("legacy post-finalization intent creation removed")
-	createErr := errors.New("intent insert failed")
-	eventErr := errors.New("event insert failed")
-	repo := &effectCopyRepo{createErr: createErr}
-	runs, events, executor := &authorizedRunRepo{}, &effectEventRepo{err: eventErr}, &resultCopyExecutor{}
-	service, subscriptionID := newLegacyEffectService(repo, runs, events, executor)
-
-	result, err := service.Rebalance(context.Background(), subscriptionID)
-	if !errors.Is(err, createErr) || !errors.Is(err, eventErr) {
-		t.Fatalf("Rebalance() error=%v, want joined effect and event errors", err)
-	}
-	if result == nil || result.Run.Status != domain.PipelineStatusCompleted || runs.calls != 1 || executor.calls != 0 {
-		t.Fatalf("result=%+v finalize calls=%d executor calls=%d", result, runs.calls, executor.calls)
+// Planning failure is covered by TestOriginNativeRebalanceUsesAtomicPlanningBoundary.
+// These are the current claim/completion contracts replacing the removed pipeline-finalization tests.
+func TestPlannedCopyIntentClaimAndFailurePersistence(t *testing.T) {
+	claimErr := errors.New("claim unavailable")
+	updateErr := errors.New("completion unavailable")
+	executionErr := errors.New("execution unavailable")
+	for _, tc := range []struct {
+		name                                                   string
+		denied, revoked, completionLost                        bool
+		claimError, completionError, executionError, wantError error
+		wantExecution, wantCompletion                          bool
+	}{
+		{name: "claim already owned", denied: true},
+		{name: "claim write fails", claimError: claimErr, wantError: claimErr},
+		{name: "claim revoked before execution", revoked: true, wantError: repository.ErrNotFound},
+		{name: "execution failure is durably retryable", executionError: executionErr, wantExecution: true, wantCompletion: true},
+		{name: "completion write fails", completionError: updateErr, wantExecution: true, wantError: updateErr},
+		{name: "execution and completion fail", executionError: executionErr, completionError: updateErr, wantExecution: true, wantError: updateErr},
+		{name: "completion claim lost", completionLost: true, wantExecution: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding, err := domain.NewExecutionAccountBinding(uuid.New(), domain.AccountEnvironmentPaperScored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			subscription := domain.DefaultCopySubscription()
+			subscription.ID, subscription.SourceID = uuid.New(), uuid.New()
+			subscription.AccountID, subscription.Environment = binding.AccountID(), binding.Environment()
+			subscription.OriginType, subscription.OriginID, subscription.Status = "copy_subscription", subscription.ID, domain.CopySubscriptionPaperActive
+			intent := domain.CopyTradeIntent{ID: uuid.New(), AccountID: binding.AccountID(), Environment: binding.Environment(), SubscriptionID: subscription.ID, OriginType: "copy_subscription", OriginID: subscription.ID, SourceObservationID: uuid.New(), InstrumentKey: "AAPL", Ticker: "AAPL", Side: domain.OrderSideBuy, RequestedNotional: 100, CalculationVersion: CalculationVersion, PolicyStatus: "approved", RiskStatus: "pending", Status: "received"}
+			run, err := copyorigin.NewRun(subscription, []domain.CopyTradeIntent{intent})
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo := &cancellationRaceCopyRepo{subscription: subscription, intent: &intent, claimDenied: tc.denied, claimErr: tc.claimError, stopAfterClaim: tc.revoked, completeErr: tc.completionError, completeLost: tc.completionLost}
+			executor := &resultCopyExecutor{err: tc.executionError}
+			lifecycle := &countingCopyLifecycle{}
+			service := NewService(ServiceDeps{ExecutionAccount: binding, Repo: repo, Executor: executor, Lifecycle: lifecycle})
+			_, err = service.executePlannedRun(t.Context(), &subscription, run, []copyorigin.PlannedIntent{{Intent: intent}}, Preview{})
+			if tc.completionLost {
+				if err == nil || !strings.Contains(err.Error(), "applied=false") {
+					t.Fatalf("lost completion: %v", err)
+				}
+			} else if !errors.Is(err, tc.wantError) {
+				t.Fatalf("error=%v, want %v", err, tc.wantError)
+			}
+			wantCalls := 0
+			if tc.wantExecution {
+				wantCalls = 1
+			}
+			if executor.calls != wantCalls || lifecycle.calls != wantCalls {
+				t.Fatalf("executor=%d lifecycle=%d want=%d", executor.calls, lifecycle.calls, wantCalls)
+			}
+			if (repo.completed != nil) != tc.wantCompletion {
+				t.Fatalf("persisted=%+v", repo.completed)
+			}
+			if tc.wantCompletion && (repo.completed.Status != "failed" || repo.completed.RiskStatus != "pending" || len(repo.completed.RiskReasons) != 1 || repo.completed.RiskReasons[0] != executionErr.Error()) {
+				t.Fatalf("retryable failure=%+v", repo.completed)
+			}
+		})
 	}
 }

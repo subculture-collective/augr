@@ -378,7 +378,7 @@ func TestVenueReconciliationPersistentRehearsal(t *testing.T) {
 	if policies != 1 || providers != 3 || locals != 2 || runs != 3 || incidents != 1 {
 		t.Fatalf("retained graph counts=%d/%d/%d/%d/%d", policies, providers, locals, runs, incidents)
 	}
-	if _, err := pools.owner.Exec(ctx, repositoryMigrationSQL(t, "000075_venue_reconciliation.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 75") {
+	if _, err := execRepositoryMigration(t, ctx, pools.owner, "000075_venue_reconciliation.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 75") {
 		t.Fatalf("nonempty schema-75 rollback error = %v", err)
 	}
 }
@@ -427,6 +427,7 @@ func newVenueReconciliationGoldenFixtureWithPools(
 			t.Fatal(err)
 		}
 		adapterContext := kalshi.CommonLifecycleContext{
+			Scope:  kalshiRepositoryScope(t, adapter),
 			Policy: policy, Aggregate: adapter.aggregate, Account: adapter.base.account, Instrument: adapter.base.instrument,
 			VenueContract: adapter.base.contract, Route: kalshi.CommonRouteFacts{}, ReceivedAt: adapter.base.baseTime.Add(20 * time.Second),
 		}

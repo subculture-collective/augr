@@ -295,7 +295,7 @@ func (store *failCompletedResultStore) RecordCompletedResult(ctx context.Context
 func newExperimentRunnerGoldenPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool := newStrategyCatalogMigrationPool(t)
-	if _, err := pool.Exec(context.Background(), repositoryMigrationSQL(t, "000078_reproducible_experiment_runs.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, context.Background(), pool, "000078_reproducible_experiment_runs.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	return pool

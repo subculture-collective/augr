@@ -15,7 +15,7 @@ import (
 
 func TestRecordBoundMarketDatasetIsAtomicAndIdempotent(t *testing.T) {
 	fixture := newDatasetRepoFixture(t)
-	if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, "000110_immutable_market_payloads.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, fixture.ctx, fixture.pool, "000110_immutable_market_payloads.up.sql"); err != nil {
 		t.Fatalf("apply migration 110: %v", err)
 	}
 	payload, manifest := boundStockPayloadFixture(t, datasetManifestInstrumentID(t, fixture.manifest))
@@ -56,7 +56,7 @@ func TestRecordBoundMarketDatasetIsAtomicAndIdempotent(t *testing.T) {
 
 func TestMarketPayloadRepositoryPersistsBindsAndRejectsMutation(t *testing.T) {
 	fixture := newDatasetRepoFixture(t)
-	if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, "000110_immutable_market_payloads.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, fixture.ctx, fixture.pool, "000110_immutable_market_payloads.up.sql"); err != nil {
 		t.Fatalf("apply migration 110: %v", err)
 	}
 	payload, manifest := boundStockPayloadFixture(t, datasetManifestInstrumentID(t, fixture.manifest))
@@ -92,14 +92,14 @@ func TestMarketPayloadRepositoryPersistsBindsAndRejectsMutation(t *testing.T) {
 	if _, err := fixture.pool.Exec(fixture.ctx, `UPDATE dataset_market_payloads SET symbol=symbol WHERE id=$1`, payload.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("market payload mutation error = %v", err)
 	}
-	if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, "000110_immutable_market_payloads.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 110") {
+	if _, err := execRepositoryMigration(t, fixture.ctx, fixture.pool, "000110_immutable_market_payloads.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 110") {
 		t.Fatalf("nonempty rollback error = %v", err)
 	}
 }
 
 func TestMarketPayloadBindingRejectsDivergentObservation(t *testing.T) {
 	fixture := newDatasetRepoFixture(t)
-	if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, "000110_immutable_market_payloads.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, fixture.ctx, fixture.pool, "000110_immutable_market_payloads.up.sql"); err != nil {
 		t.Fatalf("apply migration 110: %v", err)
 	}
 	payload, manifest := boundStockPayloadFixture(t, datasetManifestInstrumentID(t, fixture.manifest))
@@ -132,7 +132,7 @@ func TestMarketPayloadMigrationEmptyRollbackAndReapply(t *testing.T) {
 		"000110_immutable_market_payloads.down.sql",
 		"000110_immutable_market_payloads.up.sql",
 	} {
-		if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, migration)); err != nil {
+		if _, err := execRepositoryMigration(t, fixture.ctx, fixture.pool, migration); err != nil {
 			t.Fatalf("apply %s: %v", migration, err)
 		}
 	}

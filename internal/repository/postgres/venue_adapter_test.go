@@ -625,7 +625,7 @@ func persistVenueResultConcurrently(
 func newVenueAdapterIntegrationPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	t.Helper()
 	ctx, pool := newSimulationPolicyIntegrationPool(t)
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000073_venue_adapter_observations.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000073_venue_adapter_observations.up.sql"); err != nil {
 		t.Fatalf("apply migration 73: %v", err)
 	}
 	applyRepositoryMigrationRange(t, ctx, pool, "000073", "000108")

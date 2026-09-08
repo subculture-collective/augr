@@ -413,3 +413,6 @@ TradingAgents/
 
 # Local deepwork session state
 .blacktower/deepwork/
+
+# Local scratch session output
+/.tmp/

@@ -18,28 +18,7 @@ import (
 
 func TestGeneratedProposalEvidenceReconstructsExactDailyScope(t *testing.T) {
 	fixture := newStrategyCatalogFixture(t)
-	for _, migration := range []string{
-		"000078_reproducible_experiment_runs.up.sql", "000079_trade_portfolio_evaluations.up.sql",
-		"000080_statistical_robustness_assessments.up.sql", "000095_typed_generative_strategy_compiler.up.sql",
-		"000106_paper_evaluation_scopes.up.sql", "000107_robustness_assessment_scope.up.sql",
-		"000110_immutable_market_payloads.up.sql",
-	} {
-		if _, err := fixture.pool.Exec(fixture.ctx, repositoryMigrationSQL(t, migration)); err != nil {
-			t.Fatalf("apply %s: %v", migration, err)
-		}
-	}
-	scenarioMigration := repositoryMigrationSQL(t, "000111_portfolio_risk_and_activation.up.sql")
-	startScenario := strings.Index(scenarioMigration, "CREATE TABLE generated_strategy_scenarios (")
-	endScenario := strings.Index(scenarioMigration, "CREATE FUNCTION validate_portfolio_risk_binding()")
-	if startScenario < 0 || endScenario <= startScenario {
-		t.Fatal("migration 111 generated scenario boundary is missing")
-	}
-	if _, err := fixture.pool.Exec(fixture.ctx, scenarioMigration[startScenario:endScenario]); err != nil {
-		t.Fatalf("apply migration 111 generated scenario schema: %v", err)
-	}
-	if _, err := fixture.pool.Exec(fixture.ctx, `ALTER TABLE strategies ADD COLUMN execution_strategy_version_id UUID REFERENCES strategy_versions(id) ON DELETE RESTRICT`); err != nil {
-		t.Fatal(err)
-	}
+	applyRepositoryMigrationRange(t, fixture.ctx, fixture.pool, "000108", "000111")
 	instrumentID := datasetManifestInstrumentID(t, fixture.manifest)
 	start := time.Date(2026, 8, 10, 20, 0, 0, 0, time.UTC)
 	end := start.Add(270 * 24 * time.Hour)

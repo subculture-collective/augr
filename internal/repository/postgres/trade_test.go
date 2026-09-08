@@ -236,6 +236,7 @@ func createTestOrder(t *testing.T, ctx context.Context, repo *OrderRepo, strateg
 	t.Helper()
 
 	order := &domain.Order{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID: &strategyID,
 		Ticker:     "AAPL",
 		Side:       domain.OrderSideBuy,

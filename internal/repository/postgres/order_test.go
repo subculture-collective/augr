@@ -63,7 +63,7 @@ func TestBuildOrderListQuery_NoFilters(t *testing.T) {
 
 func TestOrderRepoCreateRejectsPartialAllocationAuthorization(t *testing.T) {
 	repo := NewOrderRepo(nil, uuid.New())
-	order := &domain.Order{AllocationOpportunityID: func() *uuid.UUID { id := uuid.New(); return &id }()}
+	order := &domain.Order{Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture", AllocationOpportunityID: func() *uuid.UUID { id := uuid.New(); return &id }()}
 	if err := repo.Create(context.Background(), order); err == nil || !strings.Contains(err.Error(), "provided together") {
 		t.Fatalf("Create() error = %v, want paired allocation fields", err)
 	}
@@ -325,6 +325,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 	baseTime := time.Date(2026, 3, 21, 9, 0, 0, 0, time.UTC)
 
 	orderA := &domain.Order{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID:           &strategyA,
 		PipelineRunID:        &runA,
 		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
@@ -338,6 +339,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 		SubmittedAt:          timePtr(baseTime),
 	}
 	orderB := &domain.Order{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID:           &strategyA,
 		PipelineRunID:        &runA,
 		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
@@ -351,6 +353,7 @@ func TestOrderRepoIntegration_ListAndScopedFilters(t *testing.T) {
 		SubmittedAt:          timePtr(baseTime.Add(30 * time.Minute)),
 	}
 	orderC := &domain.Order{
+		Environment: domain.AccountEnvironmentPaperScored, OriginType: "operator", OriginID: "fixture",
 		StrategyID:           &strategyB,
 		PipelineRunID:        &runB,
 		PipelineRunTradeDate: timePtr(canonicalRepositoryTestTradeDate),
@@ -655,7 +658,7 @@ func newOrderTradeIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.P
 			spread_max_reward   NUMERIC(20, 8),
 			UNIQUE(account_id, allocation_opportunity_id)
 		)`,
-		`CREATE TABLE trades (
+		`CREATE TABLE trades (origin_type TEXT, origin_id TEXT, strategy_id UUID, pipeline_run_id UUID, pipeline_run_trade_date DATE,
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			account_id UUID,
 			environment TEXT,

@@ -141,17 +141,17 @@ func TestReportArtifactsMigrationAppliesAgainstExistingSchema(t *testing.T) {
 		},
 		"prompt_tokens": {
 			dataType:      "integer",
-			nullable:      "YES",
+			nullable:      "NO",
 			defaultClause: "0",
 		},
 		"completion_tokens": {
 			dataType:      "integer",
-			nullable:      "YES",
+			nullable:      "NO",
 			defaultClause: "0",
 		},
 		"latency_ms": {
 			dataType:      "integer",
-			nullable:      "YES",
+			nullable:      "NO",
 			defaultClause: "0",
 		},
 		"error_message": {
@@ -192,7 +192,7 @@ VALUES ($1, 'paper_validation', $2::timestamptz, 'pending')
 	// Second insert on same key should conflict with the unique constraint.
 	_, err = pool.Exec(ctx, `
 INSERT INTO report_artifacts (strategy_id, report_type, time_bucket, status)
-VALUES ($1, 'paper_validation', $2::timestamptz, 'completed')
+VALUES ($1, 'paper_validation', $2::timestamptz, 'pending')
 `, strategyID, timeBucket)
 	if err == nil {
 		t.Fatal("expected unique constraint violation on duplicate (strategy_id, report_type, time_bucket), got nil")

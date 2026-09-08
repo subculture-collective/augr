@@ -796,55 +796,6 @@ func validatePaperOrderResult(result PaperOrderResult, scope execution.Execution
 	return nil
 }
 
-type effectFailure struct {
-	stage           string
-	err             error
-	returnedOrderID *uuid.UUID
-	precedingStage  string
-	precedingError  error
-}
-
-func (s *Service) recordEffectFailure(ctx context.Context, run domain.PipelineRun, intent domain.CopyTradeIntent, failure effectFailure) error {
-	metadata := map[string]any{
-		"intent_id":              intent.ID,
-		"stage":                  failure.stage,
-		"error":                  failure.err.Error(),
-		"observed_intent_status": intent.Status,
-	}
-	if failure.returnedOrderID != nil {
-		metadata["returned_order_id"] = *failure.returnedOrderID
-	}
-	if failure.precedingError != nil {
-		metadata["preceding_failure_stage"] = failure.precedingStage
-		metadata["preceding_failure_error"] = failure.precedingError.Error()
-	}
-	encoded, _ := json.Marshal(metadata)
-	event := &domain.AgentEvent{
-		PipelineRunID:        &run.ID,
-		PipelineRunTradeDate: &run.TradeDate,
-		StrategyID:           &run.StrategyID,
-		EventKind:            "copy_rebalance_effects_failed",
-		Title:                "Copy rebalance effects failed",
-		Summary:              fmt.Sprintf("Copy intent %s failed during %s", intent.ID, failure.stage),
-		Tags:                 []string{"pipeline", "copy_trading", "effects_failed"},
-		Metadata:             encoded,
-	}
-	var err error
-	if s.deps.Events == nil {
-		err = errors.New("agent event repository is unavailable")
-	} else {
-		eventCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		err = s.deps.Events.Create(eventCtx, event)
-		cancel()
-	}
-	if err == nil {
-		return nil
-	}
-	observabilityErr := fmt.Errorf("persist copy rebalance failure event: %w", err)
-	s.deps.Logger.Error("copy rebalance failure event persistence failed", slog.Any("error", observabilityErr), slog.String("intent_id", intent.ID.String()), slog.String("stage", failure.stage))
-	return observabilityErr
-}
-
 func (s *Service) ListIntents(ctx context.Context, subscriptionID uuid.UUID, limit, offset int) ([]domain.CopyTradeIntent, error) {
 	return s.deps.Repo.ListIntents(ctx, subscriptionID, limit, offset)
 }

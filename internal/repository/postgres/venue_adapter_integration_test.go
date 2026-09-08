@@ -30,6 +30,7 @@ func TestVenueAdapterIntegratedKalshiCrashBoundaryRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			adapterContext := kalshi.CommonLifecycleContext{
+				Scope:  kalshiRepositoryScope(t, fixture),
 				Policy: policy, Aggregate: fixture.aggregate, Account: fixture.base.account,
 				Instrument: fixture.base.instrument, VenueContract: fixture.base.contract,
 				Route:      kalshi.CommonRouteFacts{Subaccount: 0, ExchangeIndex: 0},
@@ -97,6 +98,7 @@ func TestVenueAdapterPersistentRehearsal(t *testing.T) {
 		t.Fatal(err)
 	}
 	kalshiContext := kalshi.CommonLifecycleContext{
+		Scope:  kalshiRepositoryScope(t, kalshiFixture),
 		Policy: kalshiPolicy, Aggregate: kalshiFixture.aggregate, Account: kalshiFixture.base.account,
 		Instrument: kalshiFixture.base.instrument, VenueContract: kalshiFixture.base.contract,
 		Route:      kalshi.CommonRouteFacts{Subaccount: 0, ExchangeIndex: 0},
@@ -152,7 +154,7 @@ func TestVenueAdapterPersistentRehearsal(t *testing.T) {
 			t.Fatalf("%s retained graph = %s/%d", label, reloaded.State, len(reloaded.Fills))
 		}
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000073_venue_adapter_observations.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 73") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000073_venue_adapter_observations.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back migration 73") {
 		t.Fatalf("nonempty schema-73 rollback error = %v", err)
 	}
 }

@@ -32,7 +32,7 @@ func newExperimentRunMigrationFixture(t *testing.T) experimentMigrationFixture {
 	t.Helper()
 	ctx := context.Background()
 	pool := newStrategyCatalogMigrationPool(t)
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000078_reproducible_experiment_runs.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000078_reproducible_experiment_runs.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	strategy := newStrategyCatalogFixtureWithPool(t, ctx, pool)
@@ -224,7 +224,7 @@ func TestExperimentRunMigrationNonemptyRollbackRefuses(t *testing.T) {
 	if err := insertExperimentProgramPlan(fixture.strategy.ctx, fixture.strategy.pool, fixture.program, fixture.plan, fixture.start); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.strategy.pool.Exec(fixture.strategy.ctx, repositoryMigrationSQL(t, "000078_reproducible_experiment_runs.down.sql")); err == nil ||
+	if _, err := execRepositoryMigration(t, fixture.strategy.ctx, fixture.strategy.pool, "000078_reproducible_experiment_runs.down.sql"); err == nil ||
 		!strings.Contains(err.Error(), "cannot roll back migration 78") {
 		t.Fatalf("nonempty rollback error=%v", err)
 	}

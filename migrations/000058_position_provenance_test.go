@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -45,8 +46,8 @@ func TestPositionProvenanceMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to parse db config: %v", err)
 	}
-	schemaName := "migr_" + strings.ReplaceAll(strings.ReplaceAll(t.Name(), "/", "_"), " ", "_")
-	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS `+pgx.Identifier{schemaName}.Sanitize()); err != nil {
+	schemaName := "migr_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if _, err := adminPool.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schemaName}.Sanitize()); err != nil {
 		t.Fatalf("failed to create schema: %v", err)
 	}
 	t.Cleanup(func() {
@@ -59,6 +60,10 @@ func TestPositionProvenanceMigrationAppliesAgainstExistingSchema(t *testing.T) {
 		t.Fatalf("failed to create schema pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	var actualSchema string
+	if err := pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&actualSchema); err != nil || actualSchema != schemaName {
+		t.Fatalf("isolated schema = %q, want %q: %v", actualSchema, schemaName, err)
+	}
 	for _, filename := range sortedUpMigrationsThrough(t, "000058_position_provenance.up.sql") {
 		if _, err := pool.Exec(ctx, readMigrationFile(t, filename)); err != nil {
 			t.Fatalf("failed to apply %s: %v", filename, err)

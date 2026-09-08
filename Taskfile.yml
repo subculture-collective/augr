@@ -8,7 +8,7 @@ vars:
   BINARY_NAME: tradingagent
   BUILD_DIR: ./bin
   CMD_DIR: ./cmd/tradingagent
-  GO_PACKAGES: ./cmd/... ./internal/... ./migrations/...
+  GO_PACKAGES: ./cmd/... ./internal/... ./migrations/... ./monitoring/...
   DOCKER_IMAGE: tradingagent
   DOCKER_TAG: latest
   MIGRATE_DIR: ./migrations
@@ -82,9 +82,9 @@ tasks:
       - go test -short -race -count=1 {{.GO_PACKAGES}}
 
   test:integration:
-    desc: Run integration tests (requires PostgreSQL)
+    desc: Run all Go contracts against a migrated disposable TEST_DATABASE_URL (fails on unexpected skips)
     cmds:
-      - go test -count=1 -run Integration {{.GO_PACKAGES}}
+      - python3 scripts/test-integration.py {{.CLI_ARGS}}
 
   test:cover:
     desc: Run tests with coverage report
@@ -110,7 +110,7 @@ tasks:
   fmt:check:
     desc: Check formatting without modifying files
     cmds:
-      - cmd: gofumpt -d cmd internal migrations
+      - cmd: golangci-lint fmt --diff --color never {{.GO_PACKAGES}}
         silent: true
 
   vet:
@@ -143,13 +143,28 @@ tasks:
       - echo "All checks passed"
 
   ci:
-    desc: Full CI pipeline locally (build + test + lint + vulncheck)
+    desc: Local unit quality checks (Go and frontend); run test:integration separately with a disposable database
     cmds:
       - task: build
       - task: test:race
       - task: lint
       - task: vulncheck
-      - echo "CI pipeline passed"
+      - task: test:maintenance
+      - task: web:check
+      - echo "Local unit quality checks passed; database, smoke, and release tiers are separate"
+
+  test:maintenance:
+    desc: Verify integration gate failure cases
+    cmds:
+      - python3 scripts/test-integration_test.py
+
+  web:check:
+    desc: Frontend lint, test and TypeScript production build
+    dir: web
+    cmds:
+      - npm run lint
+      - npm test -- --run
+      - npm run build
 
   # ─── Database ───────────────────────────────────────────────────────────
 

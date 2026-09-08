@@ -56,8 +56,18 @@ func TestPaperAccountRepoExcludesNonLocalPaperRowsAndParsesSequence(t *testing.T
 	if err != nil {
 		t.Fatalf("ListOpenPaperOrders() error = %v", err)
 	}
-	if len(orders) != 2 {
-		t.Fatalf("paper orders len = %d, want 2", len(orders))
+	if len(orders) != 3 {
+		t.Fatalf("paper orders len = %d, want two open orders and one incomplete filled order", len(orders))
+	}
+	expectedStatus := map[string]domain.OrderStatus{"paper-41": domain.OrderStatusPartial, "paper-42": domain.OrderStatusFilled, "paper-43": domain.OrderStatusSubmitted}
+	for _, order := range orders {
+		if expectedStatus[order.ExternalID] != order.Status {
+			t.Fatalf("unexpected recovery order %s/%s", order.ExternalID, order.Status)
+		}
+		delete(expectedStatus, order.ExternalID)
+	}
+	if len(expectedStatus) != 0 {
+		t.Fatalf("missing recovery orders: %v", expectedStatus)
 	}
 	var spreadOrder *domain.Order
 	for i := range orders {
@@ -101,10 +111,22 @@ func TestPaperAccountRestoreParityWithRealDB(t *testing.T) {
 	repo := NewPaperAccountRepo(&DB{Pool: pool})
 	seedPaperAccountFixtures(t, ctx, pool)
 
-	trades, _ := repo.ListPaperTrades(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
-	positions, _ := repo.GetOpenPaperPositions(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
-	orders, _ := repo.ListOpenPaperOrders(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
-	seq, _ := repo.GetMaxPaperExternalIDSequence(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
+	trades, err := repo.ListPaperTrades(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	positions, err := repo.GetOpenPaperPositions(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders, err := repo.ListOpenPaperOrders(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored, 100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq, err := repo.GetMaxPaperExternalIDSequence(ctx, canonicalRepositoryTestAccountID, domain.AccountEnvironmentPaperScored)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	broker := paper.NewPaperBroker(1000, 0, 0)
 	if err := broker.RestoreAccount(executionBalanceFromRows(trades, positions)); err != nil {
@@ -234,7 +256,7 @@ func newPaperAccountIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool
 	}
 	stmts := []string{
 		`CREATE TABLE strategies (id UUID PRIMARY KEY, is_paper BOOLEAN NOT NULL DEFAULT false, market_type TEXT NOT NULL, ticker TEXT NOT NULL, name TEXT NOT NULL DEFAULT '')`,
-		`CREATE TABLE orders (id UUID PRIMARY KEY, strategy_id UUID NOT NULL, pipeline_run_id UUID, account_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'strategy_version', origin_id TEXT NOT NULL DEFAULT 'paper-account-fixture', pipeline_run_trade_date DATE, copy_origin_rebalance_run_id UUID, allocation_opportunity_id UUID, client_order_id TEXT, external_id TEXT, ticker TEXT NOT NULL, market_type TEXT NOT NULL, side TEXT NOT NULL, order_type TEXT NOT NULL, quantity NUMERIC NOT NULL, limit_price NUMERIC, stop_price NUMERIC, filled_quantity NUMERIC NOT NULL DEFAULT 0, filled_avg_price NUMERIC, status TEXT NOT NULL, broker TEXT NOT NULL, submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'equity', underlying_ticker TEXT, option_type TEXT, strike NUMERIC, expiry TIMESTAMPTZ, contract_multiplier NUMERIC NOT NULL DEFAULT 100, position_intent TEXT, leg_group_id UUID, prediction_side TEXT, polymarket_intent TEXT, spread_max_risk NUMERIC, spread_max_reward NUMERIC, CONSTRAINT orders_prediction_side_check CHECK (prediction_side IS NULL OR prediction_side IN ('YES', 'NO')))`,
+		`CREATE TABLE orders (copy_intent_id UUID, copy_execution_claim_id UUID,id UUID PRIMARY KEY, strategy_id UUID NOT NULL, pipeline_run_id UUID, account_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'strategy_version', origin_id TEXT NOT NULL DEFAULT 'paper-account-fixture', pipeline_run_trade_date DATE, copy_origin_rebalance_run_id UUID, allocation_opportunity_id UUID, client_order_id TEXT, external_id TEXT, ticker TEXT NOT NULL, market_type TEXT NOT NULL, side TEXT NOT NULL, order_type TEXT NOT NULL, quantity NUMERIC NOT NULL, limit_price NUMERIC, stop_price NUMERIC, filled_quantity NUMERIC NOT NULL DEFAULT 0, filled_avg_price NUMERIC, status TEXT NOT NULL, broker TEXT NOT NULL, submitted_at TIMESTAMPTZ, filled_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'equity', underlying_ticker TEXT, option_type TEXT, strike NUMERIC, expiry TIMESTAMPTZ, contract_multiplier NUMERIC NOT NULL DEFAULT 100, position_intent TEXT, leg_group_id UUID, prediction_side TEXT, polymarket_intent TEXT, spread_max_risk NUMERIC, spread_max_reward NUMERIC, CONSTRAINT orders_prediction_side_check CHECK (prediction_side IS NULL OR prediction_side IN ('YES', 'NO')))`,
 		`CREATE TABLE positions (id UUID PRIMARY KEY, strategy_id UUID NOT NULL, account_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'strategy_version', origin_id TEXT NOT NULL DEFAULT 'paper-account-fixture', ticker TEXT NOT NULL, side TEXT NOT NULL, quantity NUMERIC NOT NULL, avg_entry NUMERIC NOT NULL, current_price NUMERIC, unrealized_pnl NUMERIC, realized_pnl NUMERIC, stop_loss NUMERIC, take_profit NUMERIC, opened_at TIMESTAMPTZ NOT NULL, closed_at TIMESTAMPTZ, market_type TEXT NOT NULL DEFAULT 'stock', asset_class TEXT NOT NULL DEFAULT 'equity', underlying_ticker TEXT, option_type TEXT, strike NUMERIC, expiry TIMESTAMPTZ, contract_multiplier NUMERIC NOT NULL DEFAULT 100, leg_group_id UUID, delta NUMERIC, gamma NUMERIC, theta NUMERIC, vega NUMERIC)`,
 		`CREATE TABLE trades (id UUID PRIMARY KEY, account_id UUID NOT NULL DEFAULT '00000000-0000-4000-8000-000000000064', environment TEXT NOT NULL DEFAULT 'paper_scored', origin_type TEXT NOT NULL DEFAULT 'strategy_version', origin_id TEXT NOT NULL DEFAULT 'paper-account-fixture', external_id TEXT, order_id UUID NOT NULL, position_id UUID NOT NULL, ticker TEXT NOT NULL, side TEXT NOT NULL, quantity NUMERIC NOT NULL, price NUMERIC NOT NULL, fee NUMERIC NOT NULL DEFAULT 0, executed_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), asset_class TEXT NOT NULL DEFAULT 'equity', open_close TEXT, contract_multiplier NUMERIC NOT NULL DEFAULT 100, premium NUMERIC, exit_reason TEXT)`,
 	}

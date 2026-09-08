@@ -31,7 +31,7 @@ func newWheelRepositoryFixture(t *testing.T) wheelRepositoryFixture {
 	t.Helper()
 	base := newBenchmarkFixture(t)
 	ctx := context.Background()
-	if _, err := base.evaluation.experiment.strategy.pool.Exec(ctx, repositoryMigrationSQL(t, "000083_quality_filtered_wheel_v1.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, base.evaluation.experiment.strategy.pool, "000083_quality_filtered_wheel_v1.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 	fixture, err := wheelqualification.Build(strategycatalog.ExperimentPaperScored)
@@ -161,7 +161,7 @@ func TestWheelRepositoryAtomicStagesAppendOnlyAndRollbackRefusal(t *testing.T) {
 	if _, err := pool.Exec(ctx, `UPDATE wheel_v1_transitions SET cash='1.000000000000' WHERE report_id=$1 AND sequence=1`, fixture.report.ID()); err == nil || !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("append-only error=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000083_quality_filtered_wheel_v1.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000083_quality_filtered_wheel_v1.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 }
@@ -197,13 +197,13 @@ func TestWheelMigrationEmptyRollbackAndReapply(t *testing.T) {
 	base := newBenchmarkFixture(t)
 	ctx := context.Background()
 	pool := base.evaluation.experiment.strategy.pool
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000083_quality_filtered_wheel_v1.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000083_quality_filtered_wheel_v1.up.sql"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000083_quality_filtered_wheel_v1.down.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000083_quality_filtered_wheel_v1.down.sql"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000083_quality_filtered_wheel_v1.up.sql")); err != nil {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000083_quality_filtered_wheel_v1.up.sql"); err != nil {
 		t.Fatal(err)
 	}
 }

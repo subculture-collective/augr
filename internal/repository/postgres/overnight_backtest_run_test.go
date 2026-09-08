@@ -264,14 +264,15 @@ func TestOvernightBacktestRunRepoIntegration_CommitBindsPersistedExecutionVersio
 	}
 
 	strategy := preparedOvernightStrategy("AAPL", "versioned")
-	if _, _, err := repo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, []domain.Strategy{strategy}); err != nil {
+	prepared := []domain.Strategy{strategy}
+	if _, _, err := repo.CommitIfRunning(ctx, run.ID, time.Now(), domain.OvernightBacktestSummary{}, prepared); err != nil {
 		t.Fatal(err)
 	}
 
 	var versionID uuid.UUID
 	var canonicalConfig string
 	if err := pool.QueryRow(ctx, `SELECT s.execution_strategy_version_id,convert_from(v.config_bytes,'UTF8')
-		FROM strategies s JOIN strategy_versions v ON v.id=s.execution_strategy_version_id WHERE s.id=$1`, strategy.ID).
+		FROM strategies s JOIN strategy_versions v ON v.id=s.execution_strategy_version_id WHERE s.id=$1`, prepared[0].ID).
 		Scan(&versionID, &canonicalConfig); err != nil {
 		t.Fatal(err)
 	}

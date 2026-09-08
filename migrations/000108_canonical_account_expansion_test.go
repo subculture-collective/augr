@@ -139,12 +139,12 @@ func TestCanonicalAccountExpansionToleratesLegacyDecisionDuplicates(t *testing.T
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := pool.Exec(ctx, `INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) VALUES($1,$2,'paper','paper_order_intent'); INSERT INTO replay_events(trade_decision_id,event_type,occurred_at) VALUES($3,'decision_created',now())`, opportunityID, strategyID, decisionID); err != nil {
+		if _, err := pool.Exec(ctx, `INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) VALUES($1,$2,'paper','paper_order_intent'); INSERT INTO replay_events(trade_decision_id,event_type,occurred_at) VALUES($3,'decision_created',now())`, pgx.QueryExecModeSimpleProtocol, opportunityID, strategyID, decisionID); err != nil {
 			t.Fatal(err)
 		}
 	}
 	applyCanonicalExpansion(t, ctx, pool)
-	if _, err := pool.Exec(ctx, `INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) VALUES($1,$2,'paper','paper_order_intent'); INSERT INTO replay_events(trade_decision_id,event_type,occurred_at) VALUES($3,'decision_created',now())`, opportunityID, strategyID, decisionID); err != nil {
+	if _, err := pool.Exec(ctx, `INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) VALUES($1,$2,'paper','paper_order_intent'); INSERT INTO replay_events(trade_decision_id,event_type,occurred_at) VALUES($3,'decision_created',now())`, pgx.QueryExecModeSimpleProtocol, opportunityID, strategyID, decisionID); err != nil {
 		t.Fatalf("schema-107 duplicate writer after migration 108: %v", err)
 	}
 }
@@ -173,6 +173,12 @@ func TestCanonicalAccountExpansionCopyExecutionFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE copy_trade_intents SET execution_claim_id=NULL,execution_claimed_at=NULL WHERE id=$1`, graph.intentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE copy_subscriptions SET account_id='00000000-0000-4000-8000-000000000064',environment='paper_scored',status='paper_active',is_paper=true WHERE id=$1`, graph.subscriptionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE copy_trade_intents SET account_id='00000000-0000-4000-8000-000000000064',environment='paper_scored',policy_status='approved',status='received',order_id=NULL WHERE id=$1`, graph.intentID); err != nil {
 		t.Fatal(err)
 	}
 	repo := pgrepo.NewCopyTradingRepo(pool, uuid.MustParse("00000000-0000-4000-8000-000000000064"), domain.AccountEnvironmentPaperScored)
@@ -225,16 +231,33 @@ func TestCanonicalAccountExpansionCopyExecutionFence(t *testing.T) {
 
 func TestCanonicalAccountExpansionToleratesLegacyActiveEventDuplicates(t *testing.T) {
 	ctx, pool := newCanonicalExpansionPool(t)
+	tickers := map[string]string{}
 	for _, marketType := range []string{"kalshi", "polymarket"} {
 		ticker := "event-" + uuid.NewString()
+		tickers[marketType] = ticker
 		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "first", ticker, marketType); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "second", ticker, marketType); err != nil {
+		_, err := pool.Exec(ctx, `INSERT INTO strategies(name,ticker,market_type,is_paper,is_active,status) VALUES($1,$2,$3,true,true,'active')`, "second", ticker, marketType)
+		if marketType == "polymarket" {
+			if err == nil || !strings.Contains(err.Error(), "23505") {
+				t.Fatalf("expected existing Polymarket uniqueness constraint, got %v", err)
+			}
+		} else if err != nil {
 			t.Fatal(err)
 		}
 	}
 	applyCanonicalExpansion(t, ctx, pool)
+	for marketType, ticker := range tickers {
+		want := 2
+		if marketType == "polymarket" {
+			want = 1
+		}
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM strategies WHERE ticker=$1 AND market_type=$2`, ticker, marketType).Scan(&count); err != nil || count != want {
+			t.Fatalf("migration changed %s legacy rows: count=%d want=%d err=%v", marketType, count, want, err)
+		}
+	}
 }
 
 func TestCanonicalAccountExpansionPreservesDuplicateInactiveEventStrategies(t *testing.T) {
@@ -283,6 +306,11 @@ func TestCanonicalAccountExpansionPreservesDuplicateInactiveEventStrategies(t *t
 func TestCanonicalAccountExpansionCyclesAndLocksRollback(t *testing.T) {
 	ctx, pool := newCanonicalExpansionPool(t)
 	strategyID := insertCanonicalExpansionStrategy(t, ctx, pool)
+	var legacyRunID uuid.UUID
+	if err := pool.QueryRow(ctx, `INSERT INTO pipeline_runs(strategy_id,ticker,trade_date,started_at) VALUES($1,'QQQ',current_date,now()) RETURNING id`, strategyID).Scan(&legacyRunID); err != nil {
+		t.Fatal(err)
+	}
+	insertLegacyOperationalGraph(t, ctx, pool, strategyID, legacyRunID)
 	var hash107 string
 	if err := pool.QueryRow(ctx, `SELECT strategy_legacy_snapshot_sha($1)`, strategyID).Scan(&hash107); err != nil {
 		t.Fatal(err)
@@ -343,7 +371,7 @@ func TestCanonicalAccountExpansionCyclesAndLocksRollback(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err = tx.Exec(ctx, `INSERT INTO account_capital_policy_bindings(id,account_id,policy_artifact_id,policy_version,tier,margin_profile,environment,starting_capital,buying_power_multiplier,evidence_class,storage_namespace,currency)
-			SELECT economic_deterministic_uuid('capital-policy-binding',$1::TEXT,policy_version),$1,id,policy_version,100000,'reg_t','paper_scored',100000,2,'promotion_evidence',$2,'USD' FROM capital_margin_policy_artifacts`, accountID, "paper_scored/"+accountID.String()); err != nil {
+			SELECT economic_deterministic_uuid('capital-policy-binding',$1::TEXT,policy_version),$1::UUID,id,policy_version,100000,'reg_t','paper_scored',100000,2,'promotion_evidence',$2,'USD' FROM capital_margin_policy_artifacts`, accountID, "paper_scored/"+accountID.String()); err != nil {
 			t.Fatal(err)
 		}
 		if _, err = tx.Exec(ctx, readMigrationFile(t, "000108_canonical_account_expansion.down.sql")); err == nil || !strings.Contains(err.Error(), "another binding") {
@@ -408,7 +436,7 @@ func TestCanonicalAccountExpansionCyclesAndLocksRollback(t *testing.T) {
 		t.Fatalf("108 to 107: %v", err)
 	}
 	var outbox, validator any
-	if err := pool.QueryRow(ctx, `SELECT to_regclass('account_projection_outbox'),to_regprocedure('validate_account_projection_outbox_row()')`).Scan(&outbox, &validator); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT to_regclass(quote_ident(current_schema())||'.account_projection_outbox'),to_regprocedure(quote_ident(current_schema())||'.validate_account_projection_outbox_row()')`).Scan(&outbox, &validator); err != nil {
 		t.Fatal(err)
 	}
 	if outbox != nil || validator != nil {
@@ -532,13 +560,13 @@ func insertLegacyOperationalGraph(t *testing.T, ctx context.Context, pool *pgxpo
 		INSERT INTO allocation_decisions(opportunity_id,strategy_id,mode,action) SELECT id,$2,'paper','paper_order_intent' FROM portfolio_opportunities WHERE dedupe_key=$8;
 		INSERT INTO financial_fill_idempotency(idempotency_key,order_id,position_id,trade_id,fill_quantity,fill_price) VALUES('fill-'||$8,$3,$4,$5,1,10);
 		INSERT INTO prediction_settlement_idempotency(idempotency_key,decision_id,position_id,trade_id,replay_event_id,payout,resolved_at) VALUES('settlement-'||$8,$6,$4,$5,$7,1,now())`,
-		runID, strategyID, orderID, positionID, tradeID, decisionID, replayID, key); err != nil {
+		pgx.QueryExecModeSimpleProtocol, runID, strategyID, orderID, positionID, tradeID, decisionID, replayID, key); err != nil {
 		t.Fatalf("insert schema-107 operational graph after migration 108: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `WITH conversation AS (
 		INSERT INTO conversations(pipeline_run_id,agent_role,title) VALUES($1,'legacy','old writer') RETURNING id
 	) INSERT INTO conversation_messages(conversation_id,role,content) SELECT id,'user','legacy message' FROM conversation;
-		INSERT INTO agent_memories(agent_role,situation,pipeline_run_id) VALUES('legacy','old writer',$1)`, runID); err != nil {
+		INSERT INTO agent_memories(agent_role,situation,pipeline_run_id) VALUES('legacy','old writer',$1)`, pgx.QueryExecModeSimpleProtocol, runID); err != nil {
 		t.Fatalf("insert schema-107 conversation and memory graph after migration 108: %v", err)
 	}
 }
@@ -588,7 +616,7 @@ func insertLegacyExecutionGraph(t *testing.T, ctx context.Context, pool *pgxpool
 	fixture := commonExecutionLifecycleMigrationFixture{AccountID: uuid.MustParse("00000000-0000-4000-8000-000000000064"), InstrumentID: uuid.New(), VenueContractID: uuid.New(), QuoteSnapshotID: uuid.New(), DecisionAt: time.Date(2026, 8, 27, 19, 0, 0, 123456000, time.UTC)}
 	if _, err := pool.Exec(ctx, `INSERT INTO instruments(id,identity_key,asset_class,primary_venue,currency,tick_size,lot_size,multiplier,settlement_method,status) VALUES($1,$2,'equity','test-venue','USD',0.01,1,1,'physical','active');
 		INSERT INTO venue_contracts(id,instrument_id,venue,contract_id,currency,tick_size,lot_size,multiplier,settlement_method,valid_from,valid_to) VALUES($3,$1,'test-venue',$4,'USD',0.01,1,1,'physical',$5::TIMESTAMPTZ-interval '1 day',$5::TIMESTAMPTZ+interval '1 day');
-		INSERT INTO quote_snapshots(id,instrument_id,venue_contract_id,provider,venue,source,observation_namespace,observation_id,exchange_at,received_at,available_at,bid,ask,bid_depth_count,ask_depth_count) VALUES($6,$1,$3,'fixture','test-venue','fixture-feed','quotes/expansion',$7,$5::TIMESTAMPTZ-interval '3 seconds',$5::TIMESTAMPTZ-interval '2 seconds',$5::TIMESTAMPTZ-interval '1 second',10.24,10.26,0,0)`, fixture.InstrumentID, "figi:expansion:"+fixture.InstrumentID.String(), fixture.VenueContractID, "EXPANSION-"+strings.ToUpper(strings.ReplaceAll(fixture.InstrumentID.String(), "-", "")), fixture.DecisionAt, fixture.QuoteSnapshotID, "quote-"+fixture.InstrumentID.String()); err != nil {
+		INSERT INTO quote_snapshots(id,instrument_id,venue_contract_id,provider,venue,source,observation_namespace,observation_id,exchange_at,received_at,available_at,bid,ask,bid_depth_count,ask_depth_count) VALUES($6,$1,$3,'fixture','test-venue','fixture-feed','quotes/expansion',$7,$5::TIMESTAMPTZ-interval '3 seconds',$5::TIMESTAMPTZ-interval '2 seconds',$5::TIMESTAMPTZ-interval '1 second',10.24,10.26,0,0)`, pgx.QueryExecModeSimpleProtocol, fixture.InstrumentID, "figi:expansion:"+fixture.InstrumentID.String(), fixture.VenueContractID, "EXPANSION-"+strings.ToUpper(strings.ReplaceAll(fixture.InstrumentID.String(), "-", "")), fixture.DecisionAt, fixture.QuoteSnapshotID, "quote-"+fixture.InstrumentID.String()); err != nil {
 		t.Fatal(err)
 	}
 	key := "expansion-" + uuid.NewString()
@@ -803,7 +831,7 @@ func assertCanonicalExpansionRemoved(t *testing.T, ctx context.Context, pool *pg
 	}
 	for _, index := range indexes {
 		var found any
-		if err := pool.QueryRow(ctx, `SELECT to_regclass($1)`, index).Scan(&found); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT to_regclass(quote_ident(current_schema())||'.'||quote_ident($1))`, index).Scan(&found); err != nil {
 			t.Fatal(err)
 		}
 		if found != nil {
@@ -874,7 +902,7 @@ func assertSchema69CheckpointValidatorRestored(t *testing.T, ctx context.Context
 	if _, err := pool.Exec(ctx, `INSERT INTO ledger_transactions(id,account_id,event_type,idempotency_key,origin_type,origin_id,effective_at,observed_at,posting_count)
 		VALUES($1,$2,'migration-test',$3,'migration-test',$3,$4,$4,2);
 		INSERT INTO ledger_postings(transaction_id,idempotency_key,ledger_account,unit_kind,unit,amount) VALUES
-		($1,'debit','migration-test-debit','currency','USD',1),($1,'credit','migration-test-credit','currency','USD',-1)`, newFrontier, accountID, uuid.NewString(), now); err != nil {
+		($1,'debit','migration-test-debit','currency','USD',1),($1,'credit','migration-test-credit','currency','USD',-1)`, pgx.QueryExecModeSimpleProtocol, newFrontier, accountID, uuid.NewString(), now); err != nil {
 		t.Fatal(err)
 	}
 	secret := make([]byte, 32)
@@ -932,7 +960,6 @@ func newCanonicalExpansionPool(t *testing.T) (context.Context, *pgxpool.Pool) {
 	}
 	t.Cleanup(func() { _, _ = admin.Exec(ctx, `DROP SCHEMA IF EXISTS `+identifier+` CASCADE`) })
 	config.ConnConfig.RuntimeParams["search_path"] = migrationTestSearchPath(t, ctx, databaseURL, schema)
-	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		t.Fatal(err)

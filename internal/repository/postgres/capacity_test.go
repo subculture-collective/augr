@@ -32,7 +32,7 @@ func newCapacityRepositoryFixture(t *testing.T) capacityRepositoryFixture {
 	ctx := context.Background()
 	pool := base.evaluation.experiment.strategy.pool
 	for _, migration := range []string{"000083_quality_filtered_wheel_v1.up.sql", "000084_momentum_quality_baseline.up.sql", "000085_etf_time_series_trend.up.sql", "000086_defined_risk_options.up.sql", "000087_capital_tier_candidate_comparison.up.sql"} {
-		if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, migration)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, pool, migration); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -162,7 +162,7 @@ func TestCapacityRepositoryAtomicStagesForgeryAppendOnlyAndRollback(t *testing.T
 	if _, err := fixture.repo.GetComparison(ctx, fixture.comparison.ID()); err == nil || !strings.Contains(err.Error(), "does not reconstruct") {
 		t.Fatalf("forgery=%v", err)
 	}
-	if _, err := pool.Exec(ctx, repositoryMigrationSQL(t, "000087_capital_tier_candidate_comparison.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+	if _, err := execRepositoryMigration(t, ctx, pool, "000087_capital_tier_candidate_comparison.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
 		t.Fatalf("rollback=%v", err)
 	}
 }
@@ -171,7 +171,7 @@ func TestCapacityMigrationEmptyRollbackAndReapply(t *testing.T) {
 	base := newBenchmarkFixture(t)
 	ctx := context.Background()
 	for _, migration := range []string{"000083_quality_filtered_wheel_v1.up.sql", "000084_momentum_quality_baseline.up.sql", "000085_etf_time_series_trend.up.sql", "000086_defined_risk_options.up.sql", "000087_capital_tier_candidate_comparison.up.sql", "000087_capital_tier_candidate_comparison.down.sql", "000087_capital_tier_candidate_comparison.up.sql"} {
-		if _, err := base.evaluation.experiment.strategy.pool.Exec(ctx, repositoryMigrationSQL(t, migration)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, base.evaluation.experiment.strategy.pool, migration); err != nil {
 			t.Fatalf("%s: %v", migration, err)
 		}
 	}

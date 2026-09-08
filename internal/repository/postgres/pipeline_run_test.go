@@ -425,7 +425,7 @@ func createRunningPipelineRun(t *testing.T, ctx context.Context, repo *PipelineR
 	run := &domain.PipelineRun{
 		StrategyID: uuid.New(), Ticker: "AAPL",
 		TradeDate: time.Date(2026, time.March, 14, 0, 0, 0, 0, time.UTC),
-		Status:    domain.PipelineStatusRunning, Signal: signal, StartedAt: time.Now(),
+		Status:    domain.PipelineStatusRunning, Signal: signal, StartedAt: time.Now().UTC().Truncate(time.Microsecond),
 	}
 	scopePipelineRunTestRow(run)
 	if err := repo.Create(ctx, run); err != nil {
@@ -816,6 +816,7 @@ func newPipelineRunIntegrationPool(t *testing.T, ctx context.Context) (*pgxpool.
 			completed_at    TIMESTAMPTZ,
 			error_message   TEXT            NOT NULL DEFAULT '',
 			config_snapshot JSONB,
+			execution_version_id UUID, evaluation_scope_id UUID, manifest_id UUID, quality_result_id UUID, deployment_id UUID, promotion_decision_id UUID, capital_binding_id UUID, risk_policy_version TEXT,
 			phase_timings   JSONB,
 			PRIMARY KEY (id, trade_date)
 		) PARTITION BY RANGE (trade_date)`,

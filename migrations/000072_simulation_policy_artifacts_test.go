@@ -362,7 +362,7 @@ func insertMigrationLifecycleOrder(
 		side, order_type, time_in_force, quantity, limit_price, venue,
 		venue_contract_id, route_quote_snapshot_id, routed_at, policy_kind,
 		policy_version, created_at
-	) VALUES ($1,$2,$3,$4,$5,$1::TEXT,'buy','limit','day',8,10.25,'test-venue',$6,$7,$8,$9,$10,$8)`,
+	) VALUES ($1::UUID,$2,$3,$4,$5,$1::TEXT,'buy','limit','day',8,10.25,'test-venue',$6,$7,$8,$9,$10,$8)`,
 		orderID, intentID, fixture.AccountID, fixture.InstrumentID, "order-"+key,
 		fixture.VenueContractID, fixture.QuoteSnapshotID, routedAt, policyKind, policyVersion,
 	); err != nil {

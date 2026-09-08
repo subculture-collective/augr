@@ -170,7 +170,8 @@ func TestPortfolioProjectionRepoRebuildsAndPersistsExactCheckpoint(t *testing.T)
 	if err != nil {
 		t.Fatalf("RebuildPortfolioProjection() error = %v", err)
 	}
-	if first.TransactionCount < 2 || len(first.Lots) != 1 || len(first.Positions) != 1 {
+	// The pinned August fill precedes the migration-created opening flow.
+	if first.TransactionCount != 1 || len(first.Lots) != 1 || len(first.Positions) != 1 {
 		t.Fatalf("projection boundary/lots/positions = %d/%d/%d", first.TransactionCount, len(first.Lots), len(first.Positions))
 	}
 	if !first.Totals.TotalPnL.Equal(decimal.RequireFromString("3.5")) {
@@ -591,11 +592,7 @@ func applyRepositoryMigrationRange(t *testing.T, ctx context.Context, pool *pgxp
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		contents, err := os.ReadFile(filepath.Join(migrationDirectory, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := pool.Exec(ctx, string(contents)); err != nil {
+		if _, err := execRepositoryMigration(t, ctx, pool, name); err != nil {
 			t.Fatalf("apply %s: %v", name, err)
 		}
 	}
@@ -666,6 +663,9 @@ func newProjectionIntegrationPool(t *testing.T, ctx context.Context) projectionI
 				t.Fatalf("apply %s: %v", name, err)
 			}
 		}
+	}
+	if !preMigratedSchema {
+		applyRepositoryMigrationRange(t, ctx, ownerPool, "000069", "000108")
 	}
 	signingSecret := make([]byte, 32)
 	if _, err := rand.Read(signingSecret); err != nil {

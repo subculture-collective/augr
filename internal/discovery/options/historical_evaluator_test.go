@@ -121,10 +121,10 @@ func historicalVerticalConfig() rules.OptionsRulesConfig {
 	}
 }
 
-func historicalEvaluationFrame(at time.Time, close, longBid, longAsk, shortBid, shortAsk float64, salt int) HistoricalOptionFrame {
+func historicalEvaluationFrame(at time.Time, closePrice, longBid, longAsk, shortBid, shortAsk float64, salt int) HistoricalOptionFrame {
 	frame := HistoricalOptionFrame{
 		DecisionAt: at,
-		Underlying: domain.OHLCV{Timestamp: at, Open: close, High: close, Low: close, Close: close, Volume: 1_000_000},
+		Underlying: domain.OHLCV{Timestamp: at, Open: closePrice, High: closePrice, Low: closePrice, Close: closePrice, Volume: 1_000_000},
 		Chain: []domain.OptionSnapshot{
 			historicalEvaluationSnapshot(at, "AAPL250221C00100000", 100, 0.6, longBid, longAsk, salt*2),
 			historicalEvaluationSnapshot(at, "AAPL250221C00105000", 105, 0.3, shortBid, shortAsk, salt*2+1),

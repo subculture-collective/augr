@@ -87,7 +87,7 @@ func TestAcceptedEconomicPlannerBuildsGraphOnlyForExactRoutedOrder(t *testing.T)
 	}
 	filledAt := routed.Order.RoutedAt.Add(time.Second)
 	price := 10.25
-	order := &domain.Order{ID: routed.Order.ID, AccountID: fixture.account.ID, Environment: fixture.account.Environment, OriginType: string(ledger.ExecutionOriginOperator), OriginID: originID, Ticker: "FIXTURE", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusFilled, Quantity: 8, FilledQuantity: 8, FilledAvgPrice: &price, FilledAt: &filledAt}
+	order := &domain.Order{ID: routed.Order.ID, AccountID: fixture.account.ID, Environment: fixture.account.Environment, OriginType: string(ledger.ExecutionOriginOperator), OriginID: originID, ExternalID: "accepted-planner-order", Ticker: "FIXTURE", MarketType: domain.MarketTypeStock, Side: domain.OrderSideBuy, Status: domain.OrderStatusFilled, Quantity: 8, FilledQuantity: 8, FilledAvgPrice: &price, FilledAt: &filledAt}
 	trade := &domain.Trade{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(ledger.ExecutionOriginOperator), OriginID: originID, OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: 8, Price: price, ExecutedAt: filledAt}
 	mutation := repository.OrderFillInput{IdempotencyKey: "accepted-planner-fill", Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: 8, ExecutionPrice: price}, Now: filledAt, Trade: trade}
 	planner := NewAcceptedEconomicPlanner(fixture.pool)

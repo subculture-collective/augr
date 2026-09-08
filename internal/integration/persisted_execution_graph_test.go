@@ -84,7 +84,7 @@ func TestPersistedExecutionGraphIntegration_SurvivesCancellationAndRestart(t *te
 	}
 
 	completedAt := startedAt.Add(2 * time.Minute)
-	terminalEvent := &domain.AgentEvent{AccountID: accountID, Environment: run.Environment, OriginType: run.OriginType, OriginID: originID, PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate, StrategyID: &strategyID, EventKind: "pipeline.cancelled", Title: "Pipeline cancelled"}
+	terminalEvent := &domain.AgentEvent{AccountID: accountID, Environment: run.Environment, OriginType: run.OriginType, OriginID: originID, PipelineRunID: &runID, PipelineRunTradeDate: &tradeDate, StrategyID: &strategyID, EventKind: "pipeline_cancelled", Title: "Pipeline cancelled"}
 	receipt, err := runRepo.Finalize(ctx, domain.PipelineRunRef{ID: run.ID, TradeDate: tradeDate}, repository.PipelineRunFinalization{Status: domain.PipelineStatusCancelled, CompletedAt: completedAt, ErrorMessage: "operator cancellation", Event: terminalEvent})
 	if err != nil || !receipt.Applied {
 		t.Fatalf("cancel run = %+v, %v", receipt, err)

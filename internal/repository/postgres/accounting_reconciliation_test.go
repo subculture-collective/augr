@@ -3,9 +3,6 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -150,18 +147,6 @@ func TestAccountingReconciliationRepoChildFailureRollsBackParent(t *testing.T) {
 func newAccountingReconciliationTestPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
 	pools := newProjectionIntegrationPool(t, ctx)
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller() failed")
-	}
-	path := filepath.Join(filepath.Dir(filename), "..", "..", "..", "migrations", "000070_accounting_dual_run.up.sql")
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pools.owner.Exec(ctx, string(contents)); err != nil {
-		t.Fatalf("apply migration 70: %v", err)
-	}
 	return pools.owner
 }
 
@@ -175,7 +160,7 @@ func accountingReconciliationTestRunAt(t *testing.T, synthetic bool, asOf time.T
 	accountID := uuid.MustParse("00000000-0000-4000-8000-000000000064")
 	inputFor := func(source accountingrecon.SnapshotSource) accountingrecon.SnapshotInput {
 		input := accountingrecon.SnapshotInput{
-			Source: source, AccountID: accountID, AsOf: asOf, ObservedAt: asOf.Add(time.Second), Currency: "USD",
+			Source: source, AccountID: accountID, ThroughTransactionID: uuid.MustParse("00000000-0000-4000-8000-000000000065"), AsOf: asOf, ObservedAt: asOf.Add(time.Second), Currency: "USD",
 			ProjectionVersion: "ledger_fifo_v1", MarkSource: "test-source", MarkNamespace: "marks/test", MaxMarkAge: time.Minute,
 			CaptureFenceID: "repository-fence", CaptureEpoch: 1,
 			EvidenceID:       source.String() + ":repository-evidence",

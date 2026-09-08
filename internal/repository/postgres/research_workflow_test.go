@@ -91,7 +91,7 @@ func TestResearchWorkflowRetainedQualification(t *testing.T) {
 	if err != nil || hypotheses != 1 || sources != 2 || sourceKeys != 2 || searches != 2 || results != 4 || tests != 10 || critics != 2 || findings != 3 || checks != 12 {
 		t.Fatalf("counts=%d/%d/%d/%d/%d/%d/%d/%d/%d err=%v", hypotheses, sources, sourceKeys, searches, results, tests, critics, findings, checks, err)
 	}
-	if _, err = pool.Exec(ctx, repositoryMigrationSQL(t, "000096_hypothesis_critic_workflows.down.sql")); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
+	if _, err = execRepositoryMigration(t, ctx, pool, "000096_hypothesis_critic_workflows.down.sql"); err == nil || !strings.Contains(err.Error(), "cannot roll back") {
 		t.Fatalf("nonempty rollback=%v", err)
 	}
 	t.Logf("hypothesis=%s sha=%s ready_critic=%s sha=%s reject_critic=%s sha=%s", fixture.Hypothesis.ID(), fixture.Hypothesis.Digest(), fixture.ReadyCritic.ID(), fixture.ReadyCritic.Digest(), fixture.RejectCritic.ID(), fixture.RejectCritic.Digest())

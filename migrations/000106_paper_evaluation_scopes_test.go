@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 
@@ -19,7 +20,14 @@ import (
 )
 
 func TestPaperEvaluationScopesMigrationEnforcesScopedEvidenceEndToEnd(t *testing.T) {
-	ctx, pool := newDatasetMigrationPool(t)
+	ctx, originalPool := newDatasetMigrationPool(t)
+	connectionConfig := originalPool.Config()
+	connectionConfig.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeCacheStatement
+	pool, err := pgxpool.NewWithConfig(ctx, connectionConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
 	for _, filename := range sortedUpMigrationsThrough(t, "000105_prediction_native_snapshot_types.up.sql") {
 		if filename <= "000076_dataset_manifests_quality.up.sql" {
 			continue
