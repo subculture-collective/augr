@@ -23,12 +23,16 @@ type partialResultProvider struct {
 	calls      []string
 	emptyDaily bool
 	dailyTime  time.Time
+	ohlcv      func(string, time.Time, time.Time) ([]domain.OHLCV, error)
 }
 
-func (p *partialResultProvider) GetOHLCV(_ context.Context, ticker string, timeframe data.Timeframe, _, to time.Time) ([]domain.OHLCV, error) {
+func (p *partialResultProvider) GetOHLCV(_ context.Context, ticker string, timeframe data.Timeframe, from, to time.Time) ([]domain.OHLCV, error) {
 	p.mu.Lock()
 	p.calls = append(p.calls, ticker+":"+timeframe.String())
 	p.mu.Unlock()
+	if p.ohlcv != nil {
+		return p.ohlcv(ticker, from, to)
+	}
 	if ticker == "FAIL" {
 		return nil, errors.New("provider failed")
 	}
@@ -47,6 +51,52 @@ func (p *partialResultProvider) GetOHLCV(_ context.Context, ticker string, timef
 		}
 	}
 	return []domain.OHLCV{{Timestamp: timestamp, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}, nil
+}
+
+func TestHistoryRefreshRevalidatesEmptyIncrementalResponse(t *testing.T) {
+	for _, outcome := range []string{"fresh", "empty", "stale", "error"} {
+		t.Run(outcome, func(t *testing.T) {
+			now := time.Date(2026, time.September, 8, 0, 0, 0, 0, easternTime)
+			latest := time.Date(2026, time.September, 4, 9, 30, 0, 0, easternTime)
+			calls := 0
+			provider := &partialResultProvider{ohlcv: func(_ string, from, to time.Time) ([]domain.OHLCV, error) {
+				calls++
+				if calls == 1 {
+					return nil, nil
+				}
+				if !from.Equal(now.AddDate(0, 0, -10)) || !to.Equal(now) {
+					t.Fatalf("revalidation range = %v..%v", from, to)
+				}
+				if outcome == "empty" {
+					return nil, nil
+				}
+				if outcome == "error" {
+					return nil, errors.New("provider denied")
+				}
+				stamp := latest
+				if outcome == "stale" {
+					stamp = latest.AddDate(0, 0, -1)
+				}
+				return []domain.OHLCV{{Timestamp: stamp, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}, nil
+			}}
+			repo := &partialResultHistoryRepo{bars: []domain.HistoricalOHLCV{{Ticker: "SPY", Provider: "stock-chain", Timeframe: "1d", Timestamp: latest, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}}
+			orch := partialResultOrchestrator([]string{"SPY"}, partialResultDataService(provider, repo))
+			orch.now = func() time.Time { return now }
+			orch.Register("history_refresh", "test", historyRefreshSpec, orch.historyRefresh)
+			err := orch.historyRefresh(context.Background())
+			summary := singleJobStatus(t, orch, "history_refresh").LastSummary
+			if calls != 2 {
+				t.Fatalf("provider calls = %d, want incremental plus revalidation", calls)
+			}
+			if outcome == "fresh" {
+				if err != nil || summary["updated"] != 1 || summary["cache_revalidated"] != 1 {
+					t.Fatalf("err=%v summary=%v", err, summary)
+				}
+			} else if err == nil || summary["updated"] != 0 {
+				t.Fatalf("unusable provider evidence accepted: err=%v summary=%v", err, summary)
+			}
+		})
+	}
 }
 
 func (p *partialResultProvider) GetFundamentals(context.Context, string) (data.Fundamentals, error) {

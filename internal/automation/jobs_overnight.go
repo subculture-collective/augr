@@ -385,7 +385,7 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 	}
 	allTickers := selection.Tickers
 
-	now := time.Now()
+	now := o.currentTime()
 	summary["tickers"] = len(allTickers)
 	summary["selected"] = len(allTickers)
 	summary["positions"] = selection.Positions
@@ -433,7 +433,10 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 		}
 		cacheOnly := make([]string, 0, len(batch))
 		for _, ticker := range batch {
-			if download.ProviderRequests[ticker] == 0 {
+			// An incremental gap can contain only non-trading days. Contacting
+			// a provider for that gap is not revalidation of the cached bars.
+			// Fetch a trailing window, but never hide a failed historical request.
+			if download.ProviderFailures[ticker] == 0 && (download.ProviderRequests[ticker] == 0 || download.FreshBars[ticker] == 0) {
 				cacheOnly = append(cacheOnly, ticker)
 			}
 		}
@@ -464,6 +467,7 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 				download.ProviderRequests[ticker] += revalidated.ProviderRequests[ticker]
 				download.ProviderFailures[ticker] += revalidated.ProviderFailures[ticker]
 				download.FreshBars[ticker] += revalidated.FreshBars[ticker]
+				download.ProviderLatest[ticker] = revalidated.ProviderLatest[ticker]
 				if len(revalidated.Bars[ticker]) > 0 {
 					download.Bars[ticker] = revalidated.Bars[ticker]
 				}
@@ -494,7 +498,7 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 				summary["empty"]++
 				continue
 			}
-			if !dailyBarFresh(now, bars[len(bars)-1].Timestamp) {
+			if !dailyBarFresh(now, download.ProviderLatest[ticker]) {
 				summary["stale"]++
 				continue
 			}
