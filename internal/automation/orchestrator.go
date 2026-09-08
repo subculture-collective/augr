@@ -617,6 +617,7 @@ func (o *JobOrchestrator) RegisterAll() {
 	}
 	o.registerKalshiDiscoveryJob()
 	o.registerKalshiMarkingJob()
+	o.registerProjectionRefreshJob()
 	o.registerKalshiSettlementJob()
 	o.registerKalshiReconciliationJob()
 	o.registerReportJobs()
