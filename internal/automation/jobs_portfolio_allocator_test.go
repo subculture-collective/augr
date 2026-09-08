@@ -323,6 +323,7 @@ type portfolioAllocatorStrategyRepo struct {
 }
 
 func (r *portfolioAllocatorStrategyRepo) Create(context.Context, *domain.Strategy) error { return nil }
+
 func (r *portfolioAllocatorStrategyRepo) CreateWithExecutionVersion(ctx context.Context, strategy *domain.Strategy) (uuid.UUID, error) {
 	if err := r.Create(ctx, strategy); err != nil {
 		return uuid.Nil, err

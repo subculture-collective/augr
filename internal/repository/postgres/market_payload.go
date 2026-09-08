@@ -234,7 +234,8 @@ func (repo *DatasetRepo) BindMarketPayload(ctx context.Context, binding MarketPa
 	err = repo.pool.QueryRow(ctx, `SELECT manifest_id,partition_sequence,observation_sequence,payload_id,content_sha256,created_at
 		FROM dataset_manifest_payload_bindings WHERE manifest_id=$1 AND partition_sequence=$2 AND observation_sequence=$3`,
 		binding.ManifestID, binding.PartitionSequence, binding.ObservationSequence).Scan(
-		&stored.ManifestID, &stored.PartitionSequence, &stored.ObservationSequence, &stored.PayloadID, &stored.ContentSHA256, &stored.CreatedAt)
+		&stored.ManifestID, &stored.PartitionSequence, &stored.ObservationSequence, &stored.PayloadID, &stored.ContentSHA256, &stored.CreatedAt,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: reload market payload binding: %w", err)
 	}

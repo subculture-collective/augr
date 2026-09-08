@@ -269,7 +269,7 @@ func (*strategyDecisionCaptureRepo) CountByRun(context.Context, domain.PipelineR
 
 type persisterDecisionNode struct{}
 
-func (persisterDecisionNode) Name() string { return "test" }
+func (persisterDecisionNode) Name() string          { return "test" }
 func (persisterDecisionNode) Role() agent.AgentRole { return agent.AgentRoleTrader }
 
 func (persisterDecisionNode) Phase() agent.Phase                                  { return agent.PhaseTrading }
