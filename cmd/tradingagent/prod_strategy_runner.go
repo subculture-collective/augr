@@ -1968,6 +1968,7 @@ func (p *strategyVersionPersister) FinalizeRun(ctx context.Context, runID uuid.U
 }
 
 func (p *strategyVersionPersister) SupportsSnapshots() bool { return p.delegate.SupportsSnapshots() }
+
 func (p *strategyVersionPersister) PersistSnapshot(ctx context.Context, snapshot *domain.PipelineRunSnapshot) error {
 	scope, err := p.scope(domain.PipelineRunRef{ID: snapshot.PipelineRunID, TradeDate: snapshot.PipelineRunTradeDate})
 	if err != nil {

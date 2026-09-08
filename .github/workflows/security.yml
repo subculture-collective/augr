@@ -24,7 +24,8 @@ jobs:
 
       - name: Check for known vulnerabilities
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # v1.8 requires Go 1.26; keep the scanner compatible with the Go 1.25 target.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
 
       - name: Verify go.sum integrity

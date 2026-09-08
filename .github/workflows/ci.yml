@@ -59,8 +59,10 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
-          only-new-issues: true
+          version: v2.13.2
+          # Gitea's PR patch response is not compatible with the action's
+          # GitHub-only diff filter. Check the full tree instead.
+          only-new-issues: false
 
   unit-tests:
     name: Unit tests
