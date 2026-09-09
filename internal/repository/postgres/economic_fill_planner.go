@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -43,6 +44,18 @@ func (planner *AcceptedEconomicPlanner) RequireAcceptedOrderPrepared(ctx context
 	if order == nil || order.ID == uuid.Nil {
 		return fmt.Errorf("postgres: accepted order preparation requires an order identity")
 	}
+	originType, originID := scope.Origin()
+	if order.AccountID != scope.AccountID() || order.Environment != scope.Environment() ||
+		order.OriginType != string(originType) || order.OriginID != originID || order.CopyOriginRebalanceRunID != scope.CopyOriginRunID() {
+		return fmt.Errorf("postgres: accepted order scope differs from canonical dispatch scope")
+	}
+	if run, hasRun := scope.PipelineRun(); hasRun {
+		if order.PipelineRunID == nil || *order.PipelineRunID != run.ID || order.PipelineRunTradeDate == nil || !order.PipelineRunTradeDate.Equal(run.TradeDate) {
+			return fmt.Errorf("postgres: accepted order pipeline run differs from canonical dispatch scope")
+		}
+	} else if order.PipelineRunID != nil || order.PipelineRunTradeDate != nil {
+		return fmt.Errorf("postgres: accepted order has an unexpected pipeline run")
+	}
 	current, _, _, _, err := planner.loadRoutedContext(ctx, scope, order.ID)
 	if err != nil {
 		return err
@@ -50,7 +63,22 @@ func (planner *AcceptedEconomicPlanner) RequireAcceptedOrderPrepared(ctx context
 	if current.Order == nil || current.Order.ID != order.ID || current.Order.ClientOrderID != order.ClientOrderID {
 		return fmt.Errorf("postgres: accepted order differs from canonical routed command")
 	}
+	command := current.Order
+	if math.IsNaN(order.Quantity) || math.IsInf(order.Quantity, 0) ||
+		!command.Quantity.Equal(decimal.NewFromFloat(order.Quantity)) ||
+		string(command.Side) != string(order.Side) || string(command.OrderType) != string(order.OrderType) ||
+		!preparedOrderPriceMatches(command.LimitPrice, order.LimitPrice) ||
+		!preparedOrderPriceMatches(command.StopPrice, order.StopPrice) {
+		return fmt.Errorf("postgres: accepted order mechanics differ from canonical routed command")
+	}
 	return nil
+}
+
+func preparedOrderPriceMatches(canonical *decimal.Decimal, proposed *float64) bool {
+	if canonical == nil || proposed == nil {
+		return canonical == nil && proposed == nil
+	}
+	return !math.IsNaN(*proposed) && !math.IsInf(*proposed, 0) && canonical.Equal(decimal.NewFromFloat(*proposed))
 }
 
 func (planner *AcceptedEconomicPlanner) PlanAcceptedOrderFill(ctx context.Context, scope execution.ExecutionScope, mutation repository.OrderFillInput) (execution.AcceptedFillInput, error) {
