@@ -11,6 +11,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/capital"
 	"github.com/PatrickFanella/get-rich-quick/internal/economicid"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 )
 
@@ -23,6 +24,41 @@ type InternalPortfolioCapitalSnapshot struct {
 	Equity                 decimal.Decimal
 	LongBuyingPower        decimal.Decimal
 	ProjectionCheckpointID uuid.UUID
+}
+
+// GetAccountBalance reads attested internal capital for diagnostics without
+// creating snapshot evidence or falling back to an unrelated broker account.
+func (repo *PortfolioRiskRepo) GetAccountBalance(ctx context.Context) (execution.Balance, error) {
+	var balance execution.Balance
+	if repo == nil || repo.internal == nil {
+		return balance, fmt.Errorf("postgres: internal capital reader is required")
+	}
+	state, err := repo.internal.LoadInternalAccountCapitalState(ctx, repo.accountID)
+	if err != nil {
+		return balance, err
+	}
+	account, err := NewAccountRepo(repo.pool).GetByID(ctx, repo.accountID)
+	if err != nil {
+		return balance, err
+	}
+	policyRepo := NewCapitalPolicyRepo(repo.pool)
+	binding, err := policyRepo.GetCapitalBinding(ctx, repo.accountID)
+	if err != nil {
+		return balance, err
+	}
+	artifact, err := policyRepo.GetCapitalPolicyByVersion(ctx, binding.PolicyVersion)
+	if err != nil {
+		return balance, err
+	}
+	policy, err := capital.PolicyFromArtifact(*artifact)
+	if err != nil {
+		return balance, err
+	}
+	capacity, err := capital.LongBuyingPower(*account, *binding, policy, state)
+	if err != nil {
+		return balance, err
+	}
+	return execution.Balance{Equity: state.Equity().InexactFloat64(), BuyingPower: capacity.Truncate(8).InexactFloat64()}, nil
 }
 
 func (repo *PortfolioRiskRepo) verifyInternalAccountConsistency(ctx context.Context, id uuid.UUID, asOf time.Time) (string, error) {

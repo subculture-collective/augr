@@ -816,6 +816,15 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 	deps.EconomicAccounts = accountRepo
 	deps.EconomicLedger = pgrepo.NewLedgerRepo(db.Pool)
+	if account.Venue == "internal" {
+		if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
+			internalCapital, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
+			if constructErr != nil {
+				return nil, nil, nil, fmt.Errorf("construct internal diagnostic capital source: %w", constructErr)
+			}
+			deps.AccountBalance = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID).WithInternalCapitalSource(internalCapital)
+		}
+	}
 	if cfg.Features.EnablePolymarketAutomation {
 		deps.PolymarketAccountRepo = polymarketAccountRepo
 		deps.PolymarketWatchedRepo = polymarketWatchedRepo
@@ -1013,7 +1022,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				return nil, nil, nil, err
 			}
 			deps.AlpacaReconciler = alpacaReconciler
-			deps.AccountBalance = alpacaAdapter
+			if account.Venue == "alpaca" && account.ExternalAccountID != "" {
+				deps.AccountBalance = alpacaAdapter
+			}
 		}
 		// Options data chain: Tradier (full Greeks from ORATS) → Yahoo (free, BS Greeks)
 		// → Alpaca (paper account) → Polygon (rate-limited).

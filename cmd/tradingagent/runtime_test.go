@@ -1189,6 +1189,9 @@ func TestNewAPIServerWiresKalshiDiscoveryAndMarkingAutomationJobs(t *testing.T) 
 	if projectionDatabaseURL == cfg.Database.URL {
 		t.Fatal("ProjectionRepo constructed with general DATABASE_URL")
 	}
+	if _, ok := capturedDeps.AccountBalance.(*pgrepo.PortfolioRiskRepo); !ok {
+		t.Fatalf("internal diagnostics balance source = %T, want canonical reader", capturedDeps.AccountBalance)
+	}
 
 	cleanup()
 }

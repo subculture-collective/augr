@@ -50,6 +50,15 @@ func TestInternalAccountCapitalSnapshotPersistsReplaysAndRejectsForgery(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	reader := NewPortfolioRiskRepo(pools.owner, accountID).WithInternalCapitalSource(source)
+	balance, err := reader.GetAccountBalance(ctx)
+	if err != nil || balance.Equity != 100000 || balance.BuyingPower != 200000 || balance.OptionsBuyingPower != 0 {
+		t.Fatalf("read-only internal balance: %+v %v", balance, err)
+	}
+	var observations int
+	if err := pools.owner.QueryRow(ctx, `SELECT count(*) FROM internal_portfolio_capital_snapshots`).Scan(&observations); err != nil || observations != 0 {
+		t.Fatalf("diagnostic read created evidence: %d %v", observations, err)
+	}
 	snapshot, err := source.CaptureInternalPortfolioCapital(ctx, accountID)
 	if err != nil {
 		t.Fatal(err)
