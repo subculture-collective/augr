@@ -24,6 +24,9 @@ type PaperOrderManagerProcessor struct {
 }
 
 type PaperOrderManagerProcessorDeps struct {
+	// PrepareSignal supplies per-request canonical evidence. Once configured,
+	// missing evidence fails closed instead of falling back to legacy execution.
+	PrepareSignal    func(context.Context, PaperOrderRequest) (execution.SignalOrderPreparation, error)
 	EconomicWriter   execution.AcceptedOrderFillWriter
 	RiskEngine       risk.RiskEngine
 	PositionRepo     repository.PositionRepository
@@ -181,8 +184,23 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if p.deps.DecisionRecorder != nil {
 		manager = manager.WithDecisionRecorder(p.deps.DecisionRecorder)
 	}
-	processErr := manager.ProcessSignal(ctx, request.Scope, request.Signal, request.Plan)
+	var processErr error
+	if p.deps.PrepareSignal != nil {
+		preparation, err := p.deps.PrepareSignal(ctx, request)
+		if err != nil {
+			return PaperOrderResult{}, fmt.Errorf("portfolio: prepare canonical paper signal: %w", err)
+		}
+		if preparation == nil {
+			return PaperOrderResult{}, errors.New("portfolio: canonical paper signal preparation is missing")
+		}
+		processErr = manager.ProcessSignalWithPreparation(ctx, request.Scope, request.Signal, request.Plan, preparation)
+	} else {
+		processErr = manager.ProcessSignal(ctx, request.Scope, request.Signal, request.Plan)
+	}
 	if p.deps.OrderRepo == nil {
+		if processErr != nil && p.deps.PrepareSignal != nil {
+			return PaperOrderResult{}, processErr
+		}
 		return PaperOrderResult{Skipped: true, Reason: "missing_order_repo"}, nil
 	}
 	if allocationRepo, ok := p.deps.OrderRepo.(repository.AllocationOrderRepository); ok && request.OpportunityID != uuid.Nil {
