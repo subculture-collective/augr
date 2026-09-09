@@ -15,6 +15,7 @@ MODULE = "github.com/PatrickFanella/get-rich-quick/"
 PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/..."]
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
+    "cmd/augr-reference-import/TestReferenceImportPostgresReplay",
     "internal/repository/postgres/TestPipelineETFCaptureQualifiedStatus",
     "internal/repository/postgres/TestLoadSignalPreparationRetainedGraph",
     "internal/repository/postgres/TestPipelineStockCaptureQualifiedStatus",
