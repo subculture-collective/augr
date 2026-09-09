@@ -90,7 +90,20 @@ type accountSnapshotCanonical struct {
 
 func (repo *PortfolioRiskRepo) CaptureAccountSnapshot(ctx context.Context) (portfolio.AccountSnapshot, error) {
 	var snapshot portfolio.AccountSnapshot
-	if repo == nil || repo.pool == nil || repo.accountID == uuid.Nil || repo.source == nil {
+	if repo == nil || repo.pool == nil || repo.accountID == uuid.Nil {
+		return snapshot, fmt.Errorf("postgres: canonical portfolio account snapshot source is required")
+	}
+	account, err := NewAccountRepo(repo.pool).GetByID(ctx, repo.accountID)
+	if err != nil {
+		return snapshot, fmt.Errorf("postgres: load portfolio account identity: %w", err)
+	}
+	if string(account.Environment) != "paper_scored" || string(account.Status) != "active" {
+		return snapshot, fmt.Errorf("postgres: canonical portfolio account is not active paper_scored")
+	}
+	if string(account.Venue) != "alpaca" || account.ExternalAccountID == "" {
+		return snapshot, fmt.Errorf("postgres: portfolio account requires a supported account-specific snapshot source")
+	}
+	if repo.source == nil {
 		return snapshot, fmt.Errorf("postgres: canonical portfolio account snapshot source is required")
 	}
 	balance, err := repo.source.GetAccountBalance(ctx)
@@ -100,13 +113,7 @@ func (repo *PortfolioRiskRepo) CaptureAccountSnapshot(ctx context.Context) (port
 	if balance.Equity <= 0 || balance.BuyingPower < 0 || balance.OptionsBuyingPower < 0 {
 		return snapshot, fmt.Errorf("postgres: canonical portfolio account balance is invalid")
 	}
-	var environment, externalID string
-	if err = repo.pool.QueryRow(ctx, `SELECT environment,external_account_id FROM accounts WHERE id=$1 AND status='active'`, repo.accountID).Scan(&environment, &externalID); err != nil {
-		return snapshot, err
-	}
-	if environment != "paper_scored" || externalID == "" {
-		return snapshot, fmt.Errorf("postgres: canonical portfolio account is not active paper_scored")
-	}
+	environment, externalID := string(account.Environment), account.ExternalAccountID
 	observedAt := databaseNow()
 	canonical := accountSnapshotCanonical{
 		Schema: "portfolio-account-snapshot-v1", AccountID: repo.accountID.String(), Environment: environment, ExternalAccountID: externalID,
