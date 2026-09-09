@@ -7,6 +7,8 @@ import (
 	"slices"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
 	"github.com/PatrickFanella/get-rich-quick/internal/marketdata"
 )
@@ -75,6 +77,12 @@ func (e *StockQuoteEvidence) QuoteSnapshot(reference instrument.Instrument, cont
 	// Re-decoding prevents edited structured fields from bypassing raw evidence.
 	if e.Tape != decoded.Tape || !slices.Equal(e.Conditions, decoded.Conditions) {
 		return nil, fmt.Errorf("alpaca: quote conditions disagree with retained source bytes")
+	}
+	// A static penny-tick stock contract does not describe the sub-dollar
+	// pricing regime. Reject that quote domain rather than silently applying
+	// the above-dollar mechanics to it; a finer contract must be explicit.
+	if contract.TickSize.Equal(decimal.New(1, -2)) && (decoded.Bid.LessThan(decimal.NewFromInt(1)) || decoded.Ask.LessThan(decimal.NewFromInt(1))) {
+		return nil, fmt.Errorf("alpaca: penny-tick stock contract requires bid and ask at or above USD 1")
 	}
 	bidSize, askSize, err := decoded.ShareSizes()
 	if err != nil {

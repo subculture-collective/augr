@@ -2,6 +2,7 @@ package alpaca
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -10,6 +11,45 @@ import (
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
 )
+
+func TestStockQuotePennyContractPriceDomain(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	for _, asset := range []instrument.AssetClass{instrument.AssetClassEquity, instrument.AssetClassETF} {
+		for _, tc := range []struct {
+			name, bid, ask, tick string
+			reject               bool
+		}{
+			{"below", "0.98", "0.99", "0.01", true},
+			{"straddle", "0.99", "1.00", "0.01", true},
+			{"boundary", "1.00", "1.01", "0.01", false},
+			{"above", "762.78", "762.88", "0.01", false},
+			{"explicit_finer_contract", "0.9998", "0.9999", "0.0001", false},
+		} {
+			t.Run(string(asset)+"/"+tc.name, func(t *testing.T) {
+				ref, err := instrument.NewInstrument(instrument.InstrumentInput{IdentityKey: "fixture:price-domain", AssetClass: asset, PrimaryVenue: "iex", Currency: "USD", TickSize: decimal.RequireFromString(tc.tick), LotSize: decimal.NewFromInt(1), Multiplier: decimal.NewFromInt(1), SettlementMethod: instrument.SettlementPhysical, CreatedAt: now.Add(-time.Hour)})
+				if err != nil {
+					t.Fatal(err)
+				}
+				contract, err := instrument.NewVenueContract(instrument.VenueContractInput{InstrumentID: ref.ID, Venue: "iex", ContractID: "SPY", Currency: "USD", TickSize: ref.TickSize, LotSize: ref.LotSize, Multiplier: ref.Multiplier, SettlementMethod: ref.SettlementMethod, ValidFrom: ref.CreatedAt, CreatedAt: ref.CreatedAt})
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw := []byte(fmt.Sprintf(`{"symbol":"SPY","quote":{"bp":%s,"ap":%s,"bs":80,"as":90,"bx":"V","ax":"V","c":["R"],"z":"B","t":"2026-09-09T11:59:59Z"}}`, tc.bid, tc.ask))
+				evidence, err := decodeStockQuoteEvidence("SPY", "iex", "/v2/stocks/SPY/quotes/latest?currency=USD&feed=iex", raw, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := evidence.QuoteSnapshot(*ref, *contract, now.Add(time.Millisecond))
+				if (err != nil) != tc.reject {
+					t.Fatalf("snapshot error=%v reject=%v", err, tc.reject)
+				}
+				if tc.reject && snapshot != nil {
+					t.Fatal("rejected quote produced snapshot")
+				}
+			})
+		}
+	}
+}
 
 func TestStockQuoteCanonicalSnapshot(t *testing.T) {
 	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)

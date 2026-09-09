@@ -49,7 +49,9 @@ func (c *PipelineStockCapture) Capture(ctx context.Context, scope execution.Exec
 	if clock == nil {
 		clock = time.Now
 	}
-	at := clock().UTC()
+	// Policy and retained reference timestamps use UTC microsecond precision.
+	// Normalize the local eligibility instant, not the provider's quote time.
+	at := clock().UTC().Truncate(time.Microsecond)
 	run, err := NewPipelineRunRepo(c.Pool, scope.AccountID()).Get(ctx, ref)
 	if err != nil {
 		return nil, err
