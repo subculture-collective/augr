@@ -134,7 +134,7 @@ func testPipelineStockCapture(t *testing.T, qualified, etf bool) {
 				t.Fatal(err)
 			}
 			source := &stockCaptureSourceFixture{receipt: &alpacadata.StockQuoteEvidence{Ticker: "FIXTURE", Feed: "iex", RequestPath: "/v2/stocks/FIXTURE/quotes/latest?currency=USD&feed=iex", ResponseSHA256: hex.EncodeToString(digest[:]), BidExchange: "V", AskExchange: "V", Bid: decimal.RequireFromString("10.24"), Ask: decimal.RequireFromString("10.26"), BidSize: decimal.NewFromInt(80), AskSize: decimal.NewFromInt(90), ExchangeAt: exchange, ObservedAt: f.baseTime, RawResponse: raw}}
-			capture := &PipelineStockCapture{Pool: f.pool, Provider: source, Feed: "iex", now: func() time.Time { return f.baseTime }}
+			capture := &PipelineStockCapture{Pool: f.pool, Provider: source, Feed: "iex", now: func() time.Time { return f.baseTime.Add(123 * time.Nanosecond) }}
 			source.receipt.Tape, source.receipt.Conditions = "B", []string{"R"}
 			if qualified {
 				source.phase = "core"
