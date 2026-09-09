@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -81,6 +82,31 @@ func capacityTestContract(t *testing.T, family capacity.FamilyKind, available bo
 		t.Fatal(err)
 	}
 	return contract
+}
+
+func TestCapacityRepositorySingleConnectionReconstruction(t *testing.T) {
+	fixture := newCapacityRepositoryFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, contract := range fixture.contracts {
+		if _, err := fixture.repo.RegisterContract(ctx, contract); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := fixture.base.evaluation.experiment.strategy.pool.Config()
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	got, err := NewCapacityRepo(pool).RecordComparison(ctx, fixture.comparison)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Digest() != fixture.comparison.Digest() {
+		t.Fatal("comparison did not reconstruct")
+	}
 }
 
 func TestCapacityRepositoryRoundTripEightWritersAndRestart(t *testing.T) {

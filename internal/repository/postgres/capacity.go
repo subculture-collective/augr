@@ -189,6 +189,7 @@ func (r *CapacityRepo) GetComparison(ctx context.Context, id uuid.UUID) (*capaci
 		return nil, err
 	}
 	contracts := []*capacity.Contract{}
+	contractIDs := []uuid.UUID{}
 	expected := []json.RawMessage{}
 	for rows.Next() {
 		var contractID uuid.UUID
@@ -197,15 +198,22 @@ func (r *CapacityRepo) GetComparison(ctx context.Context, id uuid.UUID) (*capaci
 			rows.Close()
 			return nil, fmt.Errorf("postgres: capacity family scan failed")
 		}
-		contract, loadErr := r.GetContract(ctx, contractID)
-		if loadErr != nil {
-			rows.Close()
-			return nil, loadErr
-		}
-		contracts = append(contracts, contract)
+		contractIDs = append(contractIDs, contractID)
 		expected = append(expected, family)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Release the family cursor before acquiring another pool connection. Nested
+	// acquisitions can deadlock when concurrent readers occupy the whole pool.
+	for _, contractID := range contractIDs {
+		contract, loadErr := r.GetContract(ctx, contractID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		contracts = append(contracts, contract)
+	}
 	var envelope capacityComparisonEnvelope
 	_ = json.Unmarshal(raw, &envelope)
 	if len(expected) != len(envelope.Families) {
@@ -231,6 +239,9 @@ func (r *CapacityRepo) GetComparison(ctx context.Context, id uuid.UUID) (*capaci
 			index++
 		}
 		tierRows.Close()
+		if err := tierRows.Err(); err != nil {
+			return nil, err
+		}
 		if index != len(family.Tiers) {
 			return nil, fmt.Errorf("postgres: normalized capacity comparison %s does not reconstruct", id)
 		}
