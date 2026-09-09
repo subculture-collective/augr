@@ -17,15 +17,31 @@ import (
 
 // StockQuoteEvidence preserves top-of-book provider facts and original bytes.
 // It does not assert consolidated coverage, market status, or execution venue.
-// BidSize and AskSize are raw provider values, NOT normalized share quantities.
-// Consumers must prove the applicable quote-size unit and dated round lot before
-// converting them into canonical depth; execution lot size is a different fact.
+// BidSize and AskSize retain provider values. ShareSizes applies the dated REST
+// unit contract; execution lot size is a separate instrument/venue fact.
 type StockQuoteEvidence struct {
 	Ticker, Feed, RequestPath, ResponseSHA256 string
 	BidExchange, AskExchange                  string
 	Bid, Ask, BidSize, AskSize                decimal.Decimal
 	ExchangeAt, ObservedAt                    time.Time
 	RawResponse                               []byte
+}
+
+// ShareSizes returns REST quote sizes in shares after the provider's November
+// 3, 2025 unit change. The cutover day is rejected conservatively because its
+// timezone boundary is not specified. Older round-lot data needs dated reference
+// conversion and must never be multiplied by a guessed or current round lot.
+// Source: https://docs.alpaca.markets/us/reference/stocklatestquotesingle-1.md
+func (e *StockQuoteEvidence) ShareSizes() (decimal.Decimal, decimal.Decimal, error) {
+	if e == nil || e.ExchangeAt.Before(time.Date(2025, 11, 4, 0, 0, 0, 0, time.UTC)) {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("alpaca: historical quote size needs dated unit conversion")
+	}
+	for _, size := range []decimal.Decimal{e.BidSize, e.AskSize} {
+		if !size.IsPositive() || !size.Equal(size.Truncate(0)) || size.GreaterThan(decimal.NewFromInt(4294967295)) {
+			return decimal.Zero, decimal.Zero, fmt.Errorf("alpaca: quote size is not a positive uint32 share quantity")
+		}
+	}
+	return e.BidSize, e.AskSize, nil
 }
 
 // StockQuoteProvider fetches explicitly selected feeds without a broker binding.

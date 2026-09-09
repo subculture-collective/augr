@@ -8,7 +8,38 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/shopspring/decimal"
 )
+
+func TestStockQuoteShareSizeUnits(t *testing.T) {
+	for _, name := range []string{"current", "historical", "cutover", "fractional", "overflow"} {
+		t.Run(name, func(t *testing.T) {
+			evidence := &StockQuoteEvidence{ExchangeAt: time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC), BidSize: decimal.NewFromInt(80), AskSize: decimal.NewFromInt(80)}
+			switch name {
+			case "historical":
+				evidence.ExchangeAt = time.Date(2025, 11, 2, 12, 0, 0, 0, time.UTC)
+			case "cutover":
+				evidence.ExchangeAt = time.Date(2025, 11, 3, 12, 0, 0, 0, time.UTC)
+			case "fractional":
+				evidence.BidSize = decimal.RequireFromString("1.5")
+			case "overflow":
+				evidence.BidSize = decimal.NewFromInt(4294967296)
+			}
+			bid, ask, err := evidence.ShareSizes()
+			if name != "current" {
+				if err == nil {
+					t.Fatal("accepted unqualified share quantity")
+				}
+				return
+			}
+			if err != nil || !bid.Equal(decimal.NewFromInt(80)) || !ask.Equal(decimal.NewFromInt(80)) {
+				t.Fatal("current quote sizes were incorrectly multiplied by round lot")
+			}
+		})
+	}
+}
 
 func TestStockQuoteEvidence(t *testing.T) {
 	valid := `{"symbol":"SPY","quote":{"bp":600.010001,"ap":600.020002,"bs":3,"as":4,"bx":"V","ax":"V","t":"2026-01-01T15:00:00.123456789Z"}}`
