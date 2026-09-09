@@ -150,8 +150,11 @@ jobs:
 
       - name: Merge coverage profiles
         run: |
-          go install github.com/wadey/gocovmerge@latest
-          gocovmerge coverage-unit.out coverage-integration.out > coverage.out
+          coverage_tools=$(mktemp -d)
+          go -C "$coverage_tools" mod init augr-ci-coverage
+          go -C "$coverage_tools" get github.com/wadey/gocovmerge@v0.0.0-20160331181800-b5bfa59ec0ad golang.org/x/tools@v0.38.0
+          go -C "$coverage_tools" build -o "$coverage_tools/gocovmerge" github.com/wadey/gocovmerge
+          "$coverage_tools/gocovmerge" coverage-unit.out coverage-integration.out > coverage.out
 
       - name: Report coverage
         run: |
