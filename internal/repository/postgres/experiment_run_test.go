@@ -1,16 +1,58 @@
 package postgres
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/experimentrun"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
+
+func TestExperimentRunRepoCompletedReplayReleasesTransaction(t *testing.T) {
+	fixture := newExperimentRunMigrationFixture(t)
+	ctx := fixture.strategy.ctx
+	repo := NewExperimentRunRepo(fixture.strategy.pool)
+	if _, err := repo.RecordProgram(ctx, fixture.program); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RecordPlan(ctx, fixture.plan); err != nil {
+		t.Fatal(err)
+	}
+	attemptID := uuid.New()
+	started, err := experimentrun.NewAttemptEvent(experimentrun.AttemptEventInput{AttemptID: attemptID, Sequence: 0, Type: experimentrun.AttemptStarted, OccurredAt: fixture.start})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.RecordAttemptEvent(ctx, fixture.plan.ExperimentID(), uuid.Nil, started); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := experimentrun.NewAttemptEvent(experimentrun.AttemptEventInput{AttemptID: attemptID, Sequence: 1, Type: experimentrun.AttemptCompleted, OccurredAt: fixture.start.Add(time.Second), ResultID: fixture.result.ID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repo.RecordCompletedResult(ctx, fixture.plan.ExperimentID(), fixture.result, completed); err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.strategy.pool.Config()
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	result, event, err := NewExperimentRunRepo(pool).RecordCompletedResult(ctx, fixture.plan.ExperimentID(), fixture.result, completed)
+	if err != nil || !sameResult(result, fixture.result) || !sameAttemptEvent(event, completed) {
+		t.Fatalf("completed replay differs: %v", err)
+	}
+}
 
 func TestExperimentRunRepoPersistsReloadsAndListsCompleteGraph(t *testing.T) {
 	fixture := newExperimentRunMigrationFixture(t)
