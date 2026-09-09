@@ -19,6 +19,33 @@ type stubRequestLimiter struct {
 	err   error
 }
 
+func TestTradierQuoteEvidenceRetainsOlderSideTimestamp(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 9, 9, 7, 0, 0, 123000000, time.UTC)
+	for _, test := range []struct {
+		name     string
+		bid, ask int64
+		want     time.Time
+	}{
+		{"same", base.UnixMilli(), base.UnixMilli(), base},
+		{"older_bid", base.UnixMilli(), base.Add(time.Second).UnixMilli(), base},
+		{"older_ask", base.Add(time.Second).UnixMilli(), base.UnixMilli(), base},
+		{"missing_bid", 0, base.UnixMilli(), time.Time{}},
+		{"missing_ask", base.UnixMilli(), 0, time.Time{}},
+		{"negative", -1, base.UnixMilli(), time.Time{}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mapTradierContract(tradierOption{
+				Symbol: "SPY260909C00500000", ExpirationDate: "2026-09-09", OptionType: "call",
+				Bid: 2, Ask: 3, BidSize: 7, AskSize: 11, BidDate: test.bid, AskDate: test.ask,
+			}, "SPY")
+			if !got.QuoteObservedAt.Equal(test.want) || got.BidSize != 7 || got.AskSize != 11 {
+				t.Fatalf("quote evidence = %s sizes %v/%v, want %s 7/11", got.QuoteObservedAt, got.BidSize, got.AskSize, test.want)
+			}
+		})
+	}
+}
+
 func (s *stubRequestLimiter) Wait(context.Context) error {
 	s.calls++
 	return s.err
@@ -51,6 +78,24 @@ func TestOptionsProviderMapsAndFiltersChain(t *testing.T) {
 	got := chain[0]
 	if got.Mid != 3 || got.Greeks.Delta != 0.4 || got.Contract.Multiplier != 100 || got.Contract.Underlying != "AAPL" {
 		t.Fatalf("mapped snapshot = %#v", got)
+	}
+}
+
+func TestOptionsProviderDecodesQuoteTimestampAndSizes(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"options":{"option":[{"symbol":"SPY260909C00500000","strike":500,"bid":2,"ask":3,"bidsize":7,"asksize":11,"bid_date":1788937200000,"ask_date":1788937201000,"contract_size":100,"option_type":"call","expiration_date":"2026-09-09"}]}}`))
+	}))
+	defer server.Close()
+	provider := NewOptionsProvider("test-token", true, nil)
+	provider.baseURL = server.URL
+	chain, err := provider.GetOptionsChain(context.Background(), "SPY", time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC), domain.OptionTypeCall)
+	if err != nil || len(chain) != 1 {
+		t.Fatalf("chain=%v err=%v", chain, err)
+	}
+	if !chain[0].QuoteObservedAt.Equal(time.UnixMilli(1788937200000)) || chain[0].BidSize != 7 || chain[0].AskSize != 11 {
+		t.Fatalf("decoded quote evidence missing: %+v", chain[0])
 	}
 }
 
