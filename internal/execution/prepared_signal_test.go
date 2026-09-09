@@ -82,3 +82,47 @@ func TestProcessPreparedSignalIdentityHandoff(t *testing.T) {
 		})
 	}
 }
+
+func TestProcessPreparedSignalSeparatesReferenceAndRoutePrices(t *testing.T) {
+	for _, entryType := range []string{"market", "limit", "stop", "stop_limit"} {
+		t.Run(entryType, func(t *testing.T) {
+			orders, positions, trades := &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}
+			plan := defaultPlan()
+			plan.EntryType = entryType
+			plan.EntryPrice, plan.StopLoss = 150, 140
+			checks, submits := 0, 0
+			assertPrices := func(order *domain.Order) {
+				t.Helper()
+				if order.ReferencePrice == nil || *order.ReferencePrice != plan.EntryPrice || order.StopPrice != nil {
+					t.Fatalf("entry reference or protective-stop mapping is wrong: %+v", order)
+				}
+				if entryType == "market" && order.LimitPrice != nil {
+					t.Fatal("market command retained a limit price")
+				}
+				if entryType == "limit" && (order.LimitPrice == nil || *order.LimitPrice != plan.EntryPrice) {
+					t.Fatal("limit command lost its limit price")
+				}
+			}
+			broker := &mockBroker{submitOrderFn: func(_ context.Context, order *domain.Order) (string, error) {
+				submits++
+				assertPrices(order)
+				return "prepared-price-external", nil
+			}}
+			manager := newTestOrderManager(broker, &mockRiskEngine{}, orders, positions, trades, &mockAuditLogRepo{})
+			manager.WithAcceptedOrderFillWriter(&preparedSignalWriter{
+				testAcceptedOrderFillWriter: &testAcceptedOrderFillWriter{orders: orders, positions: positions, trades: trades},
+				check:                       func(order *domain.Order) error { checks++; assertPrices(order); return nil },
+			})
+			err := manager.ProcessPreparedSignal(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), plan, uuid.New())
+			if entryType == "stop" || entryType == "stop_limit" {
+				if err == nil || !strings.Contains(err.Error(), "explicit entry trigger") || checks != 0 || submits != 0 || len(orders.orders) != 0 {
+					t.Fatalf("ambiguous stop command produced effects: err=%v checks=%d submits=%d", err, checks, submits)
+				}
+				return
+			}
+			if err != nil || checks != 2 || submits != 1 {
+				t.Fatalf("prepared price dispatch: err=%v checks=%d submits=%d", err, checks, submits)
+			}
+		})
+	}
+}
