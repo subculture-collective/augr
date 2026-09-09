@@ -20,8 +20,8 @@ func TestStockQuoteCanonicalSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := []byte(`{"symbol":"SPY","quote":{"bp":600.01,"ap":600.02,"bs":80,"as":90,"bx":"V","ax":"V","t":"2026-09-09T11:59:59.123456789Z"}}`)
-	for _, name := range []string{"valid", "changed_price", "changed_hash", "changed_raw", "wrong_contract", "backdated"} {
+	raw := []byte(`{"symbol":"SPY","quote":{"bp":600.01,"ap":600.02,"bs":80,"as":90,"bx":"V","ax":"V","c":["R"],"z":"B","t":"2026-09-09T11:59:59.123456789Z"}}`)
+	for _, name := range []string{"valid", "changed_price", "changed_hash", "changed_raw", "changed_conditions", "changed_tape", "wrong_contract", "backdated"} {
 		t.Run(name, func(t *testing.T) {
 			evidence, err := decodeStockQuoteEvidence("SPY", "iex", "/v2/stocks/SPY/quotes/latest?currency=USD&feed=iex", raw, now)
 			if err != nil {
@@ -36,6 +36,10 @@ func TestStockQuoteCanonicalSnapshot(t *testing.T) {
 				evidence.ResponseSHA256 = "changed"
 			case "changed_raw":
 				evidence.RawResponse = []byte(`{}`)
+			case "changed_conditions":
+				evidence.Conditions[0] = "H"
+			case "changed_tape":
+				evidence.Tape = "A"
 			case "wrong_contract":
 				binding.InstrumentID = uuid.New()
 			case "backdated":
@@ -60,6 +64,9 @@ func TestStockQuoteCanonicalSnapshot(t *testing.T) {
 			}
 			if err := json.Unmarshal(snapshot.Metadata, &metadata); err != nil || string(metadata.Receipt.RawResponse) != string(raw) || metadata.Receipt.ExchangeAt.Nanosecond() != 123456789 || metadata.DepthScope != "top_of_book" {
 				t.Fatal("lost original source precision or depth scope")
+			}
+			if metadata.Receipt.Tape != "B" || len(metadata.Receipt.Conditions) != 1 || metadata.Receipt.Conditions[0] != "R" {
+				t.Fatal("lost source quote conditions or tape")
 			}
 			evidence.ObservedAt = evidence.ObservedAt.Add(time.Second)
 			later, err := evidence.QuoteSnapshot(*reference, binding, retained.Add(time.Second))

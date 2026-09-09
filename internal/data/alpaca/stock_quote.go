@@ -25,6 +25,8 @@ type StockQuoteEvidence struct {
 	Bid, Ask, BidSize, AskSize                decimal.Decimal
 	ExchangeAt, ObservedAt                    time.Time
 	RawResponse                               []byte
+	Conditions                                []string
+	Tape                                      string
 }
 
 // ShareSizes returns REST quote sizes in shares after the provider's November
@@ -111,6 +113,8 @@ func decodeStockQuoteEvidence(ticker, feed, path string, body []byte, observed t
 			BidExchange string      `json:"bx"`
 			AskExchange string      `json:"ax"`
 			Timestamp   time.Time   `json:"t"`
+			Conditions  []string    `json:"c"`
+			Tape        string      `json:"z"`
 		} `json:"quote"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil || payload.Symbol != ticker || payload.Quote.Timestamp.IsZero() || payload.Quote.Timestamp.After(observed) || payload.Quote.BidExchange == "" || payload.Quote.AskExchange == "" {
@@ -129,5 +133,5 @@ func decodeStockQuoteEvidence(ticker, feed, path string, body []byte, observed t
 		return nil, fmt.Errorf("alpaca: crossed stock quote")
 	}
 	digest := sha256.Sum256(body)
-	return &StockQuoteEvidence{Ticker: ticker, Feed: feed, RequestPath: path, ResponseSHA256: hex.EncodeToString(digest[:]), RawResponse: append([]byte(nil), body...), Bid: parsed[0], Ask: parsed[1], BidSize: parsed[2], AskSize: parsed[3], BidExchange: payload.Quote.BidExchange, AskExchange: payload.Quote.AskExchange, ExchangeAt: payload.Quote.Timestamp.UTC(), ObservedAt: observed}, nil
+	return &StockQuoteEvidence{Ticker: ticker, Feed: feed, RequestPath: path, ResponseSHA256: hex.EncodeToString(digest[:]), RawResponse: append([]byte(nil), body...), Bid: parsed[0], Ask: parsed[1], BidSize: parsed[2], AskSize: parsed[3], BidExchange: payload.Quote.BidExchange, AskExchange: payload.Quote.AskExchange, ExchangeAt: payload.Quote.Timestamp.UTC(), ObservedAt: observed, Conditions: append([]string(nil), payload.Quote.Conditions...), Tape: payload.Quote.Tape}, nil
 }

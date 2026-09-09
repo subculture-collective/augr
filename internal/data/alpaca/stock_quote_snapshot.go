@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
@@ -35,6 +36,9 @@ func (e *StockQuoteEvidence) QuoteSnapshot(reference instrument.Instrument, cont
 		return nil, fmt.Errorf("alpaca: quote receipt fields disagree with retained source bytes")
 	}
 	// Re-decoding prevents edited structured fields from bypassing raw evidence.
+	if e.Tape != decoded.Tape || !slices.Equal(e.Conditions, decoded.Conditions) {
+		return nil, fmt.Errorf("alpaca: quote conditions disagree with retained source bytes")
+	}
 	bidSize, askSize, err := decoded.ShareSizes()
 	if err != nil {
 		return nil, err
