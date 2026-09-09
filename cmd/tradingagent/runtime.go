@@ -1098,6 +1098,12 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			return nil, nil, nil, err
 		}
 		strategyRunner.runGroup = runGroup
+		if runtimeDeps.executionAccount.Environment() == domain.AccountEnvironmentPaperScored {
+			strategyRunner.stockCapture = &pgrepo.PipelineStockCapture{Pool: db.Pool, Feed: "iex", Provider: alpacaData.NewStockQuoteProvider(cfg.Brokers.Alpaca.APIKey, cfg.Brokers.Alpaca.APISecret), Calendar: alpacaData.NewMarketClockProvider(cfg.Brokers.Alpaca.APIKey, cfg.Brokers.Alpaca.APISecret)}
+			strategyRunner.preparePaperStockSignal = func(ctx context.Context, scope execution.ExecutionScope, plan execution.TradingPlan) (execution.SignalOrderPreparation, error) {
+				return pgrepo.LoadPipelineSignalPreparation(ctx, db.Pool, scope, plan)
+			}
+		}
 		portfolioAllocatorMode := portfolioAllocatorModeFromEnv()
 		if portfolioAllocatorMode == portfolio.AllocatorModePaper && (runtimeDeps.executionAccount.Environment() != domain.AccountEnvironmentPaperScored || cfg.Features.EnableLiveTrading) {
 			return nil, nil, nil, fmt.Errorf("portfolio allocator paper mode requires paper_scored account with live trading disabled")
@@ -1242,6 +1248,12 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				overnightBacktestRunRepo := pgrepo.NewOvernightBacktestRunRepo(db.Pool)
 				polymarketDiscoveryRunRepo := pgrepo.NewPolymarketDiscoveryRunRepo(db.Pool)
 				portfolioPaperProcessor := portfolio.NewPaperOrderManagerProcessor(portfolio.PaperOrderManagerProcessorDeps{
+					PrepareSignal: func(ctx context.Context, request portfolio.PaperOrderRequest) (execution.SignalOrderPreparation, error) {
+						if strategyRunner.preparePaperStockSignal == nil {
+							return nil, fmt.Errorf("canonical stock preparation is unavailable")
+						}
+						return strategyRunner.preparePaperStockSignal(ctx, request.Scope, request.Plan)
+					},
 					RiskEngine:       riskEngine,
 					PositionRepo:     positionRepo,
 					OrderRepo:        orderRepo,

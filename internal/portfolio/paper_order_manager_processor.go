@@ -24,8 +24,9 @@ type PaperOrderManagerProcessor struct {
 }
 
 type PaperOrderManagerProcessorDeps struct {
-	// PrepareSignal supplies per-request canonical evidence. Once configured,
-	// missing evidence fails closed instead of falling back to legacy execution.
+	// PrepareSignal supplies canonical evidence for actionable stock requests.
+	// Native prediction and HOLD paths retain their own execution contracts.
+	// Missing stock evidence fails closed once configured.
 	PrepareSignal    func(context.Context, PaperOrderRequest) (execution.SignalOrderPreparation, error)
 	EconomicWriter   execution.AcceptedOrderFillWriter
 	RiskEngine       risk.RiskEngine
@@ -185,7 +186,8 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		manager = manager.WithDecisionRecorder(p.deps.DecisionRecorder)
 	}
 	var processErr error
-	if p.deps.PrepareSignal != nil {
+	needsPreparation := p.deps.PrepareSignal != nil && request.Plan.MarketType.Normalize() == domain.MarketTypeStock && request.Signal.Signal != domain.PipelineSignalHold
+	if needsPreparation {
 		preparation, err := p.deps.PrepareSignal(ctx, request)
 		if err != nil {
 			return PaperOrderResult{}, fmt.Errorf("portfolio: prepare canonical paper signal: %w", err)
@@ -198,7 +200,7 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		processErr = manager.ProcessSignal(ctx, request.Scope, request.Signal, request.Plan)
 	}
 	if p.deps.OrderRepo == nil {
-		if processErr != nil && p.deps.PrepareSignal != nil {
+		if processErr != nil && needsPreparation {
 			return PaperOrderResult{}, processErr
 		}
 		return PaperOrderResult{Skipped: true, Reason: "missing_order_repo"}, nil

@@ -85,6 +85,9 @@ type polymarketTickFeed interface {
 }
 
 type realStrategyRunner struct {
+	stockCapture            stockEvidenceCapture
+	preparePaperStockSignal func(context.Context, execution.ExecutionScope, execution.TradingPlan) (execution.SignalOrderPreparation, error)
+
 	executionAccount       domain.ExecutionAccountBinding
 	runGroupMu             sync.Mutex
 	runGroup               *runcontrol.Group
@@ -393,7 +396,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		if err != nil {
 			return canonical, err
 		}
-		if err := orderManager.ProcessSignal(ctx, scope, finalSignal, tradingPlan); err != nil {
+		if err := r.processStrategySignal(ctx, orderManager, scope, finalSignal, tradingPlan); err != nil {
 			return canonical, err
 		}
 	}
@@ -1854,6 +1857,9 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 
 	prepared, err := runner.Prepare(strategy, r.globals)
 	if err != nil {
+		return nil, agent.PreparedRun{}, nil, nil, err
+	}
+	if err := r.configurePreparedStockCapture(&prepared, strategy); err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, err
 	}
 
