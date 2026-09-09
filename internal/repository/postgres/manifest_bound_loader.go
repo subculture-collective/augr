@@ -25,6 +25,22 @@ func NewManifestBoundHistoricalLoader(pool *pgxpool.Pool, reports *ReportArtifac
 	return &ManifestBoundHistoricalLoader{pool: pool, reports: reports, accountID: accountID}
 }
 
+// LoadResearchInterval reconstructs the same account-bound evidence graph used
+// by Load. It never derives scope dates from a provider or the wall clock.
+func (loader *ManifestBoundHistoricalLoader) LoadResearchInterval(ctx context.Context, scopeID uuid.UUID) (data.ResearchInterval, error) {
+	if loader == nil || loader.pool == nil || loader.reports == nil || loader.accountID == uuid.Nil || scopeID == uuid.Nil {
+		return data.ResearchInterval{}, fmt.Errorf("manifest-bound research interval requires scope and account")
+	}
+	report, err := loader.reports.DiscoveryDeploymentReadinessForScope(ctx, scopeID, loader.accountID)
+	if err != nil {
+		return data.ResearchInterval{}, fmt.Errorf("manifest-bound research interval: %w", err)
+	}
+	if !report.Stock.Ready {
+		return data.ResearchInterval{}, fmt.Errorf("manifest-bound stock evidence: %s", report.Stock.Reason)
+	}
+	return data.ResearchInterval{Start: report.EvaluationStart, End: report.EvaluationEnd}, nil
+}
+
 func (loader *ManifestBoundHistoricalLoader) Load(ctx context.Context, scopeID, instrumentID uuid.UUID, timeframe data.Timeframe, start, end time.Time) ([]domain.OHLCV, data.ManifestBindingReceipt, error) {
 	return loader.load(ctx, scopeID, instrumentID, timeframe, start, end, dataset.MarketPayloadStockBar)
 }
