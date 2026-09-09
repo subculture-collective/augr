@@ -1099,6 +1099,13 @@ func TestNewAPIServerWiresPolymarketReconcileAutomationJob(t *testing.T) {
 }
 
 func TestNewAPIServerWiresKalshiDiscoveryAndMarkingAutomationJobs(t *testing.T) {
+	originalAccountLoader := runtimeLoadCanonicalAccount
+	t.Cleanup(func() { runtimeLoadCanonicalAccount = originalAccountLoader })
+	runtimeLoadCanonicalAccount = func(_ context.Context, _ *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
+		account := validRuntimeAccount(accountID)
+		account.Venue = "internal"
+		return &account, nil
+	}
 	origNewDB := runtimeNewDB
 	origNewProjectionDB := runtimeNewProjectionDB
 	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
