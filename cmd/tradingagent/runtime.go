@@ -1248,6 +1248,12 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				overnightBacktestRunRepo := pgrepo.NewOvernightBacktestRunRepo(db.Pool)
 				polymarketDiscoveryRunRepo := pgrepo.NewPolymarketDiscoveryRunRepo(db.Pool)
 				portfolioPaperProcessor := portfolio.NewPaperOrderManagerProcessor(portfolio.PaperOrderManagerProcessorDeps{
+					PrepareSignal: func(ctx context.Context, request portfolio.PaperOrderRequest) (execution.SignalOrderPreparation, error) {
+						if strategyRunner.preparePaperStockSignal == nil {
+							return nil, fmt.Errorf("canonical stock preparation is unavailable")
+						}
+						return strategyRunner.preparePaperStockSignal(ctx, request.Scope, request.Plan)
+					},
 					RiskEngine:       riskEngine,
 					PositionRepo:     positionRepo,
 					OrderRepo:        orderRepo,

@@ -33,7 +33,7 @@ func TestPaperPreparationFailsClosed(t *testing.T) {
 					return nil, test.failure
 				},
 			})
-			result, err := processor.ProcessPaperOrder(context.Background(), PaperOrderRequest{NotionalUSD: 100})
+			result, err := processor.ProcessPaperOrder(context.Background(), PaperOrderRequest{NotionalUSD: 100, Plan: execution.TradingPlan{MarketType: domain.MarketTypeStock}, Signal: execution.FinalSignal{Signal: domain.PipelineSignalBuy}})
 			if err == nil || !strings.Contains(err.Error(), test.message) || calls != 1 || result.Skipped {
 				t.Fatalf("result=%+v err=%v calls=%d", result, err, calls)
 			}
@@ -69,7 +69,7 @@ func TestPaperPreparationRequiresCanonicalChecker(t *testing.T) {
 			return uncalledPreparation{t}, nil
 		},
 	})
-	_, err := processor.ProcessPaperOrder(context.Background(), PaperOrderRequest{NotionalUSD: 100})
+	_, err := processor.ProcessPaperOrder(context.Background(), PaperOrderRequest{NotionalUSD: 100, Plan: execution.TradingPlan{MarketType: domain.MarketTypeStock}, Signal: execution.FinalSignal{Signal: domain.PipelineSignalBuy}})
 	if err == nil || !strings.Contains(err.Error(), "canonical preparation checker") {
 		t.Fatalf("missing checker not rejected: %v", err)
 	}
@@ -85,5 +85,21 @@ func TestPaperPreparationRequiresClaimRepository(t *testing.T) {
 	_, err := processor.ProcessPaperOrder(context.Background(), PaperOrderRequest{NotionalUSD: 100, OpportunityID: uuid.New(), ClaimID: uuid.New()})
 	if err == nil || !strings.Contains(err.Error(), "claim repository") {
 		t.Fatalf("missing claim ownership boundary: %v", err)
+	}
+}
+
+func TestStockPreparationPreservesOtherRoutes(t *testing.T) {
+	for _, market := range []domain.MarketType{domain.MarketTypeKalshi, domain.MarketTypePolymarket, domain.MarketTypeStock} {
+		t.Run(string(market), func(t *testing.T) {
+			processor := NewPaperOrderManagerProcessor(PaperOrderManagerProcessorDeps{PrepareSignal: func(context.Context, PaperOrderRequest) (execution.SignalOrderPreparation, error) {
+				t.Fatal("stock preparation intercepted native or HOLD route")
+				return nil, nil
+			}})
+			signal := domain.PipelineSignalBuy
+			if market == domain.MarketTypeStock {
+				signal = domain.PipelineSignalHold
+			}
+			_, _ = processor.ProcessPaperOrder(t.Context(), PaperOrderRequest{NotionalUSD: 100, Plan: execution.TradingPlan{MarketType: market}, Signal: execution.FinalSignal{Signal: signal}})
+		})
 	}
 }

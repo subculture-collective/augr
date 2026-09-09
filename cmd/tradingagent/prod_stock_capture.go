@@ -43,8 +43,14 @@ func (r *realStrategyRunner) configurePreparedStockCapture(prepared *agent.Prepa
 		if err != nil {
 			return err
 		}
-		_, err = r.stockCapture.Capture(ctx, scope, selection)
-		return err
+		pinned, err := r.stockCapture.Capture(ctx, scope, selection)
+		if err != nil {
+			return err
+		}
+		if pinned == nil {
+			return fmt.Errorf("stock capture returned no pinned selection")
+		}
+		return nil
 	}
 	return nil
 }
