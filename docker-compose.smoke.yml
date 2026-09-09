@@ -1,5 +1,12 @@
 services:
+  postgres:
+    ports: !override
+      - '127.0.0.1::5432'
+  redis:
+    ports: !reset []
   app:
     build:
       target: production
     volumes: !reset []
+    ports: !override
+      - '127.0.0.1::8080'

@@ -78,7 +78,9 @@ jobs:
           cache: true
 
       - name: Verify integration gate failure cases
-        run: python3 scripts/test-integration_test.py
+        run: |
+          python3 scripts/test-integration_test.py
+          python3 scripts/test-smoke-isolation.py
 
       - name: Run unit tests
         run: go test -short -race -count=1 -coverprofile=coverage-unit.out ./...
@@ -182,6 +184,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       COMPOSE_FILE: docker-compose.yml:docker-compose.smoke.yml
+      COMPOSE_PROJECT_NAME: augr-smoke-${{ github.run_id }}-${{ github.run_attempt }}
     needs:
       - changes
       - integration-tests
@@ -261,8 +264,11 @@ jobs:
             echo "SMOKE_BASE_URL=http://app:8080" >> "$GITHUB_ENV"
             echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@postgres:5432/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
           else
-            echo "SMOKE_BASE_URL=http://127.0.0.1:8081" >> "$GITHUB_ENV"
-            echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
+            app_address=$(docker compose port app 8080)
+            database_address=$(docker compose port postgres 5432)
+            test -n "$app_address" && test -n "$database_address"
+            echo "SMOKE_BASE_URL=http://${app_address}" >> "$GITHUB_ENV"
+            echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@${database_address}/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
           fi
 
       - name: Wait for API
