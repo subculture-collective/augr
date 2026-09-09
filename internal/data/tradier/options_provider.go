@@ -283,11 +283,18 @@ func mapTradierContract(c tradierOption, underlying string) domain.OptionSnapsho
 			Style:      "american",
 		},
 		Bid:          c.Bid,
+		BidSize:      c.BidSize,
 		Ask:          c.Ask,
+		AskSize:      c.AskSize,
 		Mid:          mid,
 		Last:         c.Last,
 		Volume:       float64(c.Volume),
 		OpenInterest: float64(c.OpenInterest),
+	}
+	// Both sides must carry source timestamps. Taking the older side prevents
+	// a recent ask from making an old bid appear fresh (or vice versa).
+	if c.BidDate > 0 && c.AskDate > 0 {
+		snap.QuoteObservedAt = time.UnixMilli(min(c.BidDate, c.AskDate)).UTC()
 	}
 
 	if c.Greeks != nil {
@@ -319,7 +326,11 @@ type tradierOption struct {
 	Description    string         `json:"description"`
 	Strike         float64        `json:"strike"`
 	Bid            float64        `json:"bid"`
+	BidSize        float64        `json:"bidsize"`
+	BidDate        int64          `json:"bid_date"`
 	Ask            float64        `json:"ask"`
+	AskSize        float64        `json:"asksize"`
+	AskDate        int64          `json:"ask_date"`
 	Last           float64        `json:"last"`
 	Volume         int            `json:"volume"`
 	OpenInterest   int            `json:"open_interest"`
