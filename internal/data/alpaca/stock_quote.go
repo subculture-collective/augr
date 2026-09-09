@@ -17,6 +17,9 @@ import (
 
 // StockQuoteEvidence preserves top-of-book provider facts and original bytes.
 // It does not assert consolidated coverage, market status, or execution venue.
+// BidSize and AskSize are raw provider values, NOT normalized share quantities.
+// Consumers must prove the applicable quote-size unit and dated round lot before
+// converting them into canonical depth; execution lot size is a different fact.
 type StockQuoteEvidence struct {
 	Ticker, Feed, RequestPath, ResponseSHA256 string
 	BidExchange, AskExchange                  string
