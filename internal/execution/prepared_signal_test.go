@@ -11,11 +11,93 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 )
 
 type preparedSignalWriter struct {
 	*testAcceptedOrderFillWriter
 	check func(*domain.Order) error
+}
+
+type signalPreparationStub struct {
+	resolve func(float64) (uuid.UUID, float64, error)
+	persist func(domain.Order) error
+}
+
+func (p signalPreparationStub) Resolve(_ context.Context, _ execution.ExecutionScope, _ execution.FinalSignal, _ execution.TradingPlan, requested float64) (uuid.UUID, float64, error) {
+	return p.resolve(requested)
+}
+
+func (p signalPreparationStub) PersistApproved(_ context.Context, _ execution.ExecutionScope, order domain.Order) error {
+	return p.persist(order)
+}
+
+func TestSignalPreparationUsesActualRiskAdmission(t *testing.T) {
+	for _, name := range []string{"approved", "risk_rejected", "quantity_increased", "persistence_failed"} {
+		t.Run(name, func(t *testing.T) {
+			orders, positions, trades := &mockOrderRepo{}, &mockPositionRepo{}, &mockTradeRepo{}
+			orderID := uuid.New()
+			var resolvedQuantity float64
+			riskChecks, writes, checks, submissions := 0, 0, 0, 0
+			engine := &mockRiskEngine{checkPreTradeFn: func(_ context.Context, order *domain.Order, _ risk.Portfolio) (bool, string, error) {
+				riskChecks++
+				if writes != 0 || order.ID != orderID || order.Quantity != resolvedQuantity {
+					t.Fatal("risk did not see the resolved command before preparation writes")
+				}
+				return name != "risk_rejected", "test risk decision", nil
+			}}
+			broker := &mockBroker{submitOrderFn: func(_ context.Context, order *domain.Order) (string, error) {
+				submissions++
+				if writes != 1 || checks != 1 || order.ID != orderID || order.Quantity != resolvedQuantity {
+					t.Fatal("broker called before checked preparation")
+				}
+				return "admitted-external", nil
+			}}
+			manager := newTestOrderManager(broker, engine, orders, positions, trades, &mockAuditLogRepo{})
+			manager.WithAcceptedOrderFillWriter(&preparedSignalWriter{
+				testAcceptedOrderFillWriter: &testAcceptedOrderFillWriter{orders: orders, positions: positions, trades: trades},
+				check: func(order *domain.Order) error {
+					checks++
+					if writes != 1 || order.ID != orderID || order.Quantity != resolvedQuantity {
+						t.Fatal("checker did not receive persisted resolved command")
+					}
+					return nil
+				},
+			})
+			preparation := signalPreparationStub{
+				resolve: func(requested float64) (uuid.UUID, float64, error) {
+					resolvedQuantity = requested / 2
+					if name == "quantity_increased" {
+						resolvedQuantity = requested * 2
+					}
+					return orderID, resolvedQuantity, nil
+				},
+				persist: func(order domain.Order) error {
+					writes++
+					if riskChecks != 1 || order.Quantity != resolvedQuantity || order.ID != orderID {
+						t.Fatal("preparation wrote without exact risk admission")
+					}
+					if name == "persistence_failed" {
+						return errors.New("durable route failed")
+					}
+					return nil
+				},
+			}
+			err := manager.ProcessSignalWithPreparation(context.Background(), strategyScope(uuid.New(), uuid.New()), defaultSignal(), defaultPlan(), preparation)
+			if name == "approved" {
+				if err != nil || submissions != 1 || writes != 1 {
+					t.Fatalf("approved preparation: err=%v writes=%d submissions=%d", err, writes, submissions)
+				}
+				return
+			}
+			if err == nil || submissions != 0 || len(orders.orders) != 0 {
+				t.Fatalf("failed preparation produced effects: err=%v submissions=%d", err, submissions)
+			}
+			if name != "persistence_failed" && writes != 0 {
+				t.Fatal("unapproved command persisted")
+			}
+		})
+	}
 }
 
 func (w *preparedSignalWriter) RequireAcceptedOrderPrepared(_ context.Context, _ execution.ExecutionScope, order *domain.Order) error {
