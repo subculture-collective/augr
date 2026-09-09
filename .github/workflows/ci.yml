@@ -185,6 +185,7 @@ jobs:
     env:
       COMPOSE_FILE: docker-compose.yml:docker-compose.smoke.yml
       COMPOSE_PROJECT_NAME: augr-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      PROJECTION_ACCOUNT_ID: 00000000-0000-4000-8000-000000000064
     needs:
       - changes
       - integration-tests
@@ -206,6 +207,7 @@ jobs:
           APP_ENV=smoke
           APP_HOST=0.0.0.0
           APP_PORT=8080
+          PROJECTION_ACCOUNT_ID=${PROJECTION_ACCOUNT_ID}
           JWT_SECRET=${SMOKE_JWT_SECRET}
           DATABASE_URL=postgres://postgres:postgres@postgres:5432/tradingagent?sslmode=disable
           DATABASE_POOL_SIZE=10
