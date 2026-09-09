@@ -22,6 +22,14 @@ type PortfolioRiskRepo struct {
 	pool      *pgxpool.Pool
 	accountID uuid.UUID
 	source    balanceSource
+	internal  *CanonicalExperimentCapitalStateSource
+}
+
+// WithInternalCapitalSource configures the separately attested internal-account
+// path during runtime construction; broker account handling is unchanged.
+func (repo *PortfolioRiskRepo) WithInternalCapitalSource(source *CanonicalExperimentCapitalStateSource) *PortfolioRiskRepo {
+	repo.internal = source
+	return repo
 }
 
 func NewPortfolioRiskRepo(pool *pgxpool.Pool, accountID uuid.UUID, source ...balanceSource) *PortfolioRiskRepo {
@@ -100,6 +108,9 @@ func (repo *PortfolioRiskRepo) CaptureAccountSnapshot(ctx context.Context) (port
 	if string(account.Environment) != "paper_scored" || string(account.Status) != "active" {
 		return snapshot, fmt.Errorf("postgres: canonical portfolio account is not active paper_scored")
 	}
+	if account.Venue == "internal" && account.ExternalAccountID == "" && repo.internal != nil {
+		return repo.captureInternalAccountSnapshot(ctx)
+	}
 	if string(account.Venue) != "alpaca" || account.ExternalAccountID == "" {
 		return snapshot, fmt.Errorf("postgres: portfolio account requires a supported account-specific snapshot source")
 	}
@@ -156,24 +167,36 @@ func (repo *PortfolioRiskRepo) LoadPortfolioRiskState(ctx context.Context, accou
 	if err = repo.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM risk_breaker_state WHERE reset_at IS NULL)`).Scan(&state.CircuitBreakerOpen); err != nil {
 		return state, fmt.Errorf("postgres: load risk breaker state: %w", err)
 	}
-	var reconciliationID uuid.UUID
-	var reconciliationClean bool
-	var reconciliationAt time.Time
-	err = repo.pool.QueryRow(ctx, `SELECT run.id,run.clean,run.created_at FROM venue_reconciliation_runs run
+	var internalID *uuid.UUID
+	if err := repo.pool.QueryRow(ctx, `SELECT internal_capital_snapshot_id FROM portfolio_account_snapshots WHERE id=$1 AND account_id=$2`, accountSnapshotID, repo.accountID).Scan(&internalID); err != nil {
+		return state, err
+	}
+	if internalID != nil {
+		identity, err := repo.verifyInternalAccountConsistency(ctx, *internalID, asOf)
+		if err != nil {
+			return state, err
+		}
+		state.ReconciliationID = identity
+	} else {
+		var reconciliationID uuid.UUID
+		var reconciliationClean bool
+		var reconciliationAt time.Time
+		err = repo.pool.QueryRow(ctx, `SELECT run.id,run.clean,run.created_at FROM venue_reconciliation_runs run
 		JOIN venue_local_snapshots snapshot ON snapshot.id=run.local_snapshot_id
 		WHERE snapshot.account_id=$1 AND snapshot.provider='alpaca'
 		ORDER BY run.created_at DESC,run.id DESC LIMIT 1`, repo.accountID).Scan(&reconciliationID, &reconciliationClean, &reconciliationAt)
-	if err != nil {
-		return state, fmt.Errorf("postgres: load latest Alpaca reconciliation: %w", err)
+		if err != nil {
+			return state, fmt.Errorf("postgres: load latest Alpaca reconciliation: %w", err)
+		}
+		if reconciliationID == uuid.Nil || !reconciliationClean {
+			return state, fmt.Errorf("postgres: latest Alpaca reconciliation is not clean")
+		}
+		policy, policyErr := portfolio.ReviewedPortfolioRiskPolicyV1()
+		if policyErr != nil || reconciliationAt.After(asOf) || asOf.Sub(reconciliationAt) > policy.MaxReconciliationAge() {
+			return state, fmt.Errorf("postgres: latest Alpaca reconciliation is stale")
+		}
+		state.ReconciliationID = reconciliationID.String()
 	}
-	if reconciliationID == uuid.Nil || !reconciliationClean {
-		return state, fmt.Errorf("postgres: latest Alpaca reconciliation is not clean")
-	}
-	policy, policyErr := portfolio.ReviewedPortfolioRiskPolicyV1()
-	if policyErr != nil || reconciliationAt.After(asOf) || asOf.Sub(reconciliationAt) > policy.MaxReconciliationAge() {
-		return state, fmt.Errorf("postgres: latest Alpaca reconciliation is stale")
-	}
-	state.ReconciliationID = reconciliationID.String()
 	rows, err := repo.pool.Query(ctx, `SELECT upper(opportunity.ticker),sum(decision.reserved_risk_usd)::double precision
 		FROM allocation_decisions decision
 		JOIN portfolio_opportunities opportunity ON opportunity.id=decision.opportunity_id AND opportunity.account_id=decision.account_id AND opportunity.market_type='options'

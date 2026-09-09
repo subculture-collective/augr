@@ -1254,6 +1254,13 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				if alpacaAdapter != nil {
 					portfolioRiskRepo = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID, alpacaAdapter)
 				}
+				if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
+					internalCapital, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct internal portfolio capital source: %w", constructErr)
+					}
+					portfolioRiskRepo.WithInternalCapitalSource(internalCapital)
+				}
 				var generatedResearch *generativestrategy.BatchService
 				var generatedResearchPreparation *generativestrategy.PreparationBatchService
 				var generatedEvaluation *generativestrategy.EvaluationBatchService

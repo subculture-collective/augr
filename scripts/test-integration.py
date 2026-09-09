@@ -15,7 +15,10 @@ MODULE = "github.com/PatrickFanella/get-rich-quick/"
 PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/..."]
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
-	"internal/repository/postgres/TestCashOnlyProjectionBootstrapRefreshAndReplay",
+    "internal/repository/postgres/TestInternalAccountCapitalSnapshotPersistsReplaysAndRejectsForgery",
+    "internal/repository/postgres/TestInternalAccountCapitalSnapshotDoesNotCallBroker",
+    "internal/repository/postgres/TestInternalAccountCapitalUsesAttestedProjectionWithoutExperiment",
+    "internal/repository/postgres/TestCashOnlyProjectionBootstrapRefreshAndReplay",
     "migrations/TestPortfolioRiskMigrationRejectsForgeryMutationAndRollback",
     "internal/repository/postgres/TestAccountRepoCreatesAccountWithOpeningCapital",
     "internal/repository/postgres/TestAccountRepoRejectsCapitalFlowMetadataConflictBeyondFloatPrecision",
