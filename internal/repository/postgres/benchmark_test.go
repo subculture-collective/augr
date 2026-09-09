@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/benchmark"
 	"github.com/PatrickFanella/get-rich-quick/internal/evaluation"
@@ -76,6 +77,38 @@ func newBenchmarkFixture(t *testing.T) benchmarkFixture {
 		t.Fatal(err)
 	}
 	return benchmarkFixture{evaluation: fixture, declaration: declaration, report: report, repo: NewBenchmarkRepo(fixture.experiment.strategy.pool)}
+}
+
+func TestBenchmarkRepositoryListsWithSingleConnection(t *testing.T) {
+	fixture := newBenchmarkFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := fixture.repo.RegisterDeclaration(ctx, fixture.declaration); err != nil {
+		t.Fatal(err)
+	}
+	service, err := benchmark.NewService(fixture.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Evaluate(ctx, fixture.declaration, fixture.report.EvaluationID()); err != nil {
+		t.Fatal(err)
+	}
+	config := fixture.evaluation.experiment.strategy.pool.Config()
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	repo := NewBenchmarkRepo(pool)
+	declarations, err := repo.ListExperimentDeclarations(ctx, fixture.declaration.ExperimentID(), 10, 0)
+	if err != nil || len(declarations) != 1 {
+		t.Fatalf("single connection declarations=%d/%v", len(declarations), err)
+	}
+	reports, err := repo.ListEvaluationReports(ctx, fixture.report.EvaluationID(), 10, 0)
+	if err != nil || len(reports) != 1 {
+		t.Fatalf("single connection reports=%d/%v", len(reports), err)
+	}
 }
 
 func TestBenchmarkRepositoryRoundTripListsAndEightWriters(t *testing.T) {
