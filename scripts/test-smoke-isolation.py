@@ -7,6 +7,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class SmokeIsolationTests(unittest.TestCase):
+    def test_smoke_binds_the_seeded_canonical_account(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        smoke = workflow.split("  smoke-tests:", 1)[1].split("  build:", 1)[0]
+        self.assertIn("PROJECTION_ACCOUNT_ID: 00000000-0000-4000-8000-000000000064", smoke)
+        self.assertIn("PROJECTION_ACCOUNT_ID=${PROJECTION_ACCOUNT_ID}", smoke)
+        contract = (ROOT / "cmd/tradingagent/smoke_test.go").read_text()
+        self.assertIn('t.Fatal("PROJECTION_ACCOUNT_ID is required', contract)
+
     def test_integration_database_is_selected_by_exact_run_identity(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         self.assertNotIn("55432", workflow)
