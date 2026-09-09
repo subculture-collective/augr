@@ -251,7 +251,26 @@ func (m *OrderManager) ProcessSignal(
 		return fmt.Errorf("order_manager: PostgreSQL execution account locker is required")
 	}
 	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
-		return m.processSignal(ctx, scope, signal, plan)
+		return m.processSignal(ctx, scope, signal, plan, uuid.Nil)
+	})
+}
+
+// ProcessPreparedSignal dispatches an already routed canonical command. The
+// identity is supplied by the lifecycle owner, never by model-produced JSON.
+// Persisted preparation is checked before both recovery and new submission;
+// this method does not create a route or confer risk authorization.
+func (m *OrderManager) ProcessPreparedSignal(ctx context.Context, scope ExecutionScope, signal FinalSignal, plan TradingPlan, orderID uuid.UUID) error {
+	if m == nil || m.accountLocker == nil {
+		return fmt.Errorf("order_manager: PostgreSQL execution account locker is required")
+	}
+	if orderID == uuid.Nil {
+		return fmt.Errorf("order_manager: canonical order identity is required")
+	}
+	if _, ok := m.economicWriter.(AcceptedOrderPreparationChecker); !ok {
+		return fmt.Errorf("order_manager: canonical preparation checker is required")
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.processSignal(ctx, scope, signal, plan, orderID)
 	})
 }
 
@@ -262,7 +281,7 @@ func (m *OrderManager) ProcessSignalWithAccountLockHeld(ctx context.Context, sco
 	if m == nil {
 		return fmt.Errorf("order_manager: manager is nil")
 	}
-	return m.processSignal(ctx, scope, signal, plan)
+	return m.processSignal(ctx, scope, signal, plan, uuid.Nil)
 }
 
 func (m *OrderManager) processSignal(
@@ -270,6 +289,7 @@ func (m *OrderManager) processSignal(
 	scope ExecutionScope,
 	signal FinalSignal,
 	plan TradingPlan,
+	preparedOrderID uuid.UUID,
 ) error {
 	strategyID, runID, hasRun, err := scopeOriginIDs(scope)
 	if err != nil {
@@ -574,6 +594,10 @@ func (m *OrderManager) processSignal(
 		PredictionSide:           plan.Side,
 	}
 	order.ClientOrderID = "augr-" + order.ID.String()
+	if preparedOrderID != uuid.Nil {
+		order.ID = preparedOrderID
+		order.ClientOrderID = preparedOrderID.String()
+	}
 	if originType == ledger.ExecutionOriginStrategyVersion {
 		order.StrategyID = scope.LegacyStrategyID()
 	}
@@ -599,6 +623,15 @@ func (m *OrderManager) processSignal(
 
 	if plan.StopLoss > 0 {
 		order.StopPrice = &plan.StopLoss
+	}
+	if preparedOrderID != uuid.Nil {
+		checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker)
+		if !ok {
+			return fmt.Errorf("order_manager: canonical preparation checker is required")
+		}
+		if err := checker.RequireAcceptedOrderPrepared(ctx, scope, order); err != nil {
+			return fmt.Errorf("order_manager: canonical routed order is not prepared: %w", err)
+		}
 	}
 	if hasRun {
 		run, _ := scope.PipelineRun()
