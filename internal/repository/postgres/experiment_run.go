@@ -261,6 +261,9 @@ func (repo *ExperimentRunRepo) RecordCompletedResult(ctx context.Context, experi
 		if !sameAttemptEvent(existingEvent, event) {
 			return nil, nil, experimentRunConflict("experiment attempt already has different terminal evidence")
 		}
+		if err := tx.Rollback(ctx); err != nil {
+			return nil, nil, fmt.Errorf("postgres: release completed experiment replay transaction: %w", err)
+		}
 		existingResult, resultErr := repo.GetResult(ctx, value.ID())
 		if resultErr != nil {
 			return nil, nil, resultErr

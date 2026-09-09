@@ -194,11 +194,11 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestRuntimeSchemaVersionAcceptsExpansionAndEnforcement(t *testing.T) {
+func TestRuntimeSchemaVersionRequiresInternalPortfolioCapital(t *testing.T) {
 	for _, tt := range []struct {
 		version int
 		want    bool
-	}{{109, false}, {110, false}, {111, true}, {112, false}} {
+	}{{109, false}, {110, false}, {111, false}, {112, false}, {113, true}, {114, false}} {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
@@ -1099,6 +1099,13 @@ func TestNewAPIServerWiresPolymarketReconcileAutomationJob(t *testing.T) {
 }
 
 func TestNewAPIServerWiresKalshiDiscoveryAndMarkingAutomationJobs(t *testing.T) {
+	originalAccountLoader := runtimeLoadCanonicalAccount
+	t.Cleanup(func() { runtimeLoadCanonicalAccount = originalAccountLoader })
+	runtimeLoadCanonicalAccount = func(_ context.Context, _ *pgrepo.DB, accountID uuid.UUID) (*domain.Account, error) {
+		account := validRuntimeAccount(accountID)
+		account.Venue = "internal"
+		return &account, nil
+	}
 	origNewDB := runtimeNewDB
 	origNewProjectionDB := runtimeNewProjectionDB
 	origCurrentSchemaVersion := runtimeCurrentSchemaVersion
@@ -1188,6 +1195,9 @@ func TestNewAPIServerWiresKalshiDiscoveryAndMarkingAutomationJobs(t *testing.T) 
 	}
 	if projectionDatabaseURL == cfg.Database.URL {
 		t.Fatal("ProjectionRepo constructed with general DATABASE_URL")
+	}
+	if _, ok := capturedDeps.AccountBalance.(*pgrepo.PortfolioRiskRepo); !ok {
+		t.Fatalf("internal diagnostics balance source = %T, want canonical reader", capturedDeps.AccountBalance)
 	}
 
 	cleanup()

@@ -12,8 +12,8 @@ import (
 )
 
 func TestSchemaVersionSync(t *testing.T) {
-	if postgres.MinimumSupportedSchemaVersion != 111 || postgres.MaximumSupportedSchemaVersion != 111 {
-		t.Fatalf("schema compatibility range = %d..%d, want 111..111", postgres.MinimumSupportedSchemaVersion, postgres.MaximumSupportedSchemaVersion)
+	if postgres.MinimumSupportedSchemaVersion != 113 || postgres.MaximumSupportedSchemaVersion != 113 {
+		t.Fatalf("schema compatibility range = %d..%d, want 113..113", postgres.MinimumSupportedSchemaVersion, postgres.MaximumSupportedSchemaVersion)
 	}
 	entries, err := os.ReadDir(tradingAgentMigrationsDir(t))
 	if err != nil {
