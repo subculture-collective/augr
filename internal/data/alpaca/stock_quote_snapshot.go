@@ -61,7 +61,7 @@ func (e *StockQuoteEvidence) QuoteSnapshot(reference instrument.Instrument, cont
 	if err := contract.Validate(); err != nil {
 		return nil, err
 	}
-	if reference.AssetClass != instrument.AssetClassEquity || reference.Currency != "USD" || contract.Currency != "USD" || contract.InstrumentID != reference.ID {
+	if (reference.AssetClass != instrument.AssetClassEquity && reference.AssetClass != instrument.AssetClassETF) || reference.Currency != "USD" || contract.Currency != "USD" || contract.InstrumentID != reference.ID {
 		return nil, fmt.Errorf("alpaca: stock quote requires an explicit matching USD equity contract")
 	}
 	path := "/v2/stocks/" + url.PathEscape(e.Ticker) + "/quotes/latest?" + url.Values{"feed": {e.Feed}, "currency": {"USD"}}.Encode()

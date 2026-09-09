@@ -67,7 +67,7 @@ func (c *PipelineStockCapture) Capture(ctx context.Context, scope execution.Exec
 	if err != nil {
 		return nil, err
 	}
-	if contract.InstrumentID != reference.ID || reference.AssetClass != instrument.AssetClassEquity || reference.Status != instrument.StatusActive || reference.CreatedAt.After(at) || contract.CreatedAt.After(at) || contract.ValidFrom.After(at) || contract.ValidTo != nil && !at.Before(*contract.ValidTo) {
+	if contract.InstrumentID != reference.ID || (reference.AssetClass != instrument.AssetClassEquity && reference.AssetClass != instrument.AssetClassETF) || reference.Status != instrument.StatusActive || reference.CreatedAt.After(at) || contract.CreatedAt.After(at) || contract.ValidFrom.After(at) || contract.ValidTo != nil && !at.Before(*contract.ValidTo) {
 		return nil, fmt.Errorf("stock capture reference is not eligible at capture time")
 	}
 	artifact, err := NewSimulationPolicyRepo(c.Pool).GetSimulationPolicyByVersion(ctx, selection.SimulationPolicyVersion)

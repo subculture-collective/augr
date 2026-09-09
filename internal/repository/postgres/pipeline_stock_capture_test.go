@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,17 +51,40 @@ func (s *stockCaptureSourceFixture) LatestQuote(context.Context, string, string)
 }
 
 func TestPipelineStockCaptureRejectsMissingStatus(t *testing.T) {
-	testPipelineStockCapture(t, false)
+	testPipelineStockCapture(t, false, false)
 }
 
 func TestPipelineStockCaptureQualifiedStatus(t *testing.T) {
-	testPipelineStockCapture(t, true)
+	testPipelineStockCapture(t, true, false)
 }
 
-func testPipelineStockCapture(t *testing.T, qualified bool) {
+func TestPipelineETFCaptureQualifiedStatus(t *testing.T) {
+	testPipelineStockCapture(t, true, true)
+}
+
+func testPipelineStockCapture(t *testing.T, qualified, etf bool) {
 	t.Helper()
 	f := newExecutionLifecycleFixture(t)
 	applyRepositoryMigrationRange(t, f.ctx, f.pool, "000108", "000113")
+	if etf {
+		value := *f.instrument
+		value.ID = uuid.New()
+		value.IdentityKey = "fixture-etf:" + value.ID.String()
+		value.AssetClass = instrument.AssetClassETF
+		var err error
+		f.instrument, err = NewInstrumentRepo(f.pool).CreateInstrument(f.ctx, &value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		contract := *f.contract
+		contract.ID = uuid.New()
+		contract.InstrumentID = value.ID
+		contract.ContractID = strings.ToUpper("fixture-etf:" + contract.ID.String())
+		f.contract, err = NewInstrumentRepo(f.pool).RegisterVenueContract(f.ctx, &contract)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	alias, err := instrument.NewAliasEvent(instrument.AliasEventInput{InstrumentID: f.instrument.ID, Provider: "alpaca", AliasType: instrument.AliasTicker, AliasValue: "FIXTURE", Action: instrument.AliasAssigned, EffectiveAt: f.baseTime.Add(-time.Hour), CreatedAt: f.baseTime.Add(-time.Hour), Source: "test-fixture"})
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +96,7 @@ func testPipelineStockCapture(t *testing.T, qualified bool) {
 	if qualified {
 		marketStatus, sessionStatus = alpacadata.IEXRegularQuoteStatus, "core"
 	}
-	policy, err := simulation.NewPolicy(simulation.PolicyInput{Schema: simulation.PolicySchemaV1, Assets: []simulation.AssetPolicy{{AssetClass: instrument.AssetClassEquity, OrderTypes: []lifecycle.OrderType{lifecycle.OrderLimit}, TimeInForce: []lifecycle.TimeInForce{lifecycle.TimeInForceDay}, QuoteRequirements: marketdata.QuoteRequirements{RequireSource: true, RequireVenueContract: true, RequireBid: true, RequireAsk: true, RequireBidDepth: true, RequireAskDepth: true, RequireMarketStatus: true, RequireSessionStatus: true, AllowedMarketStatuses: []string{marketStatus}, AllowedSessionStatuses: []string{sessionStatus}, MaxAge: 10 * time.Second}, MaxDepthParticipation: decimal.NewFromInt(1), Calendar: simulation.CalendarPolicy{Kind: simulation.CalendarExplicitSessions, Sessions: []simulation.SessionWindow{{Label: "fixture", OpenAt: f.baseTime.Add(-time.Hour), CloseAt: f.baseTime.Add(time.Hour)}}}, Fees: simulation.FeePolicy{Scale: 4}}}})
+	policy, err := simulation.NewPolicy(simulation.PolicyInput{Schema: simulation.PolicySchemaV1, Assets: []simulation.AssetPolicy{{AssetClass: f.instrument.AssetClass, OrderTypes: []lifecycle.OrderType{lifecycle.OrderLimit}, TimeInForce: []lifecycle.TimeInForce{lifecycle.TimeInForceDay}, QuoteRequirements: marketdata.QuoteRequirements{RequireSource: true, RequireVenueContract: true, RequireBid: true, RequireAsk: true, RequireBidDepth: true, RequireAskDepth: true, RequireMarketStatus: true, RequireSessionStatus: true, AllowedMarketStatuses: []string{marketStatus}, AllowedSessionStatuses: []string{sessionStatus}, MaxAge: 10 * time.Second}, MaxDepthParticipation: decimal.NewFromInt(1), Calendar: simulation.CalendarPolicy{Kind: simulation.CalendarExplicitSessions, Sessions: []simulation.SessionWindow{{Label: "fixture", OpenAt: f.baseTime.Add(-time.Hour), CloseAt: f.baseTime.Add(time.Hour)}}}, Fees: simulation.FeePolicy{Scale: 4}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
