@@ -101,6 +101,9 @@ func (repo *VenueReconciliationRepo) RecordVenueProviderSnapshot(ctx context.Con
 		return fmt.Errorf("postgres: insert provider snapshot: %w", err)
 	}
 	if command.RowsAffected() == 0 {
+		if err := tx.Rollback(ctx); err != nil {
+			return fmt.Errorf("postgres: release replayed provider snapshot transaction: %w", err)
+		}
 		return repo.verifyStoredBytes(ctx, "venue_provider_snapshots", snapshot.ID(), snapshot.Digest(), snapshot.CanonicalBytes())
 	}
 	for index, page := range capture.Pages() {
@@ -151,6 +154,9 @@ func (repo *VenueReconciliationRepo) RecordVenueLocalSnapshot(ctx context.Contex
 		return fmt.Errorf("postgres: insert local snapshot: %w", err)
 	}
 	if command.RowsAffected() == 0 {
+		if err := tx.Rollback(ctx); err != nil {
+			return fmt.Errorf("postgres: release replayed local snapshot transaction: %w", err)
+		}
 		return repo.verifyStoredBytes(ctx, "venue_local_snapshots", snapshot.ID(), snapshot.Digest(), snapshot.CanonicalBytes())
 	}
 	for _, id := range snapshot.TransactionIDs() {
@@ -203,6 +209,9 @@ func (repo *VenueReconciliationRepo) RecordVenueReconciliationRun(ctx context.Co
 		return nil, fmt.Errorf("postgres: insert reconciliation run: %w", err)
 	}
 	if command.RowsAffected() == 0 {
+		if err := tx.Rollback(ctx); err != nil {
+			return nil, fmt.Errorf("postgres: release replayed reconciliation transaction: %w", err)
+		}
 		return repo.GetVenueReconciliationRun(ctx, run.ID)
 	}
 	for _, result := range run.Results {

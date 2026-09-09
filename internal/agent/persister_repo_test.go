@@ -51,6 +51,7 @@ type phaseCapturePersister struct {
 }
 
 func (*phaseCapturePersister) RecordRunStart(context.Context, *domain.PipelineRun) error { return nil }
+
 func (*phaseCapturePersister) FinalizeRun(context.Context, uuid.UUID, time.Time, repository.PipelineRunFinalization) (repository.PipelineRunFinalizationReceipt, error) {
 	return repository.PipelineRunFinalizationReceipt{}, nil
 }

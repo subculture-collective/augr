@@ -246,11 +246,20 @@ func (repo *RobustnessRepo) GetAssessment(ctx context.Context, id uuid.UUID) (*r
 	defer rows.Close()
 	reports := map[uuid.UUID]*evaluation.Report{}
 	evalRepo := NewEvaluationRepo(repo.pool)
+	reportIDs := []uuid.UUID{}
 	for rows.Next() {
 		var reportID uuid.UUID
 		if err = rows.Scan(&reportID); err != nil {
 			return nil, err
 		}
+		reportIDs = append(reportIDs, reportID)
+	}
+	// Materialize IDs and release the cursor before nested repository reads.
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, reportID := range reportIDs {
 		reports[reportID], err = evalRepo.GetEvaluation(ctx, reportID)
 		if err != nil {
 			return nil, err
@@ -336,6 +345,14 @@ func (repo *RobustnessRepo) loadNormalizedCandidates(ctx context.Context, assess
 		if err := rows.Scan(&candidate.Sequence, &candidate.VersionID); err != nil {
 			return nil, err
 		}
+		candidates = append(candidates, candidate)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range candidates {
+		candidate := &candidates[index]
 		candidate.Folds, err = repo.loadNormalizedFolds(ctx, assessmentID, candidate.Sequence)
 		if err != nil {
 			return nil, err
@@ -348,9 +365,8 @@ func (repo *RobustnessRepo) loadNormalizedCandidates(ctx context.Context, assess
 		if err != nil {
 			return nil, err
 		}
-		candidates = append(candidates, candidate)
 	}
-	return candidates, rows.Err()
+	return candidates, nil
 }
 
 func (repo *RobustnessRepo) loadNormalizedFolds(ctx context.Context, assessmentID uuid.UUID, candidateSequence int) ([]robustness.FoldEvidence, error) {
@@ -370,6 +386,14 @@ func (repo *RobustnessRepo) loadNormalizedFolds(ctx context.Context, assessmentI
 		fold.TrainEnd = trainEnd.UTC().Format("2006-01-02T15:04:05.000000Z")
 		fold.TestStart = testStart.UTC().Format("2006-01-02T15:04:05.000000Z")
 		fold.TestEnd = testEnd.UTC().Format("2006-01-02T15:04:05.000000Z")
+		folds = append(folds, fold)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range folds {
+		fold := &folds[index]
 		scenarios, err := repo.loadNormalizedScenarios(ctx, assessmentID, candidateSequence, fold.Sequence)
 		if err != nil {
 			return nil, err
@@ -378,9 +402,8 @@ func (repo *RobustnessRepo) loadNormalizedFolds(ctx context.Context, assessmentI
 			fold.Baseline = scenarios[0]
 			fold.Perturbations = scenarios[1:]
 		}
-		folds = append(folds, fold)
 	}
-	return folds, rows.Err()
+	return folds, nil
 }
 
 func (repo *RobustnessRepo) loadNormalizedScenarios(ctx context.Context, assessmentID uuid.UUID, candidateSequence, foldSequence int) ([]robustness.ScenarioEvidence, error) {

@@ -53,7 +53,8 @@ func (r *ReportArtifactRepo) ValidateBacktestConfigScope(ctx context.Context, co
 		JOIN dataset_manifest_partitions p ON p.manifest_id=m.id
 		WHERE s.id=$1
 		GROUP BY s.evaluation_start,s.evaluation_end,b.starting_capital,m.decision_cutoff,q.quarantined`, *config.ScopeID).Scan(
-		&start, &end, &capital, &cutoff, &quarantined, &minEffective, &maxEffective)
+		&start, &end, &capital, &cutoff, &quarantined, &minEffective, &maxEffective,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("scope evidence graph is missing or inconsistent")
 	}
@@ -154,7 +155,8 @@ func (r *ReportArtifactRepo) DiscoveryDeploymentReadinessForScope(ctx context.Co
 		&report.AccountID, &environment, &report.ManifestID, &report.ManifestSHA256, &report.QualityResultID,
 		&report.QualitySHA256, &report.DecisionCutoff, &quarantined, &evaluationStart, &evaluationEnd,
 		&report.ObservationCount, &report.BindingCount, &report.Stock.PayloadCount, &stockStart, &stockEnd,
-		&optionBarCount, &optionStart, &optionEnd, &optionContractCount, &optionQuoteCount, &optionTradeCount, &optionSnapshotCount)
+		&optionBarCount, &optionStart, &optionEnd, &optionContractCount, &optionQuoteCount, &optionTradeCount, &optionSnapshotCount,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		reason := "configured evaluation scope evidence graph is missing or inconsistent"
 		report.Reason = reason
@@ -367,7 +369,8 @@ func (r *ReportArtifactRepo) GetScopeBySHA256(ctx context.Context, sha string) (
 		FROM paper_evaluation_scopes WHERE canonical_sha256=$1`, sha).Scan(
 		&scope.ID, &scope.AccountID, &scope.CapitalBindingID, &scope.ManifestSHA256, &scope.QualitySHA256, &scope.SimulationPolicySHA256,
 		&scope.CapitalPolicySHA256, &scope.EvaluationStart, &scope.EvaluationEnd, &scope.CanonicalBytes,
-		&scope.CanonicalSHA256, &scope.CreatedAt)
+		&scope.CanonicalSHA256, &scope.CreatedAt,
+	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("postgres: paper evaluation scope: %w", ErrNotFound)
 	}

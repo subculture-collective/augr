@@ -59,8 +59,10 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
-          only-new-issues: true
+          version: v2.13.2
+          # Gitea's PR patch response is not compatible with the action's
+          # GitHub-only diff filter. Check the full tree instead.
+          only-new-issues: false
 
   unit-tests:
     name: Unit tests
@@ -76,7 +78,9 @@ jobs:
           cache: true
 
       - name: Verify integration gate failure cases
-        run: python3 scripts/test-integration_test.py
+        run: |
+          python3 scripts/test-integration_test.py
+          python3 scripts/test-smoke-isolation.py
 
       - name: Run unit tests
         run: go test -short -race -count=1 -coverprofile=coverage-unit.out ./...
@@ -102,9 +106,9 @@ jobs:
           POSTGRES_USER: tradingagent
           POSTGRES_PASSWORD: tradingagent
           POSTGRES_DB: tradingagent_test
-        ports:
-          - 55432:5432
         options: >-
+          --label tv.subcult.augr.ci-run=${{ github.run_id }}-${{ github.run_attempt }}
+          --label tv.subcult.augr.ci-service=integration-postgres
           --health-cmd "pg_isready -U tradingagent"
           --health-interval 10s
           --health-timeout 5s
@@ -129,8 +133,8 @@ jobs:
 
       - name: Configure integration database URL
         run: |
-          database_container=$(docker ps --filter publish=55432 --filter ancestor=timescale/timescaledb:2.17.2-pg17 --format '{{.ID}}' | head -1)
-          test -n "$database_container"
+          database_container=$(docker ps --filter 'label=tv.subcult.augr.ci-run=${{ github.run_id }}-${{ github.run_attempt }}' --filter 'label=tv.subcult.augr.ci-service=integration-postgres' --format '{{.ID}}')
+          [[ "$database_container" =~ ^[0-9a-f]{12,64}$ ]]
           database_host=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$database_container")
           test -n "$database_host"
           echo "DATABASE_CONTAINER=$database_container" >> "$GITHUB_ENV"
@@ -148,8 +152,11 @@ jobs:
 
       - name: Merge coverage profiles
         run: |
-          go install github.com/wadey/gocovmerge@latest
-          gocovmerge coverage-unit.out coverage-integration.out > coverage.out
+          coverage_tools=$(mktemp -d)
+          go -C "$coverage_tools" mod init augr-ci-coverage
+          go -C "$coverage_tools" get github.com/wadey/gocovmerge@v0.0.0-20160331181800-b5bfa59ec0ad golang.org/x/tools@v0.38.0
+          go -C "$coverage_tools" build -o "$coverage_tools/gocovmerge" github.com/wadey/gocovmerge
+          "$coverage_tools/gocovmerge" coverage-unit.out coverage-integration.out > coverage.out
 
       - name: Report coverage
         run: |
@@ -177,6 +184,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       COMPOSE_FILE: docker-compose.yml:docker-compose.smoke.yml
+      COMPOSE_PROJECT_NAME: augr-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      PROJECTION_ACCOUNT_ID: 00000000-0000-4000-8000-000000000064
     needs:
       - changes
       - integration-tests
@@ -198,6 +207,7 @@ jobs:
           APP_ENV=smoke
           APP_HOST=0.0.0.0
           APP_PORT=8080
+          PROJECTION_ACCOUNT_ID=${PROJECTION_ACCOUNT_ID}
           JWT_SECRET=${SMOKE_JWT_SECRET}
           DATABASE_URL=postgres://postgres:postgres@postgres:5432/tradingagent?sslmode=disable
           DATABASE_POOL_SIZE=10
@@ -256,8 +266,11 @@ jobs:
             echo "SMOKE_BASE_URL=http://app:8080" >> "$GITHUB_ENV"
             echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@postgres:5432/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
           else
-            echo "SMOKE_BASE_URL=http://127.0.0.1:8081" >> "$GITHUB_ENV"
-            echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
+            app_address=$(docker compose port app 8080)
+            database_address=$(docker compose port postgres 5432)
+            test -n "$app_address" && test -n "$database_address"
+            echo "SMOKE_BASE_URL=http://${app_address}" >> "$GITHUB_ENV"
+            echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@${database_address}/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
           fi
 
       - name: Wait for API

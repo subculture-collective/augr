@@ -251,7 +251,49 @@ func (m *OrderManager) ProcessSignal(
 		return fmt.Errorf("order_manager: PostgreSQL execution account locker is required")
 	}
 	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
-		return m.processSignal(ctx, scope, signal, plan)
+		return m.processSignal(ctx, scope, signal, plan, uuid.Nil, nil)
+	})
+}
+
+// ProcessPreparedSignal dispatches an already routed canonical command. The
+// identity is supplied by the lifecycle owner, never by model-produced JSON.
+// Persisted preparation is checked before both recovery and new submission;
+// this method does not create a route or confer risk authorization.
+func (m *OrderManager) ProcessPreparedSignal(ctx context.Context, scope ExecutionScope, signal FinalSignal, plan TradingPlan, orderID uuid.UUID) error {
+	if m == nil || m.accountLocker == nil {
+		return fmt.Errorf("order_manager: PostgreSQL execution account locker is required")
+	}
+	if orderID == uuid.Nil {
+		return fmt.Errorf("order_manager: canonical order identity is required")
+	}
+	if _, ok := m.economicWriter.(AcceptedOrderPreparationChecker); !ok {
+		return fmt.Errorf("order_manager: canonical preparation checker is required")
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.processSignal(ctx, scope, signal, plan, orderID, nil)
+	})
+}
+
+// SignalOrderPreparation resolves a canonical command without writing risk
+// approval. PersistApproved is called only after the actual pre-trade check
+// approves the exact resolved quantity. Resolve must use durable scoped facts
+// and return a stable identity and a positive quantity no larger than requested.
+type SignalOrderPreparation interface {
+	Resolve(context.Context, ExecutionScope, FinalSignal, TradingPlan, float64) (uuid.UUID, float64, error)
+	PersistApproved(context.Context, ExecutionScope, domain.Order) error
+}
+
+// ProcessSignalWithPreparation prepares and dispatches under one account lock.
+// The provider owns canonical reference evidence; the manager owns risk checks.
+func (m *OrderManager) ProcessSignalWithPreparation(ctx context.Context, scope ExecutionScope, signal FinalSignal, plan TradingPlan, preparation SignalOrderPreparation) error {
+	if m == nil || m.accountLocker == nil || preparation == nil {
+		return fmt.Errorf("order_manager: account locker and signal preparation are required")
+	}
+	if _, ok := m.economicWriter.(AcceptedOrderPreparationChecker); !ok {
+		return fmt.Errorf("order_manager: canonical preparation checker is required")
+	}
+	return m.accountLocker.WithExecutionAccountLock(ctx, scope.AccountID(), func() error {
+		return m.processSignal(ctx, scope, signal, plan, uuid.Nil, preparation)
 	})
 }
 
@@ -262,7 +304,7 @@ func (m *OrderManager) ProcessSignalWithAccountLockHeld(ctx context.Context, sco
 	if m == nil {
 		return fmt.Errorf("order_manager: manager is nil")
 	}
-	return m.processSignal(ctx, scope, signal, plan)
+	return m.processSignal(ctx, scope, signal, plan, uuid.Nil, nil)
 }
 
 func (m *OrderManager) processSignal(
@@ -270,6 +312,8 @@ func (m *OrderManager) processSignal(
 	scope ExecutionScope,
 	signal FinalSignal,
 	plan TradingPlan,
+	preparedOrderID uuid.UUID,
+	preparation SignalOrderPreparation,
 ) error {
 	strategyID, runID, hasRun, err := scopeOriginIDs(scope)
 	if err != nil {
@@ -483,6 +527,17 @@ func (m *OrderManager) processSignal(
 		}
 	}
 
+	if preparation != nil {
+		identity, resolvedQuantity, resolveErr := preparation.Resolve(ctx, scope, signal, plan, quantity)
+		if resolveErr != nil {
+			return fmt.Errorf("order_manager: resolve canonical command: %w", resolveErr)
+		}
+		if identity == uuid.Nil || math.IsNaN(quantity) || math.IsInf(quantity, 0) ||
+			math.IsNaN(resolvedQuantity) || math.IsInf(resolvedQuantity, 0) || resolvedQuantity <= 0 || resolvedQuantity > quantity {
+			return fmt.Errorf("order_manager: canonical command must retain a valid identity and not increase quantity")
+		}
+		preparedOrderID, quantity = identity, resolvedQuantity
+	}
 	if quantity <= 0 {
 		m.logger.WarnContext(ctx, "calculated position size is zero", "ticker", plan.Ticker)
 		return fmt.Errorf("order_manager: calculated position size is zero for %s", plan.Ticker)
@@ -574,6 +629,10 @@ func (m *OrderManager) processSignal(
 		PredictionSide:           plan.Side,
 	}
 	order.ClientOrderID = "augr-" + order.ID.String()
+	if preparedOrderID != uuid.Nil {
+		order.ID = preparedOrderID
+		order.ClientOrderID = preparedOrderID.String()
+	}
 	if originType == ledger.ExecutionOriginStrategyVersion {
 		order.StrategyID = scope.LegacyStrategyID()
 	}
@@ -600,6 +659,34 @@ func (m *OrderManager) processSignal(
 	if plan.StopLoss > 0 {
 		order.StopPrice = &plan.StopLoss
 	}
+	if preparedOrderID != uuid.Nil {
+		// Canonical route mechanics distinguish an execution-price reference
+		// from a limit, and an entry trigger from a protective exit stop.
+		// TradingPlan has no separate entry-trigger field, so do not invent
+		// stop/stop-limit commands from its protective StopLoss.
+		switch order.OrderType {
+		case domain.OrderTypeMarket:
+			order.LimitPrice = nil
+			order.StopPrice = nil
+		case domain.OrderTypeLimit:
+			order.StopPrice = nil
+		default:
+			return fmt.Errorf("order_manager: prepared stop orders require an explicit entry trigger")
+		}
+		if order.ReferencePrice == nil && plan.EntryPrice > 0 {
+			entryReference := plan.EntryPrice
+			order.ReferencePrice = &entryReference
+		}
+		checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker)
+		if !ok {
+			return fmt.Errorf("order_manager: canonical preparation checker is required")
+		}
+		if preparation == nil {
+			if err := checker.RequireAcceptedOrderPrepared(ctx, scope, order); err != nil {
+				return fmt.Errorf("order_manager: canonical routed order is not prepared: %w", err)
+			}
+		}
+	}
 	if hasRun {
 		run, _ := scope.PipelineRun()
 		existing, loadErr := m.orderRepo.GetByRun(ctx, run, repository.OrderFilter{Ticker: order.Ticker, Side: order.Side}, 2, 0)
@@ -607,6 +694,15 @@ func (m *OrderManager) processSignal(
 			return fmt.Errorf("order_manager: load durable effect: %w", loadErr)
 		}
 		if len(existing) > 0 {
+			if preparation != nil {
+				checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker)
+				if !ok {
+					return fmt.Errorf("order_manager: canonical preparation checker is required")
+				}
+				if err := checker.RequireAcceptedOrderPrepared(ctx, scope, order); err != nil {
+					return fmt.Errorf("order_manager: canonical retry is not prepared: %w", err)
+				}
+			}
 			intentMismatch := (existing[0].PositionIntent == nil) != (order.PositionIntent == nil) || existing[0].PositionIntent != nil && *existing[0].PositionIntent != *order.PositionIntent
 			if len(existing) != 1 || existing[0].ID != order.ID || existing[0].AccountID != order.AccountID || existing[0].Environment != order.Environment || existing[0].OriginType != order.OriginType || existing[0].OriginID != order.OriginID || existing[0].MarketType.Normalize() != order.MarketType.Normalize() || existing[0].Ticker != order.Ticker || existing[0].Side != order.Side || existing[0].OrderType != order.OrderType || existing[0].Quantity != order.Quantity || existing[0].ClientOrderID != order.ClientOrderID || existing[0].Broker != order.Broker || intentMismatch || !sameOptionalFloat(existing[0].LimitPrice, order.LimitPrice) || !sameOptionalFloat(existing[0].StopPrice, order.StopPrice) || !strings.EqualFold(strings.TrimSpace(existing[0].PredictionSide), strings.TrimSpace(order.PredictionSide)) {
 				return fmt.Errorf("order_manager: durable effect key conflicts with persisted order")
@@ -644,6 +740,14 @@ func (m *OrderManager) processSignal(
 			return err
 		}
 		return fmt.Errorf("order_manager: pre-trade check rejected for %s: %s", plan.Ticker, reason)
+	}
+	if preparation != nil {
+		if err := m.fenceEffect(ctx); err != nil {
+			return err
+		}
+		if err := preparation.PersistApproved(ctx, scope, *order); err != nil {
+			return fmt.Errorf("order_manager: persist approved canonical command: %w", err)
+		}
 	}
 	if checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker); ok {
 		if err := checker.RequireAcceptedOrderPrepared(ctx, scope, order); err != nil {

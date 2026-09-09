@@ -98,7 +98,8 @@ func (r *ReportArtifactRepo) Upsert(ctx context.Context, a *ReportArtifact) erro
 		        report_artifacts.backtest_run_id IS NOT DISTINCT FROM EXCLUDED.backtest_run_id AND
 		        report_artifacts.report_sha256 IS NOT DISTINCT FROM EXCLUDED.report_sha256 AND
 		        report_artifacts.status=EXCLUDED.status)
-		 RETURNING id, created_at`, conflict),
+		 RETURNING id, created_at`, conflict,
+	),
 		a.ID, a.StrategyID, a.ScopeID, a.BacktestRunID, a.ReportType, a.TimeBucket,
 		a.Status, a.ReportJSON, reportBytes, nullString(a.ReportSHA256),
 		nullString(a.Provider), nullString(a.Model),

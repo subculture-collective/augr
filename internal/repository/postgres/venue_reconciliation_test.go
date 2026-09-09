@@ -205,6 +205,38 @@ func TestVenueReconciliationRepoPersistsReloadsAndConverges(t *testing.T) {
 	}
 }
 
+func TestVenueReconciliationReplayReleasesTransactionBeforeRead(t *testing.T) {
+	fixture := newVenueReconFixture(t)
+	ctx, cancel := context.WithTimeout(fixture.ctx, 5*time.Second)
+	defer cancel()
+	config := fixture.pool.Config()
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	repo := NewVenueReconciliationRepo(pool)
+	if _, err := repo.RegisterVenueReconciliationPolicy(ctx, fixture.policy); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := repo.RecordVenueProviderSnapshot(ctx, fixture.provider, fixture.created); err != nil {
+			t.Fatal(err)
+		}
+		if err := repo.RecordVenueLocalSnapshot(ctx, fixture.local, fixture.created); err != nil {
+			t.Fatal(err)
+		}
+		got, err := repo.RecordVenueReconciliationRun(ctx, fixture.run, fixture.created)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.SHA256 != fixture.run.SHA256 {
+			t.Fatal("replay changed evidence")
+		}
+	}
+}
+
 func TestVenueReconciliationRepoEightWritersConvergeWithoutDuplicateIncidents(t *testing.T) {
 	fixture := newVenueReconFixture(t)
 	if _, err := fixture.repo.RegisterVenueReconciliationPolicy(fixture.ctx, fixture.policy); err != nil {

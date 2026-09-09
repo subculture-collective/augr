@@ -45,6 +45,29 @@ class IntegrationGateTests(unittest.TestCase):
         self.assertTrue(gate.validate(events, {})[0])
         self.assertFalse(gate.validate(self.events, {})[0])
 
+    def test_timeout_reports_unfinished_test_without_raw_output(self):
+        package = gate.MODULE + "internal/repository/postgres"
+        events = [
+            event("internal/repository/postgres/TestBlocked", "run"),
+            {"Package": package, "Action": "output",
+             "Output": "panic: test timed out after 30m0s\npostgres://secret@example/db"},
+            {"Package": package, "Action": "fail"},
+        ]
+        result = gate.failure_diagnostics(events)
+        self.assertEqual(result["timeout_packages"], ["internal/repository/postgres"])
+        self.assertEqual(result["unfinished_tests"], ["internal/repository/postgres/TestBlocked"])
+        self.assertNotIn("secret", str(result))
+
+    def test_finished_tests_are_not_reported_as_unfinished(self):
+        events = []
+        for action in ("pass", "skip", "fail"):
+            key = "internal/example/Test_" + action
+            events += [event(key, "run"), event(key, action)]
+        result = gate.failure_diagnostics(events)
+        self.assertEqual(result["unfinished_tests"], [])
+        self.assertEqual(result["timeout_packages"], [])
+        self.assertEqual(result["failed_packages"], ["internal/example"])
+
 
 if __name__ == "__main__":
     unittest.main()

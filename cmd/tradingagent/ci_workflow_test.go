@@ -21,7 +21,9 @@ func TestCIWorkflowUsesDynamicMigrationsAndGeneratedSmokeJWTSecret(t *testing.T)
 		`OLLAMA_API_KEY=smoke-key`,
 		`COMPOSE_FILE: docker-compose.yml:docker-compose.smoke.yml`,
 		`docker compose up -d postgres redis`,
-		`docker ps --filter publish=55432 --filter ancestor=timescale/timescaledb:2.17.2-pg17`,
+		`--label tv.subcult.augr.ci-run=${{ github.run_id }}-${{ github.run_attempt }}`,
+		`--filter 'label=tv.subcult.augr.ci-service=integration-postgres'`,
+		`[[ "$database_container" =~ ^[0-9a-f]{12,64}$ ]]`,
 		`docker exec "$DATABASE_CONTAINER" pg_isready -U tradingagent -d tradingagent_test`,
 		`find migrations -maxdepth 1 -type f -name '*.up.sql' -print | sort | while read -r migration; do`,
 		`docker exec -i "$DATABASE_CONTAINER" psql -U tradingagent -d tradingagent_test --single-transaction --set ON_ERROR_STOP=1`,
@@ -44,6 +46,8 @@ func TestCIWorkflowUsesDynamicMigrationsAndGeneratedSmokeJWTSecret(t *testing.T)
 	}
 
 	for _, unwanted := range []string{
+		`55432:5432`,
+		`--filter publish=55432`,
 		"smoke-jwt-secret",
 		`migrate -path migrations -database`,
 	} {

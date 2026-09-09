@@ -242,18 +242,26 @@ func (repo *BenchmarkRepo) listDeclarations(ctx context.Context, query string, i
 	}
 	defer rows.Close()
 	var values []*benchmark.Declaration
+	var ids []uuid.UUID
 	for rows.Next() {
 		var valueID uuid.UUID
 		if err = rows.Scan(&valueID); err != nil {
 			return nil, err
 		}
+		ids = append(ids, valueID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, valueID := range ids {
 		value, loadErr := repo.GetDeclaration(ctx, valueID)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		values = append(values, value)
 	}
-	return values, rows.Err()
+	return values, nil
 }
 
 func (repo *BenchmarkRepo) listReports(ctx context.Context, query string, id uuid.UUID, limit, offset int) ([]*benchmark.Report, error) {
@@ -266,18 +274,26 @@ func (repo *BenchmarkRepo) listReports(ctx context.Context, query string, id uui
 	}
 	defer rows.Close()
 	var values []*benchmark.Report
+	var ids []uuid.UUID
 	for rows.Next() {
 		var valueID uuid.UUID
 		if err = rows.Scan(&valueID); err != nil {
 			return nil, err
 		}
+		ids = append(ids, valueID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, valueID := range ids {
 		value, loadErr := repo.GetReport(ctx, valueID)
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		values = append(values, value)
 	}
-	return values, rows.Err()
+	return values, nil
 }
 
 func (repo *BenchmarkRepo) stage(name string) error {

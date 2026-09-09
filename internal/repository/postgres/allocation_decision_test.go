@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
@@ -89,7 +90,16 @@ func TestAllocationDecisionRepoIntegration_CreateListAndCount(t *testing.T) {
 		t.Fatal("expected Create() to populate id/timestamp")
 	}
 
-	listed, err := repo.List(ctx, repository.AllocationDecisionFilter{Mode: domain.AllocationDecisionModeShadow}, 10, 0)
+	listCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	config := pool.Config()
+	config.MaxConns = 1
+	listPool, err := pgxpool.NewWithConfig(listCtx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listPool.Close()
+	listed, err := NewAllocationDecisionRepo(listPool, canonicalRepositoryTestAccountID).List(listCtx, repository.AllocationDecisionFilter{Mode: domain.AllocationDecisionModeShadow}, 10, 0)
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}

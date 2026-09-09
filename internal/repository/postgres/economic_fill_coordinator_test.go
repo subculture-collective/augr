@@ -91,6 +91,53 @@ func TestAcceptedEconomicPlannerBuildsGraphOnlyForExactRoutedOrder(t *testing.T)
 	trade := &domain.Trade{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(ledger.ExecutionOriginOperator), OriginID: originID, OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: 8, Price: price, ExecutedAt: filledAt}
 	mutation := repository.OrderFillInput{IdempotencyKey: "accepted-planner-fill", Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: 8, ExecutionPrice: price}, Now: filledAt, Trade: trade}
 	planner := NewAcceptedEconomicPlanner(fixture.pool)
+	// Compatibility order identities must come from the prepared canonical
+	// command, not the legacy order-effect UUID or its augr- client prefix.
+	order.ClientOrderID = routed.Order.ClientOrderID
+	order.OrderType = domain.OrderType(routed.Order.OrderType)
+	if routed.Order.LimitPrice != nil {
+		limitPrice := routed.Order.LimitPrice.InexactFloat64()
+		order.LimitPrice = &limitPrice
+	}
+	if routed.Order.StopPrice != nil {
+		stopPrice := routed.Order.StopPrice.InexactFloat64()
+		order.StopPrice = &stopPrice
+	}
+	if err := planner.RequireAcceptedOrderPrepared(fixture.ctx, scope, order); err != nil {
+		t.Fatalf("exact canonical command rejected: %v", err)
+	}
+	legacyClient := *order
+	legacyClient.ClientOrderID = "augr-" + order.ID.String()
+	if err := planner.RequireAcceptedOrderPrepared(fixture.ctx, scope, &legacyClient); err == nil {
+		t.Fatal("legacy client identity accepted as the canonical routed command")
+	}
+	legacyOrder := *order
+	legacyOrder.ID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("order-effect:v1:legacy-smoke"))
+	if err := planner.RequireAcceptedOrderPrepared(fixture.ctx, scope, &legacyOrder); err == nil {
+		t.Fatal("legacy order identity accepted as the canonical routed command")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*domain.Order)
+	}{
+		{"account", func(changed *domain.Order) { changed.AccountID = uuid.New() }},
+		{"environment", func(changed *domain.Order) { changed.Environment = domain.AccountEnvironmentPaperStress }},
+		{"origin", func(changed *domain.Order) { changed.OriginID = "foreign-origin" }},
+		{"unexpected_run", func(changed *domain.Order) { id := uuid.New(); changed.PipelineRunID = &id }},
+		{"quantity", func(changed *domain.Order) { changed.Quantity++ }},
+		{"side", func(changed *domain.Order) { changed.Side = domain.OrderSideSell }},
+		{"type", func(changed *domain.Order) { changed.OrderType = domain.OrderType("different") }},
+		{"limit", func(changed *domain.Order) { value := 9876.0; changed.LimitPrice = &value }},
+		{"stop", func(changed *domain.Order) { value := 9876.0; changed.StopPrice = &value }},
+	} {
+		t.Run("reject_changed_"+test.name, func(t *testing.T) {
+			changed := *order
+			test.mutate(&changed)
+			if err := planner.RequireAcceptedOrderPrepared(fixture.ctx, scope, &changed); err == nil {
+				t.Fatal("changed command accepted under prepared canonical identity")
+			}
+		})
+	}
 	planned, err := planner.PlanAcceptedOrderFill(context.Background(), scope, mutation)
 	if err != nil {
 		t.Fatal(err)

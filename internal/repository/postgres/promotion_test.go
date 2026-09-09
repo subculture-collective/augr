@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/PatrickFanella/get-rich-quick/internal/evaluation"
 	"github.com/PatrickFanella/get-rich-quick/internal/promotion"
 	"github.com/PatrickFanella/get-rich-quick/internal/robustness"
@@ -58,6 +60,26 @@ func newPromotionRepositoryFixture(t *testing.T) promotionRepositoryFixture {
 		t.Fatal(err)
 	}
 	return promotionRepositoryFixture{robustness: robustnessFixture, deployment: deployment, policy: policy, decision: decision, repo: repo}
+}
+
+func TestPromotionRepositorySingleConnectionReconstruction(t *testing.T) {
+	fixture := newPromotionRepositoryFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	config := fixture.robustness.evaluation.experiment.strategy.pool.Config()
+	config.MaxConns = 1
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	got, err := NewPromotionRepo(pool).RecordDecision(ctx, fixture.decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.CanonicalBytes(), fixture.decision.CanonicalBytes()) {
+		t.Fatal("decision did not reconstruct")
+	}
 }
 
 func TestPromotionRepositoryRoundTripConcurrentConvergenceAndRollbackRefusal(t *testing.T) {

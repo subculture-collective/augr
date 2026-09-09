@@ -61,7 +61,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 	defer pool.Close()
 	accountID, err := uuid.Parse(os.Getenv("PROJECTION_ACCOUNT_ID"))
 	if err != nil || accountID == uuid.Nil {
-		t.Skip("PROJECTION_ACCOUNT_ID is required for account-scoped smoke test")
+		t.Fatal("PROJECTION_ACCOUNT_ID is required for account-scoped smoke test")
 	}
 
 	strategyRepo := pgrepo.NewStrategyRepo(pool)
