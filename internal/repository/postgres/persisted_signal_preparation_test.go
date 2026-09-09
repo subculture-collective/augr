@@ -102,6 +102,36 @@ func TestLoadSignalPreparationRetainedGraph(t *testing.T) {
 		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM execution_intents WHERE account_id=$1`, f.account.ID).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("pipeline loader writes: count=%d err=%v", count, err)
 		}
+		t.Run("selection_writer", func(t *testing.T) {
+			pin := CanonicalSignalSelection{Schema: CanonicalSignalSelectionSchema, Ticker: "FIXTURE", AliasProvider: "fixture", VenueContractID: f.contract.ID, QuoteSnapshotID: f.snapshot.ID, SimulationPolicyVersion: artifact.Version, TimeInForce: lifecycle.TimeInForceDay}
+			if _, err := RecordPipelineSignalSelection(f.ctx, f.pool, scope, pin); err == nil {
+				t.Fatal("writer accepted completed run")
+			}
+			activeRun := *run
+			activeRun.ID, activeRun.Status, activeRun.CompletedAt = uuid.New(), domain.PipelineStatusRunning, nil
+			if err := NewPipelineRunRepo(f.pool, f.account.ID).Create(f.ctx, &activeRun); err != nil {
+				t.Fatal(err)
+			}
+			activeScope, err := execution.NewStrategyExecutionScope(f.account.ID, scope.Environment(), uuid.MustParse(originID), domain.PipelineRunRef{ID: activeRun.ID, TradeDate: activeRun.TradeDate})
+			if err != nil {
+				t.Fatal(err)
+			}
+			missing := pin
+			missing.QuoteSnapshotID = uuid.New()
+			if _, err := RecordPipelineSignalSelection(f.ctx, f.pool, activeScope, missing); err == nil {
+				t.Fatal("writer accepted missing quote")
+			}
+			pinned, err := RecordPipelineSignalSelection(f.ctx, f.pool, activeScope, pin)
+			if err != nil || pinned == nil {
+				t.Fatalf("pin real retained fixture: %v", err)
+			}
+			if !pinned.CreatedAt.After(f.baseTime) {
+				t.Fatal("writer backdated retention time")
+			}
+			if _, err := RecordPipelineSignalSelection(f.ctx, f.pool, activeScope, pin); err == nil {
+				t.Fatal("writer duplicated pinned selection")
+			}
+		})
 	})
 	for _, name := range []string{"valid", "stale", "late_alias", "missing_quote", "wrong_contract", "wrong_quote", "missing_alias", "wrong_tif", "wrong_order", "missing_policy", "future_policy", "missing_key", "missing_decision"} {
 		t.Run(name, func(t *testing.T) {
