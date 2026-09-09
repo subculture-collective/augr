@@ -69,6 +69,11 @@ func TestStockQuoteCanonicalSnapshot(t *testing.T) {
 			if metadata.Receipt.Tape != "B" || len(metadata.Receipt.Conditions) != 1 || metadata.Receipt.Conditions[0] != "R" {
 				t.Fatal("lost source quote conditions or tape")
 			}
+			etfReference := *reference
+			etfReference.AssetClass = instrument.AssetClassETF
+			if _, err := evidence.QuoteSnapshot(etfReference, binding, retained); err != nil {
+				t.Fatal("ETF quote was rejected", err)
+			}
 			for _, clockCase := range []string{"valid", "tampered_phase", "later_instant", "premature_retention", "wrong_feed", "wrong_exchange"} {
 				t.Run("calendar_"+clockCase, func(t *testing.T) {
 					clockRaw := []byte(`{"clocks":[{"market":{"acronym":"IEX","mic":"IEXG"},"timestamp":"2026-09-09T11:59:59.123456789Z","phase_until":"2026-09-09T13:30:00Z","phase":"pre","is_market_day":true}]}`)
