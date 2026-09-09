@@ -272,6 +272,11 @@ func (planner *AcceptedEconomicPlanner) loadRoutedContext(ctx context.Context, s
 	if current.Intent.OriginType != originType || current.Intent.OriginID != originID || current.Intent.CopyOriginRebalanceRunID != scope.CopyOriginRunID() {
 		return nil, domain.Account{}, instrument.Instrument{}, instrument.VenueContract{}, fmt.Errorf("canonical routed lifecycle origin mismatch")
 	}
+	if _, hasRun := scope.PipelineRun(); hasRun {
+		if err := requireSignalPreparationRun(current.Intent.Metadata, scope); err != nil {
+			return nil, domain.Account{}, instrument.Instrument{}, instrument.VenueContract{}, err
+		}
+	}
 	account, err := NewAccountRepo(planner.pool).GetByID(ctx, scope.AccountID())
 	if err != nil {
 		return nil, domain.Account{}, instrument.Instrument{}, instrument.VenueContract{}, err
