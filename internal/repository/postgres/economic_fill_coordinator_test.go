@@ -91,6 +91,22 @@ func TestAcceptedEconomicPlannerBuildsGraphOnlyForExactRoutedOrder(t *testing.T)
 	trade := &domain.Trade{ID: uuid.New(), AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(ledger.ExecutionOriginOperator), OriginID: originID, OrderID: &order.ID, Ticker: order.Ticker, Side: order.Side, Quantity: 8, Price: price, ExecutedAt: filledAt}
 	mutation := repository.OrderFillInput{IdempotencyKey: "accepted-planner-fill", Order: order, FillIntent: repository.OrderFillIntent{Side: order.Side, Quantity: 8, ExecutionPrice: price}, Now: filledAt, Trade: trade}
 	planner := NewAcceptedEconomicPlanner(fixture.pool)
+	// Compatibility order identities must come from the prepared canonical
+	// command, not the legacy order-effect UUID or its augr- client prefix.
+	order.ClientOrderID = routed.Order.ClientOrderID
+	if err := planner.RequireAcceptedOrderPrepared(fixture.ctx, scope, order); err != nil {
+		t.Fatalf("exact canonical command rejected: %v", err)
+	}
+	legacyClient := *order
+	legacyClient.ClientOrderID = "augr-" + order.ID.String()
+	if err := planner.RequireAcceptedOrderPrepared(fixture.ctx, scope, &legacyClient); err == nil {
+		t.Fatal("legacy client identity accepted as the canonical routed command")
+	}
+	legacyOrder := *order
+	legacyOrder.ID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("order-effect:v1:legacy-smoke"))
+	if err := planner.RequireAcceptedOrderPrepared(fixture.ctx, scope, &legacyOrder); err == nil {
+		t.Fatal("legacy order identity accepted as the canonical routed command")
+	}
 	planned, err := planner.PlanAcceptedOrderFill(context.Background(), scope, mutation)
 	if err != nil {
 		t.Fatal(err)
