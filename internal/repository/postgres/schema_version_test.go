@@ -57,11 +57,11 @@ func TestCompareSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestSchemaVersionCompatibilityRequiresPortfolioRiskAndActivation(t *testing.T) {
+func TestSchemaVersionCompatibilityRequiresInternalPortfolioCapital(t *testing.T) {
 	tests := []struct {
 		version int
 		want    bool
-	}{{109, false}, {110, false}, {111, true}, {112, false}}
+	}{{109, false}, {110, false}, {111, false}, {112, false}, {113, true}, {114, false}}
 	for _, tt := range tests {
 		if got := IsSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("IsSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
