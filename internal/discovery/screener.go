@@ -63,6 +63,13 @@ func Screen(ctx context.Context, dataService *data.DataService, cfg ScreenerConf
 	// Extra calendar days for indicator warmup.
 	from := now.AddDate(0, 0, -lookback*2)
 	to := now
+	interval, err := dataService.ResearchInterval(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("screener: research interval: %w", err)
+	}
+	if interval != nil {
+		from, to = interval.Start, interval.End
+	}
 
 	type result struct {
 		res ScreenResult

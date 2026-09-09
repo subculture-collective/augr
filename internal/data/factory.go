@@ -83,6 +83,32 @@ func NewManifestBoundDataService(base *DataService, scopeID uuid.UUID, loader Ma
 	}, nil
 }
 
+// ResearchInterval returns the reconstructed interval for immutable research.
+// A nil interval denotes the ordinary live service. Bound readers fail closed
+// if their interval is unavailable; callers must not substitute wall-clock time.
+func (s *DataService) ResearchInterval(ctx context.Context) (*ResearchInterval, error) {
+	if s == nil {
+		return nil, fmt.Errorf("data: research service is nil")
+	}
+	if s.boundHistory == nil {
+		return nil, nil
+	}
+	reader, ok := s.boundHistory.(ManifestBoundIntervalReader)
+	if !ok {
+		return nil, fmt.Errorf("data: manifest-bound reader cannot reconstruct its research interval")
+	}
+	interval, err := reader.LoadResearchInterval(ctx, s.boundScopeID)
+	if err != nil {
+		return nil, fmt.Errorf("data: reconstruct research interval: %w", err)
+	}
+	if interval.Start.IsZero() || interval.Start.Location() != time.UTC || interval.End.Location() != time.UTC ||
+		!interval.Start.Before(interval.End) || !interval.Start.Equal(interval.Start.Truncate(time.Microsecond)) ||
+		!interval.End.Equal(interval.End.Truncate(time.Microsecond)) {
+		return nil, fmt.Errorf("data: manifest-bound research interval is not canonical")
+	}
+	return &interval, nil
+}
+
 // SocialTriageConfig holds optional LLM dependencies for social sentiment
 // providers that require LLM-based triage (e.g. Reddit RSS).
 type SocialTriageConfig struct {

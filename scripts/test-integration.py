@@ -15,6 +15,11 @@ MODULE = "github.com/PatrickFanella/get-rich-quick/"
 PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/..."]
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
+    "internal/discovery/TestScreenUsesFrozenManifestEvaluationInterval",
+    "internal/discovery/TestSweepHistoryUsesFrozenManifestIntervalAcrossWallClocks",
+    "internal/data/TestResearchIntervalReconstructsExactScopeAndFailsClosed",
+    "internal/data/TestResearchIntervalNeverFallsBackForBoundReaders",
+    "internal/repository/postgres/TestConfiguredScopeEnablesStockAndKeepsOptionsFailClosed",
     "internal/data/alpaca/TestStockQuotePennyContractPriceDomain",
     "cmd/augr-reference-import/TestReferenceImportPostgresReplay",
     "internal/repository/postgres/TestPipelineETFCaptureQualifiedStatus",

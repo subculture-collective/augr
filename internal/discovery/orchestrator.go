@@ -29,6 +29,24 @@ type DiscoveryConfig struct {
 	ScheduleCron string // cron for deployed strategies (default "0 */4 * * *")
 }
 
+// loadSweepHistory chooses explicit scope bounds before making the normal data
+// request. The loader still rejects any request that escapes those bounds.
+func loadSweepHistory(ctx context.Context, service *data.DataService, market domain.MarketType, ticker string, now time.Time) ([]domain.OHLCV, error) {
+	from, to := now.AddDate(-5, 0, 0), now
+	interval, err := service.ResearchInterval(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("discovery: research interval: %w", err)
+	}
+	if interval != nil {
+		from, to = interval.Start, interval.End
+	}
+	bars, err := service.DownloadHistoricalOHLCV(ctx, market, []string{ticker}, data.Timeframe1d, from, to, true)
+	if err != nil {
+		return nil, err
+	}
+	return bars[ticker], nil
+}
+
 // DiscoveryDeps bundles external dependencies required by the discovery pipeline.
 type DiscoveryDeps struct {
 	DataService      *data.DataService
@@ -194,16 +212,9 @@ func RunDiscovery(ctx context.Context, cfg DiscoveryConfig, deps DiscoveryDeps) 
 		sweepCfg.Ticker = gen.candidate.Ticker
 		sweepCfg.MarketType = cfg.Screener.MarketType
 
-		// Download 5 years of history for backtesting — more data means more
-		// trades and more statistically significant results. The first ~1 year
-		// serves as indicator warmup (SMA-200 needs 200 bars).
-		now := time.Now()
-		histFrom := now.AddDate(-5, 0, 0)
-		barsMap, dlErr := deps.DataService.DownloadHistoricalOHLCV(
-			ctx, cfg.Screener.MarketType,
-			[]string{gen.candidate.Ticker},
-			data.Timeframe1d, histFrom, now, true,
-		)
+		// Immutable research uses its full reconstructed scope; the ordinary
+		// provider path retains five years of history, including indicator warmup.
+		histBars, dlErr := loadSweepHistory(ctx, deps.DataService, cfg.Screener.MarketType, gen.candidate.Ticker, time.Now())
 		if dlErr != nil {
 			logger.Warn("discovery: historical download failed",
 				slog.String("ticker", gen.candidate.Ticker),
@@ -212,7 +223,6 @@ func RunDiscovery(ctx context.Context, cfg DiscoveryConfig, deps DiscoveryDeps) 
 			result.Errors = append(result.Errors, fmt.Sprintf("history %s: %v", gen.candidate.Ticker, dlErr))
 			continue
 		}
-		histBars := barsMap[gen.candidate.Ticker]
 		if len(histBars) < 50 {
 			logger.Warn("discovery: insufficient historical bars",
 				slog.String("ticker", gen.candidate.Ticker),

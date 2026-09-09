@@ -94,6 +94,17 @@ func TestConfiguredScopeEnablesStockAndKeepsOptionsFailClosed(t *testing.T) {
 		t.Fatal("readiness accepted a cross-account scope")
 	}
 	loader := NewManifestBoundHistoricalLoader(fixture.pool, reports, fixture.account.ID)
+	interval, err := loader.LoadResearchInterval(fixture.ctx, scope.ID)
+	if err != nil || !interval.Start.Equal(start) || !interval.End.Equal(end) {
+		t.Fatalf("reconstructed research interval = %+v, %v", interval, err)
+	}
+	if _, err := loader.LoadResearchInterval(fixture.ctx, uuid.New()); err == nil {
+		t.Fatal("research interval accepted a missing scope")
+	}
+	wrongAccount := NewManifestBoundHistoricalLoader(fixture.pool, reports, uuid.New())
+	if _, err := wrongAccount.LoadResearchInterval(fixture.ctx, scope.ID); err == nil {
+		t.Fatal("research interval accepted a different account")
+	}
 	bars, receipt, err := loader.Load(fixture.ctx, scope.ID, instrumentID, data.Timeframe1d, start, end)
 	if err != nil || len(bars) != 2 || receipt.ManifestID != manifest.ID() || len(receipt.ContentSHA256) != 2 {
 		t.Fatalf("manifest-bound load = %#v, %+v, %v", bars, receipt, err)

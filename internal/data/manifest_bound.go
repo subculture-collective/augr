@@ -99,3 +99,15 @@ type ManifestBoundOptionFrameEvidenceReader interface {
 type ManifestBoundSymbolLoader interface {
 	LoadSymbol(context.Context, uuid.UUID, string, Timeframe, time.Time, time.Time) ([]domain.OHLCV, ManifestBindingReceipt, error)
 }
+
+// ResearchInterval is the exact historical interval reconstructed from a scope.
+// It does not authorize reads outside that scope or change observation times.
+type ResearchInterval struct {
+	Start time.Time
+	End   time.Time
+}
+
+// ManifestBoundIntervalReader reconstructs the scope used by a research reader.
+type ManifestBoundIntervalReader interface {
+	LoadResearchInterval(context.Context, uuid.UUID) (ResearchInterval, error)
+}
