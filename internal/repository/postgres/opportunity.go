@@ -380,13 +380,16 @@ func (r *OpportunityRepo) list(ctx context.Context, query string, args []any, op
 		if err != nil {
 			return nil, fmt.Errorf("postgres: %s scan: %w", op, err)
 		}
-		if err := r.loadOptionLegs(ctx, opportunity); err != nil {
-			return nil, fmt.Errorf("postgres: %s option legs: %w", op, err)
-		}
 		opportunities = append(opportunities, *opportunity)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: %s rows: %w", op, err)
+	}
+	rows.Close()
+	for index := range opportunities {
+		if err := r.loadOptionLegs(ctx, &opportunities[index]); err != nil {
+			return nil, fmt.Errorf("postgres: %s option legs: %w", op, err)
+		}
 	}
 	return opportunities, nil
 }

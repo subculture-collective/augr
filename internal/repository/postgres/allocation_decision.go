@@ -183,13 +183,16 @@ func (r *AllocationDecisionRepo) List(ctx context.Context, filter repository.All
 		if err != nil {
 			return nil, fmt.Errorf("postgres: list allocation decisions scan: %w", err)
 		}
-		if err := r.loadRiskCaps(ctx, decision); err != nil {
-			return nil, fmt.Errorf("postgres: list allocation decision risk caps: %w", err)
-		}
 		decisions = append(decisions, *decision)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("postgres: list allocation decisions rows: %w", err)
+	}
+	rows.Close()
+	for index := range decisions {
+		if err := r.loadRiskCaps(ctx, &decisions[index]); err != nil {
+			return nil, fmt.Errorf("postgres: list allocation decision risk caps: %w", err)
+		}
 	}
 	return decisions, nil
 }
