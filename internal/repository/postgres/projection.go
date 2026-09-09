@@ -219,7 +219,7 @@ func (repo *ProjectionRepo) rebuildPortfolioProjectionOnce(ctx context.Context, 
 		checkpoint.AttestationKeyID,
 		checkpoint.AttestationHMAC,
 	).Scan(&persistedID)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || isProjectionCheckpointIdentityConflict(err) {
 		if rollbackErr := databaseTransaction.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, pgx.ErrTxClosed) {
 			return nil, fmt.Errorf("postgres: roll back replayed projection checkpoint: %w", rollbackErr)
 		}
@@ -618,4 +618,13 @@ func sameProjectionCheckpoint(left, right *ledger.ProjectionCheckpoint) bool {
 func isProjectionRetryable(err error) bool {
 	var postgresError *pgconn.PgError
 	return errors.As(err, &postgresError) && (postgresError.Code == "40001" || postgresError.Code == "40P01")
+}
+
+// A concurrent insert can hit the deterministic primary key before the SQL
+// identity conflict target. Replay still requires a fresh read and full payload
+// comparison; a unique violation alone never establishes successful persistence.
+func isProjectionCheckpointIdentityConflict(err error) bool {
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError) && postgresError.Code == "23505" &&
+		postgresError.ConstraintName == "projection_checkpoints_pkey"
 }
