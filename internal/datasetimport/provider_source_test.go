@@ -2,6 +2,7 @@ package datasetimport
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,6 +17,25 @@ import (
 type stockProviderStub struct {
 	bars    []domain.OHLCV
 	receipt *data.HistoricalFetchReceipt
+}
+
+type exactStockProviderStub struct {
+	stockProviderStub
+	result data.ExactHistoricalResult
+}
+
+func (stub exactStockProviderStub) GetExactOHLCVWithReceipt(context.Context, string, data.Timeframe, time.Time, time.Time, string, string) (data.ExactHistoricalResult, error) {
+	return stub.result, nil
+}
+
+func exactStockFixture(at time.Time) exactStockProviderStub {
+	row := []byte(fmt.Sprintf(`{"o":10,"h":12,"l":9,"c":11.000000000000000001,"v":100,"n":5,"vw":10.5,"t":%d}`, at.UnixMilli()))
+	page := append(append([]byte(`{"status":"OK","results":[`), row...), []byte(`]}`)...)
+	return exactStockProviderStub{result: data.ExactHistoricalResult{
+		Receipt: data.HistoricalFetchReceipt{Provider: "polygon", Feed: "sip", AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true},
+		Bars:    []data.ExactHistoricalBar{{Timestamp: at, Open: "10", High: "12", Low: "9", Close: "11.000000000000000001", Volume: "100", TradeCount: "5", VWAP: "10.5", Raw: row}},
+		Pages:   []data.HistoricalSourcePage{{RequestPath: fmt.Sprintf("/v2/aggs/ticker/AAPL/range/1/day/%d/%d", at.UnixMilli(), at.UnixMilli()), Query: "adjusted=false", Body: page}},
+	}}
 }
 
 func (stub stockProviderStub) GetOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
@@ -105,7 +125,7 @@ func TestProviderSourceFetchesCanonicalStockAndOptionBars(t *testing.T) {
 	}
 	for name, source := range map[string]*ProviderSource{
 		"stock": {
-			Mode: ModeStockBars, Stock: stockProviderStub{bars: bars}, Instruments: resolver, Clock: func() time.Time { return observedAt },
+			Mode: ModeStockBars, Stock: exactStockFixture(barAt), Instruments: resolver, Clock: func() time.Time { return observedAt },
 		},
 		"option": {
 			Mode: ModeOptionBars, Options: optionsProviderStub{bars: bars}, Instruments: resolver,
@@ -113,7 +133,11 @@ func TestProviderSourceFetchesCanonicalStockAndOptionBars(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			result, err := source.FetchMarketPayloads(context.Background(), base)
+			request := base
+			if name == "stock" {
+				request.Provider = "polygon"
+			}
+			result, err := source.FetchMarketPayloads(context.Background(), request)
 			if err != nil {
 				t.Fatalf("FetchMarketPayloads() error = %v", err)
 			}
@@ -132,12 +156,12 @@ func TestProviderSourceRejectsBarBeforeConservativePublication(t *testing.T) {
 	barAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
 	observedAt := barAt.Add(time.Hour)
 	request := dataset.MarketImportRequest{
-		Provider: "alpaca", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
+		Provider: "polygon", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
 		From: barAt, To: barAt, DecisionCutoff: observedAt, Universe: []string{"AAPL"},
 	}
 	source := &ProviderSource{
 		Mode:        ModeStockBars,
-		Stock:       stockProviderStub{bars: []domain.OHLCV{{Timestamp: barAt, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}},
+		Stock:       exactStockFixture(barAt),
 		Instruments: resolverStub{stockID: uuid.New()}, Clock: func() time.Time { return observedAt },
 	}
 	if _, err := source.FetchMarketPayloads(context.Background(), request); err == nil {
@@ -148,15 +172,15 @@ func TestProviderSourceRejectsBarBeforeConservativePublication(t *testing.T) {
 func TestProviderSourceRejectsEmptyEntitlementResultAndLateResponse(t *testing.T) {
 	barAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
 	request := dataset.MarketImportRequest{
-		Provider: "alpaca", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
+		Provider: "polygon", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
 		From: barAt, To: barAt, DecisionCutoff: barAt.Add(time.Hour), Universe: []string{"AAPL"},
 	}
 	resolver := resolverStub{stockID: uuid.New()}
-	source := &ProviderSource{Mode: ModeStockBars, Stock: stockProviderStub{}, Instruments: resolver, Clock: func() time.Time { return request.DecisionCutoff }}
+	source := &ProviderSource{Mode: ModeStockBars, Stock: exactStockProviderStub{}, Instruments: resolver, Clock: func() time.Time { return request.DecisionCutoff }}
 	if _, err := source.FetchMarketPayloads(context.Background(), request); err == nil {
 		t.Fatal("FetchMarketPayloads() accepted empty provider result")
 	}
-	source.Stock = stockProviderStub{bars: []domain.OHLCV{{Timestamp: barAt, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}}
+	source.Stock = exactStockFixture(barAt)
 	source.Clock = func() time.Time { return request.DecisionCutoff.Add(time.Microsecond) }
 	if _, err := source.FetchMarketPayloads(context.Background(), request); err == nil {
 		t.Fatal("FetchMarketPayloads() accepted response after cutoff")
@@ -166,20 +190,21 @@ func TestProviderSourceRejectsEmptyEntitlementResultAndLateResponse(t *testing.T
 func TestProviderSourceRejectsUnverifiedOrMismatchedReceipt(t *testing.T) {
 	barAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
 	request := dataset.MarketImportRequest{
-		Provider: "alpaca", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
+		Provider: "polygon", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
 		From: barAt, To: barAt, DecisionCutoff: barAt.Add(time.Hour), Universe: []string{"AAPL"},
 	}
 	resolver := resolverStub{stockID: uuid.New()}
-	bars := []domain.OHLCV{{Timestamp: barAt, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1}}
 	for name, receipt := range map[string]data.HistoricalFetchReceipt{
-		"not entitled":       {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "raw", Pages: 1, PaginationComplete: true},
-		"incomplete pages":   {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "raw", Pages: 1, Entitled: true},
-		"wrong feed":         {Provider: "alpaca", Feed: "opra", AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true},
-		"wrong adjustment":   {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "adjusted", Pages: 1, Entitled: true, PaginationComplete: true},
-		"missing page count": {Provider: "alpaca", Feed: "sip", AdjustmentPolicy: "raw", Entitled: true, PaginationComplete: true},
+		"not entitled":       {Provider: "polygon", Feed: "sip", AdjustmentPolicy: "raw", Pages: 1, PaginationComplete: true},
+		"incomplete pages":   {Provider: "polygon", Feed: "sip", AdjustmentPolicy: "raw", Pages: 1, Entitled: true},
+		"wrong feed":         {Provider: "polygon", Feed: "opra", AdjustmentPolicy: "raw", Pages: 1, Entitled: true, PaginationComplete: true},
+		"wrong adjustment":   {Provider: "polygon", Feed: "sip", AdjustmentPolicy: "adjusted", Pages: 1, Entitled: true, PaginationComplete: true},
+		"missing page count": {Provider: "polygon", Feed: "sip", AdjustmentPolicy: "raw", Entitled: true, PaginationComplete: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			source := &ProviderSource{Mode: ModeStockBars, Stock: stockProviderStub{bars: bars, receipt: &receipt}, Instruments: resolver, Clock: func() time.Time { return request.DecisionCutoff }}
+			stub := exactStockFixture(barAt)
+			stub.result.Receipt = receipt
+			source := &ProviderSource{Mode: ModeStockBars, Stock: stub, Instruments: resolver, Clock: func() time.Time { return request.DecisionCutoff }}
 			if _, err := source.FetchMarketPayloads(context.Background(), request); err == nil {
 				t.Fatal("FetchMarketPayloads() accepted invalid provider receipt")
 			}

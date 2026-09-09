@@ -1,8 +1,10 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +53,40 @@ func TestRecordBoundMarketDatasetIsAtomicAndIdempotent(t *testing.T) {
 	reloaded, err := fixture.repo.LoadBoundMarketDataset(fixture.ctx, manifest.ID())
 	if err != nil || reloaded.Manifest().Digest() != manifest.Digest() || len(reloaded.Payloads()) != 1 || reloaded.Payloads()[0].Digest() != payload.Digest() {
 		t.Fatalf("LoadBoundMarketDataset() = %+v, %v", reloaded, err)
+	}
+}
+
+func TestBoundMarketDatasetPreservesExactSourceEvidence(t *testing.T) {
+	fixture := newDatasetRepoFixture(t)
+	if _, err := execRepositoryMigration(t, fixture.ctx, fixture.pool, "000110_immutable_market_payloads.up.sql"); err != nil {
+		t.Fatal(err)
+	}
+	for _, exact := range []bool{false, true} {
+		payload, manifest := boundStockPayloadSourceFixture(t, datasetManifestInstrumentID(t, fixture.manifest), exact)
+		bound, err := dataset.NewBoundMarketDataset(manifest, []*dataset.MarketPayload{payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.repo.RecordBoundMarketDataset(fixture.ctx, bound, fixture.createdAt); err != nil {
+			t.Fatal(err)
+		}
+		reloaded, err := NewDatasetRepo(fixture.pool).LoadBoundMarketDataset(fixture.ctx, manifest.ID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(reloaded.Payloads()) != 1 || !bytes.Equal(reloaded.Payloads()[0].CanonicalBytes(), payload.CanonicalBytes()) {
+			t.Fatal("source or legacy canonical bytes changed through SQL")
+		}
+		var raw []byte
+		if err := fixture.pool.QueryRow(fixture.ctx, `SELECT canonical_bytes FROM dataset_market_payloads WHERE id=$1`, payload.ID()).Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte("source_evidence")) != exact {
+			t.Fatal("unexpected persisted source envelope presence")
+		}
+		if _, err := fixture.repo.RecordBoundMarketDataset(fixture.ctx, bound, fixture.createdAt); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -139,13 +175,25 @@ func TestMarketPayloadMigrationEmptyRollbackAndReapply(t *testing.T) {
 }
 
 func boundStockPayloadFixture(t *testing.T, instrumentID uuid.UUID) (*dataset.MarketPayload, *dataset.Manifest) {
+	return boundStockPayloadSourceFixture(t, instrumentID, false)
+}
+
+func boundStockPayloadSourceFixture(t *testing.T, instrumentID uuid.UUID, exact bool) (*dataset.MarketPayload, *dataset.Manifest) {
 	t.Helper()
 	effective := time.Date(2026, 8, 1, 20, 0, 0, 0, time.UTC)
 	observed := time.Date(2026, 8, 2, 20, 0, 0, 123456000, time.UTC)
 	published := effective.Add(time.Minute)
+	provider, adjustment := "alpaca", "all"
+	var evidence *dataset.SourcePageEvidence
+	if exact {
+		provider, adjustment = "polygon", "raw"
+		row := []byte(fmt.Sprintf(`{ "o":500,"h":503,"l":498,"c":501,"v":1000,"n":100,"vw":500.5,"t":%d }`, effective.UnixMilli()))
+		evidence = &dataset.SourcePageEvidence{RequestPath: fmt.Sprintf("/v2/aggs/ticker/SPY/range/1/day/%d/%d", effective.UnixMilli(), effective.UnixMilli()), Query: "adjusted=false", Row: row, Page: append(append([]byte(`{"results":[`), row...), []byte(`]}`)...)}
+	}
 	payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
-		Kind: dataset.MarketPayloadStockBar, InstrumentID: instrumentID, Provider: "alpaca", Feed: "sip",
-		Symbol: "SPY", Timeframe: "1Day", AdjustmentPolicy: "all", EffectiveAt: effective,
+		SourceEvidence: evidence,
+		Kind:           dataset.MarketPayloadStockBar, InstrumentID: instrumentID, Provider: provider, Feed: "sip",
+		Symbol: "SPY", Timeframe: "1Day", AdjustmentPolicy: adjustment, EffectiveAt: effective,
 		PublishedAt: &published, ObservedAt: observed, AvailableAt: observed, Revision: "original",
 		Bar: &dataset.BarPayload{Open: "500", High: "503", Low: "498", Close: "501", Volume: "1000", TradeCount: "100", VWAP: "500.5"},
 	})
@@ -155,9 +203,9 @@ func boundStockPayloadFixture(t *testing.T, instrumentID uuid.UUID) (*dataset.Ma
 	manifest, err := dataset.NewManifest(dataset.ManifestInput{
 		DecisionCutoff: observed,
 		Partitions: []dataset.PartitionInput{{
-			Kind: dataset.KindBars, Provider: "alpaca", Source: "historical-bars", Namespace: "promotion/stock/SPY/1Day",
+			Kind: dataset.KindBars, Provider: provider, Source: "historical-bars", Namespace: "promotion/stock/SPY/1Day",
 			RequestSHA256: strings.Repeat("a", 64), MediaType: "application/json", SymbologyVersion: "alpaca-v1",
-			AdjustmentPolicy: "all", Timezone: "America/New_York", Calendar: "XNYS", Revision: "original",
+			AdjustmentPolicy: adjustment, Timezone: "America/New_York", Calendar: "XNYS", Revision: "original",
 			License: "alpaca-market-data", RetentionPolicy: "promotion-evidence",
 			Observations: []dataset.ObservationInput{{
 				SourceKey: "SPY/1Day/2026-08-01", InstrumentID: instrumentID, EffectiveAt: effective,

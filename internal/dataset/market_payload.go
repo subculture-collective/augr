@@ -76,6 +76,7 @@ type OptionSnapshotPayload struct {
 }
 
 type MarketPayloadInput struct {
+	SourceEvidence         *SourcePageEvidence
 	Kind                   MarketPayloadKind
 	InstrumentID           uuid.UUID
 	UnderlyingInstrumentID uuid.UUID
@@ -120,6 +121,7 @@ type marketPayloadCanonical struct {
 	Trade                  *TradePayload          `json:"trade"`
 	Contract               *OptionContractPayload `json:"contract"`
 	Snapshot               *OptionSnapshotPayload `json:"snapshot"`
+	SourceEvidence         *SourcePageEvidence    `json:"source_evidence,omitempty"`
 }
 
 type MarketPayload struct {
@@ -148,6 +150,9 @@ type MarketPayloadMetadata struct {
 }
 
 func NewMarketPayload(input MarketPayloadInput) (*MarketPayload, error) {
+	if err := validateBarSource(&input); err != nil {
+		return nil, err
+	}
 	if err := validateMarketPayloadInput(&input); err != nil {
 		return nil, err
 	}
@@ -164,6 +169,7 @@ func NewMarketPayload(input MarketPayloadInput) (*MarketPayload, error) {
 		Revision: input.Revision, CorrectionOfSHA256: input.CorrectionOfSHA256,
 		Bar: cloneBar(input.Bar), Quote: cloneQuote(input.Quote), Trade: cloneTrade(input.Trade),
 		Contract: cloneContract(input.Contract), Snapshot: cloneSnapshot(input.Snapshot),
+		SourceEvidence: cloneSourceEvidence(input.SourceEvidence),
 	}
 	if input.UnderlyingInstrumentID != uuid.Nil {
 		canonical.UnderlyingInstrumentID = input.UnderlyingInstrumentID.String()
@@ -205,6 +211,7 @@ func MarketPayloadFromCanonical(id uuid.UUID, digest string, raw []byte) (*Marke
 		Revision: canonical.Revision, CorrectionOfSHA256: canonical.CorrectionOfSHA256,
 		Bar: cloneBar(canonical.Bar), Quote: cloneQuote(canonical.Quote), Trade: cloneTrade(canonical.Trade),
 		Contract: cloneContract(canonical.Contract), Snapshot: cloneSnapshot(canonical.Snapshot),
+		SourceEvidence: cloneSourceEvidence(canonical.SourceEvidence),
 	}
 	if canonical.UnderlyingInstrumentID != "" {
 		input.UnderlyingInstrumentID, err = uuid.Parse(canonical.UnderlyingInstrumentID)
