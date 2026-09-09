@@ -106,9 +106,9 @@ jobs:
           POSTGRES_USER: tradingagent
           POSTGRES_PASSWORD: tradingagent
           POSTGRES_DB: tradingagent_test
-        ports:
-          - 55432:5432
         options: >-
+          --label tv.subcult.augr.ci-run=${{ github.run_id }}-${{ github.run_attempt }}
+          --label tv.subcult.augr.ci-service=integration-postgres
           --health-cmd "pg_isready -U tradingagent"
           --health-interval 10s
           --health-timeout 5s
@@ -133,8 +133,8 @@ jobs:
 
       - name: Configure integration database URL
         run: |
-          database_container=$(docker ps --filter publish=55432 --filter ancestor=timescale/timescaledb:2.17.2-pg17 --format '{{.ID}}' | head -1)
-          test -n "$database_container"
+          database_container=$(docker ps --filter 'label=tv.subcult.augr.ci-run=${{ github.run_id }}-${{ github.run_attempt }}' --filter 'label=tv.subcult.augr.ci-service=integration-postgres' --format '{{.ID}}')
+          [[ "$database_container" =~ ^[0-9a-f]{12,64}$ ]]
           database_host=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$database_container")
           test -n "$database_host"
           echo "DATABASE_CONTAINER=$database_container" >> "$GITHUB_ENV"

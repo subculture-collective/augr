@@ -7,6 +7,13 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class SmokeIsolationTests(unittest.TestCase):
+    def test_integration_database_is_selected_by_exact_run_identity(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("55432", workflow)
+        self.assertIn("--label tv.subcult.augr.ci-service=integration-postgres", workflow)
+        self.assertIn("--filter 'label=tv.subcult.augr.ci-service=integration-postgres'", workflow)
+        self.assertIn('[[ "$database_container" =~ ^[0-9a-f]{12,64}$ ]]', workflow)
+
     def test_project_is_scoped_to_run_and_attempt(self):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         smoke = workflow.split("  smoke-tests:", 1)[1].split("  build:", 1)[0]
