@@ -107,6 +107,7 @@ func TestStockQuoteCanonicalSnapshot(t *testing.T) {
 					if err := json.Unmarshal(joined.Metadata, &joinedMetadata); err != nil || string(joinedMetadata.Calendar.RawResponse) != string(clockRaw) {
 						t.Fatal("lost calendar source provenance")
 					}
+					testQuoteStatusJoin(t, quote, *reference, binding, retention, calendar)
 				})
 			}
 			evidence.ObservedAt = evidence.ObservedAt.Add(time.Second)
