@@ -58,6 +58,31 @@ def validate(events, exceptions):
     return failures, len(passed), len(skipped)
 
 
+def failure_diagnostics(events):
+    """Expose structured failure metadata, never raw test output or DSNs."""
+    running = set()
+    failed = set()
+    timed_out = set()
+    for event in events:
+        package = event.get("Package", "")
+        test = event.get("Test", "")
+        key = package.removeprefix(MODULE) + "/" + test
+        action = event.get("Action")
+        if test and action == "run":
+            running.add(key)
+        elif test and action in {"pass", "skip", "fail"}:
+            running.discard(key)
+        if action == "fail":
+            failed.add(package.removeprefix(MODULE))
+        if action == "output" and "panic: test timed out after " in event.get("Output", ""):
+            timed_out.add(package.removeprefix(MODULE))
+    return {
+        "failed_packages": sorted(failed),
+        "timeout_packages": sorted(timed_out),
+        "unfinished_tests": sorted(running),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path)
@@ -109,6 +134,8 @@ def main():
         code = process.wait()
     failures, passed, skipped = validate(events, exceptions)
     summary = {"exit_code": code, "passed_including_subtests": passed, "explicit_skips": skipped, "failures": failures}
+    if code or failures:
+        summary["diagnostics"] = failure_diagnostics(events)
     (output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))
     print("Integration evidence:", output)
