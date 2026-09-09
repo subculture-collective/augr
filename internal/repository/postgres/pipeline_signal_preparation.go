@@ -14,12 +14,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// CanonicalSignalSnapshotType identifies a pre-decision, persisted evidence
+// CanonicalSignalSelectionSchema identifies pre-decision market evidence
 // selection. Its producer must retain actual provider facts before recording it.
-const CanonicalSignalSnapshotType = "canonical-signal-evidence-v1"
+const CanonicalSignalSelectionSchema = "canonical-signal-evidence-v1"
 
 // CanonicalSignalSelection pins evidence explicitly; it never means latest.
 type CanonicalSignalSelection struct {
+	Schema                  string                `json:"schema"`
 	Ticker                  string                `json:"ticker"`
 	AliasProvider           string                `json:"alias_provider"`
 	VenueContractID         uuid.UUID             `json:"venue_contract_id"`
@@ -62,7 +63,16 @@ func pipelineSignalEvidence(scope execution.ExecutionScope, plan execution.Tradi
 	}
 	var selected *domain.PipelineRunSnapshot
 	for i := range snapshots {
-		if snapshots[i].DataType != CanonicalSignalSnapshotType {
+		if snapshots[i].DataType != "market" {
+			continue
+		}
+		var header struct {
+			Schema string `json:"schema"`
+		}
+		if err := json.Unmarshal(snapshots[i].Payload, &header); err != nil {
+			return fail("invalid retained market snapshot")
+		}
+		if header.Schema != CanonicalSignalSelectionSchema {
 			continue
 		}
 		if selected != nil {
@@ -91,7 +101,7 @@ func pipelineSignalEvidence(scope execution.ExecutionScope, plan execution.Tradi
 		AliasProvider: selection.AliasProvider, VenueContractID: selection.VenueContractID, QuoteSnapshotID: selection.QuoteSnapshotID,
 		SimulationPolicyVersion: selection.SimulationPolicyVersion, TimeInForce: selection.TimeInForce, DecisionAt: decisionAt, OrderIdempotencyKey: key,
 		Proposal: lifecycle.ProposeInput{IdempotencyKey: key, CreatedAt: decisionAt, Metadata: append(json.RawMessage(nil), selected.Payload...), Event: lifecycle.EventInput{
-			Source: "pipeline-run", SourceNamespace: CanonicalSignalSnapshotType, SourceEventID: key,
+			Source: "pipeline-run", SourceNamespace: CanonicalSignalSelectionSchema, SourceEventID: key,
 			SourceAt: decisionAt, ReceivedAt: decisionAt, Actor: "strategy-runner", ReasonCode: "completed-signal", Evidence: append(json.RawMessage(nil), selected.Payload...),
 		}},
 	}, nil

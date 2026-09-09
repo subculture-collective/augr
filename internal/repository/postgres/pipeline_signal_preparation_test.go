@@ -20,7 +20,7 @@ func TestPipelineSignalEvidenceScopeAndProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	origin, originID := scope.Origin()
-	selection := CanonicalSignalSelection{Ticker: "SPY", AliasProvider: "fixture", VenueContractID: uuid.New(), QuoteSnapshotID: uuid.New(), SimulationPolicyVersion: "fixture-policy", TimeInForce: lifecycle.TimeInForceDay}
+	selection := CanonicalSignalSelection{Schema: CanonicalSignalSelectionSchema, Ticker: "SPY", AliasProvider: "fixture", VenueContractID: uuid.New(), QuoteSnapshotID: uuid.New(), SimulationPolicyVersion: "fixture-policy", TimeInForce: lifecycle.TimeInForceDay}
 	payload, err := json.Marshal(selection)
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +28,7 @@ func TestPipelineSignalEvidenceScopeAndProvenance(t *testing.T) {
 	for _, name := range []string{"valid", "missing", "ambiguous", "wrong_account", "wrong_origin", "wrong_date", "late", "incomplete_run", "wrong_signal", "wrong_ticker", "unknown_field", "missing_quote"} {
 		t.Run(name, func(t *testing.T) {
 			run := domain.PipelineRun{ID: ref.ID, TradeDate: date, AccountID: scope.AccountID(), Environment: scope.Environment(), OriginType: string(origin), OriginID: originID, Ticker: "SPY", Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy, CompletedAt: &completed}
-			snapshot := domain.PipelineRunSnapshot{ID: uuid.New(), AccountID: run.AccountID, Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID, PipelineRunID: ref.ID, PipelineRunTradeDate: date, DataType: CanonicalSignalSnapshotType, Payload: payload, CreatedAt: completed.Add(-time.Second)}
+			snapshot := domain.PipelineRunSnapshot{ID: uuid.New(), AccountID: run.AccountID, Environment: run.Environment, OriginType: run.OriginType, OriginID: run.OriginID, PipelineRunID: ref.ID, PipelineRunTradeDate: date, DataType: "market", Payload: payload, CreatedAt: completed.Add(-time.Second)}
 			plan := execution.TradingPlan{Ticker: "SPY", MarketType: domain.MarketTypeStock, Action: domain.PipelineSignalBuy}
 			switch name {
 			case "wrong_account":
@@ -46,7 +46,7 @@ func TestPipelineSignalEvidenceScopeAndProvenance(t *testing.T) {
 			case "wrong_ticker":
 				plan.Ticker = "QQQ"
 			case "unknown_field":
-				snapshot.Payload = json.RawMessage(`{"ticker":"SPY","unknown":true}`)
+				snapshot.Payload = json.RawMessage(`{"schema":"canonical-signal-evidence-v1","ticker":"SPY","unknown":true}`)
 			case "missing_quote":
 				changed := selection
 				changed.QuoteSnapshotID = uuid.Nil

@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -70,6 +71,38 @@ func TestLoadSignalPreparationRetainedGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Run("pipeline_factory", func(t *testing.T) {
+		applyRepositoryMigrationRange(t, f.ctx, f.pool, "000108", "000113")
+		ref, ok := scope.PipelineRun()
+		if !ok {
+			t.Fatal("fixture has no run")
+		}
+		origin, originID := scope.Origin()
+		run := &domain.PipelineRun{ID: ref.ID, TradeDate: ref.TradeDate, AccountID: f.account.ID, Environment: scope.Environment(), OriginType: string(origin), OriginID: originID, StrategyID: uuid.New(), Ticker: "FIXTURE", Status: domain.PipelineStatusCompleted, Signal: domain.PipelineSignalBuy, StartedAt: f.baseTime.Add(-time.Minute), CompletedAt: &f.baseTime}
+		if err := NewPipelineRunRepo(f.pool, f.account.ID).Create(f.ctx, run); err != nil {
+			t.Fatal(err)
+		}
+		plan := execution.TradingPlan{Ticker: "FIXTURE", MarketType: domain.MarketTypeStock, Action: domain.PipelineSignalBuy, EntryType: "limit", EntryPrice: 10.25}
+		if _, err := LoadPipelineSignalPreparation(f.ctx, f.pool, scope, plan); err == nil {
+			t.Fatal("factory accepted missing selection")
+		}
+		selection, err := json.Marshal(CanonicalSignalSelection{Schema: CanonicalSignalSelectionSchema, Ticker: "FIXTURE", AliasProvider: "fixture", VenueContractID: f.contract.ID, QuoteSnapshotID: f.snapshot.ID, SimulationPolicyVersion: artifact.Version, TimeInForce: lifecycle.TimeInForceDay})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Explicit historical fixture timestamp in the disposable schema only.
+		if _, err := f.pool.Exec(f.ctx, `INSERT INTO pipeline_run_snapshots (id,account_id,environment,origin_type,origin_id,pipeline_run_id,pipeline_run_trade_date,data_type,payload,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.New(), f.account.ID, scope.Environment(), string(origin), originID, ref.ID, ref.TradeDate, "market", selection, f.baseTime.Add(-time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := LoadPipelineSignalPreparation(f.ctx, f.pool, scope, plan)
+		if err != nil || loaded == nil {
+			t.Fatalf("load pipeline graph: %v", err)
+		}
+		var count int
+		if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM execution_intents WHERE account_id=$1`, f.account.ID).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("pipeline loader writes: count=%d err=%v", count, err)
+		}
+	})
 	for _, name := range []string{"valid", "stale", "late_alias", "missing_quote", "wrong_contract", "wrong_quote", "missing_alias", "wrong_tif", "wrong_order", "missing_policy", "future_policy", "missing_key", "missing_decision"} {
 		t.Run(name, func(t *testing.T) {
 			plan := execution.TradingPlan{Ticker: "FIXTURE", EntryType: "limit", EntryPrice: 10.25}
