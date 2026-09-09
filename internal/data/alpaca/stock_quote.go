@@ -92,6 +92,15 @@ func (p *StockQuoteProvider) LatestQuote(ctx context.Context, ticker, feed strin
 		return nil, fmt.Errorf("alpaca: stock quote response unreadable or oversized")
 	}
 	observed := time.Now().UTC()
+	return decodeStockQuoteEvidence(ticker, feed, path, body, observed)
+}
+
+func decodeStockQuoteEvidence(ticker, feed, path string, body []byte, observed time.Time) (*StockQuoteEvidence, error) {
+	switch feed {
+	case "iex", "sip", "delayed_sip", "boats", "overnight", "otc":
+	default:
+		return nil, fmt.Errorf("alpaca: unsupported receipt feed")
+	}
 	var payload struct {
 		Symbol string `json:"symbol"`
 		Quote  struct {
@@ -109,6 +118,7 @@ func (p *StockQuoteProvider) LatestQuote(ctx context.Context, ticker, feed strin
 	}
 	values := []json.Number{payload.Quote.Bid, payload.Quote.Ask, payload.Quote.BidSize, payload.Quote.AskSize}
 	parsed := make([]decimal.Decimal, len(values))
+	var err error
 	for i, value := range values {
 		parsed[i], err = decimal.NewFromString(value.String())
 		if err != nil || !parsed[i].IsPositive() {
