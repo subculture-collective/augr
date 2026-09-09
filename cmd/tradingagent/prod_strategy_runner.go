@@ -85,6 +85,7 @@ type polymarketTickFeed interface {
 }
 
 type realStrategyRunner struct {
+	stockCapture            stockEvidenceCapture
 	preparePaperStockSignal func(context.Context, execution.ExecutionScope, execution.TradingPlan) (execution.SignalOrderPreparation, error)
 
 	executionAccount       domain.ExecutionAccountBinding
@@ -1856,6 +1857,9 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 
 	prepared, err := runner.Prepare(strategy, r.globals)
 	if err != nil {
+		return nil, agent.PreparedRun{}, nil, nil, err
+	}
+	if err := r.configurePreparedStockCapture(&prepared, strategy); err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, err
 	}
 

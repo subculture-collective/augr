@@ -116,6 +116,9 @@ type PreparedRun struct {
 	ConfigSnapshot json.RawMessage
 	InitialState   InitialStateSeed
 	BindRunScope   func(*domain.PipelineRun) error
+	// PrepareCompletion persists execution evidence before the terminal timestamp.
+	// Failure follows the ordinary failed-run finalization path.
+	PrepareCompletion func(context.Context, domain.PipelineRun, domain.PipelineSignal) error
 
 	// RunID may be set by the caller to reuse a pre-created pipeline run
 	// record.  When non-zero Run() skips RecordRunStart and uses this ID.
@@ -460,7 +463,14 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 		))
 	}
 
-	if err := ctx.Err(); err != nil {
+	completionErr := ctx.Err()
+	if completionErr == nil && prepared.PrepareCompletion != nil {
+		completionErr = prepared.PrepareCompletion(ctx, run, r.canonicalSignal(state))
+	}
+	if completionErr == nil {
+		completionErr = ctx.Err()
+	}
+	if err := completionErr; err != nil {
 		completedAt := r.currentTime().UTC()
 		phaseTimingsJSON, _ := json.Marshal(phaseTimings)
 		status, eventKind, eventType, terminalErr := classifyRunFailure(ctx, err)
