@@ -625,6 +625,23 @@ func (m *OrderManager) processSignal(
 		order.StopPrice = &plan.StopLoss
 	}
 	if preparedOrderID != uuid.Nil {
+		// Canonical route mechanics distinguish an execution-price reference
+		// from a limit, and an entry trigger from a protective exit stop.
+		// TradingPlan has no separate entry-trigger field, so do not invent
+		// stop/stop-limit commands from its protective StopLoss.
+		switch order.OrderType {
+		case domain.OrderTypeMarket:
+			order.LimitPrice = nil
+			order.StopPrice = nil
+		case domain.OrderTypeLimit:
+			order.StopPrice = nil
+		default:
+			return fmt.Errorf("order_manager: prepared stop orders require an explicit entry trigger")
+		}
+		if order.ReferencePrice == nil && plan.EntryPrice > 0 {
+			entryReference := plan.EntryPrice
+			order.ReferencePrice = &entryReference
+		}
 		checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker)
 		if !ok {
 			return fmt.Errorf("order_manager: canonical preparation checker is required")
