@@ -18,6 +18,12 @@ import (
 // StockQuoteSource returns actual receipts from an explicitly selected feed.
 type StockQuoteSource interface {
 	LatestQuote(context.Context, string, string) (*alpacadata.StockQuoteEvidence, error)
+	QuoteConditions(context.Context, string) (*alpacadata.QuoteConditionEvidence, error)
+}
+
+// StockCalendarSource classifies the exact quote instant using source evidence.
+type StockCalendarSource interface {
+	ClockAt(context.Context, string, time.Time) (*alpacadata.MarketClockEvidence, error)
 }
 
 // PipelineStockCapture owns source acquisition, normalization and pre-completion
@@ -26,6 +32,7 @@ type StockQuoteSource interface {
 type PipelineStockCapture struct {
 	Pool     *pgxpool.Pool
 	Provider StockQuoteSource
+	Calendar StockCalendarSource
 	Feed     string
 	now      func() time.Time
 }
@@ -89,8 +96,23 @@ func (c *PipelineStockCapture) Capture(ctx context.Context, scope execution.Exec
 	if receipt == nil || receipt.Ticker != selection.Ticker || receipt.Feed != c.Feed || receipt.ObservedAt.Before(at) {
 		return nil, fmt.Errorf("stock capture source returned mismatched or cached receipt")
 	}
+	var calendar *alpacadata.MarketClockEvidence
+	var conditions *alpacadata.QuoteConditionEvidence
+	if c.Calendar != nil {
+		conditions, err = c.Provider.QuoteConditions(ctx, receipt.Tape)
+		if err != nil {
+			return nil, err
+		}
+		calendar, err = c.Calendar.ClockAt(ctx, "IEX", receipt.ExchangeAt)
+		if err != nil {
+			return nil, err
+		}
+	}
 	retainedAt := clock().UTC()
 	snapshot, err := receipt.QuoteSnapshot(*reference, *contract, retainedAt)
+	if c.Calendar != nil {
+		snapshot, err = receipt.QuoteSnapshotWithStatus(*reference, *contract, retainedAt, calendar, conditions)
+	}
 	if err != nil {
 		return nil, err
 	}
