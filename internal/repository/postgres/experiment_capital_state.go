@@ -47,12 +47,58 @@ func (source *CanonicalExperimentCapitalStateSource) LoadExperimentCapitalState(
 		experiment.AccountID() != account.ID || experiment.CapitalBindingID() != binding.ID || experiment.CapitalPolicyVersion() != policy.Version() {
 		return nil, fmt.Errorf("postgres: canonical experiment capital request does not reconstruct")
 	}
+	return source.loadAccountCapitalState(ctx, account, binding, policy)
+}
+
+// LoadInternalAccountCapitalState resolves the account and its immutable policy
+// binding independently before deriving capital from an attested checkpoint.
+// It never consults a broker balance or creates an experiment as a side effect.
+func (source *CanonicalExperimentCapitalStateSource) LoadInternalAccountCapitalState(
+	ctx context.Context,
+	accountID uuid.UUID,
+) (*capital.State, error) {
+	if source == nil || source.pool == nil || accountID == uuid.Nil {
+		return nil, fmt.Errorf("postgres: internal capital account source is required")
+	}
+	account, err := NewAccountRepo(source.pool).GetByID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if account.Venue != "internal" || account.ExternalAccountID != "" ||
+		account.Environment != domain.AccountEnvironmentPaperScored || account.Status != domain.AccountStatusActive {
+		return nil, fmt.Errorf("postgres: internal capital requires an active internal paper_scored account")
+	}
+	policyRepo := NewCapitalPolicyRepo(source.pool)
+	binding, err := policyRepo.GetCapitalBinding(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	artifact, err := policyRepo.GetCapitalPolicyByVersion(ctx, binding.PolicyVersion)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := capital.PolicyFromArtifact(*artifact)
+	if err != nil {
+		return nil, err
+	}
+	return source.loadAccountCapitalState(ctx, account, binding, policy)
+}
+
+func (source *CanonicalExperimentCapitalStateSource) loadAccountCapitalState(
+	ctx context.Context,
+	account *domain.Account,
+	binding *capital.Binding,
+	policy *capital.Policy,
+) (*capital.State, error) {
+	if err := binding.Validate(*account, policy); err != nil {
+		return nil, fmt.Errorf("postgres: capital account binding does not reconstruct: %w", err)
+	}
 	var checkpointID uuid.UUID
 	err := source.pool.QueryRow(ctx, `SELECT id FROM projection_checkpoints
 		WHERE account_id=$1 AND projection_type=$2 AND projection_version=$3
-			AND as_of<=clock_timestamp() AND as_of>=clock_timestamp()-$4::interval
+			AND as_of<=clock_timestamp() AND as_of>=clock_timestamp()-($4 * interval '1 microsecond')
 		ORDER BY as_of DESC,created_at DESC,id DESC LIMIT 1`,
-		account.ID, ledger.PortfolioProjectionType, ledger.PortfolioProjectionVersion, source.maxAge.String()).Scan(&checkpointID)
+		account.ID, ledger.PortfolioProjectionType, ledger.PortfolioProjectionVersion, source.maxAge.Microseconds()).Scan(&checkpointID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, repository.ErrNotFound
