@@ -894,6 +894,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		var strategyRunner api.StrategyRunner
 		if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 			strategyRunner = newSmokeStrategyRunner(executionAccount, runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, economicWriter, notificationManager, tradeDecisionRecorder, logger)
+			strategyRunner.(*smokeStrategyRunner).preparationFactory = newSmokePreparationFactory(cfg.Environment, db.Pool)
 			return nil
 		}); err != nil {
 			return nil, nil, nil, err
@@ -1855,6 +1856,7 @@ func newRedisHealthCheck(cfg config.Config) (api.HealthCheck, func()) {
 }
 
 type smokeStrategyRunner struct {
+	preparationFactory    smokePreparationFactory
 	executionAccount      domain.ExecutionAccountBinding
 	runner                *agent.Runner
 	runRepo               repository.PipelineRunRepository
@@ -1983,30 +1985,39 @@ func (r *smokeStrategyRunner) RunStrategy(ctx context.Context, strategy domain.S
 	if err != nil {
 		return canonical, err
 	}
-	if err := orderManager.ProcessSignal(
-		ctx,
-		scope,
-		execution.FinalSignal{
-			Signal:     signal,
-			Confidence: state.FinalSignal.Confidence,
-		},
-		execution.TradingPlan{
-			Action:           signal,
-			MarketType:       strategy.MarketType.Normalize(),
-			Ticker:           planTicker,
-			EntryType:        state.TradingPlan.EntryType,
-			EntryPrice:       state.TradingPlan.EntryPrice,
-			PositionSize:     state.TradingPlan.PositionSize,
-			StopLoss:         state.TradingPlan.StopLoss,
-			TakeProfit:       state.TradingPlan.TakeProfit,
-			TimeHorizon:      state.TradingPlan.TimeHorizon,
-			Confidence:       state.TradingPlan.Confidence,
-			Rationale:        state.TradingPlan.Rationale,
-			RiskReward:       state.TradingPlan.RiskReward,
-			Side:             state.TradingPlan.Side,
-			DecisionMetadata: executionDecisionMetadata(ctx, r.decisionRepo, r.logger, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}),
-		},
-	); err != nil {
+	finalSignal := execution.FinalSignal{
+		Signal:     signal,
+		Confidence: state.FinalSignal.Confidence,
+	}
+	plan := execution.TradingPlan{
+		Action:           signal,
+		MarketType:       strategy.MarketType.Normalize(),
+		Ticker:           planTicker,
+		EntryType:        state.TradingPlan.EntryType,
+		EntryPrice:       state.TradingPlan.EntryPrice,
+		PositionSize:     state.TradingPlan.PositionSize,
+		StopLoss:         state.TradingPlan.StopLoss,
+		TakeProfit:       state.TradingPlan.TakeProfit,
+		TimeHorizon:      state.TradingPlan.TimeHorizon,
+		Confidence:       state.TradingPlan.Confidence,
+		Rationale:        state.TradingPlan.Rationale,
+		RiskReward:       state.TradingPlan.RiskReward,
+		Side:             state.TradingPlan.Side,
+		DecisionMetadata: executionDecisionMetadata(ctx, r.decisionRepo, r.logger, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate}),
+	}
+	if signal != domain.PipelineSignalHold {
+		if r.preparationFactory == nil || run.CompletedAt == nil {
+			return canonical, errors.New("smoke canonical preparation and completed run are required")
+		}
+		preparation, prepareErr := r.preparationFactory(ctx, scope, plan, *run.CompletedAt)
+		if prepareErr != nil {
+			return canonical, prepareErr
+		}
+		err = orderManager.ProcessSignalWithPreparation(ctx, scope, finalSignal, plan, preparation)
+	} else {
+		err = orderManager.ProcessSignal(ctx, scope, finalSignal, plan)
+	}
+	if err != nil {
 		return canonical, err
 	}
 
