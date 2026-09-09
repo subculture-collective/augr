@@ -263,6 +263,7 @@ jobs:
           test -n "$compose_network"
           if docker inspect "$HOSTNAME" >/dev/null 2>&1; then
             docker network connect "$compose_network" "$HOSTNAME"
+            echo "SMOKE_RUNNER_NETWORK=${compose_network}" >> "$GITHUB_ENV"
             echo "SMOKE_BASE_URL=http://app:8080" >> "$GITHUB_ENV"
             echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@postgres:5432/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
           else
@@ -289,7 +290,15 @@ jobs:
 
       - name: Tear down docker compose
         if: always()
-        run: docker compose down -v
+        run: |
+          cleanup_status=0
+          # The runner is not a Compose service. Detach it first so Compose
+          # can remove this job's network instead of leaking its subnet.
+          if [ -n "${SMOKE_RUNNER_NETWORK:-}" ]; then
+            docker network disconnect "$SMOKE_RUNNER_NETWORK" "$HOSTNAME" || cleanup_status=$?
+          fi
+          docker compose down -v || cleanup_status=$?
+          exit "$cleanup_status"
 
   build:
     name: Build
