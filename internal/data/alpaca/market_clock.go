@@ -69,6 +69,13 @@ func (p *MarketClockProvider) ClockAt(ctx context.Context, market string, at tim
 		return nil, fmt.Errorf("alpaca: clock response unreadable or oversized")
 	}
 	observed := time.Now().UTC()
+	return decodeMarketClockEvidence(market, at, path, body, observed)
+}
+
+func decodeMarketClockEvidence(market string, at time.Time, path string, body []byte, observed time.Time) (*MarketClockEvidence, error) {
+	if market != "IEX" || at.IsZero() || observed.Before(at) {
+		return nil, fmt.Errorf("alpaca: invalid clock receipt binding")
+	}
 	var payload struct {
 		Clocks []struct {
 			Market struct {

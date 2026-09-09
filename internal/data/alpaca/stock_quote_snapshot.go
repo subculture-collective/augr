@@ -11,6 +11,43 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/marketdata"
 )
 
+// QuoteSnapshotWithClock retains a provider-derived session phase at the quote
+// instant. It deliberately leaves MarketStatus absent: a calendar is not a
+// security-level trading-status source. Policy must explicitly admit the phase.
+func (e *StockQuoteEvidence) QuoteSnapshotWithClock(reference instrument.Instrument, contract instrument.VenueContract, retainedAt time.Time, clock *MarketClockEvidence) (*marketdata.QuoteSnapshot, error) {
+	if e == nil || clock == nil || e.Feed != "iex" || e.BidExchange != "V" || e.AskExchange != "V" || !clock.At.Equal(e.ExchangeAt) || clock.ObservedAt.Before(e.ObservedAt) || retainedAt.Before(clock.ObservedAt) {
+		return nil, fmt.Errorf("alpaca: quote and calendar must share exact IEX time and receipt chronology")
+	}
+	path := "/v3/clock?" + url.Values{"markets": {"IEX"}, "time": {e.ExchangeAt.UTC().Format(time.RFC3339Nano)}}.Encode()
+	decoded, err := decodeMarketClockEvidence("IEX", e.ExchangeAt, path, clock.RawResponse, clock.ObservedAt)
+	if err != nil {
+		return nil, err
+	}
+	if clock.RequestPath != path || clock.ResponseSHA256 != decoded.ResponseSHA256 || clock.Market != decoded.Market || clock.MIC != decoded.MIC || clock.Phase != decoded.Phase || clock.IsMarketDay != decoded.IsMarketDay || !clock.PhaseUntil.Equal(decoded.PhaseUntil) {
+		return nil, fmt.Errorf("alpaca: clock fields disagree with retained source bytes")
+	}
+	snapshot, err := e.QuoteSnapshot(reference, contract, retainedAt)
+	if err != nil {
+		return nil, err
+	}
+	var metadata map[string]json.RawMessage
+	if err := json.Unmarshal(snapshot.Metadata, &metadata); err != nil {
+		return nil, err
+	}
+	metadata["calendar_receipt"], err = json.Marshal(decoded)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Metadata, err = json.Marshal(metadata)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.SessionStatus = decoded.Phase
+	snapshot.ObservationNamespace += "/calendar-v1"
+	snapshot.ObservationID += ":" + decoded.ResponseSHA256 + ":" + decoded.ObservedAt.Format(time.RFC3339Nano)
+	return snapshot, nil
+}
+
 // QuoteSnapshot converts a receipt into canonical top-of-book facts using the
 // explicitly supplied retained reference/contract binding. It does not persist,
 // resolve ticker aliases, infer trading status, or authorize execution.

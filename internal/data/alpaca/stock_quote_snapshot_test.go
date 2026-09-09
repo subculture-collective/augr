@@ -2,6 +2,7 @@ package alpaca
 
 import (
 	"encoding/json"
+	"net/url"
 	"testing"
 	"time"
 
@@ -67,6 +68,46 @@ func TestStockQuoteCanonicalSnapshot(t *testing.T) {
 			}
 			if metadata.Receipt.Tape != "B" || len(metadata.Receipt.Conditions) != 1 || metadata.Receipt.Conditions[0] != "R" {
 				t.Fatal("lost source quote conditions or tape")
+			}
+			for _, clockCase := range []string{"valid", "tampered_phase", "later_instant", "premature_retention", "wrong_feed", "wrong_exchange"} {
+				t.Run("calendar_"+clockCase, func(t *testing.T) {
+					clockRaw := []byte(`{"clocks":[{"market":{"acronym":"IEX","mic":"IEXG"},"timestamp":"2026-09-09T11:59:59.123456789Z","phase_until":"2026-09-09T13:30:00Z","phase":"pre","is_market_day":true}]}`)
+					path := "/v3/clock?" + url.Values{"markets": {"IEX"}, "time": {evidence.ExchangeAt.Format(time.RFC3339Nano)}}.Encode()
+					calendar, err := decodeMarketClockEvidence("IEX", evidence.ExchangeAt, path, clockRaw, now.Add(time.Millisecond))
+					if err != nil {
+						t.Fatal(err)
+					}
+					quote := *evidence
+					retention := retained
+					switch clockCase {
+					case "tampered_phase":
+						calendar.Phase = "core"
+					case "later_instant":
+						calendar.At = calendar.At.Add(time.Second)
+					case "premature_retention":
+						retention = now
+					case "wrong_feed":
+						quote.Feed = "sip"
+					case "wrong_exchange":
+						quote.AskExchange = "N"
+					}
+					joined, err := quote.QuoteSnapshotWithClock(*reference, binding, retention, calendar)
+					if clockCase != "valid" {
+						if err == nil {
+							t.Fatal("accepted invalid clock/quote evidence join")
+						}
+						return
+					}
+					if err != nil || joined.SessionStatus != "pre" || joined.MarketStatus != "" || joined.ObservationID == snapshot.ObservationID {
+						t.Fatal("lost phase or invented security status", err)
+					}
+					var joinedMetadata struct {
+						Calendar MarketClockEvidence `json:"calendar_receipt"`
+					}
+					if err := json.Unmarshal(joined.Metadata, &joinedMetadata); err != nil || string(joinedMetadata.Calendar.RawResponse) != string(clockRaw) {
+						t.Fatal("lost calendar source provenance")
+					}
+				})
 			}
 			evidence.ObservedAt = evidence.ObservedAt.Add(time.Second)
 			later, err := evidence.QuoteSnapshot(*reference, binding, retained.Add(time.Second))
