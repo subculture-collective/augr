@@ -41,16 +41,9 @@ type ProviderSource struct {
 	Clock         func() time.Time
 }
 
-type fetchedBars struct {
-	symbol       string
-	underlying   string
-	instrumentID uuid.UUID
-	underlyingID uuid.UUID
-	bars         []domain.OHLCV
-	receipt      data.HistoricalFetchReceipt
-}
-
 type fetchedExactStock struct {
+	underlying   string
+	underlyingID uuid.UUID
 	symbol       string
 	instrumentID uuid.UUID
 	result       data.ExactHistoricalResult
@@ -80,7 +73,6 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 	if resolveAt.IsZero() {
 		resolveAt = source.Clock().UTC().Truncate(time.Microsecond)
 	}
-	var fetched []fetchedBars
 	var exactStocks []fetchedExactStock
 	var snapshots []fetchedSnapshot
 	var tradeSets []fetchedTrades
@@ -119,9 +111,9 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		if source.Options == nil || len(source.OptionSymbols) == 0 {
 			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider and explicit OCC symbols are required")
 		}
-		verified, ok := source.Options.(data.VerifiedOptionsHistoricalProvider)
+		verified, ok := source.Options.(data.ExactOptionsHistoricalProvider)
 		if !ok {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot prove entitlement and pagination")
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot supply exact source evidence")
 		}
 		optionSymbols := append([]string(nil), source.OptionSymbols...)
 		sort.Strings(optionSymbols)
@@ -147,15 +139,15 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			if resolved.UnderlyingID == nil || *resolved.UnderlyingID != underlying.ID {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("option %s canonical underlying binding does not reconstruct", symbol)
 			}
-			bars, receipt, err := verified.GetOptionsOHLCVWithReceipt(ctx, symbol, timeframe, request.From, request.To, request.Feed, request.AdjustmentPolicy)
+			result, err := verified.GetExactOptionsOHLCVWithReceipt(ctx, symbol, timeframe, request.From, request.To, request.Feed, request.AdjustmentPolicy)
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("fetch option bars for %s: %w", symbol, err)
 			}
-			if len(bars) == 0 {
+			if len(result.Bars) == 0 {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider returned no option bars for %s", symbol)
 			}
-			fetched = append(fetched, fetchedBars{
-				symbol: symbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, bars: bars, receipt: receipt,
+			exactStocks = append(exactStocks, fetchedExactStock{
+				symbol: symbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, result: result,
 			})
 		}
 	case ModeOptionTrades:
@@ -238,7 +230,7 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		}
 		for _, bar := range fetched.result.Bars {
 			if bar.PageIndex < 0 || bar.PageIndex >= len(fetched.result.Pages) || bar.TradeCount == "" || bar.VWAP == "" {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("exact stock source lacks bound page or required bar fields")
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("exact bar source lacks bound page or required bar fields")
 			}
 			page := fetched.result.Pages[bar.PageIndex]
 			expandedSourceBytes += len(page.Body) + len(bar.Raw)
@@ -250,51 +242,20 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, err
 			}
+			kind := dataset.MarketPayloadStockBar
+			symbolKey := ""
+			if source.Mode == ModeOptionBars {
+				kind, symbolKey = dataset.MarketPayloadOptionBar, fetched.symbol
+			}
 			payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
-				Kind: dataset.MarketPayloadStockBar, InstrumentID: fetched.instrumentID,
+				Kind: kind, InstrumentID: fetched.instrumentID, UnderlyingInstrumentID: fetched.underlyingID, UnderlyingSymbol: fetched.underlying,
 				Provider: request.Provider, Feed: request.Feed, Symbol: fetched.symbol, Timeframe: request.Timeframe, AdjustmentPolicy: request.AdjustmentPolicy,
 				EffectiveAt: effectiveAt, PublishedAt: &publishedAt, ObservedAt: observedAt, AvailableAt: observedAt, Revision: "original",
 				Bar:            &dataset.BarPayload{Open: bar.Open, High: bar.High, Low: bar.Low, Close: bar.Close, Volume: bar.Volume, TradeCount: bar.TradeCount, VWAP: bar.VWAP},
-				SourceEvidence: &dataset.SourcePageEvidence{RequestPath: page.RequestPath, Query: page.Query, Page: page.Body, RowIndex: bar.RowIndex, Row: bar.Raw},
+				SourceEvidence: &dataset.SourcePageEvidence{RequestPath: page.RequestPath, Query: page.Query, Page: page.Body, RowIndex: bar.RowIndex, Row: bar.Raw, SymbolKey: symbolKey},
 			})
 			if err != nil {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize exact stock bar: %w", err)
-			}
-			payloads = append(payloads, payload)
-		}
-	}
-	for _, result := range fetched {
-		if !result.receipt.Entitled || !result.receipt.PaginationComplete || result.receipt.Pages <= 0 {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("provider receipt for %s is incomplete", result.symbol)
-		}
-		if result.receipt.Provider != request.Provider || result.receipt.Feed != request.Feed || result.receipt.AdjustmentPolicy != request.AdjustmentPolicy {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("provider receipt for %s does not match requested provenance", result.symbol)
-		}
-		for _, bar := range result.bars {
-			effectiveAt := bar.Timestamp.UTC().Truncate(time.Microsecond)
-			publishedAt, err := barPublicationAt(effectiveAt, request.Timeframe)
-			if err != nil {
-				return dataset.MarketImportSourceResult{}, err
-			}
-			if publishedAt.After(observedAt) {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider bar %s at %s was imported before its conservative publication boundary %s", result.symbol, effectiveAt, publishedAt)
-			}
-			payloadKind := dataset.MarketPayloadStockBar
-			if source.Mode == ModeOptionBars {
-				payloadKind = dataset.MarketPayloadOptionBar
-			}
-			payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
-				Kind: payloadKind, InstrumentID: result.instrumentID, UnderlyingInstrumentID: result.underlyingID,
-				Provider: request.Provider, Feed: request.Feed, Symbol: result.symbol, UnderlyingSymbol: result.underlying,
-				Timeframe: request.Timeframe, AdjustmentPolicy: request.AdjustmentPolicy, EffectiveAt: effectiveAt, PublishedAt: &publishedAt,
-				ObservedAt: observedAt, AvailableAt: observedAt, Revision: "original",
-				Bar: &dataset.BarPayload{
-					Open: canonicalFloat(bar.Open), High: canonicalFloat(bar.High), Low: canonicalFloat(bar.Low),
-					Close: canonicalFloat(bar.Close), Volume: canonicalFloat(bar.Volume), TradeCount: "0", VWAP: "0",
-				},
-			})
-			if err != nil {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize provider bar %s at %s: %w", result.symbol, effectiveAt, err)
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize exact bar: %w", err)
 			}
 			payloads = append(payloads, payload)
 		}

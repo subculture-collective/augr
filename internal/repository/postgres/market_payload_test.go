@@ -188,7 +188,7 @@ func boundStockPayloadSourceFixture(t *testing.T, instrumentID uuid.UUID, exact 
 	if exact {
 		provider, adjustment = "polygon", "raw"
 		row := []byte(fmt.Sprintf(`{ "o":500,"h":503,"l":498,"c":501,"v":1000,"n":100,"vw":500.5,"t":%d }`, effective.UnixMilli()))
-		evidence = &dataset.SourcePageEvidence{RequestPath: fmt.Sprintf("/v2/aggs/ticker/SPY/range/1/day/%d/%d", effective.UnixMilli(), effective.UnixMilli()), Query: "adjusted=false", Row: row, Page: append(append([]byte(`{"results":[`), row...), []byte(`]}`)...)}
+		evidence = &dataset.SourcePageEvidence{RequestPath: fmt.Sprintf("/v2/aggs/ticker/SPY/range/1/day/%d/%d", effective.UnixMilli(), effective.UnixMilli()), Query: "adjusted=false&sort=asc", Row: row, Page: append(append([]byte(`{"results":[`), row...), []byte(`]}`)...)}
 	}
 	payload, err := dataset.NewMarketPayload(dataset.MarketPayloadInput{
 		SourceEvidence: evidence,

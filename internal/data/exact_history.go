@@ -34,3 +34,9 @@ type ExactHistoricalResult struct {
 type ExactHistoricalProvider interface {
 	GetExactOHLCVWithReceipt(context.Context, string, Timeframe, time.Time, time.Time, string, string) (ExactHistoricalResult, error)
 }
+
+// ExactOptionsHistoricalProvider retains option bars without a float round-trip.
+// Implementations must preserve the actual options feed and source page identity.
+type ExactOptionsHistoricalProvider interface {
+	GetExactOptionsOHLCVWithReceipt(context.Context, string, Timeframe, time.Time, time.Time, string, string) (ExactHistoricalResult, error)
+}

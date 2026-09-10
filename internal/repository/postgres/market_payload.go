@@ -97,7 +97,7 @@ func insertMarketPayloadTx(ctx context.Context, tx pgx.Tx, payload *dataset.Mark
 		payload.ID(), dataset.MarketPayloadSchemaV1, metadata.Kind, metadata.InstrumentID, optionalUUIDText(metadata.UnderlyingInstrumentID),
 		metadata.Provider, metadata.Feed, metadata.Symbol, metadata.UnderlyingSymbol, metadata.Timeframe,
 		metadata.AdjustmentPolicy, metadata.EffectiveAt, metadata.PublishedAt, metadata.ObservedAt, metadata.AvailableAt,
-		metadata.Revision, metadata.CorrectionOfSHA256, payload.Digest(), payload.CanonicalBytes(), createdAt)
+		metadata.Revision, metadata.CorrectionOfSHA256, payload.Digest(), []byte(payload.CanonicalBytes()), createdAt)
 	if err != nil {
 		return fmt.Errorf("postgres: insert imported market payload: %w", err)
 	}
@@ -183,7 +183,7 @@ func (repo *DatasetRepo) RecordMarketPayload(ctx context.Context, payload *datas
 		payload.ID(), dataset.MarketPayloadSchemaV1, metadata.Kind, metadata.InstrumentID, optionalUUIDText(metadata.UnderlyingInstrumentID),
 		metadata.Provider, metadata.Feed, metadata.Symbol, metadata.UnderlyingSymbol, metadata.Timeframe,
 		metadata.AdjustmentPolicy, metadata.EffectiveAt, metadata.PublishedAt, metadata.ObservedAt, metadata.AvailableAt,
-		metadata.Revision, metadata.CorrectionOfSHA256, payload.Digest(), payload.CanonicalBytes(), createdAt)
+		metadata.Revision, metadata.CorrectionOfSHA256, payload.Digest(), []byte(payload.CanonicalBytes()), createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: insert market payload: %w", err)
 	}
