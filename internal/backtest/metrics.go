@@ -20,6 +20,9 @@ const (
 
 // Metrics holds computed performance statistics derived from an equity curve.
 type Metrics struct {
+	// ClosedTrades counts matched stock lot closures or completed options packages,
+	// never price observations, order attempts, or individual options legs.
+	ClosedTrades     int       `json:"closed_trades,omitempty"`
 	OrderAttempts    int       `json:"order_attempts"`
 	OrderFills       int       `json:"order_fills"`
 	FillRate         float64   `json:"fill_rate"`
@@ -50,6 +53,7 @@ type Metrics struct {
 // mathematically infinite.
 func (m Metrics) MarshalJSON() ([]byte, error) {
 	type metricsJSON struct {
+		ClosedTrades     int       `json:"closed_trades,omitempty"`
 		OrderAttempts    int       `json:"order_attempts"`
 		OrderFills       int       `json:"order_fills"`
 		FillRate         any       `json:"fill_rate"`
@@ -76,6 +80,7 @@ func (m Metrics) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(metricsJSON{
+		ClosedTrades:     m.ClosedTrades,
 		OrderAttempts:    m.OrderAttempts,
 		OrderFills:       m.OrderFills,
 		FillRate:         jsonFloatValue(m.FillRate),
@@ -135,6 +140,7 @@ func (f *metricJSONFloat) UnmarshalJSON(data []byte) error {
 // non-finite sentinels emitted by MarshalJSON.
 func (m *Metrics) UnmarshalJSON(data []byte) error {
 	type metricsJSON struct {
+		ClosedTrades     int             `json:"closed_trades,omitempty"`
 		OrderAttempts    int             `json:"order_attempts"`
 		OrderFills       int             `json:"order_fills"`
 		FillRate         metricJSONFloat `json:"fill_rate"`
@@ -168,6 +174,7 @@ func (m *Metrics) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = Metrics{
+		ClosedTrades:     decoded.ClosedTrades,
 		OrderAttempts:    decoded.OrderAttempts,
 		OrderFills:       decoded.OrderFills,
 		FillRate:         float64(decoded.FillRate),

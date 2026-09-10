@@ -29,6 +29,9 @@ func TestEvaluateManifestBoundOptionsUsesExecutableObservedQuotes(t *testing.T) 
 	if result.OpenedPackages != 1 || result.ClosedPackages != 1 {
 		t.Fatalf("packages = opened %d closed %d", result.OpenedPackages, result.ClosedPackages)
 	}
+	if result.Metrics.ClosedTrades != 1 {
+		t.Fatalf("closed-trade evidence = %d, want one package, not four leg fills", result.Metrics.ClosedTrades)
+	}
 	// Entry pays 3.0 and receives 1.0; close receives 4.0 and pays 1.0.
 	// Gross profit is $100, with four $0.65 contract fees.
 	if got, want := result.Metrics.EndEquity, 100097.4; got != want {

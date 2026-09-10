@@ -184,6 +184,7 @@ func (o *Orchestrator) Run(ctx context.Context) (*OrchestratorResult, error) {
 		metrics.FillRate = float64(metrics.OrderFills) / float64(metrics.OrderAttempts)
 	}
 	tradeAnalytics := ComputeTradeAnalytics(trades, o.config.StartDate, o.config.EndDate)
+	metrics.ClosedTrades = tradeAnalytics.ClosedTrades
 	inputHash, err := simulationInputHash(o.config, filtered)
 	if err != nil {
 		return nil, fmt.Errorf("backtest: hash simulation inputs: %w", err)

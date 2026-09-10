@@ -12,7 +12,7 @@ import (
 type ScoringConfig struct {
 	MinSharpe      float64 // default 0.5
 	MaxDrawdown    float64 // default 0.20
-	MinTrades      int     // default 10
+	MinTrades      int     // minimum closed stock lots or options packages; default 10
 	SharpeWeight   float64 // default 0.5
 	SortinoWeight  float64 // default 0.3
 	DrawdownWeight float64 // default 0.2
@@ -42,7 +42,7 @@ type SweepResult struct {
 // ScoreMetrics computes a composite score from backtest metrics.
 // Returns -Inf for strategies that do not meet the minimum thresholds.
 func ScoreMetrics(m backtest.Metrics, cfg ScoringConfig) float64 {
-	if m.TotalBars < cfg.MinTrades {
+	if m.ClosedTrades < cfg.MinTrades {
 		return math.Inf(-1)
 	}
 	if m.SharpeRatio < cfg.MinSharpe {

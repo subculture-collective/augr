@@ -77,6 +77,9 @@ func TestRunOptionsSweepReturnsTradesAndEquityCurve(t *testing.T) {
 	}
 
 	best := results[0]
+	if best.Metrics.ClosedTrades <= 0 || best.Metrics.ClosedTrades*4 != len(best.Trades) {
+		t.Fatalf("closed two-leg packages = %d, fill records = %d", best.Metrics.ClosedTrades, len(best.Trades))
+	}
 	if len(best.Trades) == 0 {
 		t.Fatal("best.Trades empty, want full trade log")
 	}

@@ -12,6 +12,7 @@ func TestScoreMetricsGoodMetrics(t *testing.T) {
 	cfg := DefaultScoringConfig()
 	m := backtest.Metrics{
 		TotalBars:    50,
+		ClosedTrades: 10,
 		SharpeRatio:  1.5,
 		SortinoRatio: 2.0,
 		MaxDrawdown:  0.10,
@@ -32,6 +33,7 @@ func TestScoreMetricsLowSharpe(t *testing.T) {
 	cfg := DefaultScoringConfig()
 	m := backtest.Metrics{
 		TotalBars:    50,
+		ClosedTrades: 10,
 		SharpeRatio:  0.3, // below MinSharpe 0.5
 		SortinoRatio: 1.0,
 		MaxDrawdown:  0.10,
@@ -47,6 +49,7 @@ func TestScoreMetricsHighDrawdown(t *testing.T) {
 	cfg := DefaultScoringConfig()
 	m := backtest.Metrics{
 		TotalBars:    50,
+		ClosedTrades: 10,
 		SharpeRatio:  1.5,
 		SortinoRatio: 2.0,
 		MaxDrawdown:  0.30, // above MaxDrawdown 0.20
@@ -61,7 +64,8 @@ func TestScoreMetricsFewTrades(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultScoringConfig()
 	m := backtest.Metrics{
-		TotalBars:    5, // below MinTrades 10
+		TotalBars:    500,
+		ClosedTrades: 5, // below MinTrades 10
 		SharpeRatio:  1.5,
 		SortinoRatio: 2.0,
 		MaxDrawdown:  0.10,
@@ -77,6 +81,7 @@ func TestScoreMetricsNaN(t *testing.T) {
 	cfg := DefaultScoringConfig()
 	m := backtest.Metrics{
 		TotalBars:    50,
+		ClosedTrades: 10,
 		SharpeRatio:  math.NaN(),
 		SortinoRatio: 2.0,
 		MaxDrawdown:  0.10,
@@ -93,16 +98,16 @@ func TestFilterAndRankFiltersAndSorts(t *testing.T) {
 
 	results := []SweepResult{
 		{Label: "bad-sharpe", Metrics: backtest.Metrics{
-			TotalBars: 50, SharpeRatio: 0.2, SortinoRatio: 0.5, MaxDrawdown: 0.10,
+			TotalBars: 50, ClosedTrades: 10, SharpeRatio: 0.2, SortinoRatio: 0.5, MaxDrawdown: 0.10,
 		}},
 		{Label: "best", Metrics: backtest.Metrics{
-			TotalBars: 50, SharpeRatio: 2.0, SortinoRatio: 3.0, MaxDrawdown: 0.05,
+			TotalBars: 50, ClosedTrades: 10, SharpeRatio: 2.0, SortinoRatio: 3.0, MaxDrawdown: 0.05,
 		}},
 		{Label: "good", Metrics: backtest.Metrics{
-			TotalBars: 50, SharpeRatio: 1.0, SortinoRatio: 1.5, MaxDrawdown: 0.10,
+			TotalBars: 50, ClosedTrades: 10, SharpeRatio: 1.0, SortinoRatio: 1.5, MaxDrawdown: 0.10,
 		}},
 		{Label: "bad-drawdown", Metrics: backtest.Metrics{
-			TotalBars: 50, SharpeRatio: 1.5, SortinoRatio: 2.0, MaxDrawdown: 0.50,
+			TotalBars: 50, ClosedTrades: 10, SharpeRatio: 1.5, SortinoRatio: 2.0, MaxDrawdown: 0.50,
 		}},
 	}
 
@@ -124,13 +129,13 @@ func TestFilterAndRankReturnsTopN(t *testing.T) {
 
 	results := []SweepResult{
 		{Label: "a", Metrics: backtest.Metrics{
-			TotalBars: 50, SharpeRatio: 2.0, SortinoRatio: 3.0, MaxDrawdown: 0.05,
+			TotalBars: 50, ClosedTrades: 10, SharpeRatio: 2.0, SortinoRatio: 3.0, MaxDrawdown: 0.05,
 		}},
 		{Label: "b", Metrics: backtest.Metrics{
-			TotalBars: 50, SharpeRatio: 1.5, SortinoRatio: 2.0, MaxDrawdown: 0.10,
+			TotalBars: 50, ClosedTrades: 10, SharpeRatio: 1.5, SortinoRatio: 2.0, MaxDrawdown: 0.10,
 		}},
 		{Label: "c", Metrics: backtest.Metrics{
-			TotalBars: 50, SharpeRatio: 1.0, SortinoRatio: 1.5, MaxDrawdown: 0.10,
+			TotalBars: 50, ClosedTrades: 10, SharpeRatio: 1.0, SortinoRatio: 1.5, MaxDrawdown: 0.10,
 		}},
 	}
 
