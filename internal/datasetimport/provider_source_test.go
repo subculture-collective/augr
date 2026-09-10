@@ -213,7 +213,7 @@ func TestProviderSourceRejectsUnverifiedOrMismatchedReceipt(t *testing.T) {
 	}
 }
 
-func TestProviderSourceCapturesPointInTimeOptionContractAndSnapshot(t *testing.T) {
+func TestProviderSourceRejectsLegacyFloatSnapshots(t *testing.T) {
 	observedAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
 	resolver := resolverStub{stockID: uuid.New(), optionID: uuid.New()}
 	contract, err := domain.ParseOCC("AAPL260116C00150000")
@@ -232,13 +232,8 @@ func TestProviderSourceCapturesPointInTimeOptionContractAndSnapshot(t *testing.T
 		Provider: "alpaca", Feed: "opra", Timeframe: "snapshot", AdjustmentPolicy: "raw",
 		From: observedAt, To: observedAt, DecisionCutoff: observedAt, Universe: []string{"AAPL"},
 	})
-	if err != nil {
-		t.Fatalf("FetchMarketPayloads() error = %v", err)
-	}
-	if len(result.Payloads) != 4 || result.Payloads[0].Kind() != dataset.MarketPayloadOptionContract ||
-		result.Payloads[1].Kind() != dataset.MarketPayloadOptionQuote || result.Payloads[2].Kind() != dataset.MarketPayloadOptionTrade ||
-		result.Payloads[3].Kind() != dataset.MarketPayloadOptionSnapshot {
-		t.Fatalf("payloads = %#v, want contract, quote, trade, and snapshot", result.Payloads)
+	if err == nil || len(result.Payloads) != 0 {
+		t.Fatal("legacy float snapshots accepted without source evidence")
 	}
 }
 

@@ -34,6 +34,15 @@ func cloneSourceEvidence(value *SourcePageEvidence) *SourcePageEvidence {
 	return &cloned
 }
 
+func isOptionSnapshotSourcePath(path string) bool {
+	const prefix = "/v1beta1/options/snapshots/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	underlying := strings.TrimPrefix(path, prefix)
+	return len(underlying) > 0 && len(underlying) <= 6 && strings.Trim(underlying, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == ""
+}
+
 func validateSourceEvidence(value *SourcePageEvidence) error {
 	if value == nil {
 		return nil
@@ -52,7 +61,7 @@ func validateSourceEvidence(value *SourcePageEvidence) error {
 	for name := range query {
 		// This exact provider parameter is an opaque pagination cursor, not
 		// an authentication token. All other token parameters remain forbidden.
-		if name == "page_token" && (value.RequestPath == "/v1beta1/options/bars" || value.RequestPath == "/v1beta1/options/trades") && value.SymbolKey != "" && len(query[name]) == 1 && len(query.Get(name)) > 0 && len(query.Get(name)) <= 4096 {
+		if name == "page_token" && (value.RequestPath == "/v1beta1/options/bars" || value.RequestPath == "/v1beta1/options/trades" || isOptionSnapshotSourcePath(value.RequestPath)) && value.SymbolKey != "" && len(query[name]) == 1 && len(query.Get(name)) > 0 && len(query.Get(name)) <= 4096 {
 			continue
 		}
 		key := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(name, "_", ""), "-", ""))
@@ -73,6 +82,17 @@ func validateSourceEvidence(value *SourcePageEvidence) error {
 		fields, err := sourceObjectFields(value.Page)
 		if err != nil {
 			return err
+		}
+		if isOptionSnapshotSourcePath(value.RequestPath) {
+			keyed, err := sourceObjectFields(fields["snapshots"])
+			if err != nil {
+				return err
+			}
+			row, exists := keyed[value.SymbolKey]
+			if !exists || value.RowIndex != 0 || !bytes.Equal(row, value.Row) {
+				return fmt.Errorf("snapshot source object does not reconstruct from page")
+			}
+			return nil
 		}
 		collection := "bars"
 		if value.RequestPath == "/v1beta1/options/trades" {
@@ -144,6 +164,12 @@ func validateBarSource(input *MarketPayloadInput) error {
 	}
 	if input.Kind == MarketPayloadOptionTrade && input.Provider == "alpaca" {
 		return validateAlpacaOptionTradeSource(input)
+	}
+	if input.Kind == MarketPayloadOptionQuote && input.Provider == "alpaca" {
+		return validateAlpacaSnapshotQuoteSource(input)
+	}
+	if input.Kind == MarketPayloadOptionSnapshot && input.Provider == "alpaca" {
+		return validateAlpacaSnapshotSource(input)
 	}
 	if source.SymbolKey != "" {
 		return fmt.Errorf("symbol-keyed evidence requires supported options layout")
