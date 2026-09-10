@@ -85,6 +85,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) 
 		Mode: input.Mode, Instruments: postgresrepo.NewInstrumentRepo(db.Pool), OptionSymbols: input.OptionSymbols, Clock: time.Now,
 	}
 	switch input.Mode {
+	case datasetimport.ModeOptionContracts:
+		providerSource.Contracts, err = exactContractProviderFromEnv(input.Provider, os.Getenv)
+		if err != nil {
+			return err
+		}
 	case datasetimport.ModeStockBars:
 		if input.Provider != "polygon" || strings.TrimSpace(os.Getenv("POLYGON_API_KEY")) == "" {
 			return errors.New("augr-dataset-import: stock_bars requires provider polygon and POLYGON_API_KEY")
@@ -114,6 +119,23 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout io.Writer) 
 		return err
 	}
 	return json.NewEncoder(stdout).Encode(summary)
+}
+
+// exactContractProviderFromEnv requires an explicit reference origin; a data-host
+// credential does not imply a broker environment or permission to place orders.
+func exactContractProviderFromEnv(provider string, getenv func(string) string) (*alpaca.ExactContractProvider, error) {
+	if provider != "alpaca" {
+		return nil, errors.New("augr-dataset-import: option_contracts requires provider alpaca")
+	}
+	origin, key, secret := getenv("ALPACA_REFERENCE_URL"), getenv("ALPACA_API_KEY"), getenv("ALPACA_API_SECRET")
+	if strings.TrimSpace(origin) == "" || strings.TrimSpace(key) == "" || strings.TrimSpace(secret) == "" {
+		return nil, errors.New("augr-dataset-import: option_contracts requires ALPACA_REFERENCE_URL, ALPACA_API_KEY and ALPACA_API_SECRET")
+	}
+	client, err := alpaca.NewExactContractProvider(origin, key, secret)
+	if err != nil {
+		return nil, errors.New("augr-dataset-import: invalid Alpaca reference origin or credentials")
+	}
+	return client, nil
 }
 
 func decodeInput(path string, stdin io.Reader, target any) error {

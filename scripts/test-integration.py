@@ -15,6 +15,16 @@ MODULE = "github.com/PatrickFanella/get-rich-quick/"
 PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/..."]
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
+    "cmd/augr-dataset-import/TestExactContractProviderConfiguration",
+    "internal/datasetimport/TestExactContractImportPreflightAndProviderFailure",
+    "internal/datasetimport/TestExactContractImportReferenceAndSourceGuards",
+    "internal/repository/postgres/TestOptionContractPayloadPreservesExactAndLegacySourceEvidence",
+    "internal/dataset/TestContractSourceWholeObjectBinding",
+    "internal/dataset/TestExactContractSourceBinding",
+    "internal/data/alpaca/TestExactContractProviderRetainsCurrentReference",
+    "internal/data/alpaca/TestExactContractProviderRejectsUnsafeOrMismatchedEvidence",
+    "internal/data/alpaca/TestDecodeExactOptionContractPreservesReportedFields",
+    "internal/data/alpaca/TestDecodeExactOptionContractRejectsDefaultsAndMismatch",
     "internal/repository/postgres/TestOptionMarketPayloadPreservesExactAndLegacySourceEvidence",
     "internal/repository/postgres/TestOptionTradePayloadPreservesExactAndLegacySourceEvidence",
     "internal/repository/postgres/TestOptionSnapshotPayloadPreservesExactAndLegacySourceEvidence",
