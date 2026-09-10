@@ -183,6 +183,7 @@ type OrchestratorDeps struct {
 	Polygon                      *polygon.Client
 	PolygonBulkSnapshotsEnabled  bool
 	DataService                  *data.DataService
+	OperationalDailyProvider     OperationalDailyProvider
 	DiscoveryDataService         *data.DataService
 	AlpacaReconciler             *AlpacaReconciler
 	OptionsProvider              data.OptionsDataProvider

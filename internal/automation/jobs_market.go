@@ -416,7 +416,7 @@ func (o *JobOrchestrator) deepScan(ctx context.Context) error {
 	from := now.AddDate(0, -1, 0) // 1 month of recent bars for scoring
 
 	for i, ticker := range allSymbols {
-		bars, fetchErr := o.deps.DataService.GetOHLCV(ctx, "stock", ticker, data.Timeframe1d, from, now)
+		bars, fetchErr := o.deepScanDailyBars(ctx, ticker, from, now, summary)
 		if fetchErr != nil {
 			summary["fetch_errors"]++
 			continue

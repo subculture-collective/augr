@@ -970,6 +970,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 		dataService := data.NewDataService(cfg, reg, marketDataCacheRepo, logger, socialTriage)
 		deps.DataService = dataService
+		var operationalDailyProvider automation.OperationalDailyProvider
+		if cfg.Brokers.Alpaca.APIKey != "" && cfg.Brokers.Alpaca.APISecret != "" {
+			operationalDailyProvider = alpacaData.NewCachedStockDailyProvider(cfg.Brokers.Alpaca.APIKey, cfg.Brokers.Alpaca.APISecret, marketDataCacheRepo)
+		}
 		var discoveryDataService *data.DataService
 		if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
 			manifestLoader := pgrepo.NewManifestBoundHistoricalLoader(db.Pool, reportArtifactRepo, accountID)
@@ -1391,6 +1395,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 						Polygon:                     polygonClientForAuto,
 						PolygonBulkSnapshotsEnabled: cfg.DataProviders.PolygonBulkSnapshotsEnabled,
 						DataService:                 dataService,
+						OperationalDailyProvider:    operationalDailyProvider,
 						DiscoveryDataService:        discoveryDataService,
 						AlpacaReconciler:            alpacaReconciler,
 						OptionsProvider:             deps.OptionsProvider,
