@@ -52,7 +52,7 @@ func validateSourceEvidence(value *SourcePageEvidence) error {
 	for name := range query {
 		// This exact provider parameter is an opaque pagination cursor, not
 		// an authentication token. All other token parameters remain forbidden.
-		if name == "page_token" && value.RequestPath == "/v1beta1/options/bars" && value.SymbolKey != "" && len(query[name]) == 1 && len(query.Get(name)) > 0 && len(query.Get(name)) <= 4096 {
+		if name == "page_token" && (value.RequestPath == "/v1beta1/options/bars" || value.RequestPath == "/v1beta1/options/trades") && value.SymbolKey != "" && len(query[name]) == 1 && len(query.Get(name)) > 0 && len(query.Get(name)) <= 4096 {
 			continue
 		}
 		key := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(name, "_", ""), "-", ""))
@@ -74,7 +74,11 @@ func validateSourceEvidence(value *SourcePageEvidence) error {
 		if err != nil {
 			return err
 		}
-		keyed, err := sourceObjectFields(fields["bars"])
+		collection := "bars"
+		if value.RequestPath == "/v1beta1/options/trades" {
+			collection = "trades"
+		}
+		keyed, err := sourceObjectFields(fields[collection])
 		if err != nil || len(keyed) != 1 {
 			return fmt.Errorf("source evidence requires exact symbol map")
 		}
@@ -137,6 +141,9 @@ func validateBarSource(input *MarketPayloadInput) error {
 	}
 	if input.Kind == MarketPayloadOptionBar && input.Provider == "alpaca" {
 		return validateAlpacaOptionBarSource(input)
+	}
+	if input.Kind == MarketPayloadOptionTrade && input.Provider == "alpaca" {
+		return validateAlpacaOptionTradeSource(input)
 	}
 	if source.SymbolKey != "" {
 		return fmt.Errorf("symbol-keyed evidence requires supported options layout")

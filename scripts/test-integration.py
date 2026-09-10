@@ -16,6 +16,13 @@ PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/...
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
     "internal/repository/postgres/TestOptionMarketPayloadPreservesExactAndLegacySourceEvidence",
+    "internal/repository/postgres/TestOptionTradePayloadPreservesExactAndLegacySourceEvidence",
+    "internal/datasetimport/TestExactOptionTradeImportProviderPagination",
+    "internal/datasetimport/TestExactOptionTradeImportRejectsMismatchedEvidence",
+    "internal/datasetimport/TestOptionTradeImportRejectsLegacyFloatSource",
+    "internal/data/alpaca/TestExactOptionsTradeProviderPages",
+    "internal/data/alpaca/TestDecodeExactOptionTradePreservesSource",
+    "internal/dataset/TestExactOptionTradeSourceBinding",
     "internal/datasetimport/TestExactOptionBarImportRoundtrip",
     "internal/datasetimport/TestExactOptionBarImportProviderPagination",
     "internal/datasetimport/TestExactOptionBarImportRejectsMismatchedEvidence",

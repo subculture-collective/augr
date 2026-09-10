@@ -247,7 +247,7 @@ func TestProviderSourceCapturesHistoricalOptionTrades(t *testing.T) {
 	resolver := resolverStub{stockID: uuid.New(), optionID: uuid.New()}
 	source := &ProviderSource{
 		Mode:        ModeOptionTrades,
-		Options:     optionsProviderStub{trades: []data.OptionTradeObservation{{ProviderID: "42", Price: 5.1, Size: 2, Timestamp: at, Exchange: "C"}}},
+		Options:     exactTradeFixture(at),
 		Instruments: resolver, OptionSymbols: []string{"AAPL260116C00150000"}, Clock: func() time.Time { return at.Add(time.Minute) },
 	}
 	result, err := source.FetchMarketPayloads(context.Background(), dataset.MarketImportRequest{
