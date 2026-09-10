@@ -22,6 +22,7 @@ type SourcePageEvidence struct {
 	Page        []byte `json:"page"`
 	RowIndex    int    `json:"row_index"`
 	Row         []byte `json:"row"`
+	SymbolKey   string `json:"symbol_key,omitempty"`
 }
 
 func cloneSourceEvidence(value *SourcePageEvidence) *SourcePageEvidence {
@@ -49,6 +50,11 @@ func validateSourceEvidence(value *SourcePageEvidence) error {
 		return fmt.Errorf("source evidence query is not canonical")
 	}
 	for name := range query {
+		// This exact provider parameter is an opaque pagination cursor, not
+		// an authentication token. All other token parameters remain forbidden.
+		if name == "page_token" && value.RequestPath == "/v1beta1/options/bars" && value.SymbolKey != "" && len(query[name]) == 1 && len(query.Get(name)) > 0 && len(query.Get(name)) <= 4096 {
+			continue
+		}
 		key := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(name, "_", ""), "-", ""))
 		if strings.Contains(key, "key") || strings.Contains(key, "token") || strings.Contains(key, "secret") || strings.Contains(key, "authorization") {
 			return fmt.Errorf("source evidence query contains credential parameter")
@@ -63,7 +69,23 @@ func validateSourceEvidence(value *SourcePageEvidence) error {
 	if _, err := sourceObjectFields(value.Row); err != nil {
 		return err
 	}
-	if err := json.Unmarshal(value.Page, &page); err != nil || value.RowIndex >= len(page.Results) || !bytes.Equal(page.Results[value.RowIndex], value.Row) {
+	if value.SymbolKey != "" {
+		fields, err := sourceObjectFields(value.Page)
+		if err != nil {
+			return err
+		}
+		keyed, err := sourceObjectFields(fields["bars"])
+		if err != nil || len(keyed) != 1 {
+			return fmt.Errorf("source evidence requires exact symbol map")
+		}
+		rows, ok := keyed[value.SymbolKey]
+		if !ok || json.Unmarshal(rows, &page.Results) != nil || page.Results == nil {
+			return fmt.Errorf("source evidence symbol rows missing")
+		}
+	} else if err := json.Unmarshal(value.Page, &page); err != nil {
+		return err
+	}
+	if value.RowIndex >= len(page.Results) || !bytes.Equal(page.Results[value.RowIndex], value.Row) {
 		return fmt.Errorf("source evidence row does not reconstruct from page")
 	}
 	return nil
@@ -112,6 +134,12 @@ func validateBarSource(input *MarketPayloadInput) error {
 	}
 	if err := validateSourceEvidence(source); err != nil {
 		return err
+	}
+	if input.Kind == MarketPayloadOptionBar && input.Provider == "alpaca" {
+		return validateAlpacaOptionBarSource(input)
+	}
+	if source.SymbolKey != "" {
+		return fmt.Errorf("symbol-keyed evidence requires supported options layout")
 	}
 	if input.Kind != MarketPayloadStockBar || input.Provider != "polygon" || input.Bar == nil {
 		return fmt.Errorf("unsupported source evidence payload layout")

@@ -15,6 +15,12 @@ MODULE = "github.com/PatrickFanella/get-rich-quick/"
 PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/..."]
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
+    "internal/repository/postgres/TestOptionMarketPayloadPreservesExactAndLegacySourceEvidence",
+    "internal/datasetimport/TestExactOptionBarImportRoundtrip",
+    "internal/datasetimport/TestExactOptionBarImportProviderPagination",
+    "internal/datasetimport/TestExactOptionBarImportRejectsMismatchedEvidence",
+    "internal/datasetimport/TestOptionBarImportRejectsLegacyFloatSource",
+    "internal/data/alpaca/TestExactOptionsProviderPages",
     "internal/repository/postgres/TestBoundMarketDatasetPreservesExactSourceEvidence",
     "internal/datasetimport/TestExactStockImportEvidence",
     "internal/dataset/TestMarketPayloadSourceEvidenceRoundtrip",

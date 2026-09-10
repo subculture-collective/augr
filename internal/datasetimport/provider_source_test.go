@@ -117,7 +117,6 @@ func (stub resolverStub) ResolveAlias(_ context.Context, _ string, kind instrume
 func TestProviderSourceFetchesCanonicalStockAndOptionBars(t *testing.T) {
 	barAt := time.Date(2026, 1, 2, 14, 30, 0, 0, time.UTC)
 	observedAt := barAt.Add(25 * time.Hour)
-	bars := []domain.OHLCV{{Timestamp: barAt, Open: 10, High: 12, Low: 9, Close: 11, Volume: 100}}
 	resolver := resolverStub{stockID: uuid.New(), optionID: uuid.New()}
 	base := dataset.MarketImportRequest{
 		Provider: "alpaca", Feed: "sip", Timeframe: "1d", AdjustmentPolicy: "raw",
@@ -128,7 +127,7 @@ func TestProviderSourceFetchesCanonicalStockAndOptionBars(t *testing.T) {
 			Mode: ModeStockBars, Stock: exactStockFixture(barAt), Instruments: resolver, Clock: func() time.Time { return observedAt },
 		},
 		"option": {
-			Mode: ModeOptionBars, Options: optionsProviderStub{bars: bars}, Instruments: resolver,
+			Mode: ModeOptionBars, Options: exactOptionsFixture(barAt), Instruments: resolver,
 			OptionSymbols: []string{"AAPL260116C00150000"}, Clock: func() time.Time { return observedAt },
 		},
 	} {
@@ -136,6 +135,8 @@ func TestProviderSourceFetchesCanonicalStockAndOptionBars(t *testing.T) {
 			request := base
 			if name == "stock" {
 				request.Provider = "polygon"
+			} else {
+				request.Feed = "opra"
 			}
 			result, err := source.FetchMarketPayloads(context.Background(), request)
 			if err != nil {
