@@ -5,7 +5,6 @@ package datasetimport
 import (
 	"context"
 	"fmt"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,13 +48,6 @@ type fetchedExactStock struct {
 	result       data.ExactHistoricalResult
 }
 
-type fetchedSnapshot struct {
-	snapshot     domain.OptionSnapshot
-	instrumentID uuid.UUID
-	underlyingID uuid.UUID
-	receipt      data.HistoricalFetchReceipt
-}
-
 type fetchedTrades struct {
 	symbol       string
 	underlying   string
@@ -73,7 +65,6 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		resolveAt = source.Clock().UTC().Truncate(time.Microsecond)
 	}
 	var exactStocks []fetchedExactStock
-	var snapshots []fetchedSnapshot
 	var tradeSets []fetchedTrades
 	switch source.Mode {
 	case ModeStockBars:
@@ -177,39 +168,7 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			tradeSets = append(tradeSets, fetchedTrades{symbol: contract.OCCSymbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, result: result})
 		}
 	case ModeOptionChainSnapshot:
-		if request.Timeframe != "snapshot" || request.AdjustmentPolicy != "raw" {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("option chain snapshots require timeframe snapshot and raw adjustment policy")
-		}
-		verified, ok := source.Options.(data.VerifiedOptionsSnapshotProvider)
-		if !ok {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot prove snapshot entitlement and pagination")
-		}
-		for _, underlyingSymbol := range request.Universe {
-			underlying, err := source.Instruments.ResolveAlias(ctx, request.Provider, instrument.AliasTicker, underlyingSymbol, resolveAt)
-			if err != nil {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("resolve option underlying %s: %w", underlyingSymbol, err)
-			}
-			chain, receipt, err := verified.GetOptionsChainWithReceipt(ctx, underlyingSymbol, time.Time{}, "", request.Feed)
-			if err != nil {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("fetch option chain for %s: %w", underlyingSymbol, err)
-			}
-			if len(chain) == 0 {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider returned no option snapshots for %s", underlyingSymbol)
-			}
-			for _, snapshot := range chain {
-				if snapshot.Contract.Underlying != underlyingSymbol || snapshot.ObservedAt.IsZero() {
-					return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot for %s lacks exact canonical identity or observation time", snapshot.Contract.OCCSymbol)
-				}
-				resolved, err := source.Instruments.ResolveAlias(ctx, request.Provider, instrument.AliasOCC, snapshot.Contract.OCCSymbol, resolveAt)
-				if err != nil {
-					return dataset.MarketImportSourceResult{}, fmt.Errorf("resolve option %s: %w", snapshot.Contract.OCCSymbol, err)
-				}
-				if resolved.UnderlyingID == nil || *resolved.UnderlyingID != underlying.ID {
-					return dataset.MarketImportSourceResult{}, fmt.Errorf("option %s canonical underlying binding does not reconstruct", snapshot.Contract.OCCSymbol)
-				}
-				snapshots = append(snapshots, fetchedSnapshot{snapshot: snapshot, instrumentID: resolved.ID, underlyingID: underlying.ID, receipt: receipt})
-			}
-		}
+		return source.fetchExactSnapshots(ctx, request, resolveAt)
 	default:
 		return dataset.MarketImportSourceResult{}, fmt.Errorf("unsupported provider import mode %q", source.Mode)
 	}
@@ -258,77 +217,6 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			}
 			payloads = append(payloads, payload)
 		}
-	}
-	for _, result := range snapshots {
-		if err := validateReceipt(result.snapshot.Contract.OCCSymbol, result.receipt, request); err != nil {
-			return dataset.MarketImportSourceResult{}, err
-		}
-		effectiveAt := result.snapshot.ObservedAt.UTC().Truncate(time.Microsecond)
-		if result.snapshot.QuoteObservedAt.IsZero() {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot %s lacks quote observation time", result.snapshot.Contract.OCCSymbol)
-		}
-		if effectiveAt.Before(request.From) || effectiveAt.After(request.To) || (!request.DecisionCutoff.IsZero() && effectiveAt.After(request.DecisionCutoff)) {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot %s escapes requested observation window", result.snapshot.Contract.OCCSymbol)
-		}
-		common := dataset.MarketPayloadInput{
-			InstrumentID: result.instrumentID, UnderlyingInstrumentID: result.underlyingID,
-			Provider: request.Provider, Feed: request.Feed, Symbol: result.snapshot.Contract.OCCSymbol,
-			UnderlyingSymbol: result.snapshot.Contract.Underlying, Timeframe: request.Timeframe,
-			AdjustmentPolicy: request.AdjustmentPolicy, EffectiveAt: effectiveAt, ObservedAt: observedAt,
-			AvailableAt: observedAt, Revision: "original",
-		}
-		contractInput := common
-		contractInput.Kind = dataset.MarketPayloadOptionContract
-		contractInput.Contract = &dataset.OptionContractPayload{
-			OptionType: string(result.snapshot.Contract.OptionType), Strike: canonicalFloat(result.snapshot.Contract.Strike),
-			Expiry: result.snapshot.Contract.Expiry.UTC().Format("2006-01-02"), Multiplier: canonicalFloat(result.snapshot.Contract.Multiplier),
-			Style: result.snapshot.Contract.Style,
-		}
-		contractPayload, err := dataset.NewMarketPayload(contractInput)
-		if err != nil {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option contract %s: %w", result.snapshot.Contract.OCCSymbol, err)
-		}
-		quoteInput := common
-		quoteInput.Kind = dataset.MarketPayloadOptionQuote
-		quoteInput.EffectiveAt = result.snapshot.QuoteObservedAt.UTC().Truncate(time.Microsecond)
-		quoteInput.Quote = &dataset.QuotePayload{
-			BidPrice: canonicalFloat(result.snapshot.Bid), BidSize: canonicalFloat(result.snapshot.BidSize),
-			AskPrice: canonicalFloat(result.snapshot.Ask), AskSize: canonicalFloat(result.snapshot.AskSize),
-		}
-		quotePayload, err := dataset.NewMarketPayload(quoteInput)
-		if err != nil {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option quote %s: %w", result.snapshot.Contract.OCCSymbol, err)
-		}
-		snapshotInput := common
-		snapshotInput.Kind = dataset.MarketPayloadOptionSnapshot
-		snapshotInput.Snapshot = &dataset.OptionSnapshotPayload{
-			Quote:          dataset.QuotePayload{BidPrice: canonicalFloat(result.snapshot.Bid), BidSize: canonicalFloat(result.snapshot.BidSize), AskPrice: canonicalFloat(result.snapshot.Ask), AskSize: canonicalFloat(result.snapshot.AskSize)},
-			LastTradePrice: canonicalFloat(result.snapshot.Last), LastTradeSize: canonicalFloat(result.snapshot.LastSize),
-			ImpliedVolatility: canonicalFloat(result.snapshot.Greeks.IV), Delta: canonicalFloat(result.snapshot.Greeks.Delta),
-			Gamma: canonicalFloat(result.snapshot.Greeks.Gamma), Theta: canonicalFloat(result.snapshot.Greeks.Theta),
-			Vega: canonicalFloat(result.snapshot.Greeks.Vega), Rho: canonicalFloat(result.snapshot.Greeks.Rho),
-		}
-		snapshotPayload, err := dataset.NewMarketPayload(snapshotInput)
-		if err != nil {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option snapshot %s: %w", result.snapshot.Contract.OCCSymbol, err)
-		}
-		payloads = append(payloads, contractPayload, quotePayload)
-		if result.snapshot.Last > 0 && result.snapshot.LastSize > 0 &&
-			!result.snapshot.LastTradeObservedAt.Before(request.From) && !result.snapshot.LastTradeObservedAt.After(request.To) {
-			if result.snapshot.LastTradeObservedAt.IsZero() {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("option snapshot %s has a trade without its event time", result.snapshot.Contract.OCCSymbol)
-			}
-			tradeInput := common
-			tradeInput.Kind = dataset.MarketPayloadOptionTrade
-			tradeInput.EffectiveAt = result.snapshot.LastTradeObservedAt.UTC().Truncate(time.Microsecond)
-			tradeInput.Trade = &dataset.TradePayload{Price: canonicalFloat(result.snapshot.Last), Size: canonicalFloat(result.snapshot.LastSize)}
-			tradePayload, err := dataset.NewMarketPayload(tradeInput)
-			if err != nil {
-				return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option trade %s: %w", result.snapshot.Contract.OCCSymbol, err)
-			}
-			payloads = append(payloads, tradePayload)
-		}
-		payloads = append(payloads, snapshotPayload)
 	}
 	for _, result := range tradeSets {
 		if err := validateReceipt(result.symbol, result.result.Receipt, request); err != nil {
@@ -433,16 +321,6 @@ func barPublicationAt(effectiveAt time.Time, timeframe string) (time.Time, error
 		return time.Time{}, fmt.Errorf("unsupported market import timeframe %q", timeframe)
 	}
 	return effectiveAt.Add(duration).UTC().Truncate(time.Microsecond), nil
-}
-
-func canonicalFloat(value float64) string {
-	if value == 0 {
-		return "0"
-	}
-	if math.IsNaN(value) || math.IsInf(value, 0) {
-		return "invalid"
-	}
-	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
 func contains(values []string, sought string) bool {
