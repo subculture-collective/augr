@@ -15,6 +15,14 @@ MODULE = "github.com/PatrickFanella/get-rich-quick/"
 PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/..."]
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
+    "internal/automation/TestOperationalDailyScoringGuards",
+    "internal/automation/TestDeepScanSIPFallbackReceipts",
+    "internal/data/alpaca/TestStockDailyPreservesSplitAdjustedSIPSource",
+    "internal/data/alpaca/TestStockDailyCompletedSessionDelay",
+    "internal/data/alpaca/TestStockDailyCacheSeparatesAndRevalidatesSource",
+    "internal/repository/postgres/TestStockDailyCacheSourceIsolation",
+    "internal/automation/TestDeepScanFallsBackFromStaleCompletedDailySeries",
+    "internal/automation/TestDeepScanFreshnessCacheAndClassification",
     "internal/repository/postgres/TestOptionMarketPayloadPreservesExactAndLegacySourceEvidence",
     "internal/repository/postgres/TestOptionTradePayloadPreservesExactAndLegacySourceEvidence",
     "internal/repository/postgres/TestOptionSnapshotPayloadPreservesExactAndLegacySourceEvidence",
