@@ -157,6 +157,7 @@ func runOptionsBacktest(
 
 	equityCurve := make([]backtest.EquityPoint, 0, len(bars))
 	trades := make([]domain.Trade, 0, 16)
+	closedPackages := 0
 	var prevSnap *rules.Snapshot
 
 	for i, bar := range bars {
@@ -213,6 +214,7 @@ func runOptionsBacktest(
 				closeValue, pnl := closePosition(position, bar, realizedVol, chainCfg, fillCfg)
 				cash += position.maxRisk + pnl
 				trades = append(trades, buildOptionsCloseTrades(position, bar, closeValue, reason, fillCfg)...)
+				closedPackages++
 				position = nil
 			}
 		}
@@ -226,6 +228,7 @@ func runOptionsBacktest(
 		closeValue, pnl := closePosition(position, lastBar, realizedVol, chainCfg, fillCfg)
 		cash += position.maxRisk + pnl
 		trades = append(trades, buildOptionsCloseTrades(position, lastBar, closeValue, "final_bar", fillCfg)...)
+		closedPackages++
 		position = nil
 		equityCurve[len(equityCurve)-1] = backtest.EquityPoint{
 			Timestamp:     lastBar.Timestamp,
@@ -239,6 +242,7 @@ func runOptionsBacktest(
 	}
 
 	metrics := backtest.ComputeMetrics(equityCurve, bars)
+	metrics.ClosedTrades = closedPackages
 	return OptionsBacktestArtifacts{
 		Metrics:     metrics,
 		Trades:      trades,

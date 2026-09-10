@@ -183,6 +183,7 @@ func EvaluateManifestBoundOptions(ctx context.Context, config rules.OptionsRules
 	}
 
 	result.Metrics = backtest.ComputeMetrics(result.EquityCurve, bars)
+	result.Metrics.ClosedTrades = result.ClosedPackages
 	result.Metrics.OrderAttempts = orderAttempts
 	result.Metrics.OrderFills = orderFills
 	if orderAttempts > 0 {
