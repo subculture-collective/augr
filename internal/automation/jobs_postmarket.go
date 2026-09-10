@@ -453,6 +453,7 @@ func (o *JobOrchestrator) optionsScan(ctx context.Context) error {
 				}
 				if errors.Is(err, data.ErrOHLCVRejected) {
 					summary["price_stale"]++
+					o.logger.Warn("options_scan: price rejected", slog.String("ticker", ticker), slog.String("reason", "price_stale"))
 					continue
 				}
 				summary["price_fetch_failed"]++
@@ -465,6 +466,7 @@ func (o *JobOrchestrator) optionsScan(ctx context.Context) error {
 			}
 			if !dailyBarFresh(priceNow, bars[len(bars)-1].Timestamp) {
 				summary["price_stale"]++
+				o.logger.Warn("options_scan: price rejected", slog.String("ticker", ticker), slog.String("reason", "price_stale"), slog.Time("latest_bar_at", bars[len(bars)-1].Timestamp))
 				continue
 			}
 			closePrice := bars[len(bars)-1].Close
@@ -507,6 +509,7 @@ func (o *JobOrchestrator) optionsScan(ctx context.Context) error {
 		}
 		if len(chain) < 10 { // need at least 10 contracts for a meaningful chain
 			summary["chain_insufficient"]++
+			o.logger.Warn("options_scan: chain rejected", slog.String("ticker", candidate.ticker), slog.String("reason", "chain_insufficient"), slog.Int("contracts", len(chain)), slog.Int("minimum_contracts", 10))
 			continue
 		}
 		summary["chains"]++
