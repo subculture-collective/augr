@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
 
 // SourcePageEvidence preserves the unmodified response page and its selected
@@ -77,6 +79,27 @@ func validateSourceEvidence(value *SourcePageEvidence) error {
 	}
 	if _, err := sourceObjectFields(value.Row); err != nil {
 		return err
+	}
+	// Single-contract reference responses are whole objects, not rows in a
+	// market-data collection. This only binds the original response bytes;
+	// canonical field and execution-deliverable validation remain separate.
+	if strings.HasPrefix(value.RequestPath, "/v2/options/contracts/") {
+		symbol := strings.TrimPrefix(value.RequestPath, "/v2/options/contracts/")
+		if _, err := domain.ParseStrictOCC(symbol); err != nil {
+			return fmt.Errorf("contract source requires strict OCC request symbol")
+		}
+		if value.Query != "" || value.SymbolKey != symbol || value.RowIndex != 0 || !bytes.Equal(value.Row, value.Page) {
+			return fmt.Errorf("contract source must preserve exact whole response")
+		}
+		fields, err := sourceObjectFields(value.Page)
+		if err != nil {
+			return err
+		}
+		var reported string
+		if json.Unmarshal(fields["symbol"], &reported) != nil || reported != symbol {
+			return fmt.Errorf("contract source response symbol mismatch")
+		}
+		return nil
 	}
 	if value.SymbolKey != "" {
 		fields, err := sourceObjectFields(value.Page)
@@ -170,6 +193,9 @@ func validateBarSource(input *MarketPayloadInput) error {
 	}
 	if input.Kind == MarketPayloadOptionSnapshot && input.Provider == "alpaca" {
 		return validateAlpacaSnapshotSource(input)
+	}
+	if input.Kind == MarketPayloadOptionContract && input.Provider == "alpaca" {
+		return validateAlpacaContractSource(input)
 	}
 	if source.SymbolKey != "" {
 		return fmt.Errorf("symbol-keyed evidence requires supported options layout")

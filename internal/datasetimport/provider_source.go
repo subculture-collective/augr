@@ -25,6 +25,7 @@ const (
 	ModeOptionBars          Mode = "option_bars"
 	ModeOptionTrades        Mode = "option_trades"
 	ModeOptionChainSnapshot Mode = "option_chain_snapshot"
+	ModeOptionContracts     Mode = "option_contracts"
 )
 
 type InstrumentResolver interface {
@@ -35,6 +36,7 @@ type ProviderSource struct {
 	Mode          Mode
 	Stock         data.DataProvider
 	Options       data.OptionsDataProvider
+	Contracts     data.ExactOptionContractProvider
 	Instruments   InstrumentResolver
 	OptionSymbols []string
 	Clock         func() time.Time
@@ -67,6 +69,8 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 	var exactStocks []fetchedExactStock
 	var tradeSets []fetchedTrades
 	switch source.Mode {
+	case ModeOptionContracts:
+		return source.fetchExactContracts(ctx, request)
 	case ModeStockBars:
 		timeframe, err := parseTimeframe(request.Timeframe)
 		if err != nil {
@@ -279,7 +283,7 @@ func (source *ProviderSource) resolveOption(ctx context.Context, request dataset
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("resolve option underlying %s: %w", contract.Underlying, err)
 	}
-	if resolved.UnderlyingID == nil || *resolved.UnderlyingID != underlying.ID {
+	if resolved == nil || underlying == nil || resolved.UnderlyingID == nil || *resolved.UnderlyingID != underlying.ID {
 		return nil, nil, nil, fmt.Errorf("option %s canonical underlying binding does not reconstruct", symbol)
 	}
 	return contract, resolved, underlying, nil
