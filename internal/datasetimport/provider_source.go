@@ -61,8 +61,7 @@ type fetchedTrades struct {
 	underlying   string
 	instrumentID uuid.UUID
 	underlyingID uuid.UUID
-	trades       []data.OptionTradeObservation
-	receipt      data.HistoricalFetchReceipt
+	result       data.ExactOptionsTradeResult
 }
 
 func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request dataset.MarketImportRequest) (dataset.MarketImportSourceResult, error) {
@@ -154,9 +153,9 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		if request.Timeframe != "trade" || request.AdjustmentPolicy != "raw" || source.Options == nil || len(source.OptionSymbols) == 0 {
 			return dataset.MarketImportSourceResult{}, fmt.Errorf("option trades require timeframe trade, raw adjustment policy, provider, and explicit OCC symbols")
 		}
-		verified, ok := source.Options.(data.VerifiedOptionsTradeProvider)
+		verified, ok := source.Options.(data.ExactOptionsTradeProvider)
 		if !ok {
-			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot prove trade entitlement and pagination")
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("options provider cannot supply exact trade source evidence")
 		}
 		optionSymbols := append([]string(nil), source.OptionSymbols...)
 		sort.Strings(optionSymbols)
@@ -168,14 +167,14 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, err
 			}
-			trades, receipt, err := verified.GetOptionsTradesWithReceipt(ctx, symbol, request.From, request.To, request.Feed)
+			result, err := verified.GetExactOptionsTradesWithReceipt(ctx, symbol, request.From, request.To, request.Feed)
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("fetch option trades for %s: %w", symbol, err)
 			}
-			if len(trades) == 0 {
+			if len(result.Trades) == 0 {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("provider returned no option trades for %s", symbol)
 			}
-			tradeSets = append(tradeSets, fetchedTrades{symbol: contract.OCCSymbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, trades: trades, receipt: receipt})
+			tradeSets = append(tradeSets, fetchedTrades{symbol: contract.OCCSymbol, underlying: contract.Underlying, instrumentID: resolved.ID, underlyingID: underlying.ID, result: result})
 		}
 	case ModeOptionChainSnapshot:
 		if request.Timeframe != "snapshot" || request.AdjustmentPolicy != "raw" {
@@ -332,11 +331,24 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 		payloads = append(payloads, snapshotPayload)
 	}
 	for _, result := range tradeSets {
-		if err := validateReceipt(result.symbol, result.receipt, request); err != nil {
+		if err := validateReceipt(result.symbol, result.result.Receipt, request); err != nil {
 			return dataset.MarketImportSourceResult{}, err
 		}
-		for _, trade := range result.trades {
-			effectiveAt := trade.Timestamp.UTC().Truncate(time.Microsecond)
+		if result.result.Receipt.Pages != len(result.result.Pages) {
+			return dataset.MarketImportSourceResult{}, fmt.Errorf("exact trade source page count mismatch")
+		}
+		seenTrades := make(map[string]bool)
+		for _, trade := range result.result.Trades {
+			if trade.PageIndex < 0 || trade.PageIndex >= len(result.result.Pages) || seenTrades[trade.ProviderID] {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("exact trade source page or identity invalid")
+			}
+			seenTrades[trade.ProviderID] = true
+			page := result.result.Pages[trade.PageIndex]
+			expandedSourceBytes += len(page.Body) + len(trade.Raw)
+			if expandedSourceBytes > 64*1024*1024 {
+				return dataset.MarketImportSourceResult{}, fmt.Errorf("exact trade source expansion exceeds 64 MiB import bound")
+			}
+			effectiveAt := trade.Timestamp.UTC()
 			providerTradeID, idErr := strconv.ParseInt(trade.ProviderID, 10, 64)
 			if idErr != nil || providerTradeID <= 0 {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("option trade %s lacks canonical provider identity", result.symbol)
@@ -349,7 +361,8 @@ func (source *ProviderSource) FetchMarketPayloads(ctx context.Context, request d
 				Provider: request.Provider, Feed: request.Feed, Symbol: result.symbol, UnderlyingSymbol: result.underlying,
 				Timeframe: request.Timeframe, AdjustmentPolicy: request.AdjustmentPolicy, EffectiveAt: effectiveAt,
 				ObservedAt: observedAt, AvailableAt: observedAt, Revision: "trade_" + trade.ProviderID,
-				Trade: &dataset.TradePayload{Price: canonicalFloat(trade.Price), Size: canonicalFloat(trade.Size), Exchange: trade.Exchange},
+				Trade:          &dataset.TradePayload{Price: trade.Price, Size: trade.Size, Exchange: trade.Exchange},
+				SourceEvidence: &dataset.SourcePageEvidence{RequestPath: page.RequestPath, Query: page.Query, Page: page.Body, RowIndex: trade.RowIndex, Row: trade.Raw, SymbolKey: result.symbol},
 			})
 			if err != nil {
 				return dataset.MarketImportSourceResult{}, fmt.Errorf("canonicalize option trade %s at %s: %w", result.symbol, effectiveAt, err)
