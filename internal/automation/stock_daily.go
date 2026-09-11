@@ -10,6 +10,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 )
 
 // OperationalDailyProvider supplies a whole, source-preserving historical series
@@ -23,6 +24,12 @@ func (o *JobOrchestrator) deepScanDailyBars(ctx context.Context, ticker string, 
 	// response must not trigger additional Polygon acquisition through validation.
 	bars, originalErr := o.deps.DataService.GetOHLCV(ctx, "stock", ticker, data.Timeframe1d, from, now)
 	completed := completedDailyBars(now, bars)
+	// Momentum and relative volume compare the final two candles. Freshness of
+	// only the last candle cannot establish that this is a one-session comparison.
+	if originalErr == nil && len(completed) >= 5 && dailyBarFresh(now, completed[len(completed)-1].Timestamp) && !consecutiveScoringSessions(completed) {
+		originalErr = fmt.Errorf("deep_scan: nonconsecutive completed scoring sessions")
+		completed = nil // Never leak rejected data when fallback is absent or fails.
+	}
 	if originalErr == nil && len(completed) >= 5 && dailyBarFresh(now, completed[len(completed)-1].Timestamp) {
 		return completed, nil
 	}
@@ -77,10 +84,31 @@ func operationalDailyBars(result data.ExactHistoricalResult, now time.Time) ([]d
 	if len(completed) != len(bars) || len(bars) < 5 || !dailyBarFresh(now, bars[len(bars)-1].Timestamp) {
 		return nil, fmt.Errorf("daily fallback: insufficient or stale completed history")
 	}
+	if !consecutiveScoringSessions(bars) {
+		return nil, fmt.Errorf("daily fallback: nonconsecutive completed scoring sessions")
+	}
 	last, prev := bars[len(bars)-1], bars[len(bars)-2]
 	score := scoreFromSnapshot((last.Close-prev.Close)/prev.Close*100, last.Volume, prev.Volume, last.Close)
 	if math.IsNaN(score) || math.IsInf(score, 0) {
 		return nil, fmt.Errorf("daily fallback: nonfinite score")
 	}
 	return bars, nil
+}
+
+// This validates the two sessions actually consumed by the score, not complete
+// historical coverage or corporate-action provenance for the generic series.
+func consecutiveScoringSessions(bars []domain.OHLCV) bool {
+	if len(bars) < 2 {
+		return false
+	}
+	last := bars[len(bars)-1].Timestamp.In(easternTime)
+	previous := bars[len(bars)-2].Timestamp.In(easternTime)
+	if !scheduler.IsNYSETradingDay(last) {
+		return false
+	}
+	expected := last.AddDate(0, 0, -1)
+	for !scheduler.IsNYSETradingDay(expected) {
+		expected = expected.AddDate(0, 0, -1)
+	}
+	return sameMarketDate(previous, expected)
 }
