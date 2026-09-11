@@ -13,12 +13,66 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	"github.com/PatrickFanella/get-rich-quick/internal/universe"
 )
 
 type deepScanCache struct {
 	partialResultHistoryRepo
 	entry *domain.MarketData
 	reads int
+}
+
+type scoringWriteRecorder struct {
+	operationalUniverseRepo
+	writes int
+}
+
+func (r *scoringWriteRecorder) UpdateScore(context.Context, string, float64) error {
+	r.writes++
+	return nil
+}
+
+func TestDeepScanGapNeverPersistsOrAcquiresPolygon(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 25, 0, 0, easternTime)
+	for _, cached := range []bool{false, true} {
+		t.Run(map[bool]string{false: "provider", true: "cache"}[cached], func(t *testing.T) {
+			var bars []domain.OHLCV
+			for _, day := range []int{1, 2, 3, 4, 10} {
+				bars = append(bars, domain.OHLCV{Timestamp: time.Date(2026, 9, day, 9, 30, 0, 0, easternTime), Close: 5, Volume: 100})
+			}
+			primary := &partialResultProvider{ohlcv: func(string, time.Time, time.Time) ([]domain.OHLCV, error) { return bars, nil }}
+			polygon := &partialResultProvider{ohlcv: func(string, time.Time, time.Time) ([]domain.OHLCV, error) {
+				t.Fatal("scoring rejection must not acquire Polygon data")
+				return nil, nil
+			}}
+			var cache repository.MarketDataCacheRepository
+			if cached {
+				raw, err := json.Marshal(bars)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cache = &deepScanCache{entry: &domain.MarketData{Data: raw, ExpiresAt: time.Now().Add(time.Hour)}}
+			}
+			service := data.NewDataService(config.Config{DataProviders: config.DataProviderConfigs{Polygon: config.DataProviderConfig{APIKey: "synthetic-only"}}}, &data.ProviderRegistry{
+				Yahoo:   func(data.ProviderConfig) data.DataProvider { return primary },
+				Polygon: func(data.ProviderConfig) data.DataProvider { return polygon },
+			}, cache, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+			orch := partialResultOrchestrator([]string{"ALP"}, service)
+			repo := &scoringWriteRecorder{operationalUniverseRepo: operationalUniverseRepo{watchlist: []universe.TrackedTicker{{Ticker: "ALP"}}}}
+			orch.deps.Universe = universe.NewUniverse(repo, nil, nil)
+			fallback := &dailyFallbackStub{get: func(context.Context, string, time.Time, time.Time) (data.ExactHistoricalResult, error) {
+				return data.ExactHistoricalResult{}, errors.New("synthetic denial")
+			}}
+			orch.deps.OperationalDailyProvider = fallback
+			orch.now = func() time.Time { return now }
+			orch.Register("deep_scan", "test", deepScanSpec, orch.deepScan)
+			err := orch.deepScan(context.Background())
+			summary := singleJobStatus(t, orch, "deep_scan").LastSummary
+			if err == nil || repo.writes != 0 || summary["scored"] != 0 || summary["fetch_errors"] != 1 || fallback.calls != 1 || primary.called("ALP", "1d") == cached {
+				t.Fatalf("gap did not fail closed: err=%v writes=%d summary=%v primary=%v fallback=%d", err, repo.writes, summary, primary.calls, fallback.calls)
+			}
+		})
+	}
 }
 
 func (c *deepScanCache) Get(context.Context, repository.MarketDataCacheKey) (*domain.MarketData, error) {
@@ -102,6 +156,7 @@ func TestDeepScanFallsBackFromStaleCompletedDailySeries(t *testing.T) {
 		}
 		result = append([]domain.OHLCV{{Timestamp: time.Date(2026, time.August, 31, 9, 30, 0, 0, easternTime), Close: 5, Volume: 100}}, result...)
 		if fresh {
+			result = append(result, domain.OHLCV{Timestamp: time.Date(2026, time.September, 8, 9, 30, 0, 0, easternTime), Close: 5, Volume: 100})
 			result = append(result, domain.OHLCV{Timestamp: time.Date(2026, time.September, 9, 9, 30, 0, 0, easternTime), Close: 6, Volume: 200})
 		}
 		// Today's provisional candle must never disguise missing completed data.

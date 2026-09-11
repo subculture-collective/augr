@@ -100,3 +100,80 @@ func TestOperationalDailyScoringGuards(t *testing.T) {
 		})
 	}
 }
+
+// Reproduces the production shape: a fresh Thursday candle follows the prior
+// Friday across missing Tuesday/Wednesday sessions and the ALP reverse split.
+func TestDeepScanFreshTerminalGapFailsClosed(t *testing.T) {
+	now := time.Date(2026, 9, 11, 12, 25, 0, 0, easternTime)
+	for _, outcome := range []string{"absent", "denied", "gapped", "valid"} {
+		t.Run(outcome, func(t *testing.T) {
+			var bars []domain.OHLCV
+			for _, day := range []int{1, 2, 3, 4, 10, 11} {
+				price := .099
+				if day >= 10 {
+					price = 3.71
+				}
+				bars = append(bars, domain.OHLCV{Timestamp: time.Date(2026, 9, day, 9, 30, 0, 0, easternTime), Close: price, Volume: 100})
+			}
+			primary := &partialResultProvider{ohlcv: func(string, time.Time, time.Time) ([]domain.OHLCV, error) { return bars, nil }}
+			orch := partialResultOrchestrator([]string{"ALP"}, partialResultDataService(primary, nil))
+			fallback := &dailyFallbackStub{get: func(context.Context, string, time.Time, time.Time) (data.ExactHistoricalResult, error) {
+				if outcome == "denied" {
+					return data.ExactHistoricalResult{}, fmt.Errorf("synthetic denial")
+				}
+				if outcome == "gapped" {
+					return dailyExactFixture(completedDailyBars(now, bars)), nil
+				}
+				var good []domain.OHLCV
+				for _, day := range []int{3, 4, 8, 9, 10} {
+					good = append(good, domain.OHLCV{Timestamp: time.Date(2026, 9, day, 0, 0, 0, 0, easternTime), Close: 5, Volume: 100})
+				}
+				return dailyExactFixture(good), nil
+			}}
+			if outcome != "absent" {
+				orch.deps.OperationalDailyProvider = fallback
+			}
+			summary := map[string]int{}
+			got, err := orch.deepScanDailyBars(context.Background(), "ALP", now.AddDate(0, -1, 0), now, summary)
+			if outcome == "valid" {
+				if err != nil || len(got) != 5 || got[0].Close != 5 || fallback.calls != 1 {
+					t.Fatalf("fallback not used: bars=%v err=%v calls=%d", got, err, fallback.calls)
+				}
+			} else if err == nil || len(got) != 0 {
+				t.Fatalf("rejected primary leaked: bars=%v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestConsecutiveScoringSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		previous, last string
+		valid          bool
+	}{
+		{"ordinary", "2026-09-09", "2026-09-10", true},
+		{"weekend", "2026-09-11", "2026-09-14", true},
+		{"Labor Day", "2026-09-04", "2026-09-08", true},
+		{"DST weekend", "2026-03-06", "2026-03-09", true},
+		{"ALP gap", "2026-09-04", "2026-09-10", false},
+		{"duplicate", "2026-09-10", "2026-09-10", false},
+		{"reversed", "2026-09-11", "2026-09-10", false},
+		{"holiday candle", "2026-09-07", "2026-09-08", false},
+		{"weekend candle", "2026-09-11", "2026-09-12", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prev, err := time.ParseInLocation("2006-01-02", tc.previous, easternTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last, err := time.ParseInLocation("2006-01-02", tc.last, easternTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := consecutiveScoringSessions([]domain.OHLCV{{Timestamp: prev}, {Timestamp: last}}); got != tc.valid {
+				t.Fatalf("got %v, want %v", got, tc.valid)
+			}
+		})
+	}
+}
