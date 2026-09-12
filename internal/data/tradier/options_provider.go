@@ -358,5 +358,30 @@ type tradierExpirationsResponse struct {
 }
 
 type tradierExpirations struct {
-	Date []string `json:"date"`
+	Date tradierExpirationDates `json:"date"`
+}
+
+// Tradier may return a scalar date when only one expiration is listed.
+// Decode into temporary values so malformed arrays cannot yield partial dates.
+type tradierExpirationDates []string
+
+func (d *tradierExpirationDates) UnmarshalJSON(body []byte) error {
+	var scalar *string
+	if err := json.Unmarshal(body, &scalar); err == nil && scalar != nil {
+		*d = tradierExpirationDates{*scalar}
+		return nil
+	}
+	var values []*string
+	if err := json.Unmarshal(body, &values); err != nil {
+		return fmt.Errorf("expiration dates must be a string or string array: %w", err)
+	}
+	var dates tradierExpirationDates
+	for _, value := range values {
+		if value == nil {
+			return fmt.Errorf("expiration date array contains null")
+		}
+		dates = append(dates, *value)
+	}
+	*d = dates
+	return nil
 }
