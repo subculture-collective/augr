@@ -15,6 +15,8 @@ MODULE = "github.com/PatrickFanella/get-rich-quick/"
 PACKAGES = ["./cmd/...", "./internal/...", "./migrations/...", "./monitoring/..."]
 # These contracts must execute, not merely exist or report a skip.
 REQUIRED = {
+    "internal/data/tradier/TestListedExpirationsDateShapes",
+    "internal/data/tradier/TestOptionsChainSingletonExpirationResolution",
     "internal/automation/TestDeepScanGapNeverPersistsOrAcquiresPolygon",
     "internal/automation/TestDeepScanFreshTerminalGapFailsClosed",
     "internal/automation/TestConsecutiveScoringSessions",
