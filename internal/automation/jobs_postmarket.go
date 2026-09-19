@@ -3,7 +3,6 @@ package automation
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -411,7 +410,15 @@ func strategyResweepCompletionError(summary map[string]int) error {
 // setups with elevated IV, unusual volume, or favourable put/call skew.
 func (o *JobOrchestrator) optionsScan(ctx context.Context) error {
 	o.logger.Info("options_scan: starting")
-	summary := map[string]int{"universe": 0, "optionable": 0, "price_fetch_failed": 0, "price_empty": 0, "price_stale": 0, "chains": 0, "chain_insufficient": 0, "setups": 0, "fetch_failed": 0, "persist_failed": 0}
+	summary := map[string]int{
+		"universe": 0, "optionable": 0,
+		"price_fetch_failed": 0, "price_empty": 0, "price_stale": 0,
+		"daily_fallback_attempted": 0, "daily_fallback_accepted": 0,
+		"daily_fallback_rejected": 0, "daily_fallback_provider_pages": 0,
+		"daily_fallback_cache_hits": 0,
+		"chains":                    0, "chain_insufficient": 0, "setups": 0,
+		"fetch_failed": 0, "persist_failed": 0,
+	}
 	defer func() { o.SetLastSummary("options_scan", summary) }()
 
 	if o.deps.OptionsProvider == nil {
@@ -444,17 +451,13 @@ func (o *JobOrchestrator) optionsScan(ctx context.Context) error {
 		}
 		if o.deps.DataService != nil {
 			priceNow := o.now()
-			bars, err := o.deps.DataService.GetOHLCVValidated(ctx, domain.MarketTypeStock, ticker, data.Timeframe1d, priceNow.AddDate(0, 0, -5), priceNow, func(bars []domain.OHLCV) bool {
-				return len(bars) > 0 && dailyBarFresh(priceNow, bars[len(bars)-1].Timestamp)
-			})
+			// Reuse the source-separated operational scoring path. A stale
+			// successful generic response must not cascade into mutable Polygon
+			// acquisition; the bounded Alpaca SIP reader supplies the fallback.
+			bars, err := o.deepScanDailyBars(ctx, ticker, priceNow.AddDate(0, -1, 0), priceNow, summary)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
-				}
-				if errors.Is(err, data.ErrOHLCVRejected) {
-					summary["price_stale"]++
-					o.logger.Warn("options_scan: price rejected", slog.String("ticker", ticker), slog.String("reason", "price_stale"))
-					continue
 				}
 				summary["price_fetch_failed"]++
 				o.logger.Warn("options_scan: price lookup failed", slog.String("ticker", ticker), slog.Any("error", err))
@@ -573,8 +576,8 @@ func optionsScanCompletionError(summary map[string]int) error {
 	chainCoverage := coverageBasisPoints(chains, optionable)
 	summary["optionable_coverage_bps"] = priceCoverage
 	summary["chain_coverage_bps"] = chainCoverage
-	detail := fmt.Sprintf("universe=%d optionable=%d optionable_coverage_bps=%d chains=%d chain_coverage_bps=%d price_fetch_failed=%d price_empty=%d price_stale=%d chain_fetch_failed=%d chain_insufficient=%d persist_failed=%d",
-		universe, optionable, priceCoverage, chains, chainCoverage, summary["price_fetch_failed"], summary["price_empty"], summary["price_stale"], summary["fetch_failed"], summary["chain_insufficient"], summary["persist_failed"])
+	detail := fmt.Sprintf("universe=%d optionable=%d optionable_coverage_bps=%d chains=%d chain_coverage_bps=%d price_fetch_failed=%d price_empty=%d price_stale=%d daily_fallback_attempted=%d daily_fallback_accepted=%d daily_fallback_rejected=%d daily_fallback_provider_pages=%d daily_fallback_cache_hits=%d chain_fetch_failed=%d chain_insufficient=%d persist_failed=%d",
+		universe, optionable, priceCoverage, chains, chainCoverage, summary["price_fetch_failed"], summary["price_empty"], summary["price_stale"], summary["daily_fallback_attempted"], summary["daily_fallback_accepted"], summary["daily_fallback_rejected"], summary["daily_fallback_provider_pages"], summary["daily_fallback_cache_hits"], summary["fetch_failed"], summary["chain_insufficient"], summary["persist_failed"])
 	if universe == 0 || optionable == 0 || chains == 0 {
 		return fmt.Errorf("options_scan: zero required coverage: %s", detail)
 	}
