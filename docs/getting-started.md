@@ -1,209 +1,114 @@
-# Getting Started: first run
+# Getting started
 
-This guide takes you from a fresh clone to a visible end-to-end run in the web UI.
+This guide runs PostgreSQL and Redis in Compose, with the API and frontend on
+the host. It is intended for a disposable local environment.
 
-It uses:
-- Docker Compose for **Postgres + Redis only**
-- a **native** Go backend build/start
-- the Vite frontend in `web/`
+## 1. Install the toolchain
 
-The frontend is a separate app. In the current Compose and production stack, backend root `/` is not the SPA.
+Use Go 1.25.13, Node.js 22, npm, Python 3, Docker Compose v2,
+[Task](https://taskfile.dev/), and the `migrate` CLI. The pinned language
+versions are also recorded in `go.mod`, `.nvmrc`, and `mise.toml`.
 
-One current constraint matters:
-- Manual strategy runs are wired only when the backend starts with `APP_ENV=smoke`. Outside smoke, `POST /api/v1/strategies/{id}/run` returns `501 manual strategy runs are not configured`.
-
-## 1. Prerequisites
-
-Install these first:
-- Docker + Docker Compose v2
-- Go 1.25+
-- Node.js 20+
-- [Task](https://taskfile.dev/installation/)
-- optionally [Ollama](https://ollama.com/download) if you want a local LLM instead of a cloud API key
-
-## 2. Clone and create `.env`
+## 2. Configure the application
 
 ```bash
-git clone https://github.com/PatrickFanella/get-rich-quick.git
-cd get-rich-quick
+git clone https://git.subcult.tv/subculture-collective/augr.git
+cd augr
 cp .env.example .env
 ```
 
-Edit `.env` and set these values:
+Set these local values in `.env`:
 
 ```dotenv
-JWT_SECRET=replace-with-a-long-random-string
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/tradingagent?sslmode=disable
-REDIS_URL=redis://localhost:6379/0
+APP_ENV=development
+POSTGRES_PASSWORD=postgres
+DATABASE_URL=postgres://postgres:postgres@localhost:5434/tradingagent?sslmode=disable
+REDIS_URL=redis://localhost:6380/0
+JWT_SECRET=replace-with-a-long-random-value
+PROJECTION_ACCOUNT_ID=00000000-0000-4000-8000-000000000064
+```
 
-# choose one LLM path
-LLM_DEFAULT_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3.2
-# or set one cloud key such as OPENAI_API_KEY=...
+Startup also requires at least one configured LLM path and primary market-data
+provider. For example:
 
-# set at least one market-data provider key or startup validation fails
+```dotenv
+OPENAI_API_KEY=...
 POLYGON_API_KEY=...
-# or ALPHA_VANTAGE_API_KEY=...
 ```
 
-If you use Ollama, pull the model before starting the backend:
+For local Ollama, set both `OLLAMA_BASE_URL` and a non-empty
+`OLLAMA_API_KEY`; the token is part of Augr's provider validation even when the
+local endpoint does not enforce it. OpenCode, Anthropic, Google, OpenRouter, and
+xAI are also supported. Primary data-provider validation accepts Polygon,
+Alpha Vantage, Finnhub, or Financial Modeling Prep.
 
-```bash
-ollama serve
-ollama pull llama3.2
-```
-
-This guide keeps the backend native, so the default `OLLAMA_BASE_URL=http://localhost:11434` works as-is.
-
-## 3. Start Postgres and Redis
+## 3. Start dependencies and migrate
 
 ```bash
 docker compose up -d postgres redis
-```
-
-## 4. Apply migrations
-
-```bash
 task migrate:up
+task migrate:status
 ```
 
-If the backend was already running and logged a schema version mismatch, stop it after this step and start it again. The runtime fails fast on schema mismatch before subsystem startup, and migrations applied after process start require a fresh restart.
+Compose publishes PostgreSQL on `localhost:5434` and Redis on
+`localhost:6380`. Service names such as `postgres:5432` work only inside the
+Compose network.
 
-## 5. Build and start the backend
-
-Build once:
+## 4. Start the API
 
 ```bash
 task build
-```
-
-For the first visible run, start the server in **smoke** mode.
-`APP_ENV=smoke` enables the deterministic manual-run path, but `.env` is only auto-loaded in `development`, so export the file into your shell first:
-
-```bash
-set -a
-source .env
-set +a
-export APP_ENV=smoke
 ./bin/tradingagent serve
 ```
 
-In another terminal, confirm the API is up:
+In development, the process loads `.env`. Confirm readiness:
 
 ```bash
 curl http://localhost:8080/healthz
 ```
 
-Expected response:
+If you run the `app` service through Compose instead, its host URL is
+`http://localhost:8081`.
 
-```json
-{"status":"all-ok"}
-```
-
-## 6. Create your first account
-
-Register a user via the API:
+## 5. Start the frontend
 
 ```bash
-curl -s -X POST http://localhost:8080/api/v1/auth/register \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"demo","password":"demo-pass"}' | jq .
+npm --prefix web ci
+npm --prefix web run dev
 ```
 
-This returns an access token and refresh token you can use immediately.
+Open `http://localhost:5173/login`. The frontend defaults to an API base of
+`http://localhost:8080`; set `VITE_API_BASE_URL` when using a different port.
 
-If you prefer to insert the user directly into Postgres instead (e.g., in CI or automated setup):
+For a newly migrated disposable database, use:
 
-```bash
-docker compose exec postgres psql -U postgres -d tradingagent <<'SQL'
-INSERT INTO users (username, password_hash)
-VALUES ('demo', crypt('demo-pass', gen_salt('bf')))
-ON CONFLICT (username) DO NOTHING;
-SQL
-```
+- User: `patrick@subcult.tv`
+- Password: `demo-pass`
 
-Either way, log in with:
-- username: `demo`
-- password: `demo-pass`
+Those are seed credentials for local development only. Shared and deployed
+environments must use a separately managed password.
 
-## 7. Start the frontend and log in
+## 6. Exercise the paper path
 
-```bash
-cd web
-npm install
-npm run dev
-```
+Create a strategy from the Strategies page, keep paper trading enabled, and
+either assign a valid schedule or use **Run now**. Normal development and
+production-like runtimes wire the real strategy runner; `APP_ENV=smoke` instead
+uses a deterministic runner suitable for smoke checks without external model
+calls.
 
-Open <http://localhost:5173/login>.
+Inspect the resulting run, decisions, and any orders separately. A completed
+pipeline may legitimately produce a monitor or hold decision and no order.
 
-`VITE_API_BASE_URL` defaults to `http://localhost:8080`, so no extra frontend env var is needed for this local flow. This frontend runs separately from the backend process; do not expect `http://localhost:8080/` to serve the UI.
+## Troubleshooting
 
-Log in with the `demo` account from the previous step.
+### Configuration validation fails
 
-## 8. Create a strategy
+Check that the environment includes `DATABASE_URL`, `JWT_SECRET`,
+`PROJECTION_ACCOUNT_ID`, one LLM provider, and one primary data provider. In
+non-development environments, source the file explicitly before starting the
+binary.
 
-In the UI:
-1. Open **Strategies**.
-2. Click **New strategy**.
-3. Fill the minimum fields:
-   - **Name**: `Smoke Strategy`
-   - **Ticker**: `SMOKE`
-   - **Market type**: `stock`
-4. Leave **Paper trading** enabled.
-5. Enable **Active** if you want it to show up as active immediately.
-6. Leave schedule empty for a manual-only run.
-7. Click **Create strategy**.
-
-## 9. Trigger a run
-
-Use the strategy UI:
-- click **Run** on the strategy row, or
-- open the strategy detail page and click **Run now**
-
-Because the backend is running with `APP_ENV=smoke`, the run uses the deterministic smoke pipeline and should complete quickly without live LLM calls.
-
-## 10. View results
-
-Use these pages:
-- **Runs** — open the newest row to inspect the pipeline run at `/runs/:id`
-- **Overview** — portfolio summary, active strategies, activity feed, and risk status
-- **Strategies** / strategy detail — latest run history and current strategy status
-
-On the run detail page you should see:
-- phase progress
-- analyst cards
-- debate sections
-- trader plan
-- final signal
-
-## 11. Troubleshooting FAQ
-
-### Port already in use
-
-If `docker compose up -d postgres redis`, `./bin/tradingagent serve`, or `npm run dev` says the address is already in use:
-
-```bash
-lsof -i :8080
-lsof -i :5432
-lsof -i :6379
-lsof -i :5173
-```
-
-- Native backend/frontend: stop the conflicting process, or pick a new backend port and point Vite at it:
-
-```bash
-export APP_PORT=9090
-cd web
-VITE_API_BASE_URL=http://localhost:9090 npm run dev
-```
-
-- Docker Compose Postgres/Redis: set `POSTGRES_PORT` or `REDIS_PORT` in `.env`, then rerun `docker compose up -d postgres redis`.
-- If you use `task dev` or `docker compose up` for the full stack instead of this guide's native backend flow, `APP_PORT` changes the Compose app port mapping too.
-
-### Migration errors
-
-If `task migrate:up` fails:
+### Migration fails
 
 ```bash
 docker compose ps postgres
@@ -211,9 +116,7 @@ docker compose logs postgres --tail=50
 task migrate:status
 ```
 
-- `migrate: not found`: run `task tools`.
-- `connect: connection refused`: Postgres is not healthy yet; wait for `docker compose ps postgres` to report it running, then retry.
-- `Dirty database version` or another disposable-local-db failure: reset the local volumes and re-apply migrations:
+If a disposable local database is dirty and contains nothing worth retaining:
 
 ```bash
 docker compose down -v
@@ -221,64 +124,22 @@ docker compose up -d postgres redis
 task migrate:up
 ```
 
-- Native host commands must use `localhost:5432`. `postgres:5432` only works from inside Compose containers.
-- If the backend failed with a schema mismatch before you ran migrations, restart it after `task migrate:up`. The running process does not recover in place.
+Never use that reset procedure against shared or deployed data.
 
-### Ollama is not running
-
-If the backend starts but LLM calls fail while `LLM_DEFAULT_PROVIDER=ollama`:
-
-```bash
-curl http://localhost:11434/api/tags
-ollama serve
-ollama pull llama3.2
-```
-
-- Keep `OLLAMA_BASE_URL=http://localhost:11434` for this native-backend guide.
-- If you do not want Ollama, switch `.env` to a cloud provider and set the matching API key instead of leaving `LLM_DEFAULT_PROVIDER=ollama`.
-
-### Browser shows a CORS error
-
-Local development uses permissive CORS, so a browser CORS error usually means the frontend is calling the wrong backend URL or the backend is down.
+### The UI cannot reach the API
 
 ```bash
 curl http://localhost:8080/healthz
 ```
 
-- If you changed `APP_PORT`, restart Vite with the matching API base URL:
+Confirm that `VITE_API_BASE_URL` matches the actual API and restart Vite after
+changing it. A browser CORS error is commonly a stale or unavailable API URL.
 
-```bash
-cd web
-VITE_API_BASE_URL=http://localhost:9090 npm run dev
-```
+### A run produces no trade
 
-- Remove stale `VITE_API_BASE_URL` values from any `web/.env*` file if they still point at an old host or port.
-- If you later lock CORS down to specific origins, include the exact frontend origin such as `http://localhost:5173` or browser API/WebSocket calls will fail.
+That can be correct. Check the run's terminal status, final signal, risk result,
+qualification state, broker mode, and audit events. Candidate discovery,
+strategy qualification, order submission, and fill reconciliation are distinct
+stages.
 
-### `invalid configuration: ...` on startup
-
-In `APP_ENV=smoke`, `.env` is not auto-loaded. Export it before starting the backend:
-
-```bash
-set -a
-source .env
-set +a
-export APP_ENV=smoke
-./bin/tradingagent serve
-```
-
-Then re-check `JWT_SECRET`, `DATABASE_URL`, one LLM provider, and one market-data provider key.
-
-### Login fails with `invalid username or password`
-
-Check whether the user exists:
-
-```bash
-docker compose exec postgres psql -U postgres -d tradingagent -c "SELECT username FROM users;"
-```
-
-If `demo` is missing, register via the API (`POST /api/v1/auth/register`) or re-run the direct Postgres insert from section 6.
-
-### `manual strategy runs are not configured`
-
-The backend is not running with `APP_ENV=smoke`. Stop it and restart with the smoke-mode steps from section 5. Outside smoke, manual `POST /api/v1/strategies/{id}/run` currently returns `501 manual strategy runs are not configured`.
+Next, read [Development Setup](development-setup.md) and [Testing](testing.md).

@@ -11,7 +11,7 @@ tags: [adr, execution, lifecycle, simulation]
 - **Status:** accepted
 - **Date:** 2026-08-14
 - **Deciders:** Project owner, Engineering
-- **Technical Story:** [Augr total overhaul plan](../superpowers/plans/2026-08-14-total-overhaul-plan.md)
+- **Technical Story:** Augr execution-lifecycle hardening
 
 ## Context
 

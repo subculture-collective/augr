@@ -1,111 +1,42 @@
----
-title: "Documentation"
-description: "Canonical documentation hub for get-rich-quick."
-status: "canonical"
-updated: "2026-04-03"
-tags: [docs, canonical, index]
----
+# Augr documentation
 
-# Documentation
-
-This directory now has a single job: explain the application as it exists today, separate what is implemented from what is merely planned, and keep older design research available without pretending it is the current runtime contract.
+This directory contains maintained documentation only. Runtime code,
+configuration validation, migrations, and the deployed environment remain the
+authority when a document and observable behavior disagree.
 
 ## Start here
 
-| Page | Use it for |
-| --- | --- |
-| [Getting Started](getting-started.md) | Fastest path from clone to a working local stack, first login, first strategy, and first run |
-| [Development Setup](development-setup.md) | Full local development workflow, migrations, testing, frontend setup, and day-to-day commands |
-| [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md) | Current architecture, safety baseline, and trading-research platform foundation status |
-| [Runbooks](runbooks/README.md) | Operational procedures for incidents, safety controls, and routine interventions |
-| [Known Issues](known-issues.md) | Current gaps, rough edges, and repo-health problems that affect operators and contributors |
-| [Roadmap](roadmap.md) | Proposed next steps and the major product/engineering themes that follow from the current codebase |
+- [Getting Started](getting-started.md) — first local API and UI session.
+- [Development Setup](development-setup.md) — toolchain, configuration,
+  migrations, and contributor workflow.
+- [Testing](testing.md) — test tiers, database isolation, and coverage policy.
+- [Architecture](AUGR_ARCHITECTURE_AUDIT.md) — current component boundaries and
+  execution paths.
 
-## What the application does
+## Operate and maintain
 
-`get-rich-quick` is a Go-based trading application with three operator surfaces:
+- [Runbooks](runbooks/README.md) — incidents, safety controls, provider outages,
+  recovery, and release evidence.
+- [Known Issues](known-issues.md) — confirmed limitations that affect operators
+  or contributors.
+- [Roadmap](roadmap.md) — current priorities, without delivery-date promises.
+- [ADRs](adr/README.md) — durable architecture decisions and rationale.
+- [Agent execution guide](agent-execution-guide.md) — repository workflow for
+  autonomous contributors.
+- [Prediction-market runtime](prediction-market-runtime.md) — shared native
+  execution and settlement contract.
+- [Discord webhooks](discord-webhook-setup.md) and [n8n](n8n-integration.md) —
+  maintained notification configuration.
 
-1. A REST API and WebSocket server for programmatic control and real-time updates.
-2. A React web UI for strategies, runs, portfolio state, memories, settings, risk, and live activity.
-3. A Cobra CLI and Bubble Tea dashboard for local control and terminal-first operations.
+## Documentation policy
 
-Underneath those surfaces is a multi-agent trading runtime that:
-
-1. Pulls market data, fundamentals, news, and sentiment where available.
-2. Runs analyst agents in parallel.
-3. Runs a research debate.
-4. Builds a trade plan.
-5. Runs a risk debate.
-6. Applies hard risk controls.
-7. Routes to paper or live execution adapters depending on strategy settings and broker configuration.
-
-## Feature map
-
-### Core platform
-
-- Strategy CRUD with schedules, paper/live mode, skip-next-run support, and typed JSON config validation.
-- Manual strategy execution through the API, UI, and CLI.
-- Persistent pipeline runs, run snapshots, agent decisions, events, conversations, audit records, orders, positions, trades, and memories.
-- JWT login plus API key authentication for protected API routes.
-- WebSocket event streaming for live run and system activity.
-
-### Trading runtime
-
-- Parallel analyst phase with market, fundamentals, news, and social roles.
-- Bull/bear research debate and research-manager synthesis.
-- Trader phase that generates entry, sizing, stop, and target plans.
-- Risk debate with aggressive, conservative, and neutral perspectives plus a risk-manager final signal.
-- Hard risk engine with kill switch, circuit breaker, exposure caps, and pre-trade checks.
-
-### Market coverage
-
-- `stock` strategies.
-- `crypto` strategies.
-- `polymarket` strategies as a market type in domain/runtime logic, with incomplete live execution support.
-
-### Integrations
-
-- LLM providers: OpenAI, Anthropic, Google, OpenRouter, xAI, Ollama.
-- Market data: Polygon, Alpha Vantage, Yahoo Finance, Binance.
-- Brokers/execution: Alpaca, Binance, local paper broker, Polymarket adapter package.
-- Notifications: Telegram, email/SMTP, Discord webhooks, PagerDuty webhooks, n8n webhooks.
-- Ops/infra: PostgreSQL, Redis, Docker Compose, Prometheus, Grafana.
-
-## Canonical vs archive
-
-The pages below are the current source of truth for how the app actually behaves:
-
-- [Getting Started](getting-started.md)
-- [Development Setup](development-setup.md)
-- [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md)
-- [Runbooks](runbooks/README.md)
-- [Known Issues](known-issues.md)
-- [Roadmap](roadmap.md)
-
-The rest of `docs/` is still valuable, but it should be read with context:
-
-- [ADRs](adr/README.md) record major decisions and their rationale.
-- [Augr Trading Research](Augr%20Trading%20Research/README.md) captures strategy, execution, and risk research that informed the trading platform foundation.
-- `docs/design/` contains design/spec material. Some pages still describe intended architecture rather than the exact runtime wiring that exists today.
-- Historical planning documents such as `phase-*-execution-paths.md`, `implementation-board.md`, and audit notes remain as archive material.
-
-## Reading order
-
-If you are new to the project:
-
-1. Read [Getting Started](getting-started.md).
-2. Read [Development Setup](development-setup.md) if you plan to contribute.
-3. Read the [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md) to understand the real implementation surface.
-4. Read [Known Issues](known-issues.md) before assuming every described feature is production-ready.
-
-If you are operating the system:
-
-1. Read [Runbooks](runbooks/README.md).
-2. Review [Development Setup](development-setup.md), [Architecture Audit](AUGR_ARCHITECTURE_AUDIT.md), and the live API router in `internal/api/server.go`.
-3. Keep [Known Issues](known-issues.md) open when debugging surprising behavior.
-
-If you are planning future work:
-
-1. Read [Roadmap](roadmap.md).
-2. Review the [ADRs](adr/README.md).
-3. Use [Augr Trading Research](Augr%20Trading%20Research/README.md) for background, not for implementation truth.
+- Do not commit generated status reports, soak observations, database exports,
+  downloaded papers, or task-specific notes.
+- Store qualification and recovery evidence in the designated external release
+  or operations location.
+- Add a runbook only for a repeatable operator procedure. Add an ADR only for a
+  durable architecture decision.
+- Delete completed implementation plans after their accepted behavior is
+  represented by code, tests, maintained docs, or an ADR.
+- Update the relevant page in the same change whenever a public command,
+  configuration requirement, safety gate, or operator procedure changes.

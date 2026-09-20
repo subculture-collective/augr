@@ -10,7 +10,8 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 compose_file="${AUGR_COMPOSE_FILE:-$repo/docker-compose.nuc.yml}"
 base_url="${AUGR_BASE_URL:-http://10.0.0.56:3030}"
 observed_stamp=$(date -u '+%Y%m%dT%H%M%SZ')
-report="${OBSERVATION_REPORT:-$repo/docs/reports/${observed_stamp}-${label}-observation.txt}"
+state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}
+report="${OBSERVATION_REPORT:-$state_home/augr/observations/${observed_stamp}-${label}-observation.txt}"
 report_dir=$(dirname -- "$report")
 mkdir -p "$report_dir"
 tmp=$(mktemp "${report}.tmp.XXXXXX")

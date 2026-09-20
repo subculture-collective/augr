@@ -1132,7 +1132,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if edgarEmail != "" {
 			edgarAppName := strings.TrimSpace(os.Getenv("SEC_EDGAR_APP_NAME"))
 			if edgarAppName == "" {
-				edgarAppName = "Augr Trading Research"
+				edgarAppName = "Augr"
 			}
 			edgarProvider = edgar.NewProvider(edgar.NewClient(edgarAppName, edgarEmail, logger), logger)
 		} else {

@@ -150,7 +150,7 @@ This applies equally to human contributors and autonomous agents.
 
 - All pre-commit hooks pass (`pre-commit run --all-files`)
 - Go code is formatted with `gofumpt` and passes `golangci-lint`
-- TypeScript/JavaScript code passes ESLint and Prettier checks when a frontend `package.json` is present
+- TypeScript/JavaScript code passes the frontend ESLint check
 
 ### CI
 
@@ -183,10 +183,10 @@ This repository uses [pre-commit](https://pre-commit.com/) to run formatting and
   - `gofumpt` checks formatting and blocks commits for unformatted files (run `gofumpt -w .` or `gofumpt -w <file>` to fix)
   - `golangci-lint` runs lint checks and blocks commits on lint errors
   - If `go.mod` is not present yet, `golangci-lint` is skipped
-- **TypeScript/JavaScript files (`*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`)**
-  - ESLint runs when a frontend `package.json` is present
-- **Formatting files (`*.ts`, `*.tsx`, `*.js`, `*.jsx`, `*.mjs`, `*.cjs`, `*.json`, `*.yaml`, `*.yml`, `*.md`)**
-  - Prettier `--check` runs when a frontend `package.json` is present
+- **Frontend TypeScript/JavaScript files**
+  - the repository-wide `web` ESLint task runs once, rather than once per staged file
+- **Go lint**
+  - `golangci-lint` runs once across the maintained Go package roots
 
 ### Useful commands
 

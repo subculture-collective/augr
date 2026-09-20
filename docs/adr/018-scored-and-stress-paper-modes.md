@@ -11,7 +11,7 @@ tags: [adr, paper-trading, experiments, risk]
 - **Status:** accepted
 - **Date:** 2026-08-14
 - **Deciders:** Project owner, Engineering
-- **Technical Story:** [Augr total overhaul plan](../superpowers/plans/2026-08-14-total-overhaul-plan.md)
+- **Technical Story:** Augr paper-evidence isolation
 - **Supersedes:** [ADR-006: Paper trading slippage and fee assumptions](006-paper-trading-assumptions.md)
 
 ## Context

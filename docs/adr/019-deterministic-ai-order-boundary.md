@@ -11,7 +11,7 @@ tags: [adr, ai, risk, strategies, automation]
 - **Status:** accepted
 - **Date:** 2026-08-14
 - **Deciders:** Project owner, Engineering
-- **Technical Story:** [Augr total overhaul plan](../superpowers/plans/2026-08-14-total-overhaul-plan.md)
+- **Technical Story:** Augr deterministic execution authorization
 - **Supersedes:** [ADR-009: Human review gate before live trading](009-human-review-gate.md)
 
 ## Context

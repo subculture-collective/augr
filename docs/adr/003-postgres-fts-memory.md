@@ -15,9 +15,9 @@ tags: [adr]
 
 ## Context
 
-Agents in the pipeline recall relevant past situations to improve future decisions (see
-`docs/design/backend/memory-and-learning.md`). Each memory consists of a
-free-text `situation` description, a `recommendation`, and an eventual `outcome`. At
+Agents in the pipeline recall relevant past situations to improve future decisions.
+Each memory consists of a free-text `situation` description, a `recommendation`,
+and an eventual `outcome`. At
 query time an agent provides a free-text description of the current situation and
 expects the top-N most relevant past memories returned, ranked by relevance.
 

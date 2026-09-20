@@ -19,8 +19,8 @@ defaults:
     working-directory: web
 
 jobs:
-  lint:
-    name: Lint & Type Check
+  verify:
+    name: Lint, Test & Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -40,38 +40,8 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
       - name: Run tests
         run: npm test -- --run --reporter=verbose
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
 
       - name: Build
         run: npm run build

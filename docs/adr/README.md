@@ -1,6 +1,6 @@
 ---
 title: "Architecture Decision Records"
-description: "Index and authoring rules for ADRs in get-rich-quick."
+description: "Index and authoring rules for Augr ADRs."
 status: "canonical"
 updated: "2026-08-14"
 tags: [adr, architecture, decisions]

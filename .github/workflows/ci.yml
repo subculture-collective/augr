@@ -83,14 +83,7 @@ jobs:
           python3 scripts/test-smoke-isolation.py
 
       - name: Run unit tests
-        run: go test -short -race -count=1 -coverprofile=coverage-unit.out ./...
-
-      - name: Upload unit coverage
-        if: github.server_url == 'https://github.com'
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-unit
-          path: coverage-unit.out
+        run: go test -short -race -count=1 ./...
 
   integration-tests:
     name: Integration tests
@@ -121,16 +114,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Download unit coverage
-        if: github.server_url == 'https://github.com'
-        uses: actions/download-artifact@v4
-        with:
-          name: coverage-unit
-
-      - name: Regenerate unit coverage for Gitea
-        if: github.server_url != 'https://github.com'
-        run: go test -short -race -count=1 -coverprofile=coverage-unit.out ./...
-
       - name: Configure integration database URL
         run: |
           database_container=$(docker ps --filter 'label=tv.subcult.augr.ci-run=${{ github.run_id }}-${{ github.run_attempt }}' --filter 'label=tv.subcult.augr.ci-service=integration-postgres' --format '{{.ID}}')
@@ -142,41 +125,36 @@ jobs:
 
       - name: Run migrations
         run: |
-          timeout 90 bash -c 'until docker exec "$DATABASE_CONTAINER" pg_isready -U tradingagent -d tradingagent_test >/dev/null 2>&1; do sleep 2; done'
+          deadline=$((SECONDS + 90))
+          until docker exec "$DATABASE_CONTAINER" pg_isready -U tradingagent -d tradingagent_test >/dev/null 2>&1; do
+            if (( SECONDS >= deadline )); then
+              echo "integration database did not become ready within 90 seconds" >&2
+              exit 1
+            fi
+            sleep 2
+          done
           find migrations -maxdepth 1 -type f -name '*.up.sql' -print | sort | while read -r migration; do
             docker exec -i "$DATABASE_CONTAINER" psql -U tradingagent -d tradingagent_test --single-transaction --set ON_ERROR_STOP=1 < "$migration"
           done
 
       - name: Run integration tests
-        run: python3 scripts/test-integration.py --coverage coverage-integration.out
-
-      - name: Merge coverage profiles
-        run: |
-          coverage_tools=$(mktemp -d)
-          go -C "$coverage_tools" mod init augr-ci-coverage
-          go -C "$coverage_tools" get github.com/wadey/gocovmerge@v0.0.0-20160331181800-b5bfa59ec0ad golang.org/x/tools@v0.38.0
-          go -C "$coverage_tools" build -o "$coverage_tools/gocovmerge" github.com/wadey/gocovmerge
-          "$coverage_tools/gocovmerge" coverage-unit.out coverage-integration.out > coverage.out
+        run: python3 scripts/test-integration.py --coverage coverage.out
 
       - name: Report coverage
         run: |
-          UNIT_COVERAGE=$(go tool cover -func=coverage-unit.out | awk '/^total:/ {print $3}')
-          INTEGRATION_COVERAGE=$(go tool cover -func=coverage-integration.out | awk '/^total:/ {print $3}')
           TOTAL_COVERAGE=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}')
-          echo "Combined coverage: ${TOTAL_COVERAGE}"
+          echo "Full-suite coverage: ${TOTAL_COVERAGE}"
           {
             echo "## Go test coverage"
             echo
-            echo "- Unit: ${UNIT_COVERAGE}"
-            echo "- Integration: ${INTEGRATION_COVERAGE}"
-            echo "- Combined: ${TOTAL_COVERAGE}"
+            echo "- Full suite with disposable database: ${TOTAL_COVERAGE}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload combined coverage
         if: github.server_url == 'https://github.com'
         uses: actions/upload-artifact@v4
         with:
-          name: coverage
+          name: coverage-full
           path: coverage.out
 
   smoke-tests:
@@ -263,9 +241,11 @@ jobs:
           test -n "$compose_network"
           if docker inspect "$HOSTNAME" >/dev/null 2>&1; then
             docker network connect "$compose_network" "$HOSTNAME"
-            echo "SMOKE_RUNNER_NETWORK=${compose_network}" >> "$GITHUB_ENV"
-            echo "SMOKE_BASE_URL=http://app:8080" >> "$GITHUB_ENV"
-            echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@postgres:5432/tradingagent?sslmode=disable" >> "$GITHUB_ENV"
+            {
+              echo "SMOKE_RUNNER_NETWORK=${compose_network}"
+              echo "SMOKE_BASE_URL=http://app:8080"
+              echo "SMOKE_DATABASE_URL=postgres://postgres:postgres@postgres:5432/tradingagent?sslmode=disable"
+            } >> "$GITHUB_ENV"
           else
             app_address=$(docker compose port app 8080)
             database_address=$(docker compose port postgres 5432)
@@ -276,7 +256,14 @@ jobs:
 
       - name: Wait for API
         run: |
-          timeout 90 bash -c 'until curl -fsS "${SMOKE_BASE_URL}/healthz" >/dev/null; do sleep 2; done'
+          deadline=$((SECONDS + 90))
+          until curl -fsS "${SMOKE_BASE_URL}/healthz" >/dev/null; do
+            if (( SECONDS >= deadline )); then
+              echo "smoke API did not become ready within 90 seconds" >&2
+              exit 1
+            fi
+            sleep 2
+          done
 
       - name: Run smoke test
         env:

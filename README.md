@@ -1,285 +1,148 @@
-# get-rich-quick
+# Augr
 
-An autonomous, multi-agent trading system built in Go. The system uses LLM-powered agents organized in a pipeline to analyze markets, debate investment theses, generate trade plans, evaluate risk, and execute orders — all with configurable risk controls and paper-trading support.
+Augr is a paper-first, multi-market trading research and execution system. A Go
+service schedules data collection and strategy pipelines, applies hard risk
+controls, persists evidence in PostgreSQL, and exposes a React operator UI.
 
-## Architecture
+Augr can submit orders when a deployment is deliberately configured for it,
+but live trading is disabled by default. A healthy process or a successful scan
+does not by itself prove that a strategy is qualified or that an order was sent.
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                         Trading Agent Pipeline                          │
-│                                                                          │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ Phase 1: Analysis (parallel)                                     │    │
-│  │  Market Analyst · Fundamentals · News · Social Media             │    │
-│  └─────────────────────────┬────────────────────────────────────────┘    │
-│                            ▼                                             │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ Phase 2: Research Debate (3 rounds)                              │    │
-│  │  Bull Researcher ◄──► Bear Researcher → Research Manager         │    │
-│  └─────────────────────────┬────────────────────────────────────────┘    │
-│                            ▼                                             │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ Phase 3: Trading                                                 │    │
-│  │  Trader Agent → Entry, size, stops, take-profit                  │    │
-│  └─────────────────────────┬────────────────────────────────────────┘    │
-│                            ▼                                             │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ Phase 4: Risk Debate (3 rounds)                                  │    │
-│  │  Aggressive ◄──► Conservative ◄──► Neutral → Risk Manager        │    │
-│  └─────────────────────────┬────────────────────────────────────────┘    │
-│                            ▼                                             │
-│  ┌──────────────────────────────────────────────────────────────────┐    │
-│  │ Phase 5: Execution                                               │    │
-│  │  Risk checks → Order → Fill → Position → Audit                   │    │
-│  └──────────────────────────────────────────────────────────────────┘    │
-│                                                                          │
-├──────────────────────────────────────────────────────────────────────────┤
-│  REST API (chi/v5)  │  WebSocket  │  Cobra CLI / TUI  │  Scheduler      │
-├──────────────────────────────────────────────────────────────────────────┤
-│  PostgreSQL 17      │  Redis 7    │  LLM Providers    │  Broker Adapters │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+## What is included
 
-### Technology Stack
+- Scheduled and manual strategy pipelines for stocks, options, crypto, Kalshi,
+  and Polymarket-oriented workflows.
+- Market-data adapters for Polygon, Alpha Vantage, Finnhub, Financial Modeling
+  Prep, Yahoo, Alpaca, Tradier, Binance, Kalshi, and Polymarket.
+- Paper execution plus guarded broker adapters for Alpaca, Binance, Kalshi, and
+  Polymarket.
+- Persistent runs, decisions, events, orders, trades, positions, accounting
+  evidence, provider observations, and audit records.
+- Kill switches, circuit breakers, exposure limits, reconciliation, projection
+  checks, and capability-scoped readiness reporting.
+- JWT and API-key authentication, WebSocket activity streaming, Prometheus
+  metrics, and Grafana dashboards.
 
-| Layer           | Technology                                                 |
-|-----------------|------------------------------------------------------------|
-| Language        | Go 1.25                                                    |
-| HTTP Router     | chi/v5                                                     |
-| Database        | PostgreSQL 17 (pgx/v5)                                    |
-| Cache           | Redis 7                                                    |
-| CLI             | Cobra + Bubble Tea TUI                                     |
-| LLM Providers   | OpenAI, Anthropic, Google, OpenRouter, XAI, Ollama         |
-| Data Providers  | Alpha Vantage, Polygon, Yahoo Finance, Binance             |
-| Brokers         | Alpaca, Binance (with paper-trading modes)                 |
-| Frontend        | TypeScript, React, Vite                                    |
-| Task Runner     | Taskfile                                                   |
-| Containerization| Docker & Docker Compose                                    |
+## Repository map
 
-## Quick Start
+| Path | Purpose |
+| --- | --- |
+| `cmd/tradingagent/` | CLI, application bootstrap, scheduler wiring, and strategy runners |
+| `internal/` | API, domain, provider, execution, risk, automation, and persistence code |
+| `migrations/` | Ordered PostgreSQL/TimescaleDB migrations |
+| `web/` | React, TypeScript, and Vite operator UI |
+| `monitoring/` | Prometheus rules and Grafana provisioning |
+| `scripts/` | Maintained release, recovery, verification, and operator helpers |
+| `docs/` | Canonical guides, ADRs, and current runbooks |
 
-> **Prerequisites:** [Docker](https://docs.docker.com/get-docker/), [Docker Compose v2+](https://docs.docker.com/compose/install/), and either one supported cloud LLM API key or a local [Ollama](https://ollama.com/download) install.
+## Quick start
+
+Prerequisites are Go 1.25.13, Node.js 22, npm, Python 3, Docker Compose,
+[Task](https://taskfile.dev/), and the `migrate` CLI.
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/PatrickFanella/get-rich-quick.git
-cd get-rich-quick
-
-# 2. Copy the example environment file and configure an LLM provider
+git clone https://git.subcult.tv/subculture-collective/augr.git
+cd augr
 cp .env.example .env
+```
 
-# 3. Start the backend Compose stack (app + PostgreSQL + Redis)
-docker compose up -d --build
+For local development, set at least:
 
-# 4. Apply database migrations explicitly
+```dotenv
+POSTGRES_PASSWORD=postgres
+DATABASE_URL=postgres://postgres:postgres@localhost:5434/tradingagent?sslmode=disable
+REDIS_URL=redis://localhost:6380/0
+JWT_SECRET=replace-with-a-long-random-value
+PROJECTION_ACCOUNT_ID=00000000-0000-4000-8000-000000000064
+
+# Configure one supported LLM provider and one primary data provider.
+OPENAI_API_KEY=...
+POLYGON_API_KEY=...
+```
+
+Then start the dependencies, migrate, and run the applications:
+
+```bash
+docker compose up -d postgres redis
 task migrate:up
-
-# 5. Restart the app if it started before migrations or reported a schema mismatch
-docker compose restart app
+task build
+./bin/tradingagent serve
 ```
 
-
-For cloud LLMs, set one provider key in `.env` (for example `OPENAI_API_KEY`). For local Ollama, install Ollama, run `ollama pull llama3.2`, then set `LLM_DEFAULT_PROVIDER=ollama` and keep `OLLAMA_MODEL=llama3.2`. See the [Development Setup Guide](docs/development-setup.md) for the full prerequisites list and Docker-vs-native Ollama notes.
-
-The Compose stack in this repo serves the backend only. `http://localhost:8080` is the API and ops surface, not the frontend SPA root. Run the Vite frontend separately from `web/` when you need the browser UI.
-
-If the app logs a schema version mismatch on startup, that failure is intentional and happens before the rest of the runtime boots. Apply migrations, then restart the process or container; migrations applied after process start require a fresh restart.
-
-## Development Setup (Docker Compose)
-
-Docker Compose brings up three services with hot-reload enabled for the Go backend:
-
-| Service    | Port | Description                          |
-|------------|------|--------------------------------------|
-| `app`      | 8080 | Go application with Air hot-reload   |
-| `postgres` | 5432 | PostgreSQL 17 database               |
-| `redis`    | 6379 | Redis 7 cache                        |
-
-### Common Commands
+In another terminal:
 
 ```bash
-# Start services in the background
-docker compose up -d --build
-
-# Or use the task runner
-task dev
-
-# View logs
-docker compose logs -f        # all services
-task dev:logs                  # shortcut
-
-# Run database migrations explicitly
-task migrate:up
-
-# Restart app after migrations if startup failed on schema mismatch
-docker compose restart app
-
-# Open a PostgreSQL shell (default Compose user is postgres)
-docker compose exec postgres psql -U postgres -d tradingagent
-
-# Stop services
-docker compose down
-
-# Stop services and wipe database volumes
-docker compose down -v
+npm --prefix web ci
+npm --prefix web run dev
 ```
 
-### Agent Workspace
+The native API is available at `http://localhost:8080`; Vite uses
+`http://localhost:5173`. The Compose-published database and cache ports are
+`5434` and `6380`. Running the application itself through Compose publishes it
+at `http://localhost:8081`.
 
-If you use the shared `~/.agents` hub, this repo has a local launcher for the standard tmux workspace:
+Fresh disposable databases seed a local account named `patrick@subcult.tv`.
+The retained development password is `demo-pass`; never reuse that credential
+in a shared or deployed environment.
+
+See [Getting Started](docs/getting-started.md) for the complete local flow and
+[Development Setup](docs/development-setup.md) for configuration and validation.
+
+## Common commands
 
 ```bash
-task workspace
+task build             # compile ./bin/tradingagent
+task test              # short Go suite
+task test:race         # short Go suite with the race detector
+task test:maintenance  # verify the integration harness itself
+task web:check         # frontend lint, tests, and production build
+task test:integration  # full contracts against TEST_DATABASE_URL
+task audit             # Go vet, lint, vulnerability, and format checks
 ```
 
-That opens the standard window layout:
-
-- `edit`
-- `deck`
-- `claude`
-- `opencode`
-- `db`
-- `ops`
-
-Alternate Agent Deck profiles:
-
-```bash
-task workspace:research
-task workspace:review
-task workspace:ops
-```
-
-You can also override the profile directly or pick a custom tmux session name:
-
-```bash
-AGENT_DECK_PROFILE=opencode-research ./scripts/workspace.sh research
-```
-
-### Production Compose Verification
-
-To verify the production image and `docker-compose.prod.yml` end-to-end, run:
-
-```bash
-./scripts/verify-prod-build.sh
-```
-
-The script builds the production image, starts an isolated `docker-compose.prod.yml` stack on loopback-only dynamic ports and explicit short-lived subnets, applies every migration, asserts the expected schema version, verifies `GET /healthz` reports healthy database and Redis dependencies, checks an authenticated read-only `GET /api/v1/strategies`, and removes all temporary containers, networks, and volumes. The canonical `scripts/release-gate.sh` invokes this verifier automatically.
-
-### Build, Test & Lint
-
-The project uses [Task](https://taskfile.dev) as its task runner. Install Task, then:
-
-```bash
-task build                   # Compile binary to ./bin/tradingagent
-task test                    # Unit tests (short mode)
-task test:race               # Unit tests with race detector
-task test:integration        # Full Go contracts; migrated disposable TEST_DATABASE_URL required
-task lint                    # golangci-lint
-task fmt                     # Format with gofumpt
-task check                   # Pre-push: build + test + lint
-task ci                      # Full CI pipeline locally
-```
-
-Run `task --list` for the complete list of available tasks.
-
-> For a detailed walkthrough of native (non-Docker) development, database migrations, tool installation, and troubleshooting, see **[docs/development-setup.md](docs/development-setup.md)**.
-
-## Configuration Reference
-
-All configuration is managed via environment variables. Copy `.env.example` to `.env` and edit as needed. Key groups:
-
-| Variable                          | Default                              | Description                                   |
-|-----------------------------------|--------------------------------------|-----------------------------------------------|
-| `APP_ENV`                         | `development`                        | Runtime environment (`development`/`production`) |
-| `APP_PORT`                        | `8080`                               | HTTP listen port                              |
-| `DATABASE_URL`                    | `postgres://…/tradingagent`          | PostgreSQL connection string                  |
-| `REDIS_URL`                       | `redis://redis:6379/0`               | Redis connection string                       |
-| `JWT_SECRET`                      | *(required)*                         | Secret for JWT token signing                  |
-| **LLM**                          |                                      |                                               |
-| `LLM_DEFAULT_PROVIDER`           | `openai`                             | Default LLM provider                          |
-| `LLM_DEEP_THINK_MODEL`           | `gpt-5.2`                            | Model for research & risk debates             |
-| `LLM_QUICK_THINK_MODEL`          | `gpt-5-mini`                         | Model for analyst phases                      |
-| `OPENAI_API_KEY`                  | —                                    | OpenAI API key                                |
-| **Brokers**                      |                                      |                                               |
-| `ALPACA_API_KEY` / `_API_SECRET`  | —                                    | Alpaca credentials                            |
-| `ALPACA_PAPER_MODE`              | `true`                               | Use Alpaca paper trading                      |
-| `BINANCE_API_KEY` / `_API_SECRET` | —                                    | Binance credentials                           |
-| `BINANCE_PAPER_MODE`            | `true`                               | Use Binance testnet                           |
-| **Risk**                         |                                      |                                               |
-| `RISK_MAX_POSITION_SIZE_PCT`     | `0.10`                               | Max single-position size (% of portfolio)     |
-| `RISK_MAX_DAILY_LOSS_PCT`        | `0.02`                               | Max daily loss before circuit breaker          |
-| `RISK_MAX_DRAWDOWN_PCT`          | `0.10`                               | Max drawdown before circuit breaker            |
-| **Feature Flags**                |                                      |                                               |
-| `ENABLE_LIVE_TRADING`            | `false`                              | Enable live order execution                   |
-| `ENABLE_SCHEDULER`               | `false`                              | Enable cron-based strategy scheduler          |
-| `ENABLE_AGENT_MEMORY`            | `true`                               | Enable agent memory system                    |
-
-See [`.env.example`](.env.example) for the full list of variables including all supported LLM providers and data-source API keys.
-
-## API Overview
-
-The REST API is served under `/api/v1`. Public HTTP endpoints are `GET /healthz`, `GET /health`, `GET /metrics`, `POST /api/v1/auth/login`, and `POST /api/v1/auth/refresh`. The WebSocket endpoint is `GET /ws`; it authenticates the upgrade request before switching protocols and accepts `Authorization: Bearer`, `X-API-Key`, `?token=<jwt>`, or `?api_key=<key>` credentials. Backend root `/` is not the frontend SPA in the current Compose or production stack.
-
-All other `/api/v1/*` routes require either `Authorization: Bearer <jwt>` or `X-API-Key: <api_key>`. Implemented route groups include strategies, runs, portfolio, orders, trades, memories, risk, settings, events, conversations, audit log, and automation health/status.
-
-For the current route surface, see [`internal/api/server.go`](internal/api/server.go) and the development workflow in [`docs/development-setup.md`](docs/development-setup.md).
+The database integration task is intentionally fail-closed: use a migrated,
+disposable database that is not the development or production database. See
+[Testing](docs/testing.md) for the test tiers and their ownership.
 
 ## CLI
 
-The `tradingagent` binary provides a Cobra CLI with the following subcommands:
+`tradingagent` provides these top-level commands:
 
-```
-tradingagent serve        # Start the API server
-tradingagent run          # Trigger a one-off strategy run
-tradingagent strategies   # Manage strategies
-tradingagent portfolio    # View portfolio & positions
-tradingagent risk         # Inspect risk engine status
-tradingagent memories     # Browse agent memories
-tradingagent dashboard    # Interactive terminal dashboard (Bubble Tea TUI)
-```
+- `serve` starts the API and optional scheduler.
+- `run` executes the configured one-shot workflow.
+- `strategies` manages strategies and manual runs through the API.
+- `automation` inspects or operates automation jobs.
+- `portfolio`, `risk`, and `capital-ladder` expose operator readbacks and controls.
+- `memories` manages agent memories.
+- `dashboard` starts the terminal dashboard.
 
-Run `tradingagent --help` for full usage details.
+Run `./bin/tradingagent --help` and `<command> --help` for the current flags.
 
-## Project Structure
+## Safety and operational scope
 
-```
-cmd/tradingagent/       Entry point — CLI bootstrap
-internal/
-  agent/                Trading agent pipeline, phase executors, debate system
-  api/                  REST API server, WebSocket hub, middleware
-  backtest/             Backtesting engine
-  cli/                  Cobra commands and Bubble Tea TUI
-  config/               Configuration loading
-  data/                 Market data providers (Alpha Vantage, Polygon, Yahoo, Binance)
-  domain/               Domain models (Strategy, Order, Position, etc.)
-  execution/            Broker adapters (Alpaca, Binance, Polymarket)
-  llm/                  LLM provider abstraction
-  memory/               Agent memory with PostgreSQL full-text search
-  repository/           Data access layer (PostgreSQL repositories)
-  risk/                 Risk management engine, circuit breakers, kill switch
-  scheduler/            Cron-based strategy scheduler
-migrations/             SQL migration files (golang-migrate)
-web/                    Frontend application (TypeScript/Vite/React)
-docs/                   Architecture docs, ADRs, research
-```
+- `ENABLE_LIVE_TRADING=false` is the default and should remain so until the
+  release and venue-specific gates are satisfied.
+- Scheduled jobs are independently capable of succeeding, degrading, failing,
+  or being disabled. Container health is not workflow health.
+- Schema-affecting releases are applied migration-first, followed by the app,
+  then exact schema and health readback.
+- Qualification evidence belongs in immutable external ledgers and release
+  artifacts, not generated files committed to this repository.
+
+Operators should start with the [Runbooks](docs/runbooks/README.md). Current
+limitations are tracked in [Known Issues](docs/known-issues.md).
 
 ## Documentation
 
-- **[Documentation Hub](docs/README.md)** — Canonical entry point for all app documentation
-- **[Getting Started](docs/getting-started.md)** — Fastest path from clone to first login, first strategy, and first run
-- **[Development Setup](docs/development-setup.md)** — Full contributor workflow, migrations, testing, and smoke mode
-- **[Architecture Audit](docs/AUGR_ARCHITECTURE_AUDIT.md)** — Current architecture, safety baseline, and trading-research foundation status
-- **[Runbooks](docs/runbooks/README.md)** — Incident and operator procedures
-- **[Known Issues](docs/known-issues.md)** — Current gaps and repo-health caveats
-- **[Roadmap](docs/roadmap.md)** — Proposed future work and product direction
-- **[ADRs](docs/adr/README.md)** — Architecture Decision Records
-- **[Augr Trading Research](docs/Augr%20Trading%20Research/README.md)** — Trading-platform research package and implementation source material
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Branch strategy, commit conventions, and definition of done
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for branch strategy, commit conventions, and the definition of done.
+- [Documentation index](docs/README.md)
+- [Architecture](docs/AUGR_ARCHITECTURE_AUDIT.md)
+- [Getting Started](docs/getting-started.md)
+- [Development Setup](docs/development-setup.md)
+- [Testing](docs/testing.md)
+- [Runbooks](docs/runbooks/README.md)
+- [ADRs](docs/adr/README.md)
+- [Roadmap](docs/roadmap.md)
 
 ## License
 
-Licensed under `GPL-3.0-or-later`. See [LICENSE](LICENSE).
+See [LICENSE](LICENSE).

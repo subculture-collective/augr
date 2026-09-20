@@ -1,8 +1,6 @@
 name: Issue Lifecycle
 
 on:
-  issues:
-    types: [closed]
   pull_request:
     types: [closed]
 
@@ -11,61 +9,6 @@ permissions:
   contents: read
 
 jobs:
-  update-tracker-on-close:
-    name: Update Phase 3 tracker
-    if: github.event_name == 'issues' && github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          sparse-checkout: .github
-
-      - name: Update tracker checklist
-        uses: actions/github-script@v8
-        with:
-          script: |
-            const closedNumber = context.payload.issue.number;
-            const trackerNumber = 216;
-
-            // Skip if the tracker itself is being closed
-            if (closedNumber === trackerNumber) return;
-
-            try {
-              const tracker = await github.rest.issues.get({
-                ...context.repo,
-                issue_number: trackerNumber,
-              });
-
-              let body = tracker.data.body;
-              if (!body) return;
-
-              // Check off the closed issue in the tracker
-              const unchecked = `- [ ] #${closedNumber} `;
-              const checked = `- [x] #${closedNumber} `;
-
-              if (body.includes(unchecked)) {
-                body = body.replace(unchecked, checked);
-
-                // Update progress counter
-                const total = (body.match(/- \[[ x]\] #\d+/g) || []).length;
-                const done = (body.match(/- \[x\] #\d+/g) || []).length;
-                body = body.replace(
-                  /## Progress: \d+ \/ \d+ complete/,
-                  `## Progress: ${done} / ${total} complete`
-                );
-
-                await github.rest.issues.update({
-                  ...context.repo,
-                  issue_number: trackerNumber,
-                  body,
-                });
-
-                core.info(`Checked off #${closedNumber} in tracker (${done}/${total})`);
-              }
-            } catch (e) {
-              core.warning(`Could not update tracker: ${e.message}`);
-            }
-
   close-issue-on-merge:
     name: Close linked issues on PR merge
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true

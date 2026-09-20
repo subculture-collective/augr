@@ -1,52 +1,57 @@
----
-title: "Runbooks"
-description: "Operational procedures for common incidents, controls, and interventions in get-rich-quick."
-status: "canonical"
-updated: "2026-08-20"
-tags: [runbooks, operations]
----
-
 # Runbooks
 
-These runbooks are for operators and contributors handling a running system, an incident, or a safety intervention.
+These pages describe repeatable operator procedures. Capture timestamps,
+revisions, schema versions, and readbacks in the external operations record;
+do not add generated incident reports to this directory.
 
-## Before you start
+## Before changing a running system
 
-- Export `TRADINGAGENT_API_URL` if the API is not on `http://127.0.0.1:8080`.
-- Export either `TRADINGAGENT_TOKEN` or `TRADINGAGENT_API_KEY` for authenticated CLI/API calls.
-- Assume the system may already be in a degraded state; gather evidence before changing it.
-- Read [Known Issues](../known-issues.md) if behavior seems inconsistent with older docs.
+- Confirm the target host, checkout, release revision, container identity, and
+  canonical database.
+- Gather current job, provider, reconciliation, and account evidence.
+- Keep live trading disabled unless the specific procedure authorizes it.
+- Preserve backups, rollback artifacts, failed ledgers, and provider evidence.
+- For schema changes, migrate first, restart the app second, and verify exact
+  schema and health readbacks third.
 
-## Safety-first runbooks
+## Safety and incidents
 
-- [Emergency kill switch activation](emergency-kill-switch.md)
-- [Circuit breaker investigation and reset](circuit-breaker.md)
+- [Emergency kill switch](emergency-kill-switch.md)
+- [Circuit breaker investigation](circuit-breaker.md)
+- [Broker API outage](broker-api-outage.md)
+- [LLM provider outage](llm-provider-outage.md)
 - [Investigating a bad trade](bad-trade.md)
-- [Reviewing agent decisions for a run](review-agent-decisions.md)
+- [Reviewing agent decisions](review-agent-decisions.md)
 
-## Platform and dependency runbooks
+## Recovery and releases
 
-- [Broker API outage handling](broker-api-outage.md)
-- [LLM provider outage handling](llm-provider-outage.md)
-- [OpenCode OAuth provider](opencode-oauth-fallback.md)
-- [Rolling restart procedure](rolling-restart.md)
 - [Database backup and restore](database-backup-restore.md)
+- [Rolling restart](rolling-restart.md)
 - [Release readiness and recovery drills](release-readiness.md)
+- [OpenCode OAuth provider](opencode-oauth-fallback.md)
 
-## Routine operator tasks
+## Routine evidence workflows
 
-- [Adding a new strategy](add-strategy.md)
-- [Capital-tier and margin-policy evidence](capital-margin-policy.md)
+- [Adding a strategy](add-strategy.md)
+- [Capital and margin policy](capital-margin-policy.md)
 - [Point-in-time dataset evidence](dataset-evidence.md)
-- [Reproducible experiment runner](reproducible-experiment-runner.md)
-- [Venue reconciliation evidence](venue-reconciliation.md)
-- [Polymarket live activation (retired historical path)](polymarket-live-activation.md)
+- [Reproducible experiments](reproducible-experiment-runner.md)
+- [Venue reconciliation](venue-reconciliation.md)
+- [Seven-day paper evaluation](week-paper-evaluation.md)
+- [Strategy catalog and experiment declarations](strategy-catalog.md)
+- [Promotion and retirement decisions](promotion-retirement.md)
+- [Statistical robustness evidence](statistical-robustness.md)
 
-## Notes on scope
+## Specialized execution and data procedures
 
-These runbooks assume the current implementation reality:
+- [Common execution lifecycle](common-execution-lifecycle.md)
+- [Common simulation venue](common-simulation-venue.md)
+- [Alpaca and Kalshi lifecycle operations](alpaca-kalshi-common-lifecycle.md)
+- [Kalshi paper/data setup](kalshi-paper-data.md)
+- [Kalshi live readiness](kalshi-live-readiness.md)
+- [Exact stock source evidence](exact-stock-source-evidence.md)
+- [Local economic operator](local-economic-operator.md)
+- [PostgreSQL collation maintenance](postgres-collation-maintenance.md)
 
-- non-secret settings persist through the backend settings store, but secrets entered through the UI do not survive restart
-- WebSocket access is authenticated and tested, but public exposure still requires the same reverse-proxy and origin controls as the API
-- release readiness is capability-scoped; an unavailable optional provider must remain visible without being misreported as a healthy capability
-- rollout order for schema-affecting changes is migrate first, then restart app processes, then verify schema and health
+Runbooks do not establish that a deployment is currently qualified. Confirm the
+current external release and soak records before reporting production status.

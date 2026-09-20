@@ -10,17 +10,14 @@ repos:
 
       - id: eslint
         name: eslint (typescript/javascript)
-        entry: bash -c 'if [ ! -f package.json ]; then exit 0; fi; npx --no-install eslint "$@"' --
+        entry: npm --prefix web run lint
         language: system
-        files: \.(ts|tsx|js|jsx|mjs|cjs)$
+        files: ^web/.*\.(ts|tsx|js|jsx|mjs|cjs)$
+        pass_filenames: false
 
-      - id: prettier
-        name: prettier --check (typescript/javascript/json/yaml/markdown)
-        entry: bash -c 'if [ ! -f package.json ]; then exit 0; fi; npx --no-install prettier --check "$@"' --
-        language: system
-        files: \.(ts|tsx|js|jsx|mjs|cjs|json|ya?ml|md)$
       - id: golangci-lint
         name: golangci-lint
-        entry: bash -c 'if [ ! -f go.mod ]; then exit 0; fi; golangci-lint run --out-format=colored-line-number "$@"' --
+        entry: golangci-lint run ./cmd/... ./internal/... ./migrations/... ./monitoring/...
         language: system
         files: \.go$
+        pass_filenames: false
