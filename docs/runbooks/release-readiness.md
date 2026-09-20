@@ -60,41 +60,22 @@ remain unavailable only when they are explicitly reported as blocked and stay
 disabled or fail closed; do not enable them merely to make release readiness
 appear green.
 
-For a timestamped operational snapshot around a paper-market boundary, run:
+For qualification preparation and prospective natural-run evidence, follow
+[paper qualification](paper-qualification.md). The legacy observer entrypoints
+now delegate to the canonical schema-114 collector and fail on wrong targets.
 
 ```sh
-OBSERVATION_REPORT=/absolute/path/to/evidence.txt \
-  ./scripts/observe-paper-boundary.sh <safe-label>
+./scripts/observe-paper-boundary.sh --evidence-dir /var/lib/augr-qualification/preparation
+./scripts/observe-automation-run.sh options_scan 2026-09-22T02:00:00Z \
+  --token-file /var/lib/augr-qualification/operator-token \
+  --evidence-dir /var/lib/augr-qualification/observations
 ```
 
-The observer records service/database state from the preceding 30 minutes and
-only whitelisted warning/error metadata. It deliberately omits raw error
-fields, message text, query strings, and provider bodies. Set
-`AUGR_COMPOSE_FILE` or `AUGR_BASE_URL` only when observing a different approved
-deployment. A snapshot taken after the fact is operational context, not proof
-that a scheduled automation was prospectively observed through its inputs,
-execution, persistence, and downstream effects. Do not copy unsanitized
-production logs into a tracked evidence file.
-
-For a bounded prospective observation that starts before a known job boundary,
-run:
-
-```sh
-OBSERVATION_REPORT=/absolute/path/to/evidence.txt \
-  ./scripts/observe-automation-run.sh <job-name> <not-before-ISO-8601> <safe-label>
-```
-
-The prospective observer records its arm time, wakes for a lead-time health and
-database precheck, polls across the actual boundary, pins the first admitted
-durable run ID, follows that same row to terminal state, and records post-state
-plus only allowlisted warning/error metadata. The lead defaults to ten seconds
-and can be adjusted with `OBSERVATION_LEAD_SECONDS`. The terminal timeout
-defaults to two hours; set `OBSERVATION_TIMEOUT_SECONDS` explicitly for a known
-longer job. It refuses a not-before timestamp that is not still in the future,
-preventing a retrospective snapshot from being mislabeled prospective. Raw
-error text and result values are never retained. This generic evidence still
-does not prove job-specific provider contact, prompt/model routing, or domain
-writes; pair it with narrowly scoped, sanitized job-specific inspection.
+The previous positional label and `AUGR_COMPOSE_FILE`, `AUGR_BASE_URL`,
+`OBSERVATION_REPORT` environment overrides are no longer supported. Use the
+versioned qualification configuration and CLI flags. Collection uses canonical
+read-only SQL, bounded requests, allowlisted evidence and preserved failures.
+A terminal row alone does not establish provider contact or downstream effects.
 
 Validate Prometheus rules with `promtool check rules
 monitoring/prometheus/alerts.yml` (or the matching Prometheus container image).
