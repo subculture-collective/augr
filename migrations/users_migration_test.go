@@ -40,6 +40,32 @@ func TestUsersDownMigrationDropsUsersTable(t *testing.T) {
 	}
 }
 
+func TestRenameDemoUserMigrationPreservesAccountAndRejectsConflicts(t *testing.T) {
+	upSQL := normalizeSQL(t, readMigrationFile(t, "000114_rename_demo_user.up.sql"))
+	for _, fragment := range []string{
+		"exists (select 1 from users where username = 'demo')",
+		"exists (select 1 from users where username = 'patrick@subcult.tv')",
+		"raise exception 'cannot rename demo user: target username already exists'",
+		"update users set username = 'patrick@subcult.tv', updated_at = now() where username = 'demo'",
+	} {
+		if !strings.Contains(upSQL, fragment) {
+			t.Fatalf("expected rename migration to contain %q, got:\n%s", fragment, upSQL)
+		}
+	}
+
+	downSQL := normalizeSQL(t, readMigrationFile(t, "000114_rename_demo_user.down.sql"))
+	for _, fragment := range []string{
+		"exists (select 1 from users where username = 'patrick@subcult.tv')",
+		"exists (select 1 from users where username = 'demo')",
+		"raise exception 'cannot restore demo user: target username already exists'",
+		"update users set username = 'demo', updated_at = now() where username = 'patrick@subcult.tv'",
+	} {
+		if !strings.Contains(downSQL, fragment) {
+			t.Fatalf("expected rollback migration to contain %q, got:\n%s", fragment, downSQL)
+		}
+	}
+}
+
 func TestUsersMigrationAppliesAgainstExistingSchema(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping migration integration test in short mode")

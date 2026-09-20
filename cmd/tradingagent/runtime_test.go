@@ -194,11 +194,11 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestRuntimeSchemaVersionRequiresInternalPortfolioCapital(t *testing.T) {
+func TestRuntimeSchemaVersionRequiresRenamedOperatorUser(t *testing.T) {
 	for _, tt := range []struct {
 		version int
 		want    bool
-	}{{109, false}, {110, false}, {111, false}, {112, false}, {113, true}, {114, false}} {
+	}{{110, false}, {111, false}, {112, false}, {113, false}, {114, true}, {115, false}} {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
