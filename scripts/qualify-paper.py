@@ -42,6 +42,7 @@ def main():
     runtime = Runtime(config, args.token_file)
     if args.command == 'login':
         from qualification.session import login
+        require(sys.stdin.isatty() and sys.stderr.isatty(), 'login_requires_interactive_terminal')
         require(args.token_file is not None, 'session_file_required')
         containers = runtime.inspect()
         for role in ('app', 'web'):
@@ -77,7 +78,7 @@ def main():
     directory = save_receipt(evidence, report)
     print(directory)
     if args.command == 'plan':
-        write_json(directory / 'observer-plan.json', make_plan(config, report))
+        write_json(directory / 'observer-plan.json', make_plan(config, report, args.token_file))
     elif args.command == 'init':
         require(args.go_file, 'go_file_required')
         initialize(ledger, json.loads(args.go_file.read_text()), report, config)
