@@ -1,0 +1,106 @@
+{
+  "format": 1,
+  "host": "nuc",
+  "compose_project": "augr",
+  "database": "tradingagent_canonical_20260827",
+  "database_user": "postgres",
+  "schema": 114,
+  "source_revision": "1022b40120f408d90693f0a6ec78c9c426002919",
+  "containers": {
+    "app": {
+      "name": "augr-app-1",
+      "image": "sha256:7f2a36a3deef84f1d6aebbfc007fca66fbbc718090d5724515744cd5fce123b2"
+    },
+    "web": {
+      "name": "augr-web-1",
+      "image": "sha256:59a0fbb1ac52c45a1cbfc5bc0742dfe9ff5e95cebd8e825fa56d7777acf302ea"
+    },
+    "postgres": {
+      "name": "augr-postgres-1"
+    },
+    "redis": {
+      "name": "augr-redis-1"
+    }
+  },
+  "api_url": "http://10.0.0.56:3030",
+  "prometheus_url": "http://10.0.0.57:9090",
+  "prometheus_jobs": [
+    "augr-api",
+    "tradingagent"
+  ],
+  "safety_flags": {
+    "ENABLE_LIVE_TRADING": false,
+    "ENABLE_POLYMARKET_AUTOMATION": false,
+    "AUTOMATIC_SHADOW_PROMOTION": false,
+    "RELEASE_DRILLS_VERIFIED": false,
+    "ENABLE_SCHEDULER": true
+  },
+  "source_default_false_flags": [
+    "AUTOMATIC_SHADOW_PROMOTION",
+    "RELEASE_DRILLS_VERIFIED"
+  ],
+  "strategy": {
+    "id": "7c1aea67-ca86-4645-97d3-23b7b732c260",
+    "execution_version_id": "0225cc3c-0348-a063-16a3-8a3b46b0bb61",
+    "schedule": "CRON_TZ=America/New_York 0 10 * * 1-5"
+  },
+  "timezone": "America/New_York",
+  "display_timezone": "America/Chicago",
+  "schedules": {
+    "options_scan": "0 22 * * 1-5",
+    "history_refresh": "0 0 * * 2-6",
+    "overnight_sweep": "30 0 * * 2-6",
+    "overnight_backtest": "*/30 1-5 * * 2-6",
+    "overnight_generate": "0 6 * * 2-6",
+    "options_discovery": "30 6 * * 2-6",
+    "alpaca_reconcile": "*/5 * * * *"
+  },
+  "required_jobs": [
+    "options_scan",
+    "history_refresh",
+    "overnight_sweep",
+    "alpaca_reconcile"
+  ],
+  "capability_review_jobs": [
+    "overnight_backtest",
+    "overnight_generate",
+    "options_discovery"
+  ],
+  "monitoring": {
+    "staged_state": "inactive",
+    "future_ledger": "/var/lib/augr-qualification/paper-week-1022b401",
+    "interval_seconds": 300,
+    "receipt_max_age_seconds": 600,
+    "reconciliation_max_age_seconds": 600,
+    "auto_disable_failure_threshold": 5,
+    "job_timeout_seconds": 7200,
+    "required_gates": [
+      "strategy_session",
+      "options_scan",
+      "history_refresh",
+      "overnight",
+      "provider_freshness",
+      "decision_integrity",
+      "release_readiness",
+      "capability_review"
+    ],
+    "threshold_sources": [
+      "internal/automation/orchestrator.go: autoDisableThreshold=5",
+      "internal/automation/jobs_postmarket.go: existing options coverage and freshness checks",
+      "docs/runbooks/week-paper-evaluation.md",
+      "docs/runbooks/release-readiness.md"
+    ],
+    "policy_note": "Receipt and reconciliation age bounds are observer health limits (two five-minute intervals); they do not replace domain freshness or coverage gates. Those retain application thresholds and require reviewed natural-run evidence.",
+    "reviewed_calendar_dates": [
+      "2026-09-21",
+      "2026-09-22",
+      "2026-09-23",
+      "2026-09-24",
+      "2026-09-25",
+      "2026-09-26",
+      "2026-09-27",
+      "2026-09-28",
+      "2026-09-29"
+    ]
+  }
+}

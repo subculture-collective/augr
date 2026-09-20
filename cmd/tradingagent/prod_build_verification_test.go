@@ -2,8 +2,10 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -338,80 +340,32 @@ func TestReleaseTreeVerifierRequiresExactCleanInput(t *testing.T) {
 	}
 }
 
-func TestPaperBoundaryObserverOmitsRawErrorsAndUsesPortableOutputs(t *testing.T) {
+func TestQualificationWrappersPreserveArgumentsAndExitStatus(t *testing.T) {
 	repoRoot := filepath.Join(filepath.Dir(productionBuildVerificationScriptPath(t)), "..")
-	contents, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "observe-paper-boundary.sh"))
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "python3"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 17\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-
-	script := string(contents)
-	for _, want := range []string{
-		`repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)`,
-		`OBSERVATION_REPORT`,
-		`mktemp`,
-		`--no-log-prefix`,
-		`fromjson?`,
-		`raw errors and provider bodies omitted`,
+	for _, tc := range []struct {
+		script     string
+		args, want []string
+	}{
+		{"paper-week.sh", []string{"prepare", "--evidence-dir", "/tmp/evidence with spaces"}, []string{"prepare", "--evidence-dir", "/tmp/evidence with spaces"}},
+		{"observe-paper-boundary.sh", []string{"--since", "2026-09-21T13:00:00Z"}, []string{"collect", "--since", "2026-09-21T13:00:00Z"}},
+		{"observe-automation-run.sh", []string{"options_scan", "2026-09-22T02:00:00Z", "--token-file", "/tmp/operator session"}, []string{"observe", "--kind", "automation", "--target", "options_scan", "--due", "2026-09-22T02:00:00Z", "--token-file", "/tmp/operator session"}},
 	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("observe-paper-boundary.sh missing required content %q", want)
-		}
-	}
-	for _, forbidden := range []string{
-		`repo="/home/`,
-		`grep -E '"level":"(WARN|ERROR)"`,
-		`error: (.error`,
-		`msg: (.msg`,
-		`.message`,
-	} {
-		if strings.Contains(script, forbidden) {
-			t.Fatalf("observe-paper-boundary.sh contains unsafe content %q", forbidden)
-		}
-	}
-}
-
-func TestAutomationRunObserverIsProspectiveBoundedAndSanitized(t *testing.T) {
-	repoRoot := filepath.Join(filepath.Dir(productionBuildVerificationScriptPath(t)), "..")
-	contents, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "observe-automation-run.sh"))
-	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
-	}
-
-	script := string(contents)
-	for _, want := range []string{
-		`not_before="${2:-}"`,
-		`not-before timestamp must be in the future`,
-		`OBSERVATION_TIMEOUT_SECONDS`,
-		`OBSERVATION_LEAD_SECONDS`,
-		`precheck_epoch=$((target_epoch - lead_seconds))`,
-		`armed_at=`,
-		`started_at >= TIMESTAMPTZ '$since_sql'`,
-		`run identity changed`,
-		`(error IS NOT NULL)::text`,
-		`jsonb_typeof(result)`,
-		`raw errors, result values, message text, query strings, and provider bodies omitted`,
-		`--no-log-prefix`,
-		`fromjson?`,
-		`{name: .Name, service: .Service, image: .Image, state: .State, health: .Health, status: .Status}`,
-	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("observe-automation-run.sh missing required content %q", want)
-		}
-	}
-	for _, forbidden := range []string{
-		`repo="/home/`,
-		`result::text`,
-		`coalesce(error`,
-		`error: (.error`,
-		`msg: (.msg`,
-		`.message`,
-		`docker compose -f "$compose_file" ps --format json
-  snapshot before`,
-	} {
-		if strings.Contains(script, forbidden) {
-			t.Fatalf("observe-automation-run.sh contains unsafe content %q", forbidden)
-		}
+		t.Run(tc.script, func(t *testing.T) {
+			command := exec.Command("sh", append([]string{filepath.Join(repoRoot, "scripts", tc.script)}, tc.args...)...)
+			command.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+			output, err := command.Output()
+			if err == nil || command.ProcessState.ExitCode() != 17 {
+				t.Fatalf("wrapper lost exit status: %v", err)
+			}
+			got := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+			if len(got) == 0 || !strings.HasSuffix(got[0], "/scripts/qualify-paper.py") || !slices.Equal(got[1:], tc.want) {
+				t.Fatalf("forwarded arguments = %q, want qualification script plus %q", got, tc.want)
+			}
+		})
 	}
 }
 

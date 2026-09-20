@@ -1,0 +1,12 @@
+[Unit]
+Description=Read-only Augr paper qualification monitor (requires GO activation)
+After=docker.service
+
+[Service]
+Type=oneshot
+User=onnwee
+WorkingDirectory=/opt/augr-qualification
+ExecStart=/usr/bin/python3 /opt/augr-qualification/scripts/qualify-paper.py monitor-run --config /opt/augr-qualification/monitoring/qualification/schema114-1022b401.json --token-file /var/lib/augr-qualification/operator-token --evidence-dir /var/lib/augr-qualification/monitoring
+UMask=0077
+TimeoutStartSec=300
+NoNewPrivileges=true

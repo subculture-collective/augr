@@ -24,6 +24,7 @@ bash -n scripts/verify-prod-build.sh
 bash scripts/update-db-targets_test.sh
 bash scripts/apply-migrations-psql_test.sh
 python3 scripts/parse-old-db-snapshot_test.py
+python3 scripts/test-qualification.py
 shellcheck scripts/apply-migrations-psql.sh scripts/apply-migrations-psql_test.sh scripts/update-db-targets.sh scripts/update-db-targets_test.sh scripts/verify-account-cutover.sh
 shellcheck scripts/capture-old-db-baseline.sh scripts/verify-old-db-after-drain.sh
 ./scripts/verify-account-cutover.sh --schema-matrix

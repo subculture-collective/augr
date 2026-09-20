@@ -1,0 +1,11 @@
+[Unit]
+Description=Augr paper monitor cadence (staged; enable only after GO)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=augr-paper-monitor.service
+
+[Install]
+WantedBy=timers.target
