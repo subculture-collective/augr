@@ -173,6 +173,16 @@ activation is part of Sunday work.
 
 ## Staged monitoring
 
+Sunday read-only inventory also found a user crontab entry at `55 23 * * *`
+calling the legacy `scripts/paper-week.sh` through
+`/home/onnwee/Projects/patrickfanella/augr` (resolving to
+`/srv/repos/patrickfanella/augr`). Its old `var/paper-week/start.env` and
+`cohort.ids` exist. This entry was not changed during preparation. Before activating
+the new monitor, archive the current user crontab and old ledger, identify and
+retire only that exact legacy entry, then verify the remaining crontab. Do not
+run both writers or repoint the old ledger. No `augr-paper-monitor.timer` was
+installed or active at Sunday readback.
+
 The versioned `.service` and `.timer` files are **inactive templates**. The service
 runs the collector every five minutes and writes local JSON notification artifacts.
 It sends no external messages. Existing Prometheus release rules remain in force
