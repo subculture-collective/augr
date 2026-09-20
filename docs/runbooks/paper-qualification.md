@@ -77,6 +77,32 @@ provenance; missing Git/export identity is shown as unknown. Regenerate the expo
 after any edit. Keep original candidate source SHA, tooling Git SHA and content
 hash separate. Never label a dirty dry-run tree as an exact committed release.
 
+## Normal login on a headless NUC
+
+Use an interactive SSH terminal; no browser is required:
+
+```sh
+ssh -t nuc
+cd /opt/augr-qualification
+./scripts/qualify-paper.py login --token-file /var/lib/augr-qualification/operator-token
+```
+
+Use the actual reviewed tool directory if it has only been staged. The helper
+checks the deployed identity, prompts for the operator username/email and hidden
+password, and calls the ordinary `/api/v1/auth/login` endpoint. It saves only the
+returned access/refresh session and expiry in a private file; it never saves the
+password, emits tokens, changes credentials, grants roles or alters token lifetimes.
+The session directory must be writable by the operator/service user.
+
+Collectors using a renewable session call the normal `/api/v1/auth/refresh`
+endpoint when access expiry is within a minute. A persistent lock and atomic
+replacement serialize concurrent observers. Authentication/renewal are the only
+HTTP POST operations; database inspection stays read-only and no trading/job API
+is called. Missing, expired or rejected refresh sessions fail closed and require
+a new normal login. Existing access-only files cannot be renewed automatically.
+For a long pre-armed wait, ensure the refresh session remains valid until precheck;
+the collector does not keep sessions alive while an observer is sleeping.
+
 ## Arm prospective observers
 
 Generate/review a fresh plan, resolve scheduler authentication and monitoring

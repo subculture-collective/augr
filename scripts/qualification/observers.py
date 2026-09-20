@@ -7,6 +7,7 @@ import time
 from zoneinfo import ZoneInfo
 
 from . import queries
+from .monitor import recent_due
 from .core import (UTC, Refusal, collect, digest, instant, lock, require,
                    save_receipt, stamp, write_json)
 
@@ -102,6 +103,8 @@ def observe(runtime, config, kind, target, due, evidence_dir, clock=None,
             try:
                 event('armed')
                 require(armed < boundary - dt.timedelta(seconds=lead), 'late_arm')
+                cron = ('0 10 * * 1-5' if kind == 'strategy' else config['schedules'][target])
+                require(recent_due(cron, boundary, config) == boundary, 'not_a_scheduled_boundary')
                 while clock.now() < boundary - dt.timedelta(seconds=lead):
                     clock.sleep(min(30, (boundary - dt.timedelta(seconds=lead) - clock.now()).total_seconds()))
                 report['precheck'] = collect(runtime, config, stamp(armed), 'prospective_precheck', clock.now())

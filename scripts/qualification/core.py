@@ -169,10 +169,8 @@ class Runtime:
         headers = {}
         if authenticated:
             require(self.token_file is not None, 'authenticated_session_unavailable')
-            p = Path(self.token_file)
-            require(not p.is_symlink() and p.stat().st_mode & 0o077 == 0, 'token_file_permissions')
-            token = p.read_text().strip()
-            require(token and '\n' not in token, 'invalid_token_file')
+            from .session import access_token
+            token = access_token(self.token_file, self.config['api_url'])
             headers['Authorization'] = 'Bearer ' + token
         # Never forward an operator token through a redirect.
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -275,6 +273,10 @@ def collect(runtime, config, since, mode='dry-run', now=None):
         report['blockers'].append(str(error))
         report['collection_status'] = 'refused'
         return report
+    except (KeyError, ValueError, TypeError):
+        report['blockers'].append('invalid_runtime_identity_response')
+        report['collection_status'] = 'refused'
+        return report
     for name, sql in queries.sections(since).items():
         try:
             rows = runtime.db(sql)
@@ -292,7 +294,7 @@ def collect(runtime, config, since, mode='dry-run', now=None):
     ):
         try:
             report['sections'][name] = action()
-        except (Refusal, ValueError, KeyError, TypeError):
+        except (Refusal, ValueError, KeyError, TypeError, OSError):
             report['blockers'].append('unavailable_' + name)
     controls = report['sections'].get('controls', [])
     report['baseline'] = baseline(config, report['containers'], report['database'], report['cohort'], controls)

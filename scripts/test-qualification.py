@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from qualification import core, monitor, observers, queries
+from qualification import core, monitor, observers, queries, session
 
 CONFIG_PATH = core.ROOT / 'monitoring/qualification/schema114-1022b401.json'
 NOW = core.instant('2026-09-21T13:55:00Z')
@@ -47,7 +47,7 @@ class Fixture:
         self.cohort = [{'id':config['strategy']['id'],'ticker':'SPY','market_type':'stock',
                        'execution_strategy_version_id':self.version,'skip_next_run':False,
                        'schedule_cron':config['strategy']['schedule']}]
-        self.due = NOW + dt.timedelta(minutes=5)
+        self.due = core.instant('2026-09-22T02:00:00Z')
         self.polls = 0
     def inspect(self):
         return copy.deepcopy(self.containers)
@@ -218,7 +218,9 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(rows['options_discovery']['due_at'],'2026-09-22T10:30:00+00:00')
         self.assertEqual(len([x for x in plan['boundaries'] if x['job']=='overnight_backtest']),10)
     def observe(self,mode='ok',kind='automation'):
-        clock=FakeClock(); self.runtime.clock=clock; self.runtime.run_mode=mode; self.runtime.polls=0
+        due=self.runtime.due if kind=='automation' else core.instant('2026-09-21T14:00:00Z')
+        clock=FakeClock(due-dt.timedelta(minutes=5) if due != NOW else NOW)
+        self.runtime.due=due; self.runtime.clock=clock; self.runtime.run_mode=mode; self.runtime.polls=0
         target='options_scan' if kind=='automation' else self.config['strategy']['id']
         return observers.observe(self.runtime,self.config,kind,target,core.stamp(self.runtime.due),
                                   self.root/'observations',clock=clock,timeout=120)
@@ -233,6 +235,16 @@ class QualificationTests(unittest.TestCase):
         self.runtime.version='00000000-0000-4000-8000-000000000099'
         report,_=self.observe(kind='strategy')
         self.assertEqual(report['outcome'],'execution_version_changed')
+    def test_off_schedule_future_boundary_is_rejected(self):
+        self.runtime.due=core.instant('2026-09-22T02:03:00Z')
+        report,_=self.observe()
+        self.assertEqual(report['outcome'],'not_a_scheduled_boundary')
+        self.assertEqual(self.runtime.calls,[])
+    def test_malformed_identity_retains_refusal_receipt(self):
+        with patch.object(self.runtime,'inspect',side_effect=ValueError('SECRET')):
+            report=self.report()
+        self.assertEqual(report['collection_status'],'refused')
+        self.assertNotIn('SECRET',json.dumps(report))
     def test_manual_observation_rejected(self):
         self.runtime.manual=True
         report,_=self.observe()
@@ -309,6 +321,35 @@ class QualificationTests(unittest.TestCase):
     def test_health_allowlist_drops_provider_error_text(self):
         result=core.sanitize_health({'status':'bad SECRET','db':'SECRET','redis':'ok','error':'SECRET'})
         self.assertNotIn('SECRET',json.dumps(result))
+    def test_headless_login_uses_normal_endpoint_and_private_session(self):
+        data={'access_token':'SECRET_ACCESS','refresh_token':'SECRET_REFRESH','expires_at':'2026-09-22T03:00:00Z'}
+        path=self.root/'operator-token'
+        with patch('builtins.input',return_value='operator'), patch('getpass.getpass',return_value='SECRET_PASSWORD'), patch.object(session,'auth_request',return_value=data) as request:
+            result=session.login(self.config['api_url'],path)
+        self.assertEqual(request.call_args.args[1],'login')
+        self.assertEqual(path.stat().st_mode & 0o777,0o600)
+        self.assertNotIn('SECRET',json.dumps(result))
+        self.assertEqual(json.loads(path.read_text()),data)
+    def test_normal_session_renewal_is_separate_from_read_only_sql(self):
+        path=self.root/'operator-token'
+        session.store_session(path,{'access_token':'old','refresh_token':'renew','expires_at':core.stamp(NOW)})
+        replacement={'access_token':'new','refresh_token':'next','expires_at':core.stamp(NOW+dt.timedelta(hours=1))}
+        with patch.object(session,'auth_request',return_value=replacement) as request:
+            self.assertEqual(session.access_token(path,self.config['api_url'],NOW),'new')
+        self.assertEqual(request.call_args.args[1:3],('refresh',{'refresh_token':'renew'}))
+        self.assertEqual(json.loads(path.read_text()),replacement)
+    def test_failed_refresh_preserves_session_and_does_not_invent_token(self):
+        path=self.root/'operator-token'
+        session.store_session(path,{'access_token':'old','refresh_token':'renew','expires_at':core.stamp(NOW)})
+        before=path.read_bytes()
+        with patch.object(session,'auth_request',side_effect=core.Refusal('normal_login_or_refresh_failed')):
+            with self.assertRaises(core.Refusal): session.access_token(path,self.config['api_url'],NOW)
+        self.assertEqual(path.read_bytes(),before)
+    def test_session_rejects_world_readable_and_symlink_files(self):
+        path=self.root/'operator-token'; path.write_text('SECRET'); path.chmod(0o644)
+        with self.assertRaisesRegex(core.Refusal,'session_file_permissions'): session.access_token(path,self.config['api_url'])
+        link=self.root/'token-link'; link.symlink_to(path)
+        with self.assertRaisesRegex(core.Refusal,'session_symlink'): session.access_token(link,self.config['api_url'])
     def test_config_refuses_legacy_database_and_weakened_safety(self):
         for field,value in [('database','tradingagent'),('timezone','UTC'),('schema',113)]:
             c=copy.deepcopy(self.config); c[field]=value; p=self.root/'config.json'; p.write_text(json.dumps(c))

@@ -32,8 +32,8 @@ and the canonical database name. Container environment values are filtered in
 memory; secrets, prompts, raw error strings and provider bodies are not retained.
 
 Supply `--token-file /var/lib/augr-qualification/operator-token` for authenticated
-scheduler status. This file must contain the operator token obtained through the
-normal application login, with mode 0600. Do not invent/sign a token, reset a
+scheduler status. This file may contain an access token or the renewable session JSON created by
+the normal terminal login helper, with mode 0600. Do not invent/sign a token, reset a
 password, borrow another account, copy a server secret or bypass authentication.
 An absent/expired session is an explicit evidence gap. No token is stored in the
 configuration or receipt. HTTP redirects cannot forward the token.

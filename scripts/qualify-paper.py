@@ -17,13 +17,13 @@ from qualification import monitor
 
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument('command', choices=['prepare', 'collect', 'plan', 'observe', 'init',
+    result.add_argument('command', choices=['login', 'prepare', 'collect', 'plan', 'observe', 'init',
                                           'status', 'snapshot', 'monitor-check', 'monitor-activate',
                                           'monitor-disable', 'monitor-run'])
     result.add_argument('--config', type=Path, default=ROOT / 'monitoring/qualification/schema114-1022b401.json')
     result.add_argument('--evidence-dir', type=Path, default=ROOT / 'var/qualification')
     result.add_argument('--since', help='ISO timestamp with timezone; defaults to the preceding 30 minutes')
-    result.add_argument('--token-file', type=Path, help='mode-0600 token from normal operator login; never printed')
+    result.add_argument('--token-file', type=Path, help='mode-0600 normal operator session/access-token file; never printed')
     result.add_argument('--ledger', type=Path)
     result.add_argument('--go', type=Path, dest='go_file')
     result.add_argument('--receipt', type=Path)
@@ -40,6 +40,16 @@ def main():
     args = parser().parse_args()
     config = load_config(args.config)
     runtime = Runtime(config, args.token_file)
+    if args.command == 'login':
+        from qualification.session import login
+        require(args.token_file is not None, 'session_file_required')
+        containers = runtime.inspect()
+        for role in ('app', 'web'):
+            require(containers[role]['image'] == config['containers'][role]['image']
+                    and containers[role]['revision'] == config['source_revision'], 'login_target_identity_mismatch')
+        require(containers['app']['database'] == config['database'], 'login_database_mismatch')
+        print(json.dumps(login(config['api_url'], args.token_file)))
+        return 0
     now = dt.datetime.now(UTC)
     since = stamp(instant(args.since)) if args.since else stamp(now - dt.timedelta(minutes=30))
     ledger = args.ledger or Path(config['monitoring']['future_ledger'])
