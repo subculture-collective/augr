@@ -371,7 +371,7 @@ func overnightGenerateCompletionError(errors int) error {
 // historyRefresh downloads five years of daily OHLCV for operational stock
 // tickers, batching 10 at a time with a one-second rate-limit pause.
 func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
-	summary := map[string]int{"tickers": 0, "selected": 0, "positions": 0, "strategies": 0, "watchlist": 0, "updated": 0, "cache_revalidated": 0, "provider_requests": 0, "provider_failures": 0, "fresh_bars": 0, "empty": 0, "stale": 0, "failed": 0, "batches": 0}
+	summary := map[string]int{"tickers": 0, "selected": 0, "positions": 0, "strategies": 0, "watchlist": 0, "updated": 0, "cache_revalidated": 0, "provider_requests": 0, "provider_attempt_failures": 0, "provider_recoveries": 0, "provider_failures": 0, "fresh_bars": 0, "empty": 0, "stale": 0, "failed": 0, "batches": 0}
 	defer func() { o.SetLastSummary("history_refresh", summary) }()
 	o.logger.Info("history_refresh: starting")
 
@@ -430,6 +430,56 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 		} else if download == nil {
 			summary["failed"] += len(batch)
 			return fmt.Errorf("history_refresh: batch download at %d returned no result", i)
+		}
+		legacyGapFailures := make([]string, 0, len(batch))
+		for _, ticker := range batch {
+			if failures := download.ProviderFailures[ticker]; failures > 0 {
+				summary["provider_attempt_failures"] += failures
+				if download.FreshBars[ticker] > 0 && dailyBarFresh(now, download.ProviderLatest[ticker]) {
+					legacyGapFailures = append(legacyGapFailures, ticker)
+				}
+			}
+		}
+		if len(legacyGapFailures) > 0 {
+			// Older coverage receipts used the first returned bar as the start of
+			// coverage. For post-listing symbols that leaves a permanent leading
+			// gap, even though the provider already answered the full request.
+			// Retry the complete range once. A successful response writes a repaired
+			// receipt; unresolved failures remain visible and degraded below.
+			recovery, recoveryErr := o.deps.DataService.DownloadHistoricalOHLCVWithStats(
+				ctx, domain.MarketTypeStock,
+				legacyGapFailures, data.Timeframe1d,
+				histFrom, now, false,
+			)
+			if recoveryErr != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				if errors.Is(recoveryErr, context.Canceled) || errors.Is(recoveryErr, context.DeadlineExceeded) {
+					return recoveryErr
+				}
+				o.logger.Warn("history_refresh: partial full-range recovery", slog.Int("offset", i), slog.Any("error", recoveryErr))
+			}
+			if recovery != nil {
+				for _, ticker := range legacyGapFailures {
+					download.ProviderRequests[ticker] += recovery.ProviderRequests[ticker]
+					download.FreshBars[ticker] += recovery.FreshBars[ticker]
+					if latest := recovery.ProviderLatest[ticker]; latest.After(download.ProviderLatest[ticker]) {
+						download.ProviderLatest[ticker] = latest
+					}
+					if len(recovery.Bars[ticker]) > 0 {
+						download.Bars[ticker] = recovery.Bars[ticker]
+					}
+					if recovery.ProviderRequests[ticker] > 0 && recovery.ProviderFailures[ticker] == 0 && recovery.FreshBars[ticker] > 0 {
+						download.ProviderFailures[ticker] = 0
+						summary["provider_recoveries"]++
+						continue
+					}
+					if recovery.ProviderFailures[ticker] > 0 {
+						download.ProviderFailures[ticker] = recovery.ProviderFailures[ticker]
+					}
+				}
+			}
 		}
 		cacheOnly := make([]string, 0, len(batch))
 		for _, ticker := range batch {

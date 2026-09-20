@@ -842,19 +842,18 @@ func historicalCoverageForBars(gap historicalOHLCVRange, bars []domain.OHLCV, no
 		return domain.HistoricalOHLCVCoverage{DateFrom: gap.From.UTC(), DateTo: gap.To.UTC(), FetchedAt: now.UTC()}, true
 	}
 
-	from := bars[0].Timestamp.UTC()
-	to := from
+	// A successful OHLCV response proves that the requested interval before the
+	// first returned bar contains no data. Recording the first bar as DateFrom
+	// creates a permanent pre-listing gap for newly listed symbols. Keep DateTo
+	// pinned to the last returned bar, however, so a provider that stops before
+	// the requested end cannot make recent missing sessions look covered.
+	to := bars[0].Timestamp.UTC()
 	for _, bar := range bars[1:] {
-		ts := bar.Timestamp.UTC()
-		if ts.Before(from) {
-			from = ts
-		}
-		if ts.After(to) {
+		if ts := bar.Timestamp.UTC(); ts.After(to) {
 			to = ts
 		}
 	}
-
-	return domain.HistoricalOHLCVCoverage{DateFrom: from, DateTo: to, FetchedAt: now.UTC()}, true
+	return domain.HistoricalOHLCVCoverage{DateFrom: gap.From.UTC(), DateTo: to, FetchedAt: now.UTC()}, true
 }
 
 type historicalOHLCVRange struct {

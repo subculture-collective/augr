@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sort"
@@ -429,6 +430,54 @@ func TestDataServiceDownloadHistoricalOHLCVIncrementalFetchesOnlyMissingSubRange
 	}
 	if !bars[0].Timestamp.Equal(from) || !bars[6].Timestamp.Equal(day7) {
 		t.Fatalf("returned range = %s..%s, want %s..%s", bars[0].Timestamp, bars[6].Timestamp, from, day7)
+	}
+}
+
+func TestDataServiceDownloadHistoricalOHLCVRecordsRequestedRangeAroundListingHistory(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	from := time.Date(2021, 9, 19, 0, 0, 0, 0, time.UTC)
+	listed := time.Date(2024, 8, 15, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, 9, 18, 0, 0, 0, 0, time.UTC)
+
+	repo := newFakeHistoricalOHLCVRepo()
+	provider := &historicalStubProvider{getFn: func(_ string, _ Timeframe, gapFrom, gapTo time.Time) ([]domain.OHLCV, error) {
+		if !gapFrom.Equal(from) || !gapTo.Equal(to) {
+			return nil, fmt.Errorf("unexpected repeated gap request %s..%s", gapFrom, gapTo)
+		}
+		return []domain.OHLCV{
+			{Timestamp: listed, Open: 10, High: 11, Low: 9, Close: 10.5, Volume: 100},
+			{Timestamp: to, Open: 20, High: 21, Low: 19, Close: 20.5, Volume: 200},
+		}, nil
+	}}
+	service := &DataService{
+		stockChain:  provider,
+		historyRepo: repo,
+		logger:      logger,
+		now:         func() time.Time { return to.Add(time.Hour) },
+	}
+
+	if _, err := service.DownloadHistoricalOHLCVWithStats(context.Background(), domain.MarketTypeStock, []string{"IPO"}, Timeframe1d, from, to, true); err != nil {
+		t.Fatalf("first download error = %v", err)
+	}
+	second, err := service.DownloadHistoricalOHLCVWithStats(context.Background(), domain.MarketTypeStock, []string{"IPO"}, Timeframe1d, from, to, true)
+	if err != nil {
+		t.Fatalf("second download error = %v", err)
+	}
+	if got := second.ProviderRequests["IPO"]; got != 0 {
+		t.Fatalf("second provider requests = %d, want 0 after complete-range receipt", got)
+	}
+	if got := len(provider.calls); got != 1 {
+		t.Fatalf("provider calls = %d, want one full-range request", got)
+	}
+
+	coverage, err := repo.ListHistoricalOHLCVCoverage(context.Background(), repository.HistoricalOHLCVCoverageFilter{
+		Ticker: "IPO", Provider: cacheProviderStockChain, Timeframe: Timeframe1d.String(),
+	})
+	if err != nil {
+		t.Fatalf("ListHistoricalOHLCVCoverage() error = %v", err)
+	}
+	if len(coverage) != 1 || !coverage[0].DateFrom.Equal(from) || !coverage[0].DateTo.Equal(to) {
+		t.Fatalf("coverage = %#v, want requested range %s..%s", coverage, from, to)
 	}
 }
 

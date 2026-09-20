@@ -99,6 +99,61 @@ func TestHistoryRefreshRevalidatesEmptyIncrementalResponse(t *testing.T) {
 	}
 }
 
+func TestHistoryRefreshRepairsLegacyPreListingCoverageGap(t *testing.T) {
+	now := time.Date(2026, time.September, 9, 0, 0, 0, 0, easternTime)
+	histFrom := now.AddDate(-5, 0, 0)
+	listed := time.Date(2024, time.August, 15, 9, 30, 0, 0, easternTime)
+	prior := time.Date(2026, time.September, 7, 9, 30, 0, 0, easternTime)
+	latest := time.Date(2026, time.September, 8, 9, 30, 0, 0, easternTime)
+	calls := 0
+	provider := &partialResultProvider{ohlcv: func(_ string, from, to time.Time) ([]domain.OHLCV, error) {
+		calls++
+		if calls == 1 {
+			if !from.Equal(histFrom) || !to.Equal(listed.AddDate(0, 0, -1)) {
+				t.Fatalf("legacy gap range = %v..%v", from, to)
+			}
+			return nil, errors.New("provider rejects pre-listing range")
+		}
+		if calls == 2 {
+			if !from.Equal(prior.AddDate(0, 0, 1)) || !to.Equal(now) {
+				t.Fatalf("current gap range = %v..%v", from, to)
+			}
+			return []domain.OHLCV{{Timestamp: latest, Open: 2, High: 2, Low: 2, Close: 2, Volume: 2}}, nil
+		}
+		if !from.Equal(histFrom) || !to.Equal(now) {
+			t.Fatalf("repair range = %v..%v, want full history", from, to)
+		}
+		return []domain.OHLCV{
+			{Timestamp: listed, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1},
+			{Timestamp: latest, Open: 2, High: 2, Low: 2, Close: 2, Volume: 2},
+		}, nil
+	}}
+	repo := &partialResultHistoryRepo{
+		bars: []domain.HistoricalOHLCV{
+			{Ticker: "IPO", Provider: "stock-chain", Timeframe: "1d", Timestamp: listed, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1},
+			{Ticker: "IPO", Provider: "stock-chain", Timeframe: "1d", Timestamp: prior, Open: 2, High: 2, Low: 2, Close: 2, Volume: 2},
+		},
+		coverage: []domain.HistoricalOHLCVCoverage{{
+			Ticker: "IPO", Provider: "stock-chain", Timeframe: "1d", DateFrom: listed, DateTo: prior, FetchedAt: now.AddDate(0, 0, -1),
+		}},
+	}
+	orch := partialResultOrchestrator([]string{"IPO"}, partialResultDataService(provider, repo))
+	orch.now = func() time.Time { return now }
+	orch.Register("history_refresh", "test", historyRefreshSpec, orch.historyRefresh)
+
+	err := orch.historyRefresh(context.Background())
+	summary := singleJobStatus(t, orch, "history_refresh").LastSummary
+	if err != nil {
+		t.Fatalf("historyRefresh() error = %v, summary=%v", err, summary)
+	}
+	if calls != 3 {
+		t.Fatalf("provider calls = %d, want failed legacy gap, current gap, and full-range repair", calls)
+	}
+	if summary["provider_recoveries"] != 1 || summary["provider_failures"] != 0 || summary["failed"] != 0 || summary["updated"] != 1 {
+		t.Fatalf("repair summary = %#v", summary)
+	}
+}
+
 func (p *partialResultProvider) GetFundamentals(context.Context, string) (data.Fundamentals, error) {
 	return data.Fundamentals{}, data.ErrNotImplemented
 }
@@ -118,8 +173,9 @@ func (p *partialResultProvider) called(ticker, timeframe string) bool {
 }
 
 type partialResultHistoryRepo struct {
-	mu   sync.Mutex
-	bars []domain.HistoricalOHLCV
+	mu       sync.Mutex
+	bars     []domain.HistoricalOHLCV
+	coverage []domain.HistoricalOHLCVCoverage
 }
 
 func (r *partialResultHistoryRepo) Get(context.Context, repository.MarketDataCacheKey) (*domain.MarketData, error) {
@@ -154,12 +210,30 @@ func (r *partialResultHistoryRepo) ListHistoricalOHLCV(_ context.Context, filter
 	return result, nil
 }
 
-func (r *partialResultHistoryRepo) UpsertHistoricalOHLCVCoverage(context.Context, domain.HistoricalOHLCVCoverage) error {
+func (r *partialResultHistoryRepo) UpsertHistoricalOHLCVCoverage(_ context.Context, coverage domain.HistoricalOHLCVCoverage) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.coverage = append(r.coverage, coverage)
 	return nil
 }
 
-func (r *partialResultHistoryRepo) ListHistoricalOHLCVCoverage(context.Context, repository.HistoricalOHLCVCoverageFilter) ([]domain.HistoricalOHLCVCoverage, error) {
-	return nil, nil
+func (r *partialResultHistoryRepo) ListHistoricalOHLCVCoverage(_ context.Context, filter repository.HistoricalOHLCVCoverageFilter) ([]domain.HistoricalOHLCVCoverage, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var result []domain.HistoricalOHLCVCoverage
+	for _, item := range r.coverage {
+		if item.Ticker != filter.Ticker || item.Provider != filter.Provider || item.Timeframe != filter.Timeframe {
+			continue
+		}
+		if !filter.From.IsZero() && item.DateTo.Before(filter.From) {
+			continue
+		}
+		if !filter.To.IsZero() && item.DateFrom.After(filter.To) {
+			continue
+		}
+		result = append(result, item)
+	}
+	return result, nil
 }
 
 func partialResultDataService(provider *partialResultProvider, repo repository.MarketDataCacheRepository) *data.DataService {
