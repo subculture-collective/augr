@@ -115,13 +115,15 @@ func (p *Provider) Complete(ctx context.Context, request llm.CompletionRequest) 
 	if strings.TrimSpace(session.ID) == "" {
 		return nil, errors.New("opencode: create session response did not include an id")
 	}
-	defer p.deleteSession(session.ID)
+	requestInFlight := false
+	defer func() { p.cleanupSession(session.ID, requestInFlight) }()
 
 	system, transcript, err := buildPrompt(request)
 	if err != nil {
 		return nil, err
 	}
 	var completion messageResponse
+	requestInFlight = true
 	err = p.doJSON(ctx, http.MethodPost, "/session/"+url.PathEscape(session.ID)+"/message", map[string]any{
 		"agent": "augr-completion",
 		"model": map[string]string{
@@ -134,6 +136,7 @@ func (p *Provider) Complete(ctx context.Context, request llm.CompletionRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("opencode: complete request: %w", err)
 	}
+	requestInFlight = false
 	if len(completion.Info.Error) > 0 && string(completion.Info.Error) != "null" {
 		return nil, fmt.Errorf("opencode: completion failed: %s", compactError(completion.Info.Error))
 	}
@@ -268,10 +271,19 @@ func (p *Provider) doJSON(ctx context.Context, method, path string, body, destin
 	return nil
 }
 
-func (p *Provider) deleteSession(sessionID string) {
+func (p *Provider) cleanupSession(sessionID string, requestInFlight bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = p.doJSON(ctx, http.MethodDelete, "/session/"+url.PathEscape(sessionID), struct{}{}, nil)
+	path := "/session/" + url.PathEscape(sessionID)
+	if requestInFlight {
+		// Canceling the HTTP request does not stop OpenCode's retry loop.
+		// Abort before deleting its storage; retain it if abort is unconfirmed.
+		var stopped bool
+		if err := p.doJSON(ctx, http.MethodPost, path+"/abort", struct{}{}, &stopped); err != nil || !stopped {
+			return
+		}
+	}
+	_ = p.doJSON(ctx, http.MethodDelete, path, struct{}{}, nil)
 }
 
 func compactError(raw []byte) string {
