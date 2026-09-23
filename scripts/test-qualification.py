@@ -217,6 +217,19 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(rows['history_refresh']['chicago'],'2026-09-21T23:00:00-05:00')
         self.assertEqual(rows['options_discovery']['due_at'],'2026-09-22T10:30:00+00:00')
         self.assertEqual(len([x for x in plan['boundaries'] if x['job']=='overnight_backtest']),10)
+    def test_plan_commands_carry_session_path_without_losing_argument_boundaries(self):
+        import shlex
+        plan=observers.make_plan(self.config,self.report(),'/tmp/operator session')
+        for row in plan['boundaries']:
+            args=shlex.split(row['command'])
+            self.assertEqual(args[args.index('--token-file')+1],'/tmp/operator session')
+    def test_login_refuses_noninteractive_password_fallback(self):
+        import subprocess
+        result=subprocess.run(['python3',str(core.ROOT/'scripts/qualify-paper.py'),'login',
+                               '--token-file',str(self.root/'session')],capture_output=True,text=True)
+        self.assertEqual(result.returncode,2)
+        self.assertIn('login_requires_interactive_terminal',result.stderr)
+        self.assertFalse((self.root/'session').exists())
     def observe(self,mode='ok',kind='automation'):
         due=self.runtime.due if kind=='automation' else core.instant('2026-09-21T14:00:00Z')
         clock=FakeClock(due-dt.timedelta(minutes=5) if due != NOW else NOW)

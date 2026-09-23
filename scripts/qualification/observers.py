@@ -3,6 +3,7 @@ import datetime as dt
 import json
 from pathlib import Path
 import re
+import shlex
 import time
 from zoneinfo import ZoneInfo
 
@@ -12,13 +13,14 @@ from .core import (UTC, Refusal, collect, digest, instant, lock, require,
                    save_receipt, stamp, write_json)
 
 
-def make_plan(config, report):
+def make_plan(config, report, token_file=None):
     eastern = ZoneInfo(config['timezone'])
     chicago = ZoneInfo(config['display_timezone'])
     registered = {x.get('name'): x.get('cron') for x in report['sections'].get('scheduler_events', [])
                   if x['event'] == 'registered'}
     jobs = {x['name']: x for x in report['sections'].get('scheduler', [])}
     controls = {x['job_name']: x['enabled'] for x in report['sections'].get('controls', [])}
+    session_arg = shlex.quote(str(token_file or '/var/lib/augr-qualification/operator-token'))
     boundaries = [('strategy', '2026-09-21T10:00:00')]
     boundaries += [('options_scan', '2026-09-21T22:00:00'),
                    ('history_refresh', '2026-09-22T00:00:00'),
@@ -51,7 +53,7 @@ def make_plan(config, report):
                        'chicago': boundary.astimezone(chicago).isoformat(),
                        'arm_by': stamp(boundary - dt.timedelta(minutes=5)),
                        'runtime_status': status,
-                       'command': f'./scripts/qualify-paper.py observe --kind {kind} --target {target} --due {stamp(boundary)} --evidence-dir /var/lib/augr-qualification/observations',
+                       'command': f'./scripts/qualify-paper.py observe --kind {kind} --target {target} --due {stamp(boundary)} --token-file {session_arg} --evidence-dir /var/lib/augr-qualification/observations',
                        'deadline': stamp(boundary + dt.timedelta(seconds=config['monitoring']['job_timeout_seconds']))})
     return {'format': 1, 'created_from_receipt_sha256': digest(report),
             'timezone': config['timezone'], 'boundaries': result,
