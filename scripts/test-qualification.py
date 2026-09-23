@@ -215,7 +215,7 @@ class QualificationTests(unittest.TestCase):
         line = json.dumps({'time':'2026-09-23T04:00:00Z',
                            'msg':'automation: job starting','job':'history_refresh'})
         def current_tail(args, **kwargs):
-            self.assertEqual(args[:5], ['docker','logs','--tail','10001','--since'])
+            self.assertEqual(args[:5], ['docker','logs','--tail','20001','--since'])
             self.assertEqual(args[5], since)
             return SimpleNamespace(returncode=0, stdout='', stderr=line+'\n[]\n')
         with patch.object(core.subprocess, 'run', side_effect=current_tail):
@@ -223,10 +223,15 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(rows, [{'time':'2026-09-23T04:00:00Z',
                                 'event':'starting','job':'history_refresh'}])
         with patch.object(core.subprocess, 'run', return_value=SimpleNamespace(
-                returncode=0, stdout=(line+'\n')*10000, stderr='')):
-            self.assertEqual(len(runtime.logs(since)), 10000)
+                returncode=0, stdout=(line+'\n')*20000, stderr='')):
+            self.assertEqual(len(runtime.logs(since)), 20000)
         with patch.object(core.subprocess, 'run', return_value=SimpleNamespace(
-                returncode=0, stdout=(line+'\n')*10001, stderr='')):
+                returncode=0, stdout=(line+'\n')*20001, stderr='')):
+            with self.assertRaisesRegex(core.Refusal, 'logs_window_truncated'):
+                runtime.logs(since)
+
+        with patch.object(core.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout='x'*8_000_001, stderr='')):
             with self.assertRaisesRegex(core.Refusal, 'logs_window_truncated'):
                 runtime.logs(since)
 

@@ -282,8 +282,15 @@ ledger or paper-monitor timer.
 
 The September 23 live check also found that NUC's unbounded `docker logs --since`
 read omitted recent records while a finite tail returned them. The collector now
-requests at most 10,001 lines and refuses a window at that bound (or above 8 MB).
+requests at most 20,001 lines and refuses a window at that bound (or above 8 MB).
 With a verified registration receipt, current log collection starts at the
 requested observation window; old startup registrations come only from the
 instance-bound archive. An overflow is incomplete evidence, never a passing
 absence of manual triggers. This does not replay archived starts or completions.
+
+The initial 10,000-line capacity correctly refused the September 23 combined
+history/sweep window. A bounded diagnostic measured 13,782 lines (2,489,386 bytes),
+including both natural scheduler starts, after the sweep's backtest log burst.
+The 20,000-line accepted capacity covers that observed workload; the 8 MB byte
+limit and overflow refusal still apply. Preserve the refused receipt
+`receipt-1fg5dbst` alongside the successful narrower history receipt.

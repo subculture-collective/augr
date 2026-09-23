@@ -212,14 +212,14 @@ class Runtime:
     def logs(self, since):
         # Docker writes application stderr to its stderr. Parse both privately.
         try:
-            run = subprocess.run(['docker', 'logs', '--tail', '10001', '--since', since,
+            run = subprocess.run(['docker', 'logs', '--tail', '20001', '--since', since,
                                   self.config['containers']['app']['name']],
                                  capture_output=True, text=True, timeout=20)
         except (OSError, subprocess.TimeoutExpired):
             raise Refusal('logs_unavailable') from None
         require(run.returncode == 0, 'logs_unavailable')
         lines = run.stdout.splitlines() + run.stderr.splitlines()
-        require(len(lines) < 10001 and len(run.stdout.encode()) + len(run.stderr.encode()) <= 8_000_000,
+        require(len(lines) < 20001 and len(run.stdout.encode()) + len(run.stderr.encode()) <= 8_000_000,
                 'logs_window_truncated')
         allowed = {
             'automation: scheduled job': 'registered',
