@@ -256,7 +256,7 @@ func (planner *AcceptedEconomicPlanner) loadRoutedContext(ctx context.Context, s
 	var intentID uuid.UUID
 	err := planner.pool.QueryRow(ctx, `SELECT intent_id FROM execution_orders WHERE account_id=$1 AND id=$2`, scope.AccountID(), orderID).Scan(&intentID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.Account{}, instrument.Instrument{}, instrument.VenueContract{}, fmt.Errorf("canonical routed order %s is not prepared: %w", orderID, repository.ErrNotFound)
+		return nil, domain.Account{}, instrument.Instrument{}, instrument.VenueContract{}, fmt.Errorf("canonical routed order %s is not prepared: %w", orderID, errors.Join(execution.ErrAcceptedOrderNotPrepared, repository.ErrNotFound))
 	}
 	if err != nil {
 		return nil, domain.Account{}, instrument.Instrument{}, instrument.VenueContract{}, fmt.Errorf("load canonical routed order: %w", err)

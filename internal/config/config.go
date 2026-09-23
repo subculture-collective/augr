@@ -41,7 +41,42 @@ type Config struct {
 	LiveTradingAllowedBrokers    []string
 	TickerDiscovery              TickerDiscoveryConfig
 	HistoryRefreshWatchlistLimit int
+	// PortfolioAllocatorMode is "shadow" (default; no allocator orders) or "paper".
+	PortfolioAllocatorMode string
+	// ReleaseDrillsVerified records operator attestation for release readiness.
+	ReleaseDrillsVerified bool
+	// AdminAPIKey guards kill-switch deactivation and breaker reset. Empty
+	// disables those endpoints.
+	AdminAPIKey string
+	SECEdgar    SECEdgarConfig
+	// StaleRunTTL bounds how long a pipeline run may stay "running" before the
+	// reconciler marks it stale. Zero disables the reconciler.
+	StaleRunTTL time.Duration
+	// ShutdownDrainTimeout bounds how long shutdown waits for in-flight runs
+	// before cancelling them.
+	ShutdownDrainTimeout time.Duration
+	// Deprecations lists environment variables that were set but no longer
+	// affect behaviour; the runtime logs each at WARN.
+	Deprecations []string
 }
+
+// SECEdgarConfig identifies the application to SEC EDGAR. Refreshes are
+// disabled when AppEmail is empty.
+type SECEdgarConfig struct {
+	AppName  string
+	AppEmail string
+}
+
+const (
+	PortfolioAllocatorModeShadow = "shadow"
+	PortfolioAllocatorModePaper  = "paper"
+
+	// KalshiProductionAPIBaseURL is the default KALSHI_API_BASE_URL when
+	// KALSHI_DEMO=false.
+	KalshiProductionAPIBaseURL = "https://api.elections.kalshi.com/trade-api/v2"
+	// KalshiDemoAPIBaseURL is the default KALSHI_API_BASE_URL when KALSHI_DEMO=true.
+	KalshiDemoAPIBaseURL = "https://external-api.demo.kalshi.co/trade-api/v2"
+)
 
 // TickerDiscoveryConfig holds settings for the automated ticker discovery pipeline.
 type TickerDiscoveryConfig struct {
@@ -56,6 +91,14 @@ type ServerConfig struct {
 	Host      string
 	Port      int
 	JWTSecret string
+	// RateLimitPerMinute is the per-client request budget (API_RATE_LIMIT).
+	// Zero disables the limiter.
+	RateLimitPerMinute int
+	// TrustedProxies lists CIDRs whose X-Forwarded-For header is honoured
+	// (API_TRUSTED_PROXIES).
+	TrustedProxies []string
+	// CORSOrigins lists allowed origins (API_CORS_ORIGINS); "*" allows all.
+	CORSOrigins []string
 }
 
 // DatabaseConfig contains database connection settings.
@@ -77,6 +120,10 @@ type LLMConfig struct {
 	QuickThinkModel string
 	Timeout         time.Duration
 	Providers       LLMProviderConfigs
+
+	// DebateTimeout bounds one debate-round LLM call before the quick model
+	// retry (LLM_DEBATE_TIMEOUT). Zero disables the per-call timeout.
+	DebateTimeout time.Duration
 
 	// Resilience settings (PR: llm-resilience).
 	FallbackProvider     string
@@ -176,6 +223,9 @@ type PolymarketConfig struct {
 	APIBaseURL     string
 	GatewayBaseURL string
 	CLOBURL        string
+	// SignatureType selects the CLOB order-signing scheme
+	// (POLYMARKET_SIGNATURE_TYPE): 0 EOA, 1 POLY_PROXY, 2 GNOSIS_SAFE.
+	SignatureType int
 }
 
 // KalshiConfig contains credentials and endpoint settings for Kalshi.
@@ -197,6 +247,18 @@ type KalshiConfig struct {
 	ProjectionDatabaseURL   string
 	ProjectionKeyID         string
 	ProjectionSecretB64     string
+	// Discovery screener tuning (KALSHI_DISCOVERY_*). Zero values fall back to
+	// the automation job defaults.
+	DiscoveryFetchLimit      int     // KALSHI_DISCOVERY_FETCH_LIMIT, default 500
+	DiscoveryMinVolume       float64 // KALSHI_DISCOVERY_MIN_VOLUME, default 1000
+	DiscoveryMinOpenInterest float64 // KALSHI_DISCOVERY_MIN_OPEN_INTEREST, default 500
+	DiscoveryMaxSpreadPct    float64 // KALSHI_DISCOVERY_MAX_SPREAD_PCT, default 12
+}
+
+// IsDemoHost reports whether the configured API base URL points at the Kalshi
+// demo exchange, whose first catalog page is zero-volume markets.
+func (c KalshiConfig) IsDemoHost() bool {
+	return strings.Contains(strings.ToLower(c.APIBaseURL), "demo.kalshi.co")
 }
 
 // BrokerConfig contains broker credentials and execution mode.
@@ -236,6 +298,10 @@ type RiskConfig struct {
 	CircuitBreakerThreshold float64
 	CircuitBreakerCooldown  time.Duration
 	Polymarket              PolymarketRiskConfig
+	// Regime rules pause new allocations for a run when a threshold trips.
+	// Zero disables each rule.
+	RegimeMaxConsecutiveLosses int     // REGIME_MAX_CONSECUTIVE_LOSSES
+	RegimeMinRollingWinRate    float64 // REGIME_MIN_ROLLING_WIN_RATE (0-1)
 }
 
 // PolymarketRiskConfig contains prediction-market-specific risk limits.
@@ -323,10 +389,23 @@ type HighLatencyAlertRuleConfig struct {
 
 // FeatureFlags contains boolean feature toggles.
 type FeatureFlags struct {
-	EnableScheduler            bool
-	SchedulerJobTimeout        time.Duration
+	EnableScheduler     bool
+	SchedulerJobTimeout time.Duration
+	// SchedulerReloadInterval is how often the scheduler re-reads strategy
+	// schedules (SCHEDULER_RELOAD_INTERVAL, default 60s; 0 disables).
+	SchedulerReloadInterval time.Duration
+	// AutomationAutoDisableCooldown is the first re-arm delay after an
+	// automation job auto-disables (AUTOMATION_AUTO_DISABLE_COOLDOWN; 0 uses
+	// the orchestrator default of 1h).
+	AutomationAutoDisableCooldown time.Duration
+	// AutomationMissedRunCatchUp runs daily-or-slower jobs whose last
+	// scheduled fire was missed while the process was down
+	// (AUTOMATION_MISSED_RUN_CATCHUP, default true).
+	AutomationMissedRunCatchUp bool
 	EnableRedisCache           bool
-	EnableAgentMemory          bool
+	// RedisRequired makes a failing Redis probe fail /healthz. By default the
+	// probe is advisory and only marks redis as degraded.
+	RedisRequired              bool
 	EnableLiveTrading          bool
 	EnableTickerDiscovery      bool
 	EnablePolymarketAutomation bool
@@ -536,6 +615,15 @@ func loadFromEnvironment() (Config, error) {
 		return Config{}, err
 	}
 
+	regimeMaxConsecutiveLosses, err := getEnvInt("REGIME_MAX_CONSECUTIVE_LOSSES", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	regimeMinRollingWinRate, err := getEnvFloat64("REGIME_MIN_ROLLING_WIN_RATE", 0)
+	if err != nil {
+		return Config{}, err
+	}
+
 	pmMaxSingleExposure, err := getEnvFloat64("RISK_POLYMARKET_MAX_SINGLE_EXPOSURE_PCT", 0.05)
 	if err != nil {
 		return Config{}, err
@@ -600,6 +688,18 @@ func loadFromEnvironment() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	schedulerReloadInterval, err := getEnvDuration("SCHEDULER_RELOAD_INTERVAL", time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	automationAutoDisableCooldown, err := getEnvDuration("AUTOMATION_AUTO_DISABLE_COOLDOWN", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	automationMissedRunCatchUp, err := getEnvBool("AUTOMATION_MISSED_RUN_CATCHUP", true)
+	if err != nil {
+		return Config{}, err
+	}
 
 	embeddingTimeout, err := getEnvDuration("EMBEDDING_TIMEOUT", 30*time.Second)
 	if err != nil {
@@ -611,9 +711,13 @@ func loadFromEnvironment() (Config, error) {
 		return Config{}, err
 	}
 
-	enableAgentMemory, err := getEnvBool("ENABLE_AGENT_MEMORY", true)
+	redisRequired, err := getEnvBool("REDIS_REQUIRED", false)
 	if err != nil {
 		return Config{}, err
+	}
+	var deprecations []string
+	if strings.TrimSpace(os.Getenv("ENABLE_AGENT_MEMORY")) != "" {
+		deprecations = append(deprecations, "ENABLE_AGENT_MEMORY is deprecated and ignored: agent memory is always available when the memory repository is configured")
 	}
 
 	enableLiveTrading, err := getEnvBool("ENABLE_LIVE_TRADING", false)
@@ -653,15 +757,63 @@ func loadFromEnvironment() (Config, error) {
 		return Config{}, err
 	}
 
+	apiRateLimit, err := getEnvInt("API_RATE_LIMIT", 100)
+	if err != nil {
+		return Config{}, err
+	}
+	llmDebateTimeout, err := getEnvDuration("LLM_DEBATE_TIMEOUT", 0)
+	if err != nil {
+		return Config{}, err
+	}
+	staleRunTTL, err := getEnvDuration("STALE_RUN_TTL", 50*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	shutdownDrainTimeout, err := getEnvDuration("SHUTDOWN_DRAIN_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	releaseDrillsVerified, err := getEnvBool("RELEASE_DRILLS_VERIFIED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	kalshiDiscoveryFetchLimit, err := getEnvInt("KALSHI_DISCOVERY_FETCH_LIMIT", 500)
+	if err != nil {
+		return Config{}, err
+	}
+	kalshiDiscoveryMinVolume, err := getEnvFloat64("KALSHI_DISCOVERY_MIN_VOLUME", 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	kalshiDiscoveryMinOpenInterest, err := getEnvFloat64("KALSHI_DISCOVERY_MIN_OPEN_INTEREST", 500)
+	if err != nil {
+		return Config{}, err
+	}
+	kalshiDiscoveryMaxSpreadPct, err := getEnvFloat64("KALSHI_DISCOVERY_MAX_SPREAD_PCT", 12)
+	if err != nil {
+		return Config{}, err
+	}
+	kalshiAPIBaseURLDefault := KalshiDemoAPIBaseURL
+	if !kalshiDemo {
+		kalshiAPIBaseURLDefault = KalshiProductionAPIBaseURL
+	}
+	polymarketSignatureType, err := getEnvInt("POLYMARKET_SIGNATURE_TYPE", 0)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Environment:                getEnvString("APP_ENV", "development"),
 		CanonicalAccountID:         strings.TrimSpace(os.Getenv("PROJECTION_ACCOUNT_ID")),
 		DiscoveryEvaluationScopeID: strings.TrimSpace(os.Getenv("DISCOVERY_EVALUATION_SCOPE_ID")),
 		AutomaticShadowPromotion:   automaticShadowPromotion,
 		Server: ServerConfig{
-			Host:      getEnvString("APP_HOST", "0.0.0.0"),
-			Port:      serverPort,
-			JWTSecret: os.Getenv("JWT_SECRET"),
+			Host:               getEnvString("APP_HOST", "0.0.0.0"),
+			Port:               serverPort,
+			JWTSecret:          os.Getenv("JWT_SECRET"),
+			RateLimitPerMinute: apiRateLimit,
+			TrustedProxies:     getEnvCSV("API_TRUSTED_PROXIES"),
+			CORSOrigins:        getEnvCSVWithDefault("API_CORS_ORIGINS", []string{"*"}),
 		},
 		Database: DatabaseConfig{
 			URL:      os.Getenv("DATABASE_URL"),
@@ -676,6 +828,7 @@ func loadFromEnvironment() (Config, error) {
 			DeepThinkModel:  getEnvString("LLM_DEEP_THINK_MODEL", "openai/gpt-5.6-sol"),
 			QuickThinkModel: getEnvString("LLM_QUICK_THINK_MODEL", "openai/gpt-5.6-luna"),
 			Timeout:         llmTimeout,
+			DebateTimeout:   llmDebateTimeout,
 			Providers: LLMProviderConfigs{
 				OpenAI: LLMProviderConfig{
 					APIKey:  os.Getenv("OPENAI_API_KEY"),
@@ -773,25 +926,30 @@ func loadFromEnvironment() (Config, error) {
 				APIBaseURL:     getEnvString("POLYMARKET_API_BASE_URL", "https://api.polymarket.us"),
 				GatewayBaseURL: getEnvString("POLYMARKET_GATEWAY_BASE_URL", "https://gateway.polymarket.us"),
 				CLOBURL:        getEnvString("POLYMARKET_CLOB_URL", "https://clob.polymarket.com"),
+				SignatureType:  polymarketSignatureType,
 			},
 			Kalshi: KalshiConfig{
-				APIBaseURL:              getEnvString("KALSHI_API_BASE_URL", "https://external-api.demo.kalshi.co/trade-api/v2"),
-				APIKeyID:                os.Getenv("KALSHI_API_KEY_ID"),
-				PrivateKeyPEMB64:        os.Getenv("KALSHI_PRIVATE_KEY_PEM_B64"),
-				Demo:                    kalshiDemo,
-				RequestsPerWindow:       kalshiRequestsPerWindow,
-				Window:                  kalshiWindow,
-				MaxAttempts:             kalshiMaxAttempts,
-				BaseBackoff:             kalshiBaseBackoff,
-				MaxBackoff:              kalshiMaxBackoff,
-				JitterRatio:             kalshiJitterRatio,
-				DryRun:                  kalshiDryRun,
-				AutoExitsEnabled:        kalshiAutoExitsEnabled,
-				SettlementGateThreshold: kalshiSettlementGateThreshold,
-				MarkMaxAge:              kalshiMarkMaxAge,
-				ProjectionDatabaseURL:   os.Getenv("KALSHI_PROJECTION_DATABASE_URL"),
-				ProjectionKeyID:         os.Getenv("KALSHI_PROJECTION_KEY_ID"),
-				ProjectionSecretB64:     os.Getenv("KALSHI_PROJECTION_SECRET_B64"),
+				APIBaseURL:               getEnvString("KALSHI_API_BASE_URL", kalshiAPIBaseURLDefault),
+				APIKeyID:                 os.Getenv("KALSHI_API_KEY_ID"),
+				PrivateKeyPEMB64:         os.Getenv("KALSHI_PRIVATE_KEY_PEM_B64"),
+				Demo:                     kalshiDemo,
+				RequestsPerWindow:        kalshiRequestsPerWindow,
+				Window:                   kalshiWindow,
+				MaxAttempts:              kalshiMaxAttempts,
+				BaseBackoff:              kalshiBaseBackoff,
+				MaxBackoff:               kalshiMaxBackoff,
+				JitterRatio:              kalshiJitterRatio,
+				DryRun:                   kalshiDryRun,
+				AutoExitsEnabled:         kalshiAutoExitsEnabled,
+				SettlementGateThreshold:  kalshiSettlementGateThreshold,
+				MarkMaxAge:               kalshiMarkMaxAge,
+				ProjectionDatabaseURL:    os.Getenv("KALSHI_PROJECTION_DATABASE_URL"),
+				ProjectionKeyID:          os.Getenv("KALSHI_PROJECTION_KEY_ID"),
+				ProjectionSecretB64:      os.Getenv("KALSHI_PROJECTION_SECRET_B64"),
+				DiscoveryFetchLimit:      kalshiDiscoveryFetchLimit,
+				DiscoveryMinVolume:       kalshiDiscoveryMinVolume,
+				DiscoveryMinOpenInterest: kalshiDiscoveryMinOpenInterest,
+				DiscoveryMaxSpreadPct:    kalshiDiscoveryMaxSpreadPct,
 			},
 		},
 		Paper: PaperConfig{
@@ -802,13 +960,15 @@ func loadFromEnvironment() (Config, error) {
 			FeePct:                paperFeePct,
 		},
 		Risk: RiskConfig{
-			MaxPositionSizePct:      maxPositionSizePct,
-			MaxDailyLossPct:         maxDailyLossPct,
-			MaxDrawdownPct:          maxDrawdownPct,
-			MaxOpenPositions:        maxOpenPositions,
-			MaxKalshiExposurePct:    maxKalshiExposurePct,
-			CircuitBreakerThreshold: circuitBreakerThreshold,
-			CircuitBreakerCooldown:  circuitBreakerCooldown,
+			MaxPositionSizePct:         maxPositionSizePct,
+			MaxDailyLossPct:            maxDailyLossPct,
+			MaxDrawdownPct:             maxDrawdownPct,
+			MaxOpenPositions:           maxOpenPositions,
+			MaxKalshiExposurePct:       maxKalshiExposurePct,
+			CircuitBreakerThreshold:    circuitBreakerThreshold,
+			CircuitBreakerCooldown:     circuitBreakerCooldown,
+			RegimeMaxConsecutiveLosses: regimeMaxConsecutiveLosses,
+			RegimeMinRollingWinRate:    regimeMinRollingWinRate,
 			Polymarket: PolymarketRiskConfig{
 				MaxSingleMarketExposurePct: pmMaxSingleExposure,
 				MaxTotalExposurePct:        pmMaxTotalExposure,
@@ -870,13 +1030,16 @@ func loadFromEnvironment() (Config, error) {
 			},
 		},
 		Features: FeatureFlags{
-			EnableScheduler:            enableScheduler,
-			SchedulerJobTimeout:        schedulerJobTimeout,
-			EnableRedisCache:           enableRedisCache,
-			EnableAgentMemory:          enableAgentMemory,
-			EnableLiveTrading:          enableLiveTrading,
-			EnableTickerDiscovery:      enableTickerDiscovery,
-			EnablePolymarketAutomation: enablePolymarketAutomation,
+			EnableScheduler:               enableScheduler,
+			SchedulerJobTimeout:           schedulerJobTimeout,
+			SchedulerReloadInterval:       schedulerReloadInterval,
+			AutomationAutoDisableCooldown: automationAutoDisableCooldown,
+			AutomationMissedRunCatchUp:    automationMissedRunCatchUp,
+			EnableRedisCache:              enableRedisCache,
+			RedisRequired:                 redisRequired,
+			EnableLiveTrading:             enableLiveTrading,
+			EnableTickerDiscovery:         enableTickerDiscovery,
+			EnablePolymarketAutomation:    enablePolymarketAutomation,
 		},
 		LiveTradingAllowedStrategies: getEnvCSV("LIVE_TRADING_ALLOWED_STRATEGIES"),
 		LiveTradingAllowedBrokers:    getEnvCSV("LIVE_TRADING_ALLOWED_BROKERS"),
@@ -887,6 +1050,16 @@ func loadFromEnvironment() (Config, error) {
 			MaxTickers: tickerDiscoveryMaxTickers,
 		},
 		HistoryRefreshWatchlistLimit: historyRefreshWatchlistLimit,
+		PortfolioAllocatorMode:       strings.ToLower(strings.TrimSpace(getEnvString("PORTFOLIO_ALLOCATOR_MODE", PortfolioAllocatorModeShadow))),
+		ReleaseDrillsVerified:        releaseDrillsVerified,
+		AdminAPIKey:                  strings.TrimSpace(os.Getenv("ADMIN_API_KEY")),
+		SECEdgar: SECEdgarConfig{
+			AppName:  strings.TrimSpace(getEnvString("SEC_EDGAR_APP_NAME", "Augr")),
+			AppEmail: strings.TrimSpace(os.Getenv("SEC_EDGAR_APP_EMAIL")),
+		},
+		StaleRunTTL:          staleRunTTL,
+		ShutdownDrainTimeout: shutdownDrainTimeout,
+		Deprecations:         deprecations,
 	}
 
 	return cfg, nil

@@ -36,6 +36,40 @@ type BuildInput struct {
 	LiveTradingEnabled                   bool
 	RecoveryDrillsPassed                 bool
 	GeneratedAt                          time.Time
+	// Live execution inputs. They only explain why live_execution is blocked;
+	// live_execution is never reported ready by this report.
+	LiveTradingAllowedStrategies []string
+	LiveTradingAllowedBrokers    []string
+	AccountEnvironment           string
+}
+
+// liveExecutionActivationBlocker is always present: live execution requires
+// an explicit operator activation outside this readiness report.
+const liveExecutionActivationBlocker = "incremental operator activation required"
+
+// LiveExecutionBlockers lists the concrete configuration gaps that keep
+// live_execution blocked, so an operator can see which switch is off rather
+// than only the generic activation requirement.
+func LiveExecutionBlockers(in BuildInput) []string {
+	blockers := []string{liveExecutionActivationBlocker}
+	if !in.LiveTradingEnabled {
+		blockers = append(blockers, "ENABLE_LIVE_TRADING=false")
+	}
+	if len(in.LiveTradingAllowedStrategies) == 0 {
+		blockers = append(blockers, "LIVE_TRADING_ALLOWED_STRATEGIES is empty")
+	}
+	if len(in.LiveTradingAllowedBrokers) == 0 {
+		blockers = append(blockers, "LIVE_TRADING_ALLOWED_BROKERS is empty")
+	}
+	switch env := in.AccountEnvironment; env {
+	case "":
+		blockers = append(blockers, "account environment unknown")
+	case "live":
+		// A live account binding is the only environment that would not block.
+	default:
+		blockers = append(blockers, "account environment is "+env+" (runtime supports paper accounts only)")
+	}
+	return blockers
 }
 
 func BuildReadiness(in BuildInput) ReadinessReport {
@@ -59,7 +93,7 @@ func BuildReadiness(in BuildInput) ReadinessReport {
 		capability("polymarket", false, merge(base, map[string]bool{"polymarket data unavailable": in.PolymarketData, "settlement job unavailable": in.PolymarketSettlement})),
 		capability("kalshi", true, merge(base, map[string]bool{"kalshi data unavailable": in.KalshiData, "settlement job unavailable": in.KalshiSettlement})),
 		capability("recovery_drills", true, map[string]bool{"required recovery drills not verified": in.RecoveryDrillsPassed}),
-		{Name: "live_execution", Mode: "live", Ready: false, Required: false, Blockers: []string{"incremental operator activation required"}},
+		{Name: "live_execution", Mode: "live", Ready: false, Required: false, Blockers: LiveExecutionBlockers(in)},
 	}
 	ready := true
 	for _, c := range capabilities {

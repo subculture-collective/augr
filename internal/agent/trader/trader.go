@@ -37,6 +37,7 @@ You MUST respond with a JSON object in the following format (no markdown, no cod
   "entry_type": "market" | "limit",
   "entry_price": <float>,
   "position_size": <float>,
+  "position_size_unit": "shares" | "usd",
   "stop_loss": <float>,
   "take_profit": <float>,
   "time_horizon": "intraday" | "swing" | "position",
@@ -57,7 +58,7 @@ Rules:
 - For "buy" or "sell" actions:
   - "entry_type" must be "market" or "limit"
   - "entry_price" must be a positive number representing the target entry price
-  - "position_size" must be a positive number representing the dollar amount to allocate
+  - "position_size" is the number of shares or contracts to trade, not dollars. If you can only express size in dollars, set "position_size_unit" to "usd" and the system converts it to shares at entry_price; otherwise use "shares" (the default)
   - "stop_loss" must be a positive number representing the stop-loss price level
   - "take_profit" must be a positive number representing the take-profit price level
   - "time_horizon" must be one of: "intraday", "swing", or "position"
@@ -78,12 +79,16 @@ type TradingPlanOutput struct {
 	EntryType    string  `json:"entry_type"`
 	EntryPrice   float64 `json:"entry_price"`
 	PositionSize float64 `json:"position_size"`
-	StopLoss     float64 `json:"stop_loss"`
-	TakeProfit   float64 `json:"take_profit"`
-	TimeHorizon  string  `json:"time_horizon"`
-	Confidence   float64 `json:"confidence"`
-	Rationale    string  `json:"rationale"`
-	RiskReward   float64 `json:"risk_reward"`
+	// PositionSizeUnit is "shares" (default) or "usd". A "usd" size is
+	// converted to shares at entry_price during validation, after which the
+	// unit is always "shares".
+	PositionSizeUnit string  `json:"position_size_unit,omitempty"`
+	StopLoss         float64 `json:"stop_loss"`
+	TakeProfit       float64 `json:"take_profit"`
+	TimeHorizon      string  `json:"time_horizon"`
+	Confidence       float64 `json:"confidence"`
+	Rationale        string  `json:"rationale"`
+	RiskReward       float64 `json:"risk_reward"`
 	// Polymarket-only: the token side the plan is acting on.
 	Side string `json:"side,omitempty"`
 	// Thesis fields — populated alongside the trading plan.
@@ -435,6 +440,18 @@ func validateTradingPlan(plan *TradingPlanOutput) error {
 	}
 	if plan.PositionSize <= 0 {
 		return fmt.Errorf("trading plan position_size must be positive, got %v", plan.PositionSize)
+	}
+	switch unit := strings.ToLower(strings.TrimSpace(plan.PositionSizeUnit)); unit {
+	case "", "shares", "share", "units", "unit", "contracts", "contract":
+		plan.PositionSizeUnit = "shares"
+	case "usd", "dollars", "$", "notional":
+		plan.PositionSize /= plan.EntryPrice
+		plan.PositionSizeUnit = "shares"
+		if plan.PositionSize <= 0 {
+			return fmt.Errorf("trading plan usd position_size converts to non-positive shares at entry_price %v", plan.EntryPrice)
+		}
+	default:
+		return fmt.Errorf("trading plan has invalid position_size_unit: %q", unit)
 	}
 	if plan.StopLoss <= 0 {
 		return fmt.Errorf("trading plan stop_loss must be positive, got %v", plan.StopLoss)

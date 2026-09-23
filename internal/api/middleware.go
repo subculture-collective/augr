@@ -282,7 +282,7 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 
 func shouldSuppressRequestLog(path string) bool {
 	switch path {
-	case "/health", "/healthz", "/metrics", "/api/v1/automation/status", "/api/v1/strategies":
+	case "/health", "/healthz", "/readyz", "/metrics", "/api/v1/automation/status", "/api/v1/strategies":
 		return true
 	default:
 		return false

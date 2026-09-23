@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/agent"
@@ -46,8 +47,10 @@ Rules:
 // manager's LLM response. It captures the final action, confidence, adjusted
 // position parameters, and reasoning behind the decision.
 type FinalSignalOutput struct {
-	Action               string  `json:"action"`
-	Confidence           int     `json:"confidence"`
+	Action string `json:"action"`
+	// Confidence is the 1-10 judge scale. Models sometimes emit floats or a
+	// 0-1 fraction; validateFinalSignal normalizes both to a whole number.
+	Confidence           float64 `json:"confidence"`
 	AdjustedPositionSize float64 `json:"adjusted_position_size"`
 	AdjustedStopLoss     float64 `json:"adjusted_stop_loss"`
 	Reasoning            string  `json:"reasoning"`
@@ -177,7 +180,7 @@ func (r *RiskManager) JudgeRisk(ctx context.Context, input agent.RiskJudgeInput)
 	} else {
 		r.logger.Info("risk_manager: parsed final signal",
 			slog.String("action", signal.Action),
-			slog.Int("confidence", signal.Confidence),
+			slog.Float64("confidence", signal.Confidence),
 		)
 		if normalized, marshalErr := json.Marshal(signal); marshalErr == nil {
 			storedSignal = string(normalized)
@@ -193,7 +196,7 @@ func (r *RiskManager) JudgeRisk(ctx context.Context, input agent.RiskJudgeInput)
 			finalSignal.Signal = agent.PipelineSignalHold
 		}
 		// Normalize 1-10 integer confidence to 0-1 float for downstream consumers.
-		finalSignal.Confidence = float64(signal.Confidence) / 10.0
+		finalSignal.Confidence = signal.Confidence / 10.0
 
 		// Update TradingPlan with risk-adjusted values for actionable signals.
 		// HOLD signals intentionally leave the TradingPlan unchanged.
@@ -224,6 +227,26 @@ func (r *RiskManager) JudgeRisk(ctx context.Context, input agent.RiskJudgeInput)
 	return output, nil
 }
 
+// normalizeJudgeConfidence maps a model-supplied confidence onto the 1-10
+// integer scale: fractions in (0,1] are scaled by 10, other values are rounded
+// and clamped to [1,10]. Non-positive or non-finite values are rejected.
+func normalizeJudgeConfidence(value float64) (float64, bool) {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 0, false
+	}
+	if value <= 1 {
+		value *= 10
+	}
+	rounded := math.Round(value)
+	if rounded < 1 {
+		rounded = 1
+	}
+	if rounded > 10 {
+		rounded = 10
+	}
+	return rounded, true
+}
+
 // ParseFinalSignal attempts to parse the LLM response content into a
 // structured FinalSignalOutput. It handles responses that may include
 // markdown code fences around the JSON. If parsing fails entirely, it returns
@@ -247,9 +270,11 @@ func validateFinalSignal(signal *FinalSignalOutput) error {
 		return fmt.Errorf("final signal has invalid action: %q", signal.Action)
 	}
 
-	if signal.Confidence < 1 || signal.Confidence > 10 {
-		return fmt.Errorf("final signal confidence must be 1-10, got %d", signal.Confidence)
+	normalized, ok := normalizeJudgeConfidence(signal.Confidence)
+	if !ok {
+		return fmt.Errorf("final signal confidence must be 1-10, got %v", signal.Confidence)
 	}
+	signal.Confidence = normalized
 
 	if strings.TrimSpace(signal.Reasoning) == "" {
 		return fmt.Errorf("final signal missing required field: reasoning")

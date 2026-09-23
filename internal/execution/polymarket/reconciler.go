@@ -63,14 +63,25 @@ type Reconciler struct {
 	metrics          ReconcilerMetrics
 	logger           *slog.Logger
 
-	mu   sync.Mutex
+	mu sync.Mutex
+	// seen suppresses duplicate drift audit entries for the same signature
+	// within one process lifetime. It is in-memory only: after a restart the
+	// first reconcile re-records every still-present drift once. That is
+	// accepted; the audit log is append-only evidence, not a dedup store.
 	seen map[string]struct{}
 }
 
+// NewReconciler builds a Polymarket position reconciler. Broker positions come
+// from the public data-api keyed by the funder wallet address, while orders
+// are read through the api.polymarket.us L2 credentials; both must describe
+// the same wallet for the comparison to be meaningful.
 func NewReconciler(deps ReconcilerDeps) *Reconciler {
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if broker, ok := deps.Broker.(*Broker); ok && broker != nil && (broker.client == nil || strings.TrimSpace(broker.client.address) == "") {
+		logger.Warn("polymarket_reconcile: funder address is empty; data-api position lookups will fail until POLYMARKET_ADDRESS is configured")
 	}
 	return &Reconciler{
 		executionAccount: deps.ExecutionAccount,

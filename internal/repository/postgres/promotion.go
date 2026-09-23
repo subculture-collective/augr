@@ -44,24 +44,32 @@ func (repo *PromotionRepo) EvaluateEligiblePromotions(ctx context.Context, accou
 	if err != nil {
 		return summary, err
 	}
-	rows, err := repo.pool.Query(ctx, `SELECT deployment.id,assessment.id
+	// A deployment is eligible when it has no decision yet, or when its chain
+	// head is a held decision whose assessment evidence has since changed (a new
+	// assessment, or different bytes for the same assessment). Held is not
+	// terminal: the new decision chains from the held head via prior_decision_id.
+	rows, err := repo.pool.Query(ctx, `SELECT deployment.id,assessment.id,COALESCE(head.id,'00000000-0000-0000-0000-000000000000'::uuid)
 		FROM strategy_deployments deployment
 		JOIN robustness_assessment_candidates candidate ON candidate.version_id=deployment.version_id
 		JOIN statistical_robustness_assessments assessment ON assessment.id=candidate.assessment_id
 			AND assessment.scope_id=$2 AND assessment.mode='paper_scored' AND assessment.state='completed'
 		JOIN paper_evaluation_scopes scope ON scope.id=assessment.scope_id AND scope.account_id=$1
 			AND scope.capital_binding_id=deployment.capital_binding_id
+		LEFT JOIN LATERAL (SELECT decision.id,decision.outcome,decision.assessment_id,decision.assessment_sha256
+			FROM promotion_retirement_decisions decision WHERE decision.deployment_id=deployment.id
+			AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions child WHERE child.prior_decision_id=decision.id)
+			ORDER BY decision.created_at DESC,decision.id DESC LIMIT 1) head ON true
 		WHERE deployment.account_id=$1 AND deployment.mode='paper_scored' AND deployment.state='proposed'
-		AND NOT EXISTS(SELECT 1 FROM promotion_retirement_decisions decision WHERE decision.deployment_id=deployment.id)
+		AND (head.id IS NULL OR (head.outcome='held' AND (head.assessment_id<>assessment.id OR head.assessment_sha256<>assessment.sha256)))
 		ORDER BY deployment.id,assessment.id`, accountID, scopeID)
 	if err != nil {
 		return summary, err
 	}
-	type candidate struct{ deploymentID, assessmentID uuid.UUID }
+	type candidate struct{ deploymentID, assessmentID, priorDecisionID uuid.UUID }
 	candidates := make([]candidate, 0)
 	for rows.Next() {
 		var value candidate
-		if err = rows.Scan(&value.deploymentID, &value.assessmentID); err != nil {
+		if err = rows.Scan(&value.deploymentID, &value.assessmentID, &value.priorDecisionID); err != nil {
 			rows.Close()
 			return summary, err
 		}
@@ -84,7 +92,7 @@ func (repo *PromotionRepo) EvaluateEligiblePromotions(ctx context.Context, accou
 		return summary, err
 	}
 	for _, candidate := range candidates {
-		decision, evaluateErr := service.Evaluate(ctx, promotion.Request{DeploymentID: candidate.deploymentID, AssessmentID: candidate.assessmentID, Policy: policy, Readiness: readiness})
+		decision, evaluateErr := service.Evaluate(ctx, promotion.Request{DeploymentID: candidate.deploymentID, AssessmentID: candidate.assessmentID, PriorDecisionID: candidate.priorDecisionID, Policy: policy, Readiness: readiness})
 		if evaluateErr != nil {
 			return summary, evaluateErr
 		}

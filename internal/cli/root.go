@@ -23,6 +23,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	postgresrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 )
@@ -37,6 +38,8 @@ const (
 	inFlightPipelineRunsKey = "in_flight_pipeline_runs"
 	shutdownSignalKey       = "signal"
 	shutdownTimeoutKey      = "timeout"
+	drainTimeoutKey         = "drain_timeout"
+	drainPollInterval       = 250 * time.Millisecond
 )
 
 // SchedulerLifecycle is an optional hook for a background job scheduler that
@@ -129,7 +132,7 @@ func (g *shutdownGuard) Begin(sig os.Signal, inFlightCount int) {
 		g.logger.LogAttrs(
 			context.Background(),
 			slog.LevelInfo,
-			"waiting for in-flight pipeline runs",
+			"draining in-flight pipeline runs before cancellation",
 			slog.Int(inFlightPipelineRunsKey, inFlightCount),
 		)
 
@@ -137,6 +140,35 @@ func (g *shutdownGuard) Begin(sig os.Signal, inFlightCount int) {
 			g.forceExit(inFlightCount)
 		})
 	})
+}
+
+// drainInFlightRuns waits up to timeout for the scheduler's in-flight runs to
+// finish on their own, then reports how many will be cancelled. The scheduler
+// Stop that follows cancels those runs with cause "shutdown"; this bounded
+// wait lets order submissions that are already in progress complete first.
+func drainInFlightRuns(logger *slog.Logger, sched SchedulerLifecycle, timeout time.Duration) int {
+	if sched == nil {
+		return 0
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	deadline := time.Now().Add(timeout)
+	remaining := sched.InFlightCount()
+	for remaining > 0 && timeout > 0 && time.Now().Before(deadline) {
+		time.Sleep(drainPollInterval)
+		remaining = sched.InFlightCount()
+	}
+	if remaining == 0 {
+		logger.LogAttrs(context.Background(), slog.LevelInfo, "in-flight pipeline runs drained",
+			slog.Duration(drainTimeoutKey, timeout))
+		return 0
+	}
+	logger.LogAttrs(context.Background(), slog.LevelWarn,
+		"drain timeout elapsed; cancelling remaining in-flight pipeline runs (cause: shutdown)",
+		slog.Int(inFlightPipelineRunsKey, remaining),
+		slog.Duration(drainTimeoutKey, timeout))
+	return remaining
 }
 
 func (g *shutdownGuard) Complete() {
@@ -335,12 +367,22 @@ func (s *rootState) newServeCommand() *cobra.Command {
 				defer sched.Stop()
 			}
 
+			drainTimeout := cfg.ShutdownDrainTimeout
+			if drainTimeout >= forcedShutdownTimeout {
+				// The forced-exit timer must outlive the drain, or a slow run
+				// would trip it before cancellation even starts.
+				drainTimeout = forcedShutdownTimeout / 2
+				logger.Warn("SHUTDOWN_DRAIN_TIMEOUT exceeds the forced shutdown timeout; clamped",
+					slog.Duration(drainTimeoutKey, drainTimeout),
+					slog.Duration(shutdownTimeoutKey, forcedShutdownTimeout))
+			}
 			if err := runServerLifecycleWithHook(ctx, apiServer.Start, apiServer.Shutdown, func() {
 				inFlightCount := 0
 				if sched != nil {
 					inFlightCount = sched.InFlightCount()
 				}
 				shutdown.Begin(currentSignal(), inFlightCount)
+				drainInFlightRuns(logger, sched, drainTimeout)
 			}); err != nil {
 				return fmt.Errorf("serve http: %w", err)
 			}
@@ -370,21 +412,31 @@ func (s *rootState) newRunCommand() *cobra.Command {
 				return err
 			}
 
-			var result api.StrategyRunResult
-			if err := client.postAccount(cmd.Context(), "/strategies/"+strategy.ID.String()+"/run", nil, nil, &result); err != nil {
-				return err
-			}
-
-			output := runOutput{
-				Strategy: *strategy,
-				Result:   result,
-			}
-			if s.format == formatJSON {
-				return writeJSON(cmd.OutOrStdout(), output)
-			}
-			return renderRunTable(cmd.OutOrStdout(), output)
+			return s.triggerStrategyRun(cmd, client, strategy)
 		},
 	}
+}
+
+// triggerStrategyRun posts the manual-run request and prints the 202 receipt.
+// The API starts the pipeline asynchronously, so the response carries the
+// admission status, not the run result; watch the run through `runs` or the
+// events feed.
+func (s *rootState) triggerStrategyRun(cmd *cobra.Command, client *apiClient, strategy *domain.Strategy) error {
+	var accepted api.StrategyRunAccepted
+	if err := client.postAccount(cmd.Context(), "/strategies/"+strategy.ID.String()+"/run", nil, nil, &accepted); err != nil {
+		return err
+	}
+	if accepted.StrategyID == "" {
+		accepted.StrategyID = strategy.ID.String()
+	}
+	output := runOutput{
+		Strategy: *strategy,
+		Accepted: accepted,
+	}
+	if s.format == formatJSON {
+		return writeJSON(cmd.OutOrStdout(), output)
+	}
+	return renderRunTable(cmd.OutOrStdout(), output)
 }
 
 func (s *rootState) newStrategiesCommand() *cobra.Command {
@@ -461,6 +513,28 @@ func (s *rootState) newStrategiesCommand() *cobra.Command {
 	_ = createCmd.MarkFlagRequired("ticker")
 	_ = createCmd.MarkFlagRequired("market-type")
 	commands.AddCommand(createCmd)
+
+	commands.AddCommand(&cobra.Command{
+		Use:   "run STRATEGY_ID",
+		Short: "Trigger a manual pipeline run for a strategy by ID",
+		Long:  "Trigger a manual pipeline run through the local API. The API accepts the run asynchronously and returns a receipt; follow progress with the runs command.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			strategyID, err := uuid.Parse(strings.TrimSpace(args[0]))
+			if err != nil {
+				return fmt.Errorf("invalid strategy id %q: %w", args[0], err)
+			}
+			client, err := s.client()
+			if err != nil {
+				return err
+			}
+			var strategy domain.Strategy
+			if err := client.get(cmd.Context(), "/api/v1/strategies/"+strategyID.String(), nil, &strategy); err != nil {
+				return err
+			}
+			return s.triggerStrategyRun(cmd, client, &strategy)
+		},
+	})
 
 	return commands
 }

@@ -37,6 +37,38 @@ must be supported by explicit reviewed criteria. Retirement never deletes
 strategy, deployment, market-data, experiment, order, position, or ledger
 evidence.
 
+## Operational readiness gates
+
+`promotion.EvaluateReadiness` blocks the whole evaluation batch when the
+canonical account, exact scope, marks, checkpoint, or reconciliation evidence
+is missing or stale. Two gates were changed on 2026-09-23:
+
+- Internal ledger reconciliation. The canonical `internal` venue account has no
+  broker, so the projection-refresh job records a self-reconciliation for each
+  refreshed checkpoint (`ProjectionRepo.RecordInternalLedgerReconciliation`,
+  built by `venuerecon.NewInternalLedgerReconciliation`). The run compares the
+  checkpoint against a provider capture derived from the same checkpoint bytes,
+  is bound to the checkpoint ID and checksums, and carries the account UUID as
+  its provider identity. Readiness accepts that identity only for venue
+  `internal` with an empty external account ID; Alpaca and Kalshi accounts
+  still require a real provider capture and fail closed without one. Migration
+  `000117` widens the venue reconciliation provider vocabulary to include
+  `internal`.
+- Paper validation (soft gate, default off). `PaperValidationPolicy` with
+  `RequirePaperValidation=true` adds `paper_validation_pending` unless the
+  strategy's paper record reports a GO decision with at least 20 closed trades
+  and 60 calendar days (`papervalidation.DefaultThresholds`). The default policy
+  leaves enforcement off so current behaviour is unchanged; the evidence source
+  is the optional `PromotionPaperValidationSource` in
+  `internal/automation/promotion_evaluation.go`.
+
+Held decisions are not terminal. `EvaluateEligiblePromotions` re-evaluates a
+deployment whose chain head is `held` when a different completed assessment
+(or different bytes for the same assessment) exists in the configured scope,
+chaining the new decision from the held head via `prior_decision_id`.
+Activation is blocked only by the global breaker scope and the strategy's own
+`strategy:<id>` scope, not by unrelated strategies' breakers.
+
 ## Evaluation and state projection
 
 The service request contains only deployment ID, assessment ID, policy, and an

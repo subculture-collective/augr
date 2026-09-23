@@ -1,6 +1,7 @@
 package parse
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -226,15 +227,35 @@ func TestParseInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestParseRejectsUnknownSchemaFields(t *testing.T) {
+func TestParseAcceptsUnknownSchemaFields(t *testing.T) {
 	t.Parallel()
 
-	_, err := Parse[testPayload](`{"name":"alpha","value":42,"execute":true}`, nil)
-	if err == nil {
-		t.Fatal("Parse() error = nil, want unknown-field schema failure")
+	got, err := Parse[testPayload](`{"name":"alpha","value":42,"execute":true}`, nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v, want unknown fields ignored", err)
 	}
-	if got := err.Error(); !strings.Contains(got, `unknown field "execute"`) {
-		t.Fatalf("error = %q, want unknown execute field", got)
+	if got.Name != "alpha" || got.Value != 42 {
+		t.Fatalf("Parse() = %+v", got)
+	}
+}
+
+func TestParseReturnsTypedParseError(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		content  string
+		validate func(*testPayload) error
+		stage    string
+	}{
+		"extract":  {content: "no json here", stage: "extract"},
+		"decode":   {content: `{"name": 5}`, stage: "decode"},
+		"validate": {content: `{"name":"alpha"}`, validate: func(*testPayload) error { return errors.New("bad") }, stage: "validate"},
+	} {
+		_, err := Parse[testPayload](tc.content, tc.validate)
+		var parseErr *ParseError
+		if !errors.As(err, &parseErr) || parseErr.Stage != tc.stage || !IsParseError(err) {
+			t.Fatalf("%s: err = %v (%T), want ParseError stage %q", name, err, err, tc.stage)
+		}
 	}
 }
 

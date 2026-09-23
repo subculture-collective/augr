@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/llm"
+	"github.com/PatrickFanella/get-rich-quick/internal/llm/parse"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
@@ -65,6 +67,13 @@ type Dependencies struct {
 	Logger      *slog.Logger
 	Clock       func() time.Time
 	RunRegistry *RunContextRegistry
+	// LLMCallTimeout, when set, bounds each debate round to
+	// (debaters + 1) LLM calls instead of the configured per-round timeout
+	// when that is larger.
+	LLMCallTimeout time.Duration
+	// MaxPipelineDuration, when set, clamps the derived pipeline budget so a
+	// run cannot outlive the scheduler job timeout that owns it.
+	MaxPipelineDuration time.Duration
 }
 
 // Definition describes the concrete participants for each stage.
@@ -168,6 +177,9 @@ type Runner struct {
 	now         func() time.Time
 	helper      PhaseHelper
 	runRegistry *RunContextRegistry
+	// llmCallTimeout and maxPipelineDuration come from Dependencies.
+	llmCallTimeout      time.Duration
+	maxPipelineDuration time.Duration
 }
 
 // NewRunner constructs a runner with the supplied participants and dependencies.
@@ -187,6 +199,9 @@ func NewRunner(def Definition, deps Dependencies) *Runner {
 		logger:      logger,
 		now:         clock,
 		runRegistry: deps.RunRegistry,
+
+		llmCallTimeout:      deps.LLMCallTimeout,
+		maxPipelineDuration: deps.MaxPipelineDuration,
 	}
 	r.helper = newPhaseHelper(deps.Persister, deps.Events, logger, r.currentTime)
 	return r
@@ -219,14 +234,33 @@ func (r *Runner) Prepare(strategy domain.Strategy, globals GlobalSettings) (Prep
 		return PreparedRun{}, fmt.Errorf("agent/runner: marshal config snapshot: %w", err)
 	}
 
+	debateTimeout := runtimeDebateTimeout(resolved)
+	if r.llmCallTimeout > 0 {
+		debaters := len(r.def.Research.Debaters)
+		if len(r.def.Risk.Debaters) > debaters {
+			debaters = len(r.def.Risk.Debaters)
+		}
+		if debaters < 1 {
+			debaters = 1
+		}
+		derived := time.Duration(debaters+1) * r.llmCallTimeout
+		if debateTimeout <= 0 || derived < debateTimeout {
+			debateTimeout = derived
+		}
+	}
+	pipelineTimeout := runtimePipelineTimeout(resolved)
+	if r.maxPipelineDuration > 0 && pipelineTimeout > r.maxPipelineDuration {
+		pipelineTimeout = r.maxPipelineDuration
+	}
+
 	return PreparedRun{
 		Strategy: strategy,
 		Config:   resolved,
 		Runtime: RuntimeConfig{
-			PipelineTimeout: runtimePipelineTimeout(resolved),
+			PipelineTimeout: pipelineTimeout,
 			AnalysisTimeout: runtimeAnalysisTimeout(resolved),
 			TradingTimeout:  runtimeAnalysisTimeout(resolved),
-			DebateTimeout:   runtimeDebateTimeout(resolved),
+			DebateTimeout:   debateTimeout,
 			ResearchRounds:  resolved.PipelineConfig.DebateRounds,
 			RiskRounds:      resolved.PipelineConfig.DebateRounds,
 			SkipPhases:      defaultSkipPhases(),
@@ -421,6 +455,12 @@ func (r *Runner) Run(ctx context.Context, prepared PreparedRun) (result *RunResu
 		phaseStart := time.Now()
 		if err := phase.fn(ctx, state, prepared, &warnings, &warningsMu); err != nil {
 			phaseTimings[phase.name+"_ms"] = time.Since(phaseStart).Milliseconds()
+			if reason, ok := holdReasonForPhaseError(phase.phase, err); ok && ctx.Err() == nil {
+				// A structurally unusable decision is a HOLD, not a failed
+				// run: record the reason and finish the run without trading.
+				r.holdRun(ctx, state, prepared, PhaseHold{Phase: phase.phase, Reason: reason, Detail: err.Error()}, &warnings, &warningsMu)
+				break
+			}
 			completedAt := r.currentTime().UTC()
 			phaseTimingsJSON, _ := json.Marshal(phaseTimings)
 			status, eventKind, eventType, terminalErr := classifyRunFailure(ctx, err)
@@ -574,6 +614,79 @@ func lostTerminalAuthorityError(component string, run domain.PipelineRun) error 
 	return err
 }
 
+// Hold reason codes recorded when the runner converts a run to HOLD.
+const (
+	HoldReasonRequiredAnalystMissing = "required_analyst_missing"
+	HoldReasonStructuredOutput       = "structured_output_unparseable"
+	HoldReasonExecutionGate          = "execution_gate_rejected"
+)
+
+// PhaseHold describes why a run was converted to HOLD instead of failing.
+type PhaseHold struct {
+	Phase  Phase
+	Reason string
+	Detail string
+}
+
+// holdError is returned by a phase that wants the run to end as HOLD.
+type holdError struct {
+	reason string
+	detail string
+}
+
+func (e *holdError) Error() string { return e.reason + ": " + e.detail }
+
+// holdReasonForPhaseError maps a phase error onto a hold reason when the
+// error is a deliberate hold or an unparseable structured output.
+func holdReasonForPhaseError(phase Phase, err error) (string, bool) {
+	var hold *holdError
+	if errors.As(err, &hold) {
+		return hold.reason, true
+	}
+	if phase == PhaseAnalysis {
+		return "", false
+	}
+	if parse.IsParseError(err) {
+		return HoldReasonStructuredOutput, true
+	}
+	return "", false
+}
+
+// holdRun forces the canonical signal to HOLD, records a warning and persists
+// a pipeline_hold event so the reason is visible in the run history.
+func (r *Runner) holdRun(ctx context.Context, state *PipelineState, prepared PreparedRun, hold PhaseHold, warnings *[]RunWarning, warningsMu *sync.Mutex) {
+	if state != nil {
+		state.FinalSignal.Signal = domain.PipelineSignalHold
+		state.FinalSignal.Confidence = 0
+		state.TradingPlan.Action = domain.PipelineSignalHold
+		state.TradingPlan.PositionSize = 0
+		state.TradingPlan.Rationale = appendRationale(state.TradingPlan.Rationale, fmt.Sprintf("Run converted to HOLD (%s) during %s: %s", hold.Reason, hold.Phase, hold.Detail))
+	}
+	if warnings != nil && warningsMu != nil {
+		warningsMu.Lock()
+		*warnings = append(*warnings, RunWarning{Phase: hold.Phase, Message: hold.Reason + ": " + hold.Detail, OccurredAt: r.currentTime().UTC()})
+		warningsMu.Unlock()
+	}
+	r.logger.Warn("agent/runner: run converted to HOLD",
+		slog.String("phase", hold.Phase.String()),
+		slog.String("reason", hold.Reason),
+		slog.String("detail", hold.Detail),
+	)
+	if state == nil {
+		return
+	}
+	r.helper.persistStructuredEvent(ctx, r.helper.newStructuredEvent(
+		state.RunRef(),
+		prepared.Strategy.ID,
+		AgentEventKindPipelineHold,
+		"",
+		"Run converted to HOLD",
+		hold.Detail,
+		map[string]any{"phase": hold.Phase.String(), "reason_code": hold.Reason, "detail": hold.Detail},
+		[]string{"pipeline", "hold", hold.Reason},
+	))
+}
+
 func classifyRunFailure(ctx context.Context, err error) (domain.PipelineStatus, AgentEventKind, PipelineEventType, string) {
 	if runcontrol.IsCancelled(ctx) {
 		return domain.PipelineStatusCancelled, AgentEventKindPipelineCancelled, PipelineCancelled, context.Cause(ctx).Error()
@@ -601,7 +714,7 @@ func terminalTitle(status domain.PipelineStatus) string {
 	return "Pipeline failed"
 }
 
-func (r *Runner) runExecutionGate(_ context.Context, state *PipelineState, prepared PreparedRun, _ *[]RunWarning, _ *sync.Mutex) error {
+func (r *Runner) runExecutionGate(ctx context.Context, state *PipelineState, prepared PreparedRun, warnings *[]RunWarning, warningsMu *sync.Mutex) error {
 	signal := r.canonicalSignal(state)
 	if state == nil {
 		return nil
@@ -623,7 +736,12 @@ func (r *Runner) runExecutionGate(_ context.Context, state *PipelineState, prepa
 		))
 		signal = domain.PipelineSignalHold
 	}
-	return ValidateExecutablePlan(state.TradingPlan, signal, prepared.Config.RiskConfig)
+	if err := ValidateExecutablePlan(state.TradingPlan, signal, prepared.Config.RiskConfig); err != nil {
+		// An inconsistent actionable plan is not an execution failure; the
+		// run completes as HOLD with the gate's reason on record.
+		r.holdRun(ctx, state, prepared, PhaseHold{Phase: PhaseExecutionGate, Reason: HoldReasonExecutionGate, Detail: err.Error()}, warnings, warningsMu)
+	}
+	return nil
 }
 
 func applyInitialStateSeed(state *PipelineState, seed InitialStateSeed) {
@@ -746,7 +864,45 @@ func (r *Runner) runAnalysis(ctx context.Context, state *PipelineState, prepared
 	if err := g.Wait(); err != nil {
 		return err
 	}
+	if missing := missingRequiredAnalystRoles(state, prepared.Config.RequiredAnalystRoles, r.def.Analysis); len(missing) > 0 {
+		if err := r.helper.persistAnalysisSnapshots(phaseCtx, state); err != nil {
+			return err
+		}
+		return &holdError{reason: HoldReasonRequiredAnalystMissing, detail: "no report from required analyst role(s): " + joinRoles(missing)}
+	}
 	return r.helper.persistAnalysisSnapshots(phaseCtx, state)
+}
+
+// missingRequiredAnalystRoles returns the required roles that have a
+// participant in this pipeline but produced no report.
+func missingRequiredAnalystRoles(state *PipelineState, required []AgentRole, participants []AnalysisAgent) []AgentRole {
+	if state == nil || len(required) == 0 {
+		return nil
+	}
+	present := make(map[AgentRole]bool, len(participants))
+	for _, participant := range participants {
+		if participant != nil {
+			present[participant.Role()] = true
+		}
+	}
+	var missing []AgentRole
+	for _, role := range required {
+		if !present[role] {
+			continue
+		}
+		if strings.TrimSpace(state.AnalystReports[role]) == "" {
+			missing = append(missing, role)
+		}
+	}
+	return missing
+}
+
+func joinRoles(roles []AgentRole) string {
+	names := make([]string, 0, len(roles))
+	for _, role := range roles {
+		names = append(names, role.String())
+	}
+	return strings.Join(names, ", ")
 }
 
 func (r *Runner) runResearchDebate(ctx context.Context, state *PipelineState, prepared PreparedRun, _ *[]RunWarning, _ *sync.Mutex) error {
@@ -991,13 +1147,16 @@ func defaultSkipPhases() map[Phase]bool {
 //
 // Formula (uses the resolved per-phase limits):
 //
-//	(maxAnalysts × analysisTimeout)    – parallel analysis phase
+//	(maxAnalysts × analysisTimeout)    – analysis phase (serial when the LLM
+//	                                     throttle is 1)
 //	+ (2 × rounds × debateTimeout)    – research debate + risk debate
 //	+ (2 × analysisTimeout)           – trader + risk-eval budget
 //	+ 5-minute overhead               – DB I/O, setup, teardown
 //
 // Returns 30 minutes when any constituent timeout is unconfigured (≤ 0) so
-// there is always a finite upper bound even with default settings.
+// there is always a finite upper bound even with default settings. Prepare
+// clamps the result to Dependencies.MaxPipelineDuration (the scheduler job
+// timeout in production) so the derived budget cannot exceed its owner.
 func runtimePipelineTimeout(resolved ResolvedConfig) time.Duration {
 	const (
 		maxAnalysts     = 4

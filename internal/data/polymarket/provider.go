@@ -23,6 +23,7 @@ type Provider struct {
 	clobURL string
 	client  *http.Client
 	logger  *slog.Logger
+	gamma   GammaClient
 }
 
 // NewProvider creates a Polymarket data provider backed by the CLOB API.
@@ -33,11 +34,21 @@ func NewProvider(clobURL string, logger *slog.Logger) *Provider {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	httpClient := &http.Client{Timeout: 15 * time.Second}
 	return &Provider{
 		clobURL: strings.TrimRight(clobURL, "/"),
-		client:  &http.Client{Timeout: 15 * time.Second},
+		client:  httpClient,
 		logger:  logger,
+		gamma:   NewGammaClient("", httpClient),
 	}
+}
+
+// SetGammaClient overrides the Gamma client used for slug -> token lookups.
+func (p *Provider) SetGammaClient(client GammaClient) {
+	if p == nil || client == nil {
+		return
+	}
+	p.gamma = client
 }
 
 // GetOHLCV returns synthetic OHLCV bars derived from Polymarket YES price history.
@@ -73,17 +84,6 @@ func (p *Provider) GetSocialSentiment(_ context.Context, _ string, _, _ time.Tim
 
 // — internal API types —
 
-type marketsPage struct {
-	Data []struct {
-		MarketSlug  string `json:"market_slug"`
-		ConditionID string `json:"condition_id"`
-		Tokens      []struct {
-			TokenID string `json:"token_id"`
-			Outcome string `json:"outcome"`
-		} `json:"tokens"`
-	} `json:"data"`
-}
-
 type pricePoint struct {
 	T int64   `json:"t"` // Unix seconds
 	P float64 `json:"p"` // YES price 0..1
@@ -95,64 +95,23 @@ type priceHistoryResponse struct {
 
 // resolvePriceHistoryMarketID fetches the YES token id for a market slug. The
 // CLOB prices-history endpoint is token-oriented, while generated strategy
-// tickers store the human slug.
+// tickers store the human slug. The CLOB /markets endpoint does not filter by
+// market_slug, so the lookup goes through the Gamma API, which does.
 func (p *Provider) resolvePriceHistoryMarketID(ctx context.Context, slug string) (string, error) {
-	u, err := url.Parse(p.clobURL + "/markets")
+	if p == nil || p.gamma == nil {
+		return "", fmt.Errorf("polymarket: gamma client is required to resolve slug %q", slug)
+	}
+	market, err := p.gamma.GetMarket(ctx, slug)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve market %q: %w", slug, err)
 	}
-	q := u.Query()
-	q.Set("market_slug", slug)
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return "", err
+	if token := strings.TrimSpace(market.YesTokenID); token != "" {
+		return token, nil
 	}
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return "", err
+	if condition := strings.TrimSpace(market.ConditionID); condition != "" {
+		return condition, nil
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("markets HTTP %d", resp.StatusCode)
-	}
-
-	var page marketsPage
-	if err := json.NewDecoder(resp.Body).Decode(&page); err != nil {
-		return "", fmt.Errorf("decode markets: %w", err)
-	}
-	if len(page.Data) == 0 {
-		return "", fmt.Errorf("no market found for slug %q", slug)
-	}
-	var exact *struct {
-		MarketSlug  string `json:"market_slug"`
-		ConditionID string `json:"condition_id"`
-		Tokens      []struct {
-			TokenID string `json:"token_id"`
-			Outcome string `json:"outcome"`
-		} `json:"tokens"`
-	}
-	for i := range page.Data {
-		if strings.TrimSpace(page.Data[i].MarketSlug) == strings.TrimSpace(slug) {
-			exact = &page.Data[i]
-			break
-		}
-	}
-	if exact == nil {
-		return "", fmt.Errorf("market response did not contain exact slug %q", slug)
-	}
-	for _, token := range exact.Tokens {
-		if strings.EqualFold(strings.TrimSpace(token.Outcome), "yes") && strings.TrimSpace(token.TokenID) != "" {
-			return token.TokenID, nil
-		}
-	}
-	if len(exact.Tokens) > 0 && strings.TrimSpace(exact.Tokens[0].TokenID) != "" {
-		return exact.Tokens[0].TokenID, nil
-	}
-	return exact.ConditionID, nil
+	return "", fmt.Errorf("market %q has no YES token or condition id", slug)
 }
 
 // fidelityMinutes converts a Timeframe to the CLOB API fidelity parameter (minutes).

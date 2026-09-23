@@ -13,4 +13,7 @@ type AccountSnapshot struct {
 	BuyingPower        float64
 	OptionsBuyingPower float64
 	FallbackUsed       bool
+	// InternalAccount marks the canonical internal paper ledger account whose
+	// options buying power is pinned to zero by schema.
+	InternalAccount bool
 }

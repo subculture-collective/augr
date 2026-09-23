@@ -744,3 +744,34 @@ func marshalConfig(cfg json.RawMessage) ([]byte, error) {
 
 	return cfg, nil
 }
+
+// ListByIDs returns the strategies whose ids are in the provided set, keyed by
+// id. Missing ids are simply absent from the result. It exists so batch
+// callers such as the portfolio allocator avoid one Get per decision.
+func (r *StrategyRepo) ListByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]domain.Strategy, error) {
+	out := make(map[uuid.UUID]domain.Strategy, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, name, description, ticker, market_type, schedule_cron, config, status, skip_next_run, is_paper, created_at, updated_at, execution_strategy_version_id
+		 FROM strategies
+		 WHERE id = ANY($1)`,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list strategies by ids: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		s, err := scanStrategy(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: list strategies by ids scan: %w", err)
+		}
+		out[s.ID] = *s
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list strategies by ids rows: %w", err)
+	}
+	return out, nil
+}

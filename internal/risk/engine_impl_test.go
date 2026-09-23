@@ -1408,3 +1408,76 @@ func (m *memoryRiskPersister) Save(_ context.Context, state PersistedRiskState) 
 	m.saved = append(m.saved, state)
 	return nil
 }
+
+func TestKillSwitchHooksReportRestoreFailureAndToggles(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	var observed []bool
+	type alertCall struct {
+		active bool
+		reason string
+	}
+	var alerts []alertCall
+	engine := newTestEngine().
+		WithKillSwitchObserver(func(active bool) { observed = append(observed, active) }).
+		WithKillSwitchAlerter(func(_ context.Context, active bool, reason string, _ time.Time) error {
+			alerts = append(alerts, alertCall{active: active, reason: reason})
+			return nil
+		}).
+		WithStatePersister(ctx, &memoryRiskPersister{load: errors.New("corrupt state")})
+
+	state := engine.KillSwitchState()
+	if !state.Active || !state.RestoreFailed || !strings.Contains(state.RestoreError, "corrupt state") || !strings.Contains(state.Reason, "restore failed") {
+		t.Fatalf("KillSwitchState() = %+v, want active restore failure", state)
+	}
+	if len(observed) != 1 || !observed[0] {
+		t.Fatalf("observer calls = %v, want [true]", observed)
+	}
+	if len(alerts) != 1 || !alerts[0].active || !strings.Contains(alerts[0].reason, "corrupt state") {
+		t.Fatalf("alerts = %+v, want one restore-failure activation", alerts)
+	}
+
+	if err := engine.DeactivateKillSwitch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.ActivateKillSwitch(ctx, "operator halt"); err != nil {
+		t.Fatal(err)
+	}
+	if len(observed) != 3 || observed[1] || !observed[2] {
+		t.Fatalf("observer calls = %v, want [true false true]", observed)
+	}
+	if len(alerts) != 3 || alerts[1].active || !alerts[2].active || alerts[2].reason != "operator halt" {
+		t.Fatalf("alerts = %+v", alerts)
+	}
+	state = engine.KillSwitchState()
+	if !state.Active || state.Reason != "operator halt" || !state.RestoreFailed {
+		t.Fatalf("KillSwitchState() after toggle = %+v", state)
+	}
+}
+
+func TestKillSwitchObserverPublishesRestoredStateWithoutAlert(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	persister := &memoryRiskPersister{}
+	if err := newTestEngine().WithStatePersister(ctx, persister).ActivateKillSwitch(ctx, "durable halt"); err != nil {
+		t.Fatal(err)
+	}
+
+	var observed []bool
+	alertCalls := 0
+	restarted := newTestEngine().
+		WithKillSwitchObserver(func(active bool) { observed = append(observed, active) }).
+		WithKillSwitchAlerter(func(context.Context, bool, string, time.Time) error { alertCalls++; return nil }).
+		WithStatePersister(ctx, persister)
+	if len(observed) != 1 || !observed[0] {
+		t.Fatalf("observer calls = %v, want [true]", observed)
+	}
+	if alertCalls != 0 {
+		t.Fatalf("alert calls = %d, want 0 for a restored activation", alertCalls)
+	}
+	if state := restarted.KillSwitchState(); !state.Active || state.RestoreFailed {
+		t.Fatalf("KillSwitchState() = %+v", state)
+	}
+}

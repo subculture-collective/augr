@@ -205,8 +205,11 @@ type mlegOrderResponse struct {
 }
 
 type optionContractsResponse struct {
-	Contracts []alpacaOptionContract `json:"option_contracts"`
+	Contracts     []alpacaOptionContract `json:"option_contracts"`
+	NextPageToken *string                `json:"next_page_token"`
 }
+
+const optionContractsPageLimit = 10000
 
 type alpacaOptionContract struct {
 	ID               string `json:"id"`
@@ -252,10 +255,20 @@ func (b *OptionsBroker) SubmitOptionOrder(ctx context.Context, order *domain.Ord
 	if orderType == "" {
 		orderType = "limit"
 	}
+	hasLimit := order.LimitPrice != nil && *order.LimitPrice > 0
+	if orderType == domain.OrderTypeMarket.String() && hasLimit {
+		// Alpaca rejects a market order that carries limit_price. Mirror the
+		// stock path: the evaluated entry price becomes a limit while the
+		// internal intent stays market.
+		orderType = domain.OrderTypeLimit.String()
+	}
+	if orderType == domain.OrderTypeLimit.String() && !hasLimit {
+		return "", errors.New("alpaca: option limit order requires a positive limit price")
+	}
 
 	req := optionOrderRequest{
 		Symbol:         symbol,
-		Qty:            formatFloat(order.Quantity),
+		Qty:            formatQuantity(order.Quantity),
 		Side:           side,
 		Type:           orderType,
 		TimeInForce:    defaultTimeInForce,
@@ -264,8 +277,8 @@ func (b *OptionsBroker) SubmitOptionOrder(ctx context.Context, order *domain.Ord
 		ClientOrderID:  strings.TrimSpace(order.ClientOrderID),
 	}
 
-	if order.LimitPrice != nil {
-		req.LimitPrice = formatFloat(*order.LimitPrice)
+	if hasLimit && orderType == domain.OrderTypeLimit.String() {
+		req.LimitPrice = formatPrice(*order.LimitPrice)
 	}
 
 	responseBody, err := b.client.Post(ctx, "/v2/orders", req)
@@ -319,7 +332,7 @@ func (b *OptionsBroker) SubmitSpreadOrder(ctx context.Context, spread *domain.Op
 		OrderClass:    "mleg",
 		Legs:          legs,
 		ClientOrderID: strings.TrimSpace(clientOrderID),
-		LimitPrice:    formatFloat(netLimit),
+		LimitPrice:    formatPrice(netLimit),
 	}
 	if req.ClientOrderID == "" {
 		return nil, errors.New("alpaca: spread client order id is required")
@@ -393,28 +406,43 @@ func (b *OptionsBroker) GetOptionsContracts(ctx context.Context, underlying stri
 		return nil, errors.New("alpaca: underlying symbol is required")
 	}
 
-	params := url.Values{}
-	params.Set("underlying_symbols", symbol)
-	params.Set("status", "active")
-
-	responseBody, err := b.client.Get(ctx, "/v2/options/contracts", params)
-	if err != nil {
-		return nil, fmt.Errorf("alpaca: get options contracts: %w", err)
-	}
-
-	var resp optionContractsResponse
-	if err := json.Unmarshal(responseBody, &resp); err != nil {
-		return nil, fmt.Errorf("alpaca: decode options contracts response: %w", err)
-	}
-
-	contracts := make([]domain.OptionContract, 0, len(resp.Contracts))
-	for _, ac := range resp.Contracts {
-		contract, err := mapAlpacaContract(ac)
-		if err != nil {
-			// Skip unparseable contracts rather than failing the whole batch.
-			continue
+	var contracts []domain.OptionContract
+	pageToken := ""
+	for {
+		params := url.Values{}
+		params.Set("underlying_symbols", symbol)
+		params.Set("status", "active")
+		params.Set("limit", strconv.Itoa(optionContractsPageLimit))
+		if pageToken != "" {
+			params.Set("page_token", pageToken)
 		}
-		contracts = append(contracts, *contract)
+
+		responseBody, err := b.client.Get(ctx, "/v2/options/contracts", params)
+		if err != nil {
+			return nil, fmt.Errorf("alpaca: get options contracts: %w", err)
+		}
+
+		var resp optionContractsResponse
+		if err := json.Unmarshal(responseBody, &resp); err != nil {
+			return nil, fmt.Errorf("alpaca: decode options contracts response: %w", err)
+		}
+
+		for _, ac := range resp.Contracts {
+			contract, err := mapAlpacaContract(ac)
+			if err != nil {
+				// Skip unparseable contracts rather than failing the whole batch.
+				continue
+			}
+			contracts = append(contracts, *contract)
+		}
+
+		if resp.NextPageToken == nil || strings.TrimSpace(*resp.NextPageToken) == "" || *resp.NextPageToken == pageToken || len(resp.Contracts) == 0 {
+			break
+		}
+		pageToken = *resp.NextPageToken
+	}
+	if contracts == nil {
+		contracts = []domain.OptionContract{}
 	}
 
 	return contracts, nil

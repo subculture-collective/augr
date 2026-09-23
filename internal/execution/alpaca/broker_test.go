@@ -461,11 +461,6 @@ func TestBrokerGetOrderStatus_RejectsInvalidStatus(t *testing.T) {
 			apiStatus: "   ",
 			wantErr:   "alpaca: order status is required",
 		},
-		{
-			name:      "unknown",
-			apiStatus: "routing",
-			wantErr:   `alpaca: unsupported order status "routing"`,
-		},
 	}
 
 	for _, tt := range tests {

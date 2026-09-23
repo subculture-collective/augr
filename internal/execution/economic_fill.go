@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"time"
 
@@ -22,6 +23,19 @@ import (
 // this marker is present; every other error remains an ambiguous commit until
 // replay proves otherwise.
 var ErrAcceptedEconomicRollbackConfirmed = errors.New("accepted economic write rolled back before commit")
+
+// ErrAcceptedOrderNotPrepared marks an order that has no canonical routed
+// command (no execution_orders row). Such orders were dispatched outside signal
+// preparation and their fills persist through the unprepared path.
+var ErrAcceptedOrderNotPrepared = errors.New("accepted order has no canonical routed command")
+
+// UnpreparedFillApplier persists compatibility fills (orders, positions,
+// trades, idempotency) atomically without the canonical lifecycle and ledger
+// transition. PostgreSQL's DB implements it.
+type UnpreparedFillApplier interface {
+	ApplyOrderFill(context.Context, repository.OrderFillInput) (repository.OrderFillResult, error)
+	ApplyOptionFills(context.Context, []repository.OptionFillInput) ([]repository.OptionFillResult, error)
+}
 
 // AcceptedFillInput is the complete graph that must become durable in one
 // database transaction after its raw provider evidence has committed.
@@ -101,6 +115,8 @@ type CoordinatedEconomicWriter struct {
 	raw         rawEconomicEvidenceRecorder
 	coordinator EconomicFillCoordinator
 	locker      repository.ExecutionAccountLocker
+	unprepared  UnpreparedFillApplier
+	logger      *slog.Logger
 }
 
 func NewCoordinatedEconomicWriter(planner AcceptedEconomicPlanner, raw rawEconomicEvidenceRecorder, coordinator EconomicFillCoordinator) (*CoordinatedEconomicWriter, error) {
@@ -108,7 +124,25 @@ func NewCoordinatedEconomicWriter(planner AcceptedEconomicPlanner, raw rawEconom
 	if planner == nil || raw == nil || coordinator == nil || !ok {
 		return nil, fmt.Errorf("coordinated economic writer requires planner, raw evidence store, and coordinator")
 	}
-	return &CoordinatedEconomicWriter{planner: planner, raw: raw, coordinator: coordinator, locker: locker}, nil
+	unprepared, _ := raw.(UnpreparedFillApplier)
+	return &CoordinatedEconomicWriter{planner: planner, raw: raw, coordinator: coordinator, locker: locker, unprepared: unprepared, logger: slog.Default()}, nil
+}
+
+// WithLogger overrides the writer logger used for unprepared-fill warnings.
+func (writer *CoordinatedEconomicWriter) WithLogger(logger *slog.Logger) *CoordinatedEconomicWriter {
+	if writer != nil && logger != nil {
+		writer.logger = logger
+	}
+	return writer
+}
+
+// WithUnpreparedFillApplier overrides the fallback used for orders without a
+// canonical routed command. It exists for tests; production uses the raw store.
+func (writer *CoordinatedEconomicWriter) WithUnpreparedFillApplier(applier UnpreparedFillApplier) *CoordinatedEconomicWriter {
+	if writer != nil {
+		writer.unprepared = applier
+	}
+	return writer
 }
 
 func (writer *CoordinatedEconomicWriter) WithExecutionAccountLock(ctx context.Context, accountID uuid.UUID, fn func() error) error {
@@ -136,6 +170,17 @@ func (writer *CoordinatedEconomicWriter) RequireAcceptedOrderPrepared(ctx contex
 
 func (writer *CoordinatedEconomicWriter) ApplyAcceptedOrderFill(ctx context.Context, scope ExecutionScope, mutation repository.OrderFillInput) (repository.OrderFillResult, error) {
 	input, err := writer.planner.PlanAcceptedOrderFill(ctx, scope, mutation)
+	if errors.Is(err, ErrAcceptedOrderNotPrepared) && writer.unprepared != nil && mutation.Order != nil {
+		if scopeErr := requireUnpreparedFillScope(scope, mutation.Order); scopeErr != nil {
+			return repository.OrderFillResult{}, errors.Join(ErrAcceptedEconomicRollbackConfirmed, scopeErr)
+		}
+		writer.logger.WarnContext(ctx, "fill recorded as unprepared: order has no canonical routed command; ledger transition skipped", "order_id", mutation.Order.ID, "ticker", mutation.Order.Ticker, "market_type", mutation.Order.MarketType, "quantity", mutation.FillIntent.Quantity, "price", mutation.FillIntent.ExecutionPrice, "origin", "unprepared")
+		result, applyErr := writer.unprepared.ApplyOrderFill(ctx, mutation)
+		if applyErr != nil {
+			return repository.OrderFillResult{}, fmt.Errorf("unprepared order fill: %w", applyErr)
+		}
+		return result, nil
+	}
 	if err != nil {
 		return repository.OrderFillResult{}, errors.Join(ErrAcceptedEconomicRollbackConfirmed, err)
 	}
@@ -153,6 +198,22 @@ func (writer *CoordinatedEconomicWriter) ApplyAcceptedOrderFill(ctx context.Cont
 
 func (writer *CoordinatedEconomicWriter) ApplyAcceptedOptionFills(ctx context.Context, scope ExecutionScope, mutations []repository.OptionFillInput) ([]repository.OptionFillResult, error) {
 	inputs, err := writer.planner.PlanAcceptedOptionFills(ctx, scope, mutations)
+	if errors.Is(err, ErrAcceptedOrderNotPrepared) && writer.unprepared != nil {
+		for index := range mutations {
+			if mutations[index].Order == nil {
+				return nil, errors.Join(ErrAcceptedEconomicRollbackConfirmed, fmt.Errorf("unprepared option fill %d has no order", index))
+			}
+			if scopeErr := requireUnpreparedFillScope(scope, mutations[index].Order); scopeErr != nil {
+				return nil, errors.Join(ErrAcceptedEconomicRollbackConfirmed, scopeErr)
+			}
+			writer.logger.WarnContext(ctx, "option fill recorded as unprepared: order has no canonical routed command; ledger transition skipped", "order_id", mutations[index].Order.ID, "ticker", mutations[index].Order.Ticker, "quantity", mutations[index].FillQuantity, "price", mutations[index].FillPrice, "origin", "unprepared")
+		}
+		results, applyErr := writer.unprepared.ApplyOptionFills(ctx, mutations)
+		if applyErr != nil {
+			return nil, fmt.Errorf("unprepared option fills: %w", applyErr)
+		}
+		return results, nil
+	}
 	if err != nil {
 		return nil, errors.Join(ErrAcceptedEconomicRollbackConfirmed, err)
 	}
@@ -195,6 +256,19 @@ func (writer *CoordinatedEconomicWriter) SettleAcceptedPredictionDecision(ctx co
 		cancel()
 	}
 	return result, err
+}
+
+// requireUnpreparedFillScope refuses to persist an unprepared fill whose order
+// escaped the dispatching execution scope.
+func requireUnpreparedFillScope(scope ExecutionScope, order *domain.Order) error {
+	if order == nil || order.ID == uuid.Nil {
+		return fmt.Errorf("unprepared fill requires an order identity")
+	}
+	originType, originID := scope.Origin()
+	if order.AccountID != scope.AccountID() || order.Environment != scope.Environment() || order.OriginType != string(originType) || order.OriginID != originID || order.CopyOriginRebalanceRunID != scope.CopyOriginRunID() {
+		return fmt.Errorf("unprepared fill order scope differs from execution scope")
+	}
+	return nil
 }
 
 func (writer *CoordinatedEconomicWriter) persistRaw(ctx context.Context, source *ledger.EconomicSourceEvent) error {

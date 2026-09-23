@@ -25,6 +25,38 @@ broker allowlist, and client wiring all pass.
 - `KALSHI_PRIVATE_KEY_PEM_B64`
 - A real Kalshi live client wired and initialised
 
+## Wire-format verification (cannot be done offline)
+
+The live adapter in `internal/execution/kalshi/live_client.go` targets the
+public Kalshi Trade API v2 shape as documented on 2026-09-23:
+
+- `POST /portfolio/orders` with `{ticker, action: buy|sell, side: yes|no,
+  count: <int>, type: "limit", yes_price|no_price: <cents>, client_order_id,
+  time_in_force}`
+- `DELETE /portfolio/orders/{order_id}`
+- `GET /portfolio/orders?status=resting|executed|canceled&limit=&cursor=` with
+  client-side matching on `client_order_id` (Kalshi does not filter by it)
+- Order status values: `resting`, `pending`, `executed`, `canceled`,
+  `expired`; anything else is logged and treated as still working
+
+Before enabling live routing, verify each item against the current Kalshi API
+reference and one sandbox/demo round trip, because the unit tests only prove
+the adapter matches the shape above, not that Kalshi still accepts it:
+
+- [ ] Order create body field names, `count` as an integer, price fields in
+      cents (or `*_dollars` strings if the docs changed), and `time_in_force`
+      enum values
+- [ ] Cancel path and method
+- [ ] Order list filters (`status`, `limit`, `cursor`) and the order status
+      enum
+- [ ] Market orders remain rejected at planning (`order_mapping.go`) until a
+      sandbox smoke test covers them
+- [ ] `KALSHI_API_BASE_URL` points at the intended host: the demo default is
+      `https://external-api.demo.kalshi.co/trade-api/v2`; production is
+      `https://api.elections.kalshi.com/trade-api/v2`
+- [ ] `common_lifecycle.go` still posts to `/portfolio/events/orders` with
+      bid/ask sides; confirm which path is routed before relying on it
+
 ## Preflight checks
 
 Run these before any live activation work:

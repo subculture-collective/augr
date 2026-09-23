@@ -209,7 +209,7 @@ func (c Composer) chainOptions(cfg config.LLMConfig, appMetrics any, logger *slo
 	if concurrency < 1 {
 		concurrency = 4
 	}
-	opts = append(opts, WithThrottle(concurrency))
+	opts = append(opts, WithThrottle(concurrency), WithThrottleKey(strings.ToLower(strings.TrimSpace(cfg.DefaultProvider))))
 
 	if cfg.RetryMaxAttempts > 1 {
 		opts = append(opts, WithRetry(cfg.RetryMaxAttempts))
@@ -221,8 +221,8 @@ func (c Composer) chainOptions(cfg config.LLMConfig, appMetrics any, logger *slo
 		}
 	}
 
-	if fb := strings.TrimSpace(cfg.FallbackProvider); fb != "" {
-		secondary, err := c.buildProviderForSelection(cfg, fb, cfg.FallbackModel, logger, false)
+	if fb, fbModel, ok := c.resolveFallbackSelection(cfg, logger); ok {
+		secondary, err := c.buildProviderForSelection(cfg, fb, fbModel, logger, false)
 		if err != nil {
 			if logger != nil {
 				logger.Warn("llm: fallback provider unavailable, skipping",
@@ -257,6 +257,77 @@ func (c Composer) chainOptions(cfg config.LLMConfig, appMetrics any, logger *slo
 	}
 
 	return opts
+}
+
+// fallbackCandidateOrder is the preference order used when the configured
+// fallback provider would loop back onto the primary.
+var fallbackCandidateOrder = []string{"openai", "anthropic", "google", "openrouter", "xai", "ollama"}
+
+// resolveFallbackSelection returns the fallback provider and model to build.
+// A fallback that names the primary provider with the same (or no distinct)
+// model is a loop: when the primary is down the fallback is down too. In that
+// case the first other provider with credentials and a factory is used; if
+// none exists the fallback is disabled. A same-provider fallback with an
+// explicitly different model (for example OpenCode Luna -> Terra) is kept.
+func (c Composer) resolveFallbackSelection(cfg config.LLMConfig, logger *slog.Logger) (string, string, bool) {
+	fb := strings.ToLower(strings.TrimSpace(cfg.FallbackProvider))
+	if fb == "" {
+		return "", "", false
+	}
+	primary := strings.ToLower(strings.TrimSpace(cfg.DefaultProvider))
+	fbModel := strings.TrimSpace(cfg.FallbackModel)
+	if fb != primary {
+		return fb, fbModel, true
+	}
+	primaryModel := strings.TrimSpace(cfg.QuickThinkModel)
+	if fbModel != "" && fbModel != primaryModel {
+		if logger != nil {
+			logger.Info("llm: fallback uses the primary provider with a different model",
+				slog.String("provider", fb),
+				slog.String("fallback_model", fbModel),
+			)
+		}
+		return fb, fbModel, true
+	}
+	for _, candidate := range fallbackCandidateOrder {
+		if candidate == primary || !c.providerHasCredentials(cfg, candidate) {
+			continue
+		}
+		if logger != nil {
+			logger.Warn("llm: fallback provider equals the primary provider; using another configured provider",
+				slog.String("configured_fallback", fb),
+				slog.String("selected_fallback", candidate),
+			)
+		}
+		// The configured fallback model belongs to the primary provider; let
+		// the candidate use its own configured model.
+		return candidate, "", true
+	}
+	if logger != nil {
+		logger.Warn("llm: fallback provider equals the primary provider and no other provider has credentials; fallback disabled",
+			slog.String("provider", fb),
+		)
+	}
+	return "", "", false
+}
+
+func (c Composer) providerHasCredentials(cfg config.LLMConfig, name string) bool {
+	switch name {
+	case "openai":
+		return c.factories.OpenAI != nil && strings.TrimSpace(cfg.Providers.OpenAI.APIKey) != ""
+	case "anthropic":
+		return c.factories.Anthropic != nil && strings.TrimSpace(cfg.Providers.Anthropic.APIKey) != ""
+	case "google":
+		return c.factories.Google != nil && strings.TrimSpace(cfg.Providers.Google.APIKey) != ""
+	case "openrouter":
+		return c.factories.OpenRouter != nil && strings.TrimSpace(cfg.Providers.OpenRouter.APIKey) != ""
+	case "xai":
+		return c.factories.XAI != nil && strings.TrimSpace(cfg.Providers.XAI.APIKey) != ""
+	case "ollama":
+		return c.factories.Ollama != nil && strings.TrimSpace(cfg.Providers.Ollama.BaseURL) != ""
+	default:
+		return false
+	}
 }
 
 func runtimeCacheEnabled() bool {

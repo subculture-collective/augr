@@ -297,7 +297,10 @@ func TestProviderCanceledCompletionAbortsBeforeDeletion(t *testing.T) {
 	}
 }
 
-func TestProviderRetainsSessionWhenAbortIsUnconfirmed(t *testing.T) {
+// An HTTP failure means the server answered; the session is deleted even when
+// the best-effort abort is unconfirmed. Only a cancelled context retains the
+// session on an unconfirmed abort (see TestProviderCanceledCompletionAbortsBeforeDeletion).
+func TestProviderDeletesSessionAfterHTTPFailureWhenAbortIsUnconfirmed(t *testing.T) {
 	for _, response := range []string{`false`, `{"error":"unavailable"}`} {
 		t.Run(response, func(t *testing.T) {
 			t.Parallel()
@@ -336,8 +339,8 @@ func TestProviderRetainsSessionWhenAbortIsUnconfirmed(t *testing.T) {
 			}
 			mu.Lock()
 			defer mu.Unlock()
-			if !aborted || deleted {
-				t.Fatalf("aborted=%v deleted=%v", aborted, deleted)
+			if !aborted || !deleted {
+				t.Fatalf("aborted=%v deleted=%v, want abort attempted and session deleted", aborted, deleted)
 			}
 		})
 	}

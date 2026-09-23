@@ -34,6 +34,12 @@ type Client struct {
 	secretKey      string
 	passphrase     string
 	now            func() time.Time
+	// signatureType mirrors POLYMARKET_SIGNATURE_TYPE (0 = EOA, 1 = Magic/email
+	// proxy, 2 = Gnosis Safe proxy). It describes how the funder wallet signs
+	// CLOB orders. The api.polymarket.us retail order payload has no
+	// signatureType field, so the value is stored for diagnostics and future
+	// CLOB order signing only.
+	signatureType int
 }
 
 // ErrorResponse captures Polymarket's standard error response shape.
@@ -54,6 +60,27 @@ func (c *Client) SetL2Auth(address, apiKey, secret, passphrase string) {
 	c.keyID = strings.TrimSpace(apiKey)
 	c.secretKey = strings.TrimSpace(secret)
 	c.passphrase = strings.TrimSpace(passphrase)
+}
+
+// SetSignatureType records the wallet signature type (0 EOA, 1 POLY_PROXY,
+// 2 GNOSIS_SAFE). Values outside that range are rejected.
+func (c *Client) SetSignatureType(signatureType int) error {
+	if c == nil {
+		return errors.New("polymarket: client is nil")
+	}
+	if signatureType < 0 || signatureType > 2 {
+		return fmt.Errorf("polymarket: unsupported signature type %d (expected 0, 1 or 2)", signatureType)
+	}
+	c.signatureType = signatureType
+	return nil
+}
+
+// SignatureType returns the configured wallet signature type.
+func (c *Client) SignatureType() int {
+	if c == nil {
+		return 0
+	}
+	return c.signatureType
 }
 
 // NewClient constructs a Polymarket US retail HTTP client.
@@ -327,18 +354,38 @@ func (c *Client) authHeaders(method, signingPath string, body []byte) (map[strin
 	}, nil
 }
 
+// polyL2Signature computes the CLOB L2 HMAC: base64url(HMAC-SHA256(secret,
+// timestamp + method + path + body)). The path excludes any query string; the
+// query stays on the request URL only.
 func polyL2Signature(secret, timestamp, method, signingPath string, body []byte) (string, error) {
-	secretKeyBytes, err := decodeBase64Flexible(secret)
+	secretKeyBytes, err := decodeL2Secret(secret)
 	if err != nil {
-		return "", fmt.Errorf("polymarket: decode api secret: %w", err)
+		return "", err
 	}
+	return polyL2SignatureBytes(secretKeyBytes, timestamp, method, signingPath, body), nil
+}
+
+func polyL2SignatureBytes(secretKeyBytes []byte, timestamp, method, signingPath string, body []byte) string {
 	message := timestamp + method + signingPath
 	if len(body) > 0 {
 		message += string(body)
 	}
 	mac := hmac.New(sha256.New, secretKeyBytes)
 	_, _ = mac.Write([]byte(message))
-	return base64.URLEncoding.EncodeToString(mac.Sum(nil)), nil
+	return base64.URLEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// decodeL2Secret is the single decoder for the L2 API secret used by both the
+// ad-hoc request path and the cached order template. It accepts URL-safe
+// base64 first (the form Polymarket issues), then standard base64, padded or
+// not. The decoded bytes are used as-is: no truncation, no length check, so
+// both signing paths always agree.
+func decodeL2Secret(value string) ([]byte, error) {
+	decoded, err := decodeBase64Flexible(value)
+	if err != nil {
+		return nil, fmt.Errorf("polymarket: decode api secret: %w", err)
+	}
+	return decoded, nil
 }
 
 func decodeBase64Flexible(value string) ([]byte, error) {
@@ -396,12 +443,11 @@ func (c *Client) buildURL(requestPath string, params url.Values, authenticated b
 	}
 	baseURL.RawQuery = query.Encode()
 
+	// CLOB L2 signs timestamp+method+path+body; the query string is not part
+	// of the signed message even though it remains on the request URL.
 	signingPath := baseURL.EscapedPath()
 	if signingPath == "" {
 		signingPath = "/"
-	}
-	if baseURL.RawQuery != "" {
-		signingPath += "?" + baseURL.RawQuery
 	}
 
 	return baseURL.String(), signingPath, nil

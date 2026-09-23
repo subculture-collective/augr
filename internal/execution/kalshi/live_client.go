@@ -43,7 +43,9 @@ func (c *HTTPClient) CreateOrder(ctx context.Context, req CreateOrderRequest) (C
 		return CreateOrderResponse{}, err
 	}
 
-	body, err := c.client.Post(ctx, "/portfolio/events/orders", payload)
+	// POST is deliberately not retried by the transport; a timeout is recovered
+	// through GetOrderByClientOrderID instead of a duplicate submission.
+	body, err := c.client.Post(ctx, "/portfolio/orders", payload)
 	if err != nil {
 		return CreateOrderResponse{}, fmt.Errorf("kalshi: create order: %w", err)
 	}
@@ -67,7 +69,7 @@ func (c *HTTPClient) CancelOrder(ctx context.Context, orderID string) error {
 	if orderID == "" {
 		return errors.New("kalshi: order id is required")
 	}
-	if _, err := c.client.Delete(ctx, "/portfolio/events/orders/"+url.PathEscape(orderID), nil); err != nil {
+	if _, err := c.client.Delete(ctx, "/portfolio/orders/"+url.PathEscape(orderID), nil); err != nil {
 		return fmt.Errorf("kalshi: cancel order: %w", err)
 	}
 	return nil
@@ -94,6 +96,16 @@ func (c *HTTPClient) GetOrder(ctx context.Context, orderID string) (OrderRespons
 	return mapWireOrder(resp.Order, orderID)
 }
 
+// clientOrderLookupStatuses are the /portfolio/orders status filters scanned
+// when recovering an order by client_order_id. Kalshi does not filter by
+// client_order_id server-side, so every page is matched client-side.
+var clientOrderLookupStatuses = []string{"resting", "executed", "canceled"}
+
+const (
+	clientOrderLookupPageLimit = 200
+	clientOrderLookupMaxPages  = 10
+)
+
 func (c *HTTPClient) GetOrderByClientOrderID(ctx context.Context, clientOrderID string) (OrderResponse, error) {
 	if c == nil || c.client == nil {
 		return OrderResponse{}, errors.New("kalshi: live client is required")
@@ -102,43 +114,54 @@ func (c *HTTPClient) GetOrderByClientOrderID(ctx context.Context, clientOrderID 
 	if clientOrderID == "" {
 		return OrderResponse{}, errors.New("kalshi: client order id is required")
 	}
-	query := url.Values{"client_order_id": []string{clientOrderID}}
-	var matches []OrderResponse
-	for _, path := range []string{"/portfolio/orders", "/historical/orders"} {
-		body, err := c.client.Get(ctx, path, query, true)
-		if err != nil {
-			return OrderResponse{}, fmt.Errorf("kalshi: lookup client order id: %w", err)
-		}
-		var response struct {
-			Orders []json.RawMessage `json:"orders"`
-			Order  json.RawMessage   `json:"order"`
-		}
-		if err := json.Unmarshal(body, &response); err != nil {
-			return OrderResponse{}, fmt.Errorf("kalshi: decode client order lookup: %w", err)
-		}
-		raws := response.Orders
-		if len(response.Order) != 0 && string(response.Order) != "null" {
-			raws = append(raws, response.Order)
-		}
-		for _, raw := range raws {
-			if len(raw) == 0 || string(raw) == "null" {
-				continue
+	matches := map[string]OrderResponse{}
+	for _, status := range clientOrderLookupStatuses {
+		cursor := ""
+		for page := 0; page < clientOrderLookupMaxPages; page++ {
+			if err := ctx.Err(); err != nil {
+				return OrderResponse{}, err
 			}
-			match, decodeErr := decodeOrderResponse(raw, "")
-			if decodeErr != nil {
-				return OrderResponse{}, decodeErr
+			query := url.Values{}
+			query.Set("status", status)
+			query.Set("limit", strconv.Itoa(clientOrderLookupPageLimit))
+			if cursor != "" {
+				query.Set("cursor", cursor)
 			}
-			if match.ClientOrderID != clientOrderID || strings.TrimSpace(match.OrderID) == "" {
-				return OrderResponse{}, errors.New("kalshi: client order lookup returned conflicting identity")
+			body, err := c.client.Get(ctx, "/portfolio/orders", query, true)
+			if err != nil {
+				return OrderResponse{}, fmt.Errorf("kalshi: lookup client order id: %w", err)
 			}
-			matches = append(matches, match)
+			var response struct {
+				Orders []json.RawMessage `json:"orders"`
+				Cursor string            `json:"cursor"`
+			}
+			if err := json.Unmarshal(body, &response); err != nil {
+				return OrderResponse{}, fmt.Errorf("kalshi: decode client order lookup: %w", err)
+			}
+			for _, raw := range response.Orders {
+				if len(raw) == 0 || string(raw) == "null" {
+					continue
+				}
+				candidate, decodeErr := decodeOrderResponse(raw, "")
+				if decodeErr != nil {
+					return OrderResponse{}, decodeErr
+				}
+				if candidate.ClientOrderID != clientOrderID || strings.TrimSpace(candidate.OrderID) == "" {
+					continue
+				}
+				matches[candidate.OrderID] = candidate
+			}
+			cursor = strings.TrimSpace(response.Cursor)
+			if cursor == "" || len(response.Orders) == 0 {
+				break
+			}
 		}
 	}
 	if len(matches) > 1 {
 		return OrderResponse{}, fmt.Errorf("kalshi: client order lookup returned %d matches", len(matches))
 	}
-	if len(matches) == 1 {
-		return matches[0], nil
+	for _, match := range matches {
+		return match, nil
 	}
 	return OrderResponse{}, execution.ErrBrokerOrderNotFound
 }
@@ -296,6 +319,16 @@ type balanceEnvelope struct {
 	PortfolioValue int64 `json:"portfolio_value"`
 }
 
+// buildCreateOrderPayload maps the request onto the Kalshi Trade API v2
+// POST /portfolio/orders body:
+//
+//	{ticker, action: buy|sell, side: yes|no, count: <int>, type: "limit",
+//	 yes_price|no_price: <cents>, client_order_id, time_in_force}
+//
+// The price is expressed for the contract side actually traded; Kalshi
+// derives the opposite book itself. Only limit orders are supported; market
+// orders are rejected at planning time in mapCreateOrderRequest and again
+// here as a guard.
 func buildCreateOrderPayload(req CreateOrderRequest) (map[string]any, error) {
 	if strings.TrimSpace(req.Ticker) == "" {
 		return nil, errors.New("kalshi: ticker is required")
@@ -303,94 +336,74 @@ func buildCreateOrderPayload(req CreateOrderRequest) (map[string]any, error) {
 	if req.Count <= 0 {
 		return nil, errors.New("kalshi: count must be positive")
 	}
-
-	apiSide, err := mapOrderSide(req.Side, req.Action)
+	side, err := mapContractSide(req.Side)
 	if err != nil {
 		return nil, err
 	}
-
-	priceCents, err := mapOrderPriceCents(req)
+	action, err := mapOrderAction(req.Action)
 	if err != nil {
 		return nil, err
+	}
+	orderType := strings.ToLower(strings.TrimSpace(req.Type))
+	switch orderType {
+	case "limit":
+	case "":
+		return nil, errors.New("kalshi: order type is required")
+	case "market":
+		return nil, errors.New("kalshi: market orders are disabled until sandbox smoke-tested")
+	default:
+		return nil, fmt.Errorf("kalshi: unsupported order type %q", req.Type)
 	}
 
 	payload := map[string]any{
-		"ticker":                     strings.TrimSpace(req.Ticker),
-		"side":                       apiSide,
-		"count":                      fmt.Sprintf("%d.00", req.Count),
-		"price":                      formatCents(priceCents),
-		"time_in_force":              timeInForceForOrder(req.Type),
-		"self_trade_prevention_type": "taker_at_cross",
+		"ticker":        strings.TrimSpace(req.Ticker),
+		"action":        action,
+		"side":          side,
+		"count":         req.Count,
+		"type":          "limit",
+		"time_in_force": timeInForceForOrder(orderType),
 	}
-	if strings.TrimSpace(req.ClientOrderID) != "" {
-		payload["client_order_id"] = strings.TrimSpace(req.ClientOrderID)
+	switch side {
+	case "yes":
+		if req.YesPrice == nil {
+			return nil, errors.New("kalshi: yes price is required")
+		}
+		cents, err := validateQuoteCents(*req.YesPrice)
+		if err != nil {
+			return nil, err
+		}
+		payload["yes_price"] = cents
+	case "no":
+		if req.NoPrice == nil {
+			return nil, errors.New("kalshi: no price is required")
+		}
+		cents, err := validateQuoteCents(*req.NoPrice)
+		if err != nil {
+			return nil, err
+		}
+		payload["no_price"] = cents
+	}
+	if clientOrderID := strings.TrimSpace(req.ClientOrderID); clientOrderID != "" {
+		payload["client_order_id"] = clientOrderID
 	}
 	return payload, nil
 }
 
-func mapOrderSide(contractSide, action string) (string, error) {
-	side := strings.ToLower(strings.TrimSpace(contractSide))
-	action = strings.ToLower(strings.TrimSpace(action))
-
-	switch side {
-	case "yes":
-		switch action {
-		case "buy":
-			return "bid", nil
-		case "sell":
-			return "ask", nil
-		default:
-			return "", fmt.Errorf("kalshi: unsupported action %q", action)
-		}
-	case "no":
-		switch action {
-		case "buy":
-			return "ask", nil
-		case "sell":
-			return "bid", nil
-		default:
-			return "", fmt.Errorf("kalshi: unsupported action %q", action)
-		}
+func mapContractSide(raw string) (string, error) {
+	switch side := strings.ToLower(strings.TrimSpace(raw)); side {
+	case "yes", "no":
+		return side, nil
 	default:
-		return "", fmt.Errorf("kalshi: unsupported side %q", contractSide)
+		return "", fmt.Errorf("kalshi: unsupported side %q", raw)
 	}
 }
 
-func mapOrderPriceCents(req CreateOrderRequest) (int64, error) {
-	side := strings.ToLower(strings.TrimSpace(req.Side))
-	orderType := strings.ToLower(strings.TrimSpace(req.Type))
-
-	if orderType == "" {
-		return 0, errors.New("kalshi: order type is required")
-	}
-
-	switch orderType {
-	case "limit":
-		// Kalshi quotes the YES book. NO orders are expressed as the economically
-		// equivalent YES side, so buy NO becomes ask at 1-no_price and sell NO
-		// becomes bid at 1-no_price.
-		switch side {
-		case "yes":
-			if req.YesPrice == nil {
-				return 0, errors.New("kalshi: yes price is required")
-			}
-			return validateQuoteCents(*req.YesPrice)
-		case "no":
-			if req.NoPrice == nil {
-				return 0, errors.New("kalshi: no price is required")
-			}
-			cents, err := validateQuoteCents(*req.NoPrice)
-			if err != nil {
-				return 0, err
-			}
-			return 100 - cents, nil
-		default:
-			return 0, fmt.Errorf("kalshi: unsupported side %q", req.Side)
-		}
-	case "market":
-		return 0, errors.New("kalshi: market orders are disabled until sandbox smoke-tested")
+func mapOrderAction(raw string) (string, error) {
+	switch action := strings.ToLower(strings.TrimSpace(raw)); action {
+	case "buy", "sell":
+		return action, nil
 	default:
-		return 0, fmt.Errorf("kalshi: unsupported order type %q", req.Type)
+		return "", fmt.Errorf("kalshi: unsupported action %q", raw)
 	}
 }
 
@@ -408,10 +421,6 @@ func timeInForceForOrder(orderType string) string {
 	default:
 		return "good_till_canceled"
 	}
-}
-
-func formatCents(cents int64) string {
-	return fmt.Sprintf("%.2f", float64(cents)/100)
 }
 
 func mapMarketPosition(resp marketPosition) (PositionResponse, error) {

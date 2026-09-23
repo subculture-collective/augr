@@ -26,8 +26,8 @@ type portfolioSummary struct {
 }
 
 type runOutput struct {
-	Strategy domain.Strategy       `json:"strategy"`
-	Result   api.StrategyRunResult `json:"result"`
+	Strategy domain.Strategy         `json:"strategy"`
+	Accepted api.StrategyRunAccepted `json:"accepted"`
 }
 
 func writeJSON(w io.Writer, v any) error {
@@ -115,13 +115,8 @@ func renderRunTable(w io.Writer, output runOutput) error {
 		{"Strategy", output.Strategy.Name},
 		{"Ticker", output.Strategy.Ticker},
 		{"Strategy ID", output.Strategy.ID.String()},
-		{"Run ID", output.Result.Run.ID.String()},
-		{"Status", output.Result.Run.Status.String()},
-		{"Signal", output.Result.Signal.String()},
-		{"Orders", strconv.Itoa(len(output.Result.Orders))},
-		{"Positions", strconv.Itoa(len(output.Result.Positions))},
-		{"Started", formatTime(output.Result.Run.StartedAt)},
-		{"Completed", formatOptionalTime(output.Result.Run.CompletedAt)},
+		{"Status", output.Accepted.Status},
+		{"Message", output.Accepted.Message},
 	})
 }
 
@@ -160,13 +155,6 @@ func formatTime(value time.Time) string {
 		return "-"
 	}
 	return value.UTC().Format(time.RFC3339)
-}
-
-func formatOptionalTime(value *time.Time) string {
-	if value == nil {
-		return "-"
-	}
-	return formatTime(*value)
 }
 
 func truncateString(value string, maxLen int) string {

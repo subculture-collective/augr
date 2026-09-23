@@ -597,6 +597,17 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	var currentStatus domain.OrderStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM orders WHERE id=$1 AND account_id=$2 FOR UPDATE`, order.ID, r.accountID).Scan(&currentStatus); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("postgres: update order %s: %w", order.ID, ErrNotFound)
+		}
+		return fmt.Errorf("postgres: lock order for update: %w", err)
+	}
+	if err := requireOrderStatusTransition(currentStatus, order.Status); err != nil {
+		return fmt.Errorf("postgres: update order %s: %w", order.ID, err)
+	}
+
 	row := tx.QueryRow(ctx,
 		`WITH locked AS (SELECT id FROM orders WHERE id=$34 AND account_id=$35 FOR UPDATE)
 		 UPDATE orders o
@@ -666,6 +677,36 @@ func (r *OrderRepo) Update(ctx context.Context, order *domain.Order) error {
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// ErrInvalidOrderTransition is returned when an update would move an order
+// through a status transition that domain.validOrderTransitions forbids.
+var ErrInvalidOrderTransition = errors.New("invalid order status transition")
+
+// requireOrderStatusTransition allows idempotent same-status writes and any
+// transition permitted by the domain state machine.
+func requireOrderStatusTransition(current, next domain.OrderStatus) error {
+	if current == next {
+		return nil
+	}
+	if !next.IsValid() {
+		return fmt.Errorf("%w: %q is not a known status", ErrInvalidOrderTransition, next)
+	}
+	if !current.CanTransitionTo(next) {
+		return fmt.Errorf("%w: %s -> %s", ErrInvalidOrderTransition, current, next)
+	}
+	return nil
+}
+
+// ListNonTerminalOlderThan returns orders in a non-terminal status
+// (pending/submitted/partial) for the repository account and environment whose
+// creation time is at or before the threshold. Results are ordered oldest first.
+func (r *OrderRepo) ListNonTerminalOlderThan(ctx context.Context, environment domain.AccountEnvironment, threshold time.Time, limit int) ([]domain.Order, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	query := orderSelectSQL + ` WHERE account_id=$1 AND environment=$2 AND status IN ($3,$4,$5) AND created_at <= $6 ORDER BY created_at ASC, id ASC LIMIT $7`
+	return r.list(ctx, query, []any{r.accountID, environment, domain.OrderStatusPending, domain.OrderStatusSubmitted, domain.OrderStatusPartial, threshold.UTC(), limit}, "list non-terminal orders")
 }
 
 // Delete removes an order by ID. It returns ErrNotFound when no row matches.

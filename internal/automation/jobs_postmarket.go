@@ -57,6 +57,11 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 		"strategies_without_runs": 0,
 	}
 	defer func() { o.SetLastSummary("daily_review", summary) }()
+	// Per-strategy detail for strategies with no runs. The result column is
+	// integer counts only, so identity travels in the degraded detail text.
+	// OrchestratorDeps has no AgentEventRepo, so the last preparation_rejected
+	// reason_code cannot be looked up here.
+	var withoutRuns []string
 	for _, strat := range strategies {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -78,9 +83,11 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 		}
 		if len(runs) == 0 {
 			summary["strategies_without_runs"]++
+			withoutRuns = append(withoutRuns, fmt.Sprintf("%s(%s,%s)", strat.Ticker, strat.Name, strat.ID))
 			o.logger.Warn("daily_review: strategy has no runs in review window",
 				slog.String("ticker", strat.Ticker),
 				slog.String("strategy", strat.Name),
+				slog.String("strategy_id", strat.ID.String()),
 			)
 			continue
 		}
@@ -101,7 +108,7 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 	}
 
 	o.logger.Info("daily_review: completed", slog.Any("summary", summary))
-	completionErr := dailyReviewCompletionError(summary)
+	completionErr := dailyReviewCompletionErrorWithDetail(summary, withoutRuns)
 	if IsDegraded(completionErr) {
 		if recorder, ok := o.metrics.(interface{ RecordAutomationJobDegraded(string) }); ok {
 			recorder.RecordAutomationJobDegraded("daily_review")
@@ -111,8 +118,17 @@ func (o *JobOrchestrator) dailyReview(ctx context.Context) error {
 }
 
 func dailyReviewCompletionError(summary map[string]int) error {
+	return dailyReviewCompletionErrorWithDetail(summary, nil)
+}
+
+// dailyReviewCompletionErrorWithDetail names the strategies that produced no
+// runs so the degraded reason identifies what to investigate.
+func dailyReviewCompletionErrorWithDetail(summary map[string]int, withoutRuns []string) error {
 	detail := fmt.Sprintf("query_errors=%d failed=%d running=%d cancelled=%d completed_without_signal=%d strategies_without_runs=%d",
 		summary["query_errors"], summary[domain.PipelineStatusFailed.String()], summary[domain.PipelineStatusRunning.String()], summary[domain.PipelineStatusCancelled.String()], summary["completed_without_signal"], summary["strategies_without_runs"])
+	if len(withoutRuns) > 0 {
+		detail += " without_runs=[" + strings.Join(withoutRuns, " ") + "]"
+	}
 	if summary["query_errors"] > 0 || summary["completed_without_signal"] > 0 {
 		return fmt.Errorf("daily_review: incomplete daily runs: %s", detail)
 	}

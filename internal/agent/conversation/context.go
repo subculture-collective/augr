@@ -1,5 +1,9 @@
 // Package conversation builds token-aware LLM context from pipeline state,
 // agent decisions, market snapshots, and agent memories.
+//
+// ContextBuilder has no callers in cmd/ or the strategy runner: the package is
+// not wired into the production pipeline. Keep it until an ADR decides whether
+// to integrate or remove it.
 package conversation
 
 import (

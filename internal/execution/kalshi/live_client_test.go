@@ -37,15 +37,47 @@ func TestHTTPClientCreateOrder_MapsNoSideLimitBuy(t *testing.T) {
 	if resp.OrderID != "ord-123" {
 		t.Fatalf("CreateOrder() order id = %q", resp.OrderID)
 	}
-	if client.postPath != "/portfolio/events/orders" {
+	if client.postPath != "/portfolio/orders" {
 		t.Fatalf("postPath = %q", client.postPath)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(client.postBody, &payload); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	if payload["ticker"] != "KX-EXAMPLE" || payload["side"] != "ask" || payload["count"] != "2.00" || payload["price"] != "0.42" {
+	if payload["ticker"] != "KX-EXAMPLE" || payload["action"] != "buy" || payload["side"] != "no" || payload["count"] != float64(2) || payload["type"] != "limit" {
 		t.Fatalf("payload = %#v", payload)
+	}
+	if payload["no_price"] != float64(58) || payload["client_order_id"] != "order-123" || payload["time_in_force"] != "good_till_canceled" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	for _, forbidden := range []string{"yes_price", "price", "self_trade_prevention_type"} {
+		if _, ok := payload[forbidden]; ok {
+			t.Fatalf("payload contains %q: %#v", forbidden, payload)
+		}
+	}
+}
+
+func TestHTTPClientCreateOrder_MapsYesSideLimitSell(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeSignedClient{postResp: []byte(`{"order":{"order_id":"ord-456"}}`)}
+	adapter, err := NewLiveHTTPClient(client)
+	if err != nil {
+		t.Fatalf("NewLiveHTTPClient() error = %v", err)
+	}
+	yesPrice := int64(63)
+	if _, err := adapter.CreateOrder(context.Background(), CreateOrderRequest{Ticker: "KX-EXAMPLE", Side: "yes", Action: "sell", Count: 5, Type: "limit", YesPrice: &yesPrice, ClientOrderID: "order-456"}); err != nil {
+		t.Fatalf("CreateOrder() error = %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(client.postBody, &payload); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if payload["action"] != "sell" || payload["side"] != "yes" || payload["yes_price"] != float64(63) || payload["count"] != float64(5) {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if _, ok := payload["no_price"]; ok {
+		t.Fatalf("payload contains no_price: %#v", payload)
 	}
 }
 
@@ -60,7 +92,7 @@ func TestHTTPClientCancelOrder_UsesDelete(t *testing.T) {
 	if err := adapter.CancelOrder(context.Background(), "ord-123"); err != nil {
 		t.Fatalf("CancelOrder() error = %v", err)
 	}
-	if client.deletePath != "/portfolio/events/orders/ord-123" {
+	if client.deletePath != "/portfolio/orders/ord-123" {
 		t.Fatalf("deletePath = %q", client.deletePath)
 	}
 }
@@ -100,11 +132,16 @@ func TestHTTPClientGetOrder_InfersExecutedWhenRemainingZero(t *testing.T) {
 }
 
 func TestHTTPClientGetOrderByClientOrderID(t *testing.T) {
-	client := &fakeSignedClient{getHandler: func(path string, _ map[string]string) ([]byte, error) {
-		if path == "/historical/orders" {
+	client := &fakeSignedClient{getHandler: func(path string, query map[string]string) ([]byte, error) {
+		if path != "/portfolio/orders" {
+			return nil, errors.New("unexpected path " + path)
+		}
+		if query["status"] != "resting" {
 			return []byte(`{"orders":[]}`), nil
 		}
-		return []byte(`{"orders":[{"order_id":"ord-123","client_order_id":"client-123","status":"resting"}]}`), nil
+		// Kalshi ignores client_order_id server-side; the page carries other
+		// orders and the adapter must match locally.
+		return []byte(`{"orders":[{"order_id":"ord-other","client_order_id":"client-other","status":"resting"},{"order_id":"ord-123","client_order_id":"client-123","status":"resting"}]}`), nil
 	}}
 	adapter, err := NewLiveHTTPClient(client)
 	if err != nil {
@@ -114,8 +151,46 @@ func TestHTTPClientGetOrderByClientOrderID(t *testing.T) {
 	if err != nil || order.OrderID != "ord-123" || order.ClientOrderID != "client-123" {
 		t.Fatalf("GetOrderByClientOrderID() = (%+v, %v)", order, err)
 	}
-	if client.getQueries[0]["client_order_id"] != "client-123" {
-		t.Fatalf("lookup request = %q %+v", client.getPath, client.getQueries)
+	if len(client.getQueries) != len(clientOrderLookupStatuses) || client.getQueries[0]["status"] != "resting" || client.getQueries[0]["limit"] == "" {
+		t.Fatalf("lookup requests = %+v", client.getQueries)
+	}
+	if _, ok := client.getQueries[0]["client_order_id"]; ok {
+		t.Fatalf("lookup sent unsupported client_order_id filter: %+v", client.getQueries[0])
+	}
+}
+
+func TestHTTPClientGetOrderByClientOrderIDPagesAndReturnsNotFound(t *testing.T) {
+	client := &fakeSignedClient{getHandler: func(_ string, query map[string]string) ([]byte, error) {
+		if query["status"] == "resting" && query["cursor"] == "" {
+			return []byte(`{"orders":[{"order_id":"ord-1","client_order_id":"client-1","status":"resting"}],"cursor":"page-2"}`), nil
+		}
+		if query["status"] == "resting" && query["cursor"] == "page-2" {
+			return []byte(`{"orders":[{"order_id":"ord-2","client_order_id":"client-2","status":"resting"}]}`), nil
+		}
+		return []byte(`{"orders":[]}`), nil
+	}}
+	adapter, err := NewLiveHTTPClient(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = adapter.GetOrderByClientOrderID(context.Background(), "client-missing")
+	if !errors.Is(err, execution.ErrBrokerOrderNotFound) {
+		t.Fatalf("GetOrderByClientOrderID() error = %v, want not found", err)
+	}
+	if len(client.getQueries) != len(clientOrderLookupStatuses)+1 || client.getQueries[1]["cursor"] != "page-2" {
+		t.Fatalf("lookup requests = %+v, want cursor paging", client.getQueries)
+	}
+}
+
+func TestHTTPClientGetOrderByClientOrderIDDedupesSameOrderAcrossStatuses(t *testing.T) {
+	client := &fakeSignedClient{getResp: []byte(`{"orders":[{"order_id":"ord-1","client_order_id":"client-1","status":"executed"}]}`)}
+	adapter, err := NewLiveHTTPClient(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, err := adapter.GetOrderByClientOrderID(context.Background(), "client-1")
+	if err != nil || order.OrderID != "ord-1" {
+		t.Fatalf("GetOrderByClientOrderID() = (%+v, %v)", order, err)
 	}
 }
 

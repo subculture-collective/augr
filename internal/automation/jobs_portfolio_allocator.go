@@ -5,25 +5,131 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
+	"github.com/PatrickFanella/get-rich-quick/internal/regime"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
+	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
+	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/google/uuid"
 )
 
+// portfolioAllocatorSpec runs twice an hour from 09:15 through 20:45 ET on
+// trading days: the 09:15 run captures the day-open equity snapshot before the
+// 09:30 bell, regular-session runs keep option quotes inside the
+// MaxQuoteAgeSeconds window, and the evening runs cover the after-hours
+// selections the job previously handled exclusively.
 var portfolioAllocatorSpec = scheduler.ScheduleSpec{
-	Type:         scheduler.ScheduleTypeAfterHours,
-	Cron:         "15,45 * * * *",
+	Type:         scheduler.ScheduleTypeCron,
+	Cron:         "15,45 9-20 * * 1-5",
 	SkipWeekends: true,
 	SkipHolidays: true,
 }
 
 const portfolioAllocationClaimLease = portfolio.AllocationClaimLease
+
+// portfolioBreakerResultWindow bounds the closed-position history replayed
+// into the consecutive-loss breaker on each run.
+const portfolioBreakerResultWindow = 7 * 24 * time.Hour
+
+// portfolioLadderMetricsWindow bounds the closed-position history used for
+// capital-ladder win-rate metrics.
+const portfolioLadderMetricsWindow = 30 * 24 * time.Hour
+
+// portfolioBreakerSource is implemented by the canonical risk-state repository
+// when it can also read and trip risk breakers. Absent it, breaker wiring is
+// skipped and the allocator relies on the risk-state flags alone.
+type portfolioBreakerSource interface {
+	repository.RiskBreakerRepository
+	RecentStrategyTradeResults(context.Context, time.Time, int) ([]pgrepo.StrategyTradeResult, error)
+}
+
+// portfolioLadderSource is implemented by the canonical risk-state repository
+// when capital-ladder rows are readable and updatable.
+type portfolioLadderSource interface {
+	CapitalLadderSteps(context.Context, []uuid.UUID) (map[uuid.UUID]float64, error)
+	UpdateMetrics(context.Context, string, float64, float64, float64) error
+}
+
+// ladderMetricsAdapter exposes only the metrics write of the ladder repository
+// to risk.CapitalLadder; promotion stays on the CLI path.
+type ladderMetricsAdapter struct{ source portfolioLadderSource }
+
+func (a ladderMetricsAdapter) Upsert(context.Context, domain.CapitalLadderEntry) error {
+	return errors.New("portfolio_allocator: capital ladder upsert is not available from the allocator")
+}
+
+func (a ladderMetricsAdapter) Get(context.Context, string) (*domain.CapitalLadderEntry, error) {
+	return nil, repository.ErrNotFound
+}
+
+func (a ladderMetricsAdapter) List(context.Context) ([]domain.CapitalLadderEntry, error) {
+	return nil, errors.New("portfolio_allocator: capital ladder list is not available from the allocator")
+}
+
+func (a ladderMetricsAdapter) UpdateMetrics(ctx context.Context, strategyID string, fillRate, winRate, drawdownPct float64) error {
+	return a.source.UpdateMetrics(ctx, strategyID, fillRate, winRate, drawdownPct)
+}
+
+func (a ladderMetricsAdapter) AdvanceStep(context.Context, string, float64, time.Time) error {
+	return errors.New("portfolio_allocator: capital ladder promotion stays on the CLI path")
+}
+
+// guardedBreaker trips a scope only when it is not already open and was not
+// reset by an operator inside the replay window, so replaying closed-position
+// history each run never reopens a breaker someone deliberately reset.
+type guardedBreaker struct {
+	repo       repository.RiskBreakerRepository
+	resetAfter time.Time
+	now        time.Time
+	tripped    map[string]string
+}
+
+func (b *guardedBreaker) Allow(ctx context.Context, scope string) error {
+	state, err := b.repo.Get(ctx, scope)
+	if errors.Is(err, repository.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if state.ResetAt == nil {
+		return fmt.Errorf("%w: %s (%s)", risk.ErrBreakerTripped, scope, state.Reason)
+	}
+	return nil
+}
+
+func (b *guardedBreaker) Trip(ctx context.Context, scope, reason string) error {
+	state, err := b.repo.Get(ctx, scope)
+	if err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return err
+	}
+	if state != nil {
+		if state.ResetAt == nil {
+			b.tripped[scope] = state.Reason
+			return nil
+		}
+		if state.ResetAt.After(b.resetAfter) {
+			return nil
+		}
+	}
+	if err := b.repo.Trip(ctx, scope, reason, b.now); err != nil {
+		return err
+	}
+	b.tripped[scope] = reason
+	return nil
+}
+
+func (b *guardedBreaker) Reset(context.Context, string) error {
+	return errors.New("portfolio_allocator: breaker reset is an operator action")
+}
 
 // PortfolioAccountBalanceSource supplies the restored paper account state used
 // to size paper allocator decisions.
@@ -69,7 +175,7 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 		return fmt.Errorf("portfolio_allocator: snapshot opportunities: %w", err)
 	}
 
-	state, warnings, err := o.buildPortfolioAllocatorState(ctx, mode)
+	state, warnings, err := o.buildPortfolioAllocatorState(ctx, mode, opportunities)
 	if err != nil {
 		return err
 	}
@@ -81,7 +187,17 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 
 	allocCfg := portfolio.DefaultAllocatorConfig()
 	allocCfg.Mode = mode
+	breakerWarnings, breakerStats, err := o.evaluatePortfolioBreakers(ctx, &state, allocCfg, asOf)
+	if err != nil {
+		return err
+	}
+	warnings = append(warnings, breakerWarnings...)
+	warnings = append(warnings, o.applyPortfolioRegimeControls(ctx, &state, breakerStats)...)
 	result := portfolio.AllocateShadow(validOpportunities, state, allocCfg)
+	if !mode.OwnsExecution() && result.Summary.Selected > 0 {
+		o.logger.Warn(fmt.Sprintf("portfolio_allocator: %s mode: %d opportunities selected, none submitted", mode, result.Summary.Selected),
+			slog.String("mode", string(mode)), slog.Int("selected", result.Summary.Selected))
+	}
 	result.Decisions = append(sourceRejected, result.Decisions...)
 	result.Summary.Evaluated += len(sourceRejected)
 	result.Summary.Rejected += len(sourceRejected)
@@ -123,7 +239,7 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 			}
 			persisted = true
 			decision, err = withAllocationClaim(ctx, o.deps.OpportunityRepo, *decision.OpportunityID, claimID, func(effectCtx context.Context) (domain.AllocationDecision, error) {
-				return o.executePaperAllocatorDecision(effectCtx, decision, opportunityByID)
+				return o.executePaperAllocatorDecision(effectCtx, decision, opportunityByID, state.Equity)
 			})
 			applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, claimID, decision.CreatedOrderID, decision.Action, decision.Reasons)
 			if recordErr != nil {
@@ -152,18 +268,26 @@ func (o *JobOrchestrator) runPortfolioAllocator(ctx context.Context) error {
 		}
 	}
 
+	if mode.OwnsExecution() {
+		if err := o.recordPortfolioLadderMetrics(ctx, result.Decisions, state, asOf); err != nil {
+			warnings = append(warnings, "capital_ladder_metrics_failed")
+			o.logger.Warn("portfolio_allocator: record capital ladder metrics", slog.String("error", err.Error()))
+		}
+	}
+
 	summary := map[string]int{
-		"expired":             int(expired),
-		"queued_loaded":       len(opportunities),
-		"evaluated":           result.Summary.Evaluated,
-		"eligible":            result.Summary.Eligible,
-		"selected":            result.Summary.Selected,
-		"rejected":            result.Summary.Rejected,
-		"executed":            countDecisionActions(result.Decisions, domain.AllocationDecisionActionExecuted),
-		"execution_rejected":  countDecisionActions(result.Decisions, domain.AllocationDecisionActionExecutionRejected),
-		"source_rejected":     len(sourceRejected),
-		"persisted_decisions": len(result.Decisions),
-		"warnings":            len(warnings),
+		"positions_missing_mark": state.PositionsMissingMark,
+		"expired":                int(expired),
+		"queued_loaded":          len(opportunities),
+		"evaluated":              result.Summary.Evaluated,
+		"eligible":               result.Summary.Eligible,
+		"selected":               result.Summary.Selected,
+		"rejected":               result.Summary.Rejected,
+		"executed":               countDecisionActions(result.Decisions, domain.AllocationDecisionActionExecuted),
+		"execution_rejected":     countDecisionActions(result.Decisions, domain.AllocationDecisionActionExecutionRejected),
+		"source_rejected":        len(sourceRejected),
+		"persisted_decisions":    len(result.Decisions),
+		"warnings":               len(warnings),
 	}
 	o.SetLastSummary("portfolio_allocator", summary)
 
@@ -195,6 +319,7 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 		return nil, nil, fmt.Errorf("portfolio_allocator: %s mode requires pipeline run repository", mode)
 	}
 
+	prefetched := o.prefetchOpportunityRuns(ctx, opportunities)
 	valid := make([]domain.Opportunity, 0, len(opportunities))
 	rejected := make([]domain.AllocationDecision, 0)
 	for i := range opportunities {
@@ -214,7 +339,7 @@ func (o *JobOrchestrator) validatePortfolioOpportunitySources(ctx context.Contex
 			}
 			continue
 		}
-		run, err := o.deps.RunRepo.Get(ctx, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
+		run, err := o.lookupOpportunityRun(ctx, prefetched, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
 		switch {
 		case err == nil && run == nil:
 			reason = "source_run_missing"
@@ -301,7 +426,9 @@ func (o *JobOrchestrator) recoverSelectedPaperOpportunities(ctx context.Context,
 				if order == nil {
 					decision.ExecutionClaimID = claimID
 					decision, err = withAllocationClaim(ctx, o.deps.OpportunityRepo, opportunity.ID, claimID, func(effectCtx context.Context) (domain.AllocationDecision, error) {
-						return o.executePaperAllocatorDecision(effectCtx, decision, map[uuid.UUID]domain.Opportunity{opportunity.ID: opportunity})
+						// Recovery runs before the canonical snapshot is captured; zero
+						// equity lets the processor fall back to its configured balance.
+						return o.executePaperAllocatorDecision(effectCtx, decision, map[uuid.UUID]domain.Opportunity{opportunity.ID: opportunity}, 0)
 					})
 					applied, recordErr := o.deps.AllocationDecisionRepo.RecordPaperOrderResult(ctx, decision.ID, claimID, decision.CreatedOrderID, decision.Action, decision.Reasons)
 					if recordErr != nil {
@@ -571,7 +698,7 @@ func (o *JobOrchestrator) portfolioAllocatorMode() portfolio.AllocatorMode {
 	return mode
 }
 
-func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, decision domain.AllocationDecision, opportunities map[uuid.UUID]domain.Opportunity) (domain.AllocationDecision, error) {
+func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, decision domain.AllocationDecision, opportunities map[uuid.UUID]domain.Opportunity, accountEquity float64) (domain.AllocationDecision, error) {
 	decision.Mode = domain.AllocationDecisionModePaper
 	decision.Action = domain.AllocationDecisionActionPaperOrderIntent
 
@@ -617,7 +744,7 @@ func (o *JobOrchestrator) executePaperAllocatorDecision(ctx context.Context, dec
 		}
 		return decision, nil
 	}
-	executor := portfolio.NewPaperExecutor(portfolio.PaperExecutorDeps{Processor: o.deps.PortfolioPaperProcessor, ExecutionAccount: o.deps.ExecutionAccount})
+	executor := portfolio.NewPaperExecutor(portfolio.PaperExecutorDeps{Processor: o.deps.PortfolioPaperProcessor, ExecutionAccount: o.deps.ExecutionAccount, AccountEquityUSD: accountEquity})
 	result, err := executor.ExecutePaperDecisionScoped(ctx, scope, opportunity, decision, *strategy)
 	if err != nil {
 		decision.Action = domain.AllocationDecisionActionPaperOrderIntent
@@ -664,10 +791,11 @@ func paperAllocatorRejected(decision domain.AllocationDecision, reason string) d
 	return decision
 }
 
-func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode portfolio.AllocatorMode) (portfolio.PortfolioState, []string, error) {
+func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode portfolio.AllocatorMode, opportunities []domain.Opportunity) (portfolio.PortfolioState, []string, error) {
 	state := portfolio.PortfolioState{
-		MarketExposure: map[domain.MarketType]float64{},
-		OpenTickers:    map[string]bool{},
+		MarketExposure:      map[domain.MarketType]float64{},
+		OpenTickers:         map[string]bool{},
+		StrategyBreakerOpen: map[uuid.UUID]bool{},
 	}
 	warnings := make([]string, 0, 2)
 
@@ -718,7 +846,10 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 			continue
 		}
 		state.OpenPositionCount++
-		exposure := portfolioPositionExposure(position)
+		exposure, marked := portfolioPositionExposure(position)
+		if !marked {
+			state.PositionsMissingMark++
+		}
 		grossExposure += exposure
 		state.MarketExposure[position.MarketType] += exposure
 		if ticker := strings.TrimSpace(position.Ticker); ticker != "" {
@@ -742,6 +873,7 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 	state.Equity = snapshot.Equity
 	state.BuyingPower = snapshot.BuyingPower
 	state.OptionsBuyingPower = snapshot.OptionsBuyingPower
+	state.InternalAccount = snapshot.InternalAccount
 	if o.deps.PortfolioRiskState == nil {
 		return state, warnings, fmt.Errorf("portfolio_allocator: %s mode requires canonical risk-state source", mode)
 	}
@@ -755,27 +887,319 @@ func (o *JobOrchestrator) buildPortfolioAllocatorState(ctx context.Context, mode
 	state.CircuitBreakerOpen = riskState.CircuitBreakerOpen
 	state.ReconciliationID = riskState.ReconciliationID
 	state.UnderlyingRisk = riskState.UnderlyingRisk
+	for _, scope := range riskState.OpenBreakerScopes {
+		if strategyID, ok := strategyScopeID(scope); ok {
+			state.StrategyBreakerOpen[strategyID] = true
+		}
+	}
 	for _, reservedRisk := range riskState.UnderlyingRisk {
 		grossExposure += reservedRisk
 		state.MarketExposure[domain.MarketTypeOptions] += reservedRisk
 	}
 	state.GrossExposure = grossExposure
+	if state.PositionsMissingMark > 0 {
+		warnings = append(warnings, fmt.Sprintf("%s=%d", portfolio.WarningPositionsMissingMark, state.PositionsMissingMark))
+	}
+	if ladder, ok := o.deps.PortfolioRiskState.(portfolioLadderSource); ok && len(opportunities) > 0 {
+		steps, err := ladder.CapitalLadderSteps(ctx, opportunityStrategyIDs(opportunities))
+		if err != nil {
+			return state, warnings, fmt.Errorf("portfolio_allocator: load capital ladder steps: %w", err)
+		}
+		if len(steps) > 0 {
+			state.StrategyStepPct = steps
+		}
+	}
 	if err := portfolio.BindRiskStateEvidence(&state, snapshot.ObservedAt); err != nil {
 		return state, warnings, fmt.Errorf("portfolio_allocator: bind risk-state evidence: %w", err)
 	}
 	return state, warnings, nil
 }
 
-func portfolioPositionExposure(position domain.Position) float64 {
-	price := position.CurrentPrice
-	if price == nil || *price <= 0 {
-		if position.AvgEntry > 0 {
-			p := position.AvgEntry
-			price = &p
+// evaluatePortfolioBreakers runs the drawdown and consecutive-loss controls
+// against the ledger-derived risk state and recent closed positions, tripping
+// the durable breaker scopes when the reviewed thresholds are exceeded. The
+// updated open scopes are reflected in the state used for this run.
+func (o *JobOrchestrator) evaluatePortfolioBreakers(ctx context.Context, state *portfolio.PortfolioState, cfg portfolio.AllocatorConfig, now time.Time) ([]string, portfolioBreakerStats, error) {
+	var stats portfolioBreakerStats
+	source, ok := o.deps.PortfolioRiskState.(portfolioBreakerSource)
+	if !ok || state == nil || state.Equity <= 0 {
+		return nil, stats, nil
+	}
+	warnings := make([]string, 0, 2)
+	guard := &guardedBreaker{repo: source, resetAfter: now.Add(-portfolioBreakerResultWindow), now: now.UTC(), tripped: map[string]string{}}
+	drawdown := risk.NewDrawdownBreaker(risk.DrawdownBreakerConfig{MaxDailyDD: cfg.MaxDailyLossPct * state.Equity}, source)
+	if cfg.MaxDailyLossPct > 0 && state.DailyLossPct >= cfg.MaxDailyLossPct {
+		if err := guard.Trip(ctx, domain.RiskBreakerScopeGlobal, fmt.Sprintf("daily_loss_pct=%.4f exceeded max_daily_loss_pct=%.4f", state.DailyLossPct, cfg.MaxDailyLossPct)); err != nil {
+			return nil, stats, fmt.Errorf("portfolio_allocator: trip daily-loss breaker: %w", err)
+		}
+	} else if err := drawdownCheck(ctx, drawdown, guard, -state.DailyLossPct*state.Equity); err != nil {
+		return nil, stats, fmt.Errorf("portfolio_allocator: check drawdown breaker: %w", err)
+	}
+	if cfg.MaxDrawdownPct > 0 && state.DrawdownPct >= cfg.MaxDrawdownPct {
+		if err := guard.Trip(ctx, domain.RiskBreakerScopeGlobal, fmt.Sprintf("drawdown_pct=%.4f exceeded max_drawdown_pct=%.4f over %d days", state.DrawdownPct, cfg.MaxDrawdownPct, cfg.DrawdownWindowDays)); err != nil {
+			return nil, stats, fmt.Errorf("portfolio_allocator: trip drawdown breaker: %w", err)
 		}
 	}
-	if price == nil || *price <= 0 || position.Quantity <= 0 {
-		return 0
+	results, err := source.RecentStrategyTradeResults(ctx, now.Add(-portfolioBreakerResultWindow), 2000)
+	if err != nil {
+		return nil, stats, fmt.Errorf("portfolio_allocator: load closed positions for breakers: %w", err)
 	}
-	return position.Quantity * *price
+	losses := risk.NewConsecutiveLossBreaker(risk.ConsecutiveLossConfig{Threshold: risk.DefaultConsecutiveLossThreshold}, guard)
+	streaks := map[uuid.UUID]int{}
+	for _, result := range results {
+		if result.StrategyID == uuid.Nil {
+			continue
+		}
+		stats.Sampled++
+		if result.RealizedPnL > 0 {
+			stats.Wins++
+			streaks[result.StrategyID] = 0
+		} else {
+			streaks[result.StrategyID]++
+			if streaks[result.StrategyID] > stats.MaxConsecutiveLosses {
+				stats.MaxConsecutiveLosses = streaks[result.StrategyID]
+			}
+		}
+		if err := losses.RecordResult(ctx, result.StrategyID.String(), result.RealizedPnL); err != nil {
+			return nil, stats, fmt.Errorf("portfolio_allocator: record strategy result: %w", err)
+		}
+	}
+	for scope, reason := range guard.tripped {
+		if scope == domain.RiskBreakerScopeGlobal {
+			state.CircuitBreakerOpen = true
+		} else if strategyID, ok := strategyScopeID(scope); ok {
+			if state.StrategyBreakerOpen == nil {
+				state.StrategyBreakerOpen = map[uuid.UUID]bool{}
+			}
+			state.StrategyBreakerOpen[strategyID] = true
+		}
+		warnings = append(warnings, fmt.Sprintf("breaker_open:%s:%s", scope, reason))
+	}
+	sort.Strings(warnings)
+	return warnings, stats, nil
+}
+
+// portfolioBreakerStats summarises the recent closed results the breaker pass
+// observed so the in-memory risk engine and regime rules see the same data.
+type portfolioBreakerStats struct {
+	Sampled              int
+	Wins                 int
+	MaxConsecutiveLosses int
+}
+
+// RollingWinRate is the share of sampled closed results with positive
+// realized P&L; NaN when nothing was sampled.
+func (s portfolioBreakerStats) RollingWinRate() float64 {
+	if s.Sampled == 0 {
+		return math.NaN()
+	}
+	return float64(s.Wins) / float64(s.Sampled)
+}
+
+// applyPortfolioRegimeControls feeds the ledger-derived state into the
+// in-memory risk engine and evaluates the regime rules. A paused regime
+// closes allocation for this run through the circuit-breaker flag so the
+// allocator rejects every candidate with an explicit reason.
+func (o *JobOrchestrator) applyPortfolioRegimeControls(ctx context.Context, state *portfolio.PortfolioState, stats portfolioBreakerStats) []string {
+	if state == nil {
+		return nil
+	}
+	warnings := make([]string, 0, 2)
+	if o.deps.RiskEngine != nil {
+		if err := o.deps.RiskEngine.UpdateMetrics(ctx, -state.DailyLossPct*state.Equity, state.DrawdownPct, stats.MaxConsecutiveLosses); err != nil {
+			o.logger.Warn("portfolio_allocator: risk engine metrics update failed", slog.Any("error", err))
+			warnings = append(warnings, "risk_engine_metrics_update_failed")
+		}
+	}
+	decision := regime.Evaluate(regime.Snapshot{
+		ConsecutiveLosses: stats.MaxConsecutiveLosses,
+		RollingWinRate:    stats.RollingWinRate(),
+	}, o.deps.RegimeRules)
+	if decision.Paused {
+		state.CircuitBreakerOpen = true
+		reason := "regime_pause:" + strings.Join(decision.Reasons, ",")
+		o.logger.Warn("portfolio_allocator: regime rules paused new allocations", slog.String("reasons", strings.Join(decision.Reasons, ",")))
+		warnings = append(warnings, reason)
+	}
+	return warnings
+}
+
+// drawdownCheck routes DrawdownBreaker.CheckDrawdown through the guard so an
+// already-open or recently reset global scope is not re-tripped.
+func drawdownCheck(ctx context.Context, breaker *risk.DrawdownBreaker, guard *guardedBreaker, realizedPnL float64) error {
+	if err := guard.Allow(ctx, domain.RiskBreakerScopeGlobal); err != nil {
+		if errors.Is(err, risk.ErrBreakerTripped) {
+			guard.tripped[domain.RiskBreakerScopeGlobal] = "already_open"
+			return nil
+		}
+		return err
+	}
+	tripped := ""
+	breaker.OnTrip = func(_, reason string) { tripped = reason }
+	if err := breaker.CheckDrawdown(ctx, realizedPnL); err != nil {
+		return err
+	}
+	if tripped != "" {
+		guard.tripped[domain.RiskBreakerScopeGlobal] = tripped
+	}
+	return nil
+}
+
+// recordPortfolioLadderMetrics feeds paper execution outcomes into the
+// capital ladder for each laddered strategy the run touched: fill rate from
+// this run's paper intents, win rate from recent closed positions, and the
+// ledger drawdown.
+func (o *JobOrchestrator) recordPortfolioLadderMetrics(ctx context.Context, decisions []domain.AllocationDecision, state portfolio.PortfolioState, now time.Time) error {
+	ladderSource, ok := o.deps.PortfolioRiskState.(portfolioLadderSource)
+	if !ok || len(state.StrategyStepPct) == 0 {
+		return nil
+	}
+	type tally struct{ attempted, hits int }
+	fills := make(map[uuid.UUID]*tally)
+	for _, decision := range decisions {
+		if decision.StrategyID == nil || decision.Mode != domain.AllocationDecisionModePaper {
+			continue
+		}
+		if _, laddered := state.StrategyStepPct[*decision.StrategyID]; !laddered {
+			continue
+		}
+		switch decision.Action {
+		case domain.AllocationDecisionActionExecuted, domain.AllocationDecisionActionExecutionRejected, domain.AllocationDecisionActionPaperOrderIntent:
+			entry := fills[*decision.StrategyID]
+			if entry == nil {
+				entry = &tally{}
+				fills[*decision.StrategyID] = entry
+			}
+			entry.attempted++
+			if decision.Action == domain.AllocationDecisionActionExecuted {
+				entry.hits++
+			}
+		}
+	}
+	if len(fills) == 0 {
+		return nil
+	}
+	wins := make(map[uuid.UUID]*tally)
+	if breakerSource, ok := o.deps.PortfolioRiskState.(portfolioBreakerSource); ok {
+		results, err := breakerSource.RecentStrategyTradeResults(ctx, now.Add(-portfolioLadderMetricsWindow), 5000)
+		if err != nil {
+			return err
+		}
+		for _, result := range results {
+			entry := wins[result.StrategyID]
+			if entry == nil {
+				entry = &tally{}
+				wins[result.StrategyID] = entry
+			}
+			entry.attempted++
+			if result.RealizedPnL > 0 {
+				entry.hits++
+			}
+		}
+	}
+	ladder := risk.NewCapitalLadder(risk.CapitalLadderConfig{}, ladderMetricsAdapter{source: ladderSource})
+	strategyIDs := make([]uuid.UUID, 0, len(fills))
+	for strategyID := range fills {
+		strategyIDs = append(strategyIDs, strategyID)
+	}
+	sort.Slice(strategyIDs, func(i, j int) bool { return strategyIDs[i].String() < strategyIDs[j].String() })
+	for _, strategyID := range strategyIDs {
+		fill := fills[strategyID]
+		fillRate := float64(fill.hits) / float64(fill.attempted)
+		winRate := 0.0
+		if win := wins[strategyID]; win != nil && win.attempted > 0 {
+			winRate = float64(win.hits) / float64(win.attempted)
+		}
+		if err := ladder.RecordMetrics(ctx, strategyID.String(), fillRate, winRate, state.DrawdownPct); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func strategyScopeID(scope string) (uuid.UUID, bool) {
+	const prefix = "strategy:"
+	if !strings.HasPrefix(scope, prefix) {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(strings.TrimPrefix(scope, prefix))
+	if err != nil || id == uuid.Nil {
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+func opportunityStrategyIDs(opportunities []domain.Opportunity) []uuid.UUID {
+	seen := make(map[uuid.UUID]struct{}, len(opportunities))
+	ids := make([]uuid.UUID, 0, len(opportunities))
+	for _, opportunity := range opportunities {
+		if opportunity.StrategyID == uuid.Nil {
+			continue
+		}
+		if _, ok := seen[opportunity.StrategyID]; ok {
+			continue
+		}
+		seen[opportunity.StrategyID] = struct{}{}
+		ids = append(ids, opportunity.StrategyID)
+	}
+	return ids
+}
+
+// portfolioPositionExposure values an open position at its current mark, or
+// at entry price when no mark is available. The second return reports whether
+// a mark was present so callers can count positions_missing_mark.
+func portfolioPositionExposure(position domain.Position) (float64, bool) {
+	price := position.CurrentPrice
+	marked := price != nil && *price > 0
+	if !marked && position.AvgEntry > 0 {
+		p := position.AvgEntry
+		price = &p
+	}
+	if price == nil || *price <= 0 || position.Quantity <= 0 {
+		return 0, marked
+	}
+	return position.Quantity * *price, marked
+}
+
+// pipelineRunBatchLister is implemented by repositories that can load the
+// source runs for a whole allocation pass in one query.
+type pipelineRunBatchLister interface {
+	ListByRefs(ctx context.Context, refs []domain.PipelineRunRef) (map[uuid.UUID]domain.PipelineRun, error)
+}
+
+// prefetchOpportunityRuns loads every well-formed source run in one round
+// trip when the repository supports it; nil means "use Get per opportunity".
+func (o *JobOrchestrator) prefetchOpportunityRuns(ctx context.Context, opportunities []domain.Opportunity) map[uuid.UUID]domain.PipelineRun {
+	lister, ok := o.deps.RunRepo.(pipelineRunBatchLister)
+	if !ok {
+		return nil
+	}
+	refs := make([]domain.PipelineRunRef, 0, len(opportunities))
+	for _, opportunity := range opportunities {
+		if opportunity.PipelineRunID == nil || *opportunity.PipelineRunID == uuid.Nil || opportunity.PipelineRunTradeDate == nil {
+			continue
+		}
+		refs = append(refs, domain.PipelineRunRef{ID: *opportunity.PipelineRunID, TradeDate: *opportunity.PipelineRunTradeDate})
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	runs, err := lister.ListByRefs(ctx, refs)
+	if err != nil {
+		o.logger.Warn("portfolio_allocator: batch source run load failed; falling back to per-opportunity reads", slog.Any("error", err))
+		return nil
+	}
+	return runs
+}
+
+// lookupOpportunityRun serves a source run from the prefetched batch, falling
+// back to the repository when the batch is absent or the run was not in it.
+func (o *JobOrchestrator) lookupOpportunityRun(ctx context.Context, prefetched map[uuid.UUID]domain.PipelineRun, ref domain.PipelineRunRef) (*domain.PipelineRun, error) {
+	if prefetched != nil {
+		if run, ok := prefetched[ref.ID]; ok {
+			return &run, nil
+		}
+		return nil, repository.ErrNotFound
+	}
+	return o.deps.RunRepo.Get(ctx, ref)
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strings"
@@ -42,7 +43,7 @@ func Validate(cfg Config) error {
 	}
 
 	if !hasLLMProvider(cfg.LLM.Providers) {
-		errs = append(errs, "at least one LLM provider must be configured (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, or OLLAMA_BASE_URL + OLLAMA_API_KEY)")
+		errs = append(errs, "at least one LLM provider must be configured (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, OLLAMA_BASE_URL + OLLAMA_API_KEY, or OPENCODE_BASE_URL + OPENCODE_SERVER_PASSWORD)")
 	}
 
 	if strings.TrimSpace(cfg.DataProviders.AlphaVantage.APIKey) != "" && cfg.DataProviders.AlphaVantage.RateLimitPerMinute <= 0 {
@@ -94,6 +95,12 @@ func Validate(cfg Config) error {
 
 	if cfg.Risk.CircuitBreakerCooldown <= 0 {
 		errs = append(errs, "RISK_CIRCUIT_BREAKER_COOLDOWN must be greater than 0")
+	}
+	if cfg.Risk.RegimeMaxConsecutiveLosses < 0 {
+		errs = append(errs, "REGIME_MAX_CONSECUTIVE_LOSSES must be >= 0 (0 disables)")
+	}
+	if cfg.Risk.RegimeMinRollingWinRate < 0 || cfg.Risk.RegimeMinRollingWinRate > 1 {
+		errs = append(errs, "REGIME_MIN_ROLLING_WIN_RATE must be between 0 and 1 (0 disables)")
 	}
 	if cfg.Brokers.Kalshi.RequestsPerWindow <= 0 {
 		errs = append(errs, "KALSHI_REQUESTS_PER_WINDOW must be greater than 0")
@@ -181,6 +188,56 @@ func Validate(cfg Config) error {
 	}
 	if cfg.LLM.BudgetTokensPerDay < 0 {
 		errs = append(errs, "LLM_BUDGET_TOKENS_DAY must be >= 0")
+	}
+
+	if cfg.LLM.DebateTimeout < 0 {
+		errs = append(errs, "LLM_DEBATE_TIMEOUT must be >= 0")
+	}
+	if cfg.StaleRunTTL < 0 {
+		errs = append(errs, "STALE_RUN_TTL must be >= 0 (0 disables the stale-run reconciler)")
+	}
+	if cfg.Features.SchedulerReloadInterval < 0 {
+		errs = append(errs, "SCHEDULER_RELOAD_INTERVAL must be >= 0 (0 disables periodic reload)")
+	}
+	if cfg.Features.AutomationAutoDisableCooldown < 0 {
+		errs = append(errs, "AUTOMATION_AUTO_DISABLE_COOLDOWN must be >= 0")
+	}
+	if cfg.ShutdownDrainTimeout < 0 {
+		errs = append(errs, "SHUTDOWN_DRAIN_TIMEOUT must be >= 0")
+	}
+	if cfg.Server.RateLimitPerMinute < 0 {
+		errs = append(errs, "API_RATE_LIMIT must be >= 0 (0 disables rate limiting)")
+	}
+	for _, cidr := range cfg.Server.TrustedProxies {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+			errs = append(errs, fmt.Sprintf("API_TRUSTED_PROXIES contains invalid CIDR %q", cidr))
+		}
+	}
+	switch cfg.PortfolioAllocatorMode {
+	case "", PortfolioAllocatorModeShadow, PortfolioAllocatorModePaper:
+	default:
+		errs = append(errs, fmt.Sprintf("PORTFOLIO_ALLOCATOR_MODE %q is not supported (use shadow or paper)", cfg.PortfolioAllocatorMode))
+	}
+	if cfg.PortfolioAllocatorMode == PortfolioAllocatorModePaper && cfg.Features.EnableLiveTrading {
+		errs = append(errs, "PORTFOLIO_ALLOCATOR_MODE=paper requires ENABLE_LIVE_TRADING=false")
+	}
+	if cfg.SECEdgar.AppEmail != "" && !strings.Contains(cfg.SECEdgar.AppEmail, "@") {
+		errs = append(errs, "SEC_EDGAR_APP_EMAIL must be an email address when set")
+	}
+	if cfg.Brokers.Kalshi.DiscoveryFetchLimit < 0 {
+		errs = append(errs, "KALSHI_DISCOVERY_FETCH_LIMIT must be greater than 0")
+	}
+	if cfg.Brokers.Kalshi.DiscoveryMinVolume < 0 {
+		errs = append(errs, "KALSHI_DISCOVERY_MIN_VOLUME must be >= 0")
+	}
+	if cfg.Brokers.Kalshi.DiscoveryMinOpenInterest < 0 {
+		errs = append(errs, "KALSHI_DISCOVERY_MIN_OPEN_INTEREST must be >= 0")
+	}
+	if cfg.Brokers.Kalshi.DiscoveryMaxSpreadPct < 0 || cfg.Brokers.Kalshi.DiscoveryMaxSpreadPct > 100 {
+		errs = append(errs, "KALSHI_DISCOVERY_MAX_SPREAD_PCT must be between 0 and 100")
+	}
+	if cfg.Brokers.Polymarket.SignatureType < 0 || cfg.Brokers.Polymarket.SignatureType > 2 {
+		errs = append(errs, "POLYMARKET_SIGNATURE_TYPE must be 0 (EOA), 1 (POLY_PROXY), or 2 (GNOSIS_SAFE)")
 	}
 
 	// Database URL must be parseable.

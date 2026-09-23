@@ -57,7 +57,13 @@ func TestConfigurePreparedStockCapture(t *testing.T) {
 			}
 			prepared := agent.PreparedRun{}
 			err = runner.configurePreparedStockCapture(&prepared, strategy)
-			if name == "missing" || name == "wrong_ticker" || name == "pinned" {
+			if name == "missing" {
+				if err != nil || capture.calls != 0 || prepared.PrepareCompletion != nil {
+					t.Fatalf("missing selection must skip capture: err=%v calls=%d completion=%v", err, capture.calls, prepared.PrepareCompletion != nil)
+				}
+				return
+			}
+			if name == "wrong_ticker" || name == "pinned" {
 				if err == nil || capture.calls != 0 {
 					t.Fatal("invalid selector accepted")
 				}

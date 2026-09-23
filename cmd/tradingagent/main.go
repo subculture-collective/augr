@@ -3,11 +3,8 @@ package main
 import (
 	"context"
 	"log"
-	"log/slog"
-	"net/http"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/cli"
-	"github.com/PatrickFanella/get-rich-quick/internal/config"
 )
 
 var (
@@ -23,15 +20,4 @@ func main() {
 	}); err != nil {
 		log.Fatalf("tradingagent: %v", err)
 	}
-}
-
-func newHTTPHandler(logger *slog.Logger) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"all-ok"}`))
-	})
-
-	return config.HTTPRequestLogger(logger)(mux)
 }

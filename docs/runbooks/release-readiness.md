@@ -19,6 +19,32 @@ Run the automated gate from the repository root:
 ./scripts/release-gate.sh
 ```
 
+### Gate prerequisites
+
+`release-gate.sh` calls these tools directly and stops at the first one that
+is missing:
+
+| Tool | Used for |
+|---|---|
+| `shellcheck` | shell script linting (`scripts/*.sh`) |
+| `python3` | `scripts/parse-old-db-snapshot_test.py`, `scripts/test-qualification.py` |
+| `golangci-lint` | Go lint over `./cmd/... ./internal/... ./migrations/...` |
+| `mise` with `node@22.23.2` | `vitest`, `eslint`, `tsc -b`, `vite build` for the web app |
+| `docker buildx` | `docker buildx build --check` for `Dockerfile` and `Dockerfile.web` |
+| Docker image pull of `prom/prometheus` (pinned digest in `PROMTOOL_IMAGE`) | `promtool check rules monitoring/prometheus/alerts.yml` |
+| `scripts/verify-secret-history.sh` | committed-secret scan; runs from the checkout |
+
+The Go toolchain is assumed. Set `PROMTOOL_IMAGE` to override the pinned
+image when the digest is unavailable in an air-gapped registry.
+
+### Runtime readiness probe
+
+`GET /readyz` (unauthenticated) returns 200 only when the database and schema
+version are usable, the kill switch is inactive and restored cleanly, the
+scheduler and automation orchestrator are present and not degraded when
+`ENABLE_SCHEDULER=true`, and a default LLM provider is configured. A 503 body
+lists each failing check. `/healthz` remains the container liveness probe.
+
 ## Commit identity and synchronization order
 
 The gate is valid only for the exact commit it prints. Reconcile upstream

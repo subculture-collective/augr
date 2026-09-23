@@ -74,6 +74,34 @@ Malformed identity or unsupported assets return an error and produce no
 assessment. A valid rejection produces assessment evidence but no routed order,
 fill, economic normalization, ledger transaction, or simulation outcome.
 
+## Allocator sizing controls
+
+The portfolio allocator (`internal/portfolio/allocator.go`) applies these
+controls on top of the reviewed risk policy (2026-09-23):
+
+- `EventMarketMaxNotionalUSD` caps one Kalshi or Polymarket position. Unset, it
+  resolves to `max(25, 0.1% of snapshot equity)`; set it explicitly to pin a
+  fixed cap.
+- `DrawdownWindowDays` (default 90) is the rolling peak window for
+  `drawdown_pct`; the risk-state repository uses the same default. Daily loss is
+  measured from the earliest snapshot on the NY trade date at or before 09:30
+  ET, else the previous date's last snapshot.
+- Internal paper accounts pin `options_buying_power` to zero (migration 113).
+  Defined-risk option packages on such an account are funded from cash buying
+  power at max loss per unit; any other options package is rejected with
+  `options_margin_unsupported` rather than `sizing_zero`.
+- Crypto quantities are fractional (rounded down to 6 decimals; venue lot
+  rounding happens at the broker). Stock, options, and prediction quantities
+  stay whole units.
+- Stock opportunities without a liquidity figure are scored neutrally (50) with
+  a `liquidity_unknown` warning instead of a `below_min_liquidity` rejection;
+  evidence volume fields are used when present.
+- Capital-ladder `step_pct` scales per-position sizing for laddered strategies
+  (`capital_ladder_step_applied`), and the allocator records fill/win/drawdown
+  metrics after paper execution. Ladder promotion stays on the CLI path.
+- Option quotes outside the regular session are accepted from the last regular
+  session (up to 20h) and tagged `quote_from_prior_session`.
+
 ## Inspection
 
 Use a read-only PostgreSQL session. Never infer a current policy: there is no

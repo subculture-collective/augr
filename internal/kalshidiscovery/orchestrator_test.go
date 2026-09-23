@@ -501,3 +501,132 @@ func TestCreateOrReusePaperStrategyKeepsSingleKalshiPaperStrategy(t *testing.T) 
 		t.Fatalf("reused strategy ID = %s, want %s", second.ID, created.ID)
 	}
 }
+
+func TestRunStopsPagingOnceMaxCandidatesAccepted(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeKalshiClient{pages: []fakeKalshiPage{
+		{markets: []MarketCandidate{
+			newKalshiCandidate("KX-ZERO-1", "EVT-1", "Fresh parlay 1?", 0, 0, 0, 0, 0, 0, 12*24*time.Hour),
+			newKalshiCandidate("KX-ZERO-2", "EVT-2", "Fresh parlay 2?", 0, 0, 0, 0, 0, 0, 12*24*time.Hour),
+		}, cursor: "p2"},
+		{markets: []MarketCandidate{
+			newKalshiCandidate("KX-1", "EVT-3", "Market 1?", 0.40, 0.43, 0.56, 0.59, 5000, 3000, 12*24*time.Hour),
+			newKalshiCandidate("KX-2", "EVT-4", "Market 2?", 0.41, 0.44, 0.55, 0.58, 4800, 2800, 11*24*time.Hour),
+		}, cursor: "p3"},
+		{markets: []MarketCandidate{
+			newKalshiCandidate("KX-3", "EVT-5", "Market 3?", 0.39, 0.42, 0.57, 0.60, 4700, 2600, 10*24*time.Hour),
+		}, cursor: "p4"},
+	}}
+
+	res, err := Run(context.Background(), Config{
+		DryRun:         true,
+		FetchLimit:     500,
+		MaxDeployments: 1,
+		MinConviction:  0.55,
+		Screener:       ScreenerConfig{MaxCandidates: 2, MinVolume: 1000, MinOpenInterest: 500, MaxSpreadPct: 20, MinDaysToClose: 1},
+	}, Deps{Catalog: client})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(client.calls) != 2 || res.Pages != 2 {
+		t.Fatalf("ListMarkets calls = %d pages = %d, want paging to stop after 2 accepted candidates", len(client.calls), res.Pages)
+	}
+	if client.calls[0].Limit != maxCatalogLimit || client.calls[0].Status != "open" || client.calls[1].Cursor != "p2" {
+		t.Fatalf("ListMarkets calls = %#v", client.calls)
+	}
+	if res.FetchedAll != 4 || res.Screened != 2 || res.Rejected != 2 {
+		t.Fatalf("Run() result = %#v", res)
+	}
+	if len(res.RejectionReasons) == 0 || res.RejectionReasons[0].Count != 2 {
+		t.Fatalf("RejectionReasons = %#v, want aggregated counts", res.RejectionReasons)
+	}
+}
+
+func TestRunRecordsRejectionReasonsInRunSummary(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeKalshiClient{pages: []fakeKalshiPage{{markets: []MarketCandidate{
+		newKalshiCandidate("KX-LOW-1", "EVT-1", "Thin market 1?", 0.40, 0.43, 0.56, 0.59, 232, 10, 12*24*time.Hour),
+		newKalshiCandidate("KX-LOW-2", "EVT-2", "Thin market 2?", 0.40, 0.43, 0.56, 0.59, 12, 3, 12*24*time.Hour),
+	}}}}
+	runRepo := &fakeKalshiDiscoveryRunRepo{}
+
+	res, err := Run(context.Background(), Config{FetchLimit: 10, MaxDeployments: 1, MinConviction: 0.55, Screener: DefaultScreenerConfig()}, Deps{Catalog: client, Strategies: newKalshiStrategyRepo(), DiscoveryRuns: runRepo})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if res.Screened != 0 || res.Rejected != 2 {
+		t.Fatalf("Run() result = %#v, want all rejected", res)
+	}
+	if runRepo.lastFinished == nil {
+		t.Fatal("discovery run was not finished")
+	}
+	var summary struct {
+		RejectionReasons []ReasonCount `json:"rejection_reasons"`
+		Rejected         int           `json:"rejected"`
+		MinVolume        float64       `json:"min_volume"`
+	}
+	if err := json.Unmarshal(runRepo.lastFinished.Result.Summary, &summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.Rejected != 2 || summary.MinVolume != DefaultScreenerConfig().MinVolume {
+		t.Fatalf("summary = %#v", summary)
+	}
+	wantReasons := map[string]int{"volume below minimum": 2, "open interest below minimum": 2}
+	for _, reason := range summary.RejectionReasons {
+		if want, ok := wantReasons[reason.Reason]; ok && want == reason.Count {
+			delete(wantReasons, reason.Reason)
+		}
+	}
+	if len(wantReasons) != 0 {
+		t.Fatalf("summary rejection reasons = %#v, missing %v", summary.RejectionReasons, wantReasons)
+	}
+}
+
+func TestDeployStrategyWritesProxyFairProbabilityAndSourceReferences(t *testing.T) {
+	t.Parallel()
+
+	candidate := newKalshiCandidate("KX-PROXY", "EVT-PROXY", "Proxy market?", 0.40, 0.42, 0.57, 0.59, 5000, 3000, 12*24*time.Hour)
+	candidate.SourceURL = "https://api.elections.kalshi.com/trade-api/v2"
+	proposal, err := buildDeterministicProposal(candidate)
+	if err != nil {
+		t.Fatalf("buildDeterministicProposal() error = %v", err)
+	}
+	if proposal.Calibration != ProxyCalibration || proposal.FairProbability <= 0 || proposal.FairProbability > 1 {
+		t.Fatalf("proposal = %+v, want proxy calibration and fair probability", proposal)
+	}
+	// YES mid 0.41 with the conviction nudge stays above the mid and below 1.
+	if proposal.FairProbability < 0.41 || proposal.FairProbability > 0.60 {
+		t.Fatalf("FairProbability = %.4f, want a bounded proxy above the mid", proposal.FairProbability)
+	}
+	snapshotID := uuid.New()
+	proposal.SourceReferences = appendSourceReferences(proposal.SourceReferences, candidate, snapshotID)
+
+	repo := newKalshiStrategyRepo()
+	if _, err := DeployStrategy(context.Background(), Config{}, Deps{Strategies: repo}, candidate, proposal); err != nil {
+		t.Fatalf("DeployStrategy() error = %v", err)
+	}
+	if len(repo.created) != 1 {
+		t.Fatalf("created = %d, want 1", len(repo.created))
+	}
+	var cfg struct {
+		Meta struct {
+			FairProbability  float64  `json:"fair_probability"`
+			Calibration      string   `json:"calibration"`
+			SourceReferences []string `json:"source_references"`
+		} `json:"discovery_meta"`
+	}
+	if err := json.Unmarshal(repo.created[0].Config, &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if cfg.Meta.FairProbability != proposal.FairProbability || cfg.Meta.Calibration != ProxyCalibration {
+		t.Fatalf("discovery_meta = %+v", cfg.Meta)
+	}
+	joined := strings.Join(cfg.Meta.SourceReferences, "\n")
+	for _, want := range []string{"kalshi_market:KX-PROXY", "kalshi_market_url:https://api.elections.kalshi.com/trade-api/v2/markets/KX-PROXY", "kalshi_snapshot:" + snapshotID.String()} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("source_references = %v, missing %q", cfg.Meta.SourceReferences, want)
+		}
+	}
+}

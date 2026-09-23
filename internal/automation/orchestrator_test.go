@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -494,7 +495,7 @@ func TestJobOrchestratorDoesNotExecuteWithoutDurableRunningRow(t *testing.T) {
 	}
 }
 
-func TestJobOrchestratorJobRunHydrationFailuresDisableAll(t *testing.T) {
+func TestJobOrchestratorJobRunHydrationFailuresKeepJobsEnabledAndMarkDegraded(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		prep func(*recordingAutomationJobRunRepo)
@@ -507,15 +508,43 @@ func TestJobOrchestratorJobRunHydrationFailuresDisableAll(t *testing.T) {
 			repo := newRecordingAutomationJobRunRepo()
 			tc.prep(repo)
 			orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+			orch.hydrateRetryBackoff = 0
 			orch.Register("first", "job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
 			orch.Register("second", "job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
 			orch.hydrateFromDB()
 			for _, status := range orch.Status() {
-				if status.Enabled {
-					t.Fatalf("job %s remained enabled after %s failure", status.Name, tc.name)
+				if !status.Enabled {
+					t.Fatalf("job %s was disabled by a %s failure", status.Name, tc.name)
 				}
 			}
+			health := orch.Health()
+			if !health.Degraded || health.Reason == "" || health.Since == nil {
+				t.Fatalf("Health() = %+v, want degraded with reason", health)
+			}
+			if got := repo.failIncompleteCalls() + repo.summariesCalls(); got < hydrateAttempts {
+				t.Fatalf("hydration attempts = %d, want at least %d", got, hydrateAttempts)
+			}
 		})
+	}
+}
+
+func TestJobOrchestratorHydrationRetriesTransientFailure(t *testing.T) {
+	t.Parallel()
+
+	repo := newRecordingAutomationJobRunRepo()
+	repo.summariesErr = errors.New("transient")
+	repo.summariesFailures = 1
+	repo.summaries = []pgrepo.JobRunSummary{{JobName: "job", LastResult: "ok", RunCount: 3}}
+	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo})
+	orch.hydrateRetryBackoff = 0
+	orch.Register("job", "job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
+	orch.hydrateFromDB()
+
+	if status := singleJobStatus(t, orch, "job"); status.RunCount != 3 || !status.Enabled {
+		t.Fatalf("status after retry = %+v", status)
+	}
+	if orch.Health().Degraded {
+		t.Fatalf("Health() = %+v, want healthy after successful retry", orch.Health())
 	}
 }
 
@@ -526,7 +555,30 @@ type recordingAutomationJobRunRepo struct {
 	completeErr       error
 	failIncompleteErr error
 	summariesErr      error
+	summariesFailures int // when > 0, summariesErr is returned only this many times
 	summaries         []pgrepo.JobRunSummary
+	failIncompleteN   int
+	summariesN        int
+	stuck             []uuid.UUID
+}
+
+func (r *recordingAutomationJobRunRepo) failIncompleteCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.failIncompleteN
+}
+
+func (r *recordingAutomationJobRunRepo) summariesCalls() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.summariesN
+}
+
+func (r *recordingAutomationJobRunRepo) MarkStuck(_ context.Context, id uuid.UUID, _ time.Time, _ string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stuck = append(r.stuck, id)
+	return nil
 }
 
 func newRecordingAutomationJobRunRepo() *recordingAutomationJobRunRepo {
@@ -562,11 +614,20 @@ func (r *recordingAutomationJobRunRepo) Complete(_ context.Context, run *pgrepo.
 }
 
 func (r *recordingAutomationJobRunRepo) FailIncomplete(_ context.Context, _ time.Time, _ string) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failIncompleteN++
 	return 0, r.failIncompleteErr
 }
 
 func (r *recordingAutomationJobRunRepo) Summaries(context.Context) ([]pgrepo.JobRunSummary, error) {
-	return append([]pgrepo.JobRunSummary(nil), r.summaries...), r.summariesErr
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.summariesN++
+	if r.summariesErr != nil && (r.summariesFailures == 0 || r.summariesN <= r.summariesFailures) {
+		return nil, r.summariesErr
+	}
+	return append([]pgrepo.JobRunSummary(nil), r.summaries...), nil
 }
 
 func (r *recordingAutomationJobRunRepo) singleRun(t *testing.T) pgrepo.JobRun {
@@ -602,16 +663,200 @@ func TestJobOrchestratorRunJob_AutoDisablesAfterThreshold(t *testing.T) {
 	if status.Enabled {
 		t.Fatal("Enabled = true, want false after reaching auto-disable threshold")
 	}
+	if status.DisabledReason == "" || !strings.Contains(status.DisabledReason, "boom") || status.DisabledUntil == nil {
+		t.Fatalf("auto-disable provenance missing: %+v", status)
+	}
+	if until := time.Until(*status.DisabledUntil); until < 50*time.Minute || until > 70*time.Minute {
+		t.Fatalf("DisabledUntil = %v from now, want ~1h", until)
+	}
 }
 
-func TestAutoDisableThresholdSurvivesHydration(t *testing.T) {
+func TestJobOrchestratorAutoDisablePersistsReasonAndRearmsAfterCooldown(t *testing.T) {
 	t.Parallel()
 
-	if shouldDisableAfterHydration(autoDisableThreshold - 1) {
-		t.Fatal("below-threshold failure count should remain enabled")
+	controls := &automationJobControlRepoStub{}
+	var calls atomic.Int32
+	orch := NewJobOrchestrator(OrchestratorDeps{JobControlRepo: controls, AutoDisableCooldown: time.Hour})
+	orch.Register("job", "always fails", schedulerSpecEveryMinute(), func(context.Context) error {
+		calls.Add(1)
+		return errors.New("boom")
+	})
+	base := time.Date(2026, time.August, 6, 10, 0, 0, 0, time.UTC)
+	var nowMu sync.Mutex
+	now := base
+	orch.now = func() time.Time { nowMu.Lock(); defer nowMu.Unlock(); return now }
+	setNow := func(t time.Time) { nowMu.Lock(); now = t; nowMu.Unlock() }
+	orch.SetConsecutiveFailures("job", autoDisableThreshold-1)
+
+	job := orch.jobs["job"]
+	orch.wrapAndRun(job)
+	status := singleJobStatus(t, orch, "job")
+	if status.Enabled || status.DisabledUntil == nil || !status.DisabledUntil.Equal(base.Add(time.Hour)) {
+		t.Fatalf("after first auto-disable = %+v", status)
 	}
-	if !shouldDisableAfterHydration(autoDisableThreshold) {
-		t.Fatal("threshold failure count should hydrate disabled")
+	if len(controls.autoDisables) != 1 || controls.autoDisables[0].name != "job" || !strings.Contains(controls.autoDisables[0].reason, "boom") || !controls.autoDisables[0].until.Equal(base.Add(time.Hour)) {
+		t.Fatalf("auto-disable writes = %+v", controls.autoDisables)
+	}
+
+	// Before the cooldown elapses the tick is a no-op.
+	setNow(base.Add(30 * time.Minute))
+	orch.wrapAndRun(job)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("calls before cooldown = %d, want 1", got)
+	}
+
+	// After the cooldown the job re-arms, runs, and the failure re-disables
+	// it with a doubled cooldown.
+	setNow(base.Add(61 * time.Minute))
+	orch.SetConsecutiveFailures("job", autoDisableThreshold-1) // re-arm resets to 0; simulate history for one-run trip
+	orch.wrapAndRun(job)
+	if got := calls.Load(); got != 1 {
+		// re-arm reset ConsecutiveFailures to 0 before running, so the run happened once more
+		if got != 2 {
+			t.Fatalf("calls after cooldown = %d, want 2", got)
+		}
+	}
+	if len(controls.writes) == 0 || controls.writes[0].UpdatedBy != pgrepo.AutoRearmActor || !controls.writes[0].Enabled {
+		t.Fatalf("re-arm write missing: %+v", controls.writes)
+	}
+}
+
+func TestJobOrchestratorAutoDisableCooldownDoublesUpToMax(t *testing.T) {
+	t.Parallel()
+	orch := NewJobOrchestrator(OrchestratorDeps{})
+	for count, want := range map[int]time.Duration{1: time.Hour, 2: 2 * time.Hour, 3: 4 * time.Hour, 6: 24 * time.Hour, 10: 24 * time.Hour} {
+		if got := orch.autoDisableCooldown(count); got != want {
+			t.Fatalf("autoDisableCooldown(%d) = %s, want %s", count, got, want)
+		}
+	}
+}
+
+func TestJobOrchestratorHydratesAutoDisableProvenance(t *testing.T) {
+	t.Parallel()
+	until := time.Date(2026, time.August, 6, 12, 0, 0, 0, time.UTC)
+	controls := &automationJobControlRepoStub{details: []pgrepo.AutomationJobControlDetail{{
+		AutomationJobControl: domain.AutomationJobControl{JobName: "job", Enabled: false, UpdatedBy: pgrepo.AutoDisableActor},
+		Reason:               "5 consecutive failures",
+		AutoDisabledUntil:    &until,
+	}}}
+	orch := NewJobOrchestrator(OrchestratorDeps{JobControlRepo: controls})
+	orch.Register("job", "job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
+	orch.hydrateFromDB()
+	status := singleJobStatus(t, orch, "job")
+	if status.Enabled || status.DisabledReason != "5 consecutive failures" || status.DisabledUntil == nil || !status.DisabledUntil.Equal(until) {
+		t.Fatalf("hydrated auto-disable = %+v", status)
+	}
+}
+
+func TestJobOrchestratorStuckRunIsReportedThenAbandoned(t *testing.T) {
+	t.Parallel()
+
+	repo := newRecordingAutomationJobRunRepo()
+	release := make(chan struct{})
+	var calls atomic.Int32
+	orch := NewJobOrchestrator(OrchestratorDeps{JobRunRepo: repo, JobTimeout: time.Hour})
+	orch.Register("job", "ignores ctx", schedulerSpecEveryMinute(), func(context.Context) error {
+		calls.Add(1)
+		<-release
+		return nil
+	})
+	base := time.Date(2026, time.August, 6, 10, 0, 0, 0, time.UTC)
+	var nowMu sync.Mutex
+	now := base
+	orch.now = func() time.Time { nowMu.Lock(); defer nowMu.Unlock(); return now }
+	setNow := func(t time.Time) { nowMu.Lock(); now = t; nowMu.Unlock() }
+	job := orch.jobs["job"]
+
+	go orch.wrapAndRun(job)
+	waitForCondition(t, func() bool { return calls.Load() == 1 })
+	waitForCondition(t, func() bool { job.mu.Lock(); defer job.mu.Unlock(); return job.currentRunID != uuid.Nil })
+
+	// Within timeout + grace: ordinary overlap skip.
+	setNow(base.Add(65 * time.Minute))
+	orch.wrapAndRun(job)
+	if calls.Load() != 1 || len(repo.stuck) != 0 {
+		t.Fatalf("early overlap: calls=%d stuck=%v", calls.Load(), repo.stuck)
+	}
+
+	// Past timeout + grace: the running row is marked stuck, no new run.
+	setNow(base.Add(75 * time.Minute))
+	orch.wrapAndRun(job)
+	repo.mu.Lock()
+	stuck := len(repo.stuck)
+	repo.mu.Unlock()
+	if calls.Load() != 1 || stuck != 1 {
+		t.Fatalf("stuck phase: calls=%d stuck=%d", calls.Load(), stuck)
+	}
+
+	// Past 2x timeout: the claim is abandoned and a new run is admitted.
+	setNow(base.Add(121 * time.Minute))
+	go orch.wrapAndRun(job)
+	waitForCondition(t, func() bool { return calls.Load() == 2 })
+	status := singleJobStatus(t, orch, "job")
+	if !status.Running || status.ErrorCount != 1 || !strings.Contains(status.LastError, "timeout") {
+		t.Fatalf("abandoned status = %+v", status)
+	}
+
+	// The wedged goroutine returning must not clear the newer claim.
+	close(release)
+	time.Sleep(20 * time.Millisecond)
+	waitForCondition(t, func() bool { return !singleJobStatus(t, orch, "job").Running })
+}
+
+func waitForCondition(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func TestIsDailyOrLessFrequent(t *testing.T) {
+	t.Parallel()
+	for spec, want := range map[string]bool{
+		"30 16 * * 1-5":         true,
+		"0 9 * * *":             true,
+		"CRON_TZ=UTC 0 3 * * 0": true,
+		"*/5 * * * *":           false,
+		"0 */4 * * 1-5":         false,
+		"0,30 9 * * *":          false,
+		"@daily":                false,
+	} {
+		if got := isDailyOrLessFrequent(spec); got != want {
+			t.Fatalf("isDailyOrLessFrequent(%q) = %t, want %t", spec, got, want)
+		}
+	}
+}
+
+func TestPreviousScheduledFire(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.August, 10, 8, 0, 0, 0, easternTime) // Monday
+	prev, ok := previousScheduledFire("30 16 * * 1-5", now)
+	if !ok || !prev.Equal(time.Date(2026, time.August, 7, 16, 30, 0, 0, easternTime)) {
+		t.Fatalf("previous fire = %v ok=%t, want Friday 16:30 ET", prev, ok)
+	}
+}
+
+func TestJobOrchestratorCatchUpRunsMissedDailyJob(t *testing.T) {
+	t.Parallel()
+
+	var missed, fresh, frequent atomic.Int32
+	orch := NewJobOrchestrator(OrchestratorDeps{MissedRunCatchUpDelay: 5 * time.Millisecond})
+	daily := scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "0 3 * * *"}
+	orch.Register("missed", "daily never run", daily, func(context.Context) error { missed.Add(1); return nil })
+	orch.Register("fresh", "daily ran after last fire", daily, func(context.Context) error { fresh.Add(1); return nil })
+	orch.Register("frequent", "every minute", schedulerSpecEveryMinute(), func(context.Context) error { frequent.Add(1); return nil })
+	recent := time.Now()
+	orch.jobs["fresh"].LastRun = &recent
+	orch.jobs["fresh"].LastResult = "ok"
+
+	orch.catchUpMissedRuns()
+
+	if missed.Load() != 1 || fresh.Load() != 0 || frequent.Load() != 0 {
+		t.Fatalf("catch-up runs: missed=%d fresh=%d frequent=%d", missed.Load(), fresh.Load(), frequent.Load())
 	}
 }
 
@@ -642,10 +887,43 @@ func TestJobOrchestratorRunJob_RejectsDisabledJob(t *testing.T) {
 }
 
 type automationJobControlRepoStub struct {
-	controls []domain.AutomationJobControl
-	listErr  error
-	setErr   error
-	writes   []domain.AutomationJobControl
+	controls     []domain.AutomationJobControl
+	details      []pgrepo.AutomationJobControlDetail
+	listErr      error
+	setErr       error
+	writes       []domain.AutomationJobControl
+	autoDisables []autoDisableWrite
+}
+
+type autoDisableWrite struct {
+	name, reason string
+	until        time.Time
+}
+
+func (r *automationJobControlRepoStub) ListDetailed(ctx context.Context) ([]pgrepo.AutomationJobControlDetail, error) {
+	if r.listErr != nil {
+		return nil, r.listErr
+	}
+	if r.details != nil {
+		return append([]pgrepo.AutomationJobControlDetail(nil), r.details...), nil
+	}
+	controls, err := r.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	details := make([]pgrepo.AutomationJobControlDetail, 0, len(controls))
+	for _, control := range controls {
+		details = append(details, pgrepo.AutomationJobControlDetail{AutomationJobControl: control})
+	}
+	return details, nil
+}
+
+func (r *automationJobControlRepoStub) SetAutoDisabled(_ context.Context, name, reason string, until time.Time) error {
+	if r.setErr != nil {
+		return r.setErr
+	}
+	r.autoDisables = append(r.autoDisables, autoDisableWrite{name: name, reason: reason, until: until})
+	return nil
 }
 
 func (r *automationJobControlRepoStub) List(context.Context) ([]domain.AutomationJobControl, error) {
@@ -739,19 +1017,23 @@ func TestJobOrchestratorDurableEnableOverridesHistoricalAutoDisable(t *testing.T
 	}
 }
 
-func TestJobOrchestratorControlHydrationFailureDisablesAll(t *testing.T) {
+func TestJobOrchestratorControlHydrationFailureKeepsJobsEnabledAndMarksDegraded(t *testing.T) {
 	t.Parallel()
 
 	controls := &automationJobControlRepoStub{listErr: errors.New("database unavailable")}
 	orch := NewJobOrchestrator(OrchestratorDeps{JobControlRepo: controls})
+	orch.hydrateRetryBackoff = 0
 	orch.Register("first", "controlled job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
 	orch.Register("second", "controlled job", schedulerSpecEveryMinute(), func(context.Context) error { return nil })
 	orch.hydrateFromDB()
 
 	for _, status := range orch.Status() {
-		if status.Enabled {
-			t.Fatalf("job %s remained enabled after control hydration failure", status.Name)
+		if !status.Enabled {
+			t.Fatalf("job %s was disabled by a control hydration failure", status.Name)
 		}
+	}
+	if health := orch.Health(); !health.Degraded || !strings.Contains(health.Reason, "database unavailable") {
+		t.Fatalf("Health() = %+v", health)
 	}
 }
 
@@ -1084,8 +1366,8 @@ func TestJobOrchestratorHydratesLatestOutcomeWithRetainedFailureStreak(t *testin
 	}{
 		{name: "dependency skip", lastResult: "skipped", lastError: "stale failure", lastDetail: "dependency upstream still running", wantLastResult: "skipped: dependency upstream still running", enabled: true},
 		{name: "legacy explicit dependency skip", lastResult: "skipped: dependency upstream still running", wantLastResult: "skipped: dependency upstream still running", enabled: true},
-		{name: "ordinary skip", lastResult: "skipped", lastError: "market calendar unavailable", lastDetail: "market closed", wantLastResult: "skipped", wantLastError: "market calendar unavailable", enabled: false},
-		{name: "error", lastResult: "error", wantLastResult: "error", enabled: false},
+		{name: "ordinary skip", lastResult: "skipped", lastError: "market calendar unavailable", lastDetail: "market closed", wantLastResult: "skipped", wantLastError: "market calendar unavailable", enabled: true},
+		{name: "error", lastResult: "error", wantLastResult: "error", enabled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1321,7 +1603,7 @@ func TestJobOrchestratorRegisterAllAddsKalshiDiscovery(t *testing.T) {
 	if gotCfg.DryRun {
 		t.Fatal("Kalshi discovery cfg.DryRun = true, want false")
 	}
-	if gotCfg.FetchLimit != 50 || gotCfg.MaxDeployments != 1 || gotCfg.MinConviction != 0.70 {
+	if gotCfg.FetchLimit != 500 || gotCfg.MaxDeployments != 1 || gotCfg.MinConviction != 0.70 {
 		t.Fatalf("Kalshi discovery cfg = %#v, want conservative paper settings", gotCfg)
 	}
 	if gotCfg.Screener.MaxCandidates != 15 || gotCfg.Screener.MinVolume != 1000 || gotCfg.Screener.MinOpenInterest != 500 || gotCfg.Screener.MaxSpreadPct != 12 || gotCfg.Screener.MinDaysToClose != 3 {

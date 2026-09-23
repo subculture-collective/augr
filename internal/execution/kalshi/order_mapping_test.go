@@ -1,6 +1,7 @@
 package kalshi
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -43,10 +44,10 @@ func TestMapCreateOrderRequestYesLimitBuy(t *testing.T) {
 	}
 }
 
-func TestMapCreateOrderRequestSellMarket(t *testing.T) {
+func TestMapCreateOrderRequestRejectsMarketOrdersAtPlanning(t *testing.T) {
 	t.Parallel()
 
-	req, err := mapCreateOrderRequest(&domain.Order{
+	_, err := mapCreateOrderRequest(&domain.Order{
 		ClientOrderID:  uuid.NewString(),
 		Ticker:         "KX-EXAMPLE",
 		Side:           domain.OrderSideSell,
@@ -54,11 +55,8 @@ func TestMapCreateOrderRequestSellMarket(t *testing.T) {
 		Quantity:       1,
 		PredictionSide: "YES",
 	})
-	if err != nil {
-		t.Fatalf("mapCreateOrderRequest() error = %v", err)
-	}
-	if req.Action != "sell" || req.Type != "market" || req.Side != "yes" || req.Count != 1 {
-		t.Fatalf("request = %#v", req)
+	if err == nil || !strings.Contains(err.Error(), "market orders are disabled") {
+		t.Fatalf("mapCreateOrderRequest() error = %v, want market orders rejected before submit", err)
 	}
 }
 
@@ -160,7 +158,9 @@ func TestMapOrderStatus(t *testing.T) {
 		{name: "partial_alias", raw: " partial ", want: domain.OrderStatusPartial},
 		{name: "cancelled_canceled", raw: " canceled ", want: domain.OrderStatusCancelled},
 		{name: "cancelled_alias", raw: "cancelled_by_user", want: domain.OrderStatusCancelled},
+		{name: "cancelled_expired", raw: "expired", want: domain.OrderStatusCancelled},
 		{name: "rejected", raw: "rejected", want: domain.OrderStatusRejected},
+		{name: "unknown_treated_as_submitted", raw: "some_future_status", want: domain.OrderStatusSubmitted},
 	}
 
 	for _, tc := range cases {
@@ -179,10 +179,10 @@ func TestMapOrderStatus(t *testing.T) {
 	}
 }
 
-func TestMapOrderStatusRejectsUnsupportedStatus(t *testing.T) {
+func TestMapOrderStatusRejectsEmptyStatus(t *testing.T) {
 	t.Parallel()
 
-	if _, err := mapOrderStatus("unknown"); err == nil {
-		t.Fatal("mapOrderStatus() error = nil, want error")
+	if _, err := mapOrderStatus("  "); err == nil {
+		t.Fatal("mapOrderStatus() error = nil, want error for empty status")
 	}
 }

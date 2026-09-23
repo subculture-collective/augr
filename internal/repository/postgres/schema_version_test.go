@@ -10,6 +10,7 @@ import (
 
 type fakeSchemaVersionRow struct {
 	version int
+	dirty   bool
 	err     error
 }
 
@@ -17,14 +18,19 @@ func (r fakeSchemaVersionRow) Scan(dest ...any) error {
 	if r.err != nil {
 		return r.err
 	}
-	if len(dest) != 1 {
+	if len(dest) != 2 {
 		return errors.New("unexpected scan arity")
 	}
 	ptr, ok := dest[0].(*int)
 	if !ok {
 		return errors.New("unexpected scan target")
 	}
+	dirtyPtr, ok := dest[1].(*bool)
+	if !ok {
+		return errors.New("unexpected dirty scan target")
+	}
 	*ptr = r.version
+	*dirtyPtr = r.dirty
 	return nil
 }
 
@@ -61,7 +67,7 @@ func TestSchemaVersionCompatibilityRequiresRenamedOperatorUser(t *testing.T) {
 	tests := []struct {
 		version int
 		want    bool
-	}{{110, false}, {111, false}, {112, false}, {113, false}, {114, true}, {115, false}}
+	}{{113, false}, {114, false}, {115, false}, {116, false}, {117, true}, {118, false}}
 	for _, tt := range tests {
 		if got := IsSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("IsSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
@@ -103,5 +109,17 @@ func TestCurrentSchemaVersion_ReadError(t *testing.T) {
 	}
 	if !errors.Is(err, readErr) {
 		t.Fatalf("currentSchemaVersion() error = %v, want wrapped readErr", err)
+	}
+}
+
+func TestCurrentSchemaVersion_DirtyFailsStartup(t *testing.T) {
+	version, err := currentSchemaVersion(context.Background(), fakeSchemaVersionQuerier{
+		row: fakeSchemaVersionRow{version: 117, dirty: true},
+	})
+	if !errors.Is(err, ErrSchemaMigrationDirty) {
+		t.Fatalf("currentSchemaVersion() error = %v, want ErrSchemaMigrationDirty", err)
+	}
+	if version != 117 {
+		t.Fatalf("currentSchemaVersion() = %d, want 117 alongside the dirty error", version)
 	}
 }

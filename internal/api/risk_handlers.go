@@ -2,10 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -20,13 +20,27 @@ type RiskBreakerLister interface {
 	ListTripped(ctx context.Context) ([]domain.RiskBreakerState, error)
 }
 
+// RiskStatusResponse extends the engine status with kill-switch restore
+// diagnostics so operators can tell a fail-closed startup from an operator halt.
+type RiskStatusResponse struct {
+	risk.EngineStatus
+	KillSwitchRestoreFailed bool   `json:"kill_switch_restore_failed,omitempty"`
+	KillSwitchRestoreError  string `json:"kill_switch_restore_error,omitempty"`
+}
+
 func (s *Server) handleRiskStatus(w http.ResponseWriter, r *http.Request) {
 	status, err := s.risk.GetStatus(r.Context())
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to get risk status", ErrCodeInternal)
 		return
 	}
-	respondJSON(w, http.StatusOK, status)
+	resp := RiskStatusResponse{EngineStatus: status}
+	if reader, ok := s.risk.(KillSwitchStateReader); ok {
+		state := reader.KillSwitchState()
+		resp.KillSwitchRestoreFailed = state.RestoreFailed
+		resp.KillSwitchRestoreError = state.RestoreError
+	}
+	respondJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleKillSwitchToggle(w http.ResponseWriter, r *http.Request) {
@@ -147,13 +161,16 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	})
 }
 
+// requireAdminKey checks the X-Admin-Key header against the key captured at
+// server construction. The comparison is constant-time; an unset key disables
+// the endpoint with 503 rather than accepting any header value.
 func (s *Server) requireAdminKey(w http.ResponseWriter, r *http.Request) bool {
-	adminKey := os.Getenv("ADMIN_API_KEY")
-	if adminKey == "" {
-		respondError(w, http.StatusServiceUnavailable, "ADMIN_API_KEY not configured", ErrCodeNotImplemented)
+	if s.adminAPIKey == "" {
+		respondError(w, http.StatusServiceUnavailable, "ADMIN_API_KEY not configured: kill-switch deactivate and breaker reset are unavailable until it is set and the service restarted", ErrCodeNotImplemented)
 		return false
 	}
-	if r.Header.Get("X-Admin-Key") != adminKey {
+	presented := r.Header.Get("X-Admin-Key")
+	if subtle.ConstantTimeCompare([]byte(presented), []byte(s.adminAPIKey)) != 1 {
 		respondError(w, http.StatusUnauthorized, "admin key required", ErrCodeUnauthorized)
 		return false
 	}

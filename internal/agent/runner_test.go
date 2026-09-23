@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/llm/parse"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 )
@@ -31,6 +33,7 @@ type runnerSpyPersister struct {
 	eventHook    func(context.Context, *domain.AgentEvent)
 	receipt      *repository.PipelineRunFinalizationReceipt
 	finalizeHook func(context.Context, repository.PipelineRunFinalization) error
+	events       []AgentEventKind
 }
 
 type persistedDecision struct {
@@ -204,7 +207,18 @@ func (p *runnerSpyPersister) PersistEvent(ctx context.Context, event *domain.Age
 	if p.eventHook != nil {
 		p.eventHook(ctx, event)
 	}
+	if event != nil {
+		p.mu.Lock()
+		p.events = append(p.events, AgentEventKind(event.EventKind))
+		p.mu.Unlock()
+	}
 	return p.eventErr
+}
+
+func (p *runnerSpyPersister) eventKinds() []AgentEventKind {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]AgentEventKind(nil), p.events...)
 }
 
 func TestRunnerRun_FinalPhaseCancellationCannotComplete(t *testing.T) {
@@ -462,18 +476,162 @@ func TestRunnerRunStrategy_AnalysisFailureReturnsWarningButCompletes(t *testing.
 	if err != nil {
 		t.Fatalf("RunStrategy() error = %v, want nil", err)
 	}
-	if len(result.Warnings) != 1 {
-		t.Fatalf("warnings = %d, want 1", len(result.Warnings))
+	// The news analyst is a default required role, so its failure yields a
+	// participant warning plus a HOLD conversion instead of a failed run.
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings = %+v, want analysis failure and hold", result.Warnings)
 	}
 	if result.Warnings[0].Role != AgentRoleNewsAnalyst {
 		t.Fatalf("warning role = %s, want %s", result.Warnings[0].Role, AgentRoleNewsAnalyst)
 	}
-	if result.Run.Status != domain.PipelineStatusCompleted {
-		t.Fatalf("run status = %s, want completed", result.Run.Status)
+	if !strings.Contains(result.Warnings[1].Message, HoldReasonRequiredAnalystMissing) {
+		t.Fatalf("hold warning = %+v", result.Warnings[1])
+	}
+	if result.Run.Status != domain.PipelineStatusCompleted || result.Signal != domain.PipelineSignalHold {
+		t.Fatalf("run status/signal = %s/%s, want completed HOLD", result.Run.Status, result.Signal)
 	}
 	if got := result.State.AnalystReports[AgentRoleMarketAnalyst]; got != "market-report" {
 		t.Fatalf("market report = %q, want market-report", got)
 	}
+	if got := persister.eventKinds(); !containsEventKind(got, AgentEventKindPipelineHold) {
+		t.Fatalf("persisted event kinds = %v, want pipeline_hold", got)
+	}
+}
+
+func TestRunnerRunStrategy_OptionalAnalystFailureCompletesNormally(t *testing.T) {
+	persister := newRunnerSpyPersister()
+	def := defaultRunnerDefinition()
+	def.Analysis = append(def.Analysis, stubAnalysisAgent{name: "social", role: AgentRoleSocialMediaAnalyst, fn: func(context.Context, AnalysisInput) (AnalysisOutput, error) {
+		return AnalysisOutput{}, errors.New("social provider down")
+	}})
+	runner := NewRunner(def, Dependencies{Persister: persister})
+
+	result, err := runner.RunStrategy(context.Background(), strategyWithDebateRounds(t, "AAPL", 1), GlobalSettings{})
+	if err != nil {
+		t.Fatalf("RunStrategy() error = %v", err)
+	}
+	if len(result.Warnings) != 1 || result.Signal != domain.PipelineSignalBuy {
+		t.Fatalf("warnings=%d signal=%s, want one warning and BUY", len(result.Warnings), result.Signal)
+	}
+}
+
+func TestRunnerRunStrategy_JudgeParseFailureHoldsInsteadOfFailing(t *testing.T) {
+	persister := newRunnerSpyPersister()
+	def := defaultRunnerDefinition()
+	def.Risk.Judge = stubRiskJudge{name: "risk-manager", role: AgentRoleRiskManager, fn: func(_ context.Context, input RiskJudgeInput) (RiskJudgeOutput, error) {
+		return RiskJudgeOutput{StoredSignal: "not json", TradingPlan: input.TradingPlan},
+			fmt.Errorf("risk_manager: invalid structured output: %w", &parse.ParseError{Stage: "decode", Err: errors.New("failed to parse JSON")})
+	}}
+	runner := NewRunner(def, Dependencies{Persister: persister})
+
+	result, err := runner.RunStrategy(context.Background(), strategyWithDebateRounds(t, "AAPL", 1), GlobalSettings{})
+	if err != nil {
+		t.Fatalf("RunStrategy() error = %v, want HOLD completion", err)
+	}
+	if result.Run.Status != domain.PipelineStatusCompleted || result.Signal != domain.PipelineSignalHold {
+		t.Fatalf("status/signal = %s/%s, want completed HOLD", result.Run.Status, result.Signal)
+	}
+	if result.State.TradingPlan.PositionSize != 0 || result.State.TradingPlan.Action != PipelineSignalHold {
+		t.Fatalf("plan = %+v, want zero-size HOLD", result.State.TradingPlan)
+	}
+	found := false
+	for _, warning := range result.Warnings {
+		if warning.Phase == PhaseRiskDebate && strings.Contains(warning.Message, HoldReasonStructuredOutput) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %+v, want structured-output hold", result.Warnings)
+	}
+}
+
+func TestRunnerRunStrategy_NonParseJudgeFailureStillFails(t *testing.T) {
+	persister := newRunnerSpyPersister()
+	def := defaultRunnerDefinition()
+	def.Risk.Judge = stubRiskJudge{name: "risk-manager", role: AgentRoleRiskManager, fn: func(context.Context, RiskJudgeInput) (RiskJudgeOutput, error) {
+		return RiskJudgeOutput{}, errors.New("provider unavailable")
+	}}
+	runner := NewRunner(def, Dependencies{Persister: persister})
+
+	result, err := runner.RunStrategy(context.Background(), strategyWithDebateRounds(t, "AAPL", 1), GlobalSettings{})
+	if err == nil || result.Run.Status != domain.PipelineStatusFailed {
+		t.Fatalf("err=%v status=%s, want failed run", err, result.Run.Status)
+	}
+}
+
+func TestRunnerRunStrategy_ExecutionGateRejectionHolds(t *testing.T) {
+	persister := newRunnerSpyPersister()
+	def := defaultRunnerDefinition()
+	// Risk/reward 1.0 (< 1.5) with otherwise valid ordering.
+	def.Risk.Judge = stubRiskJudge{name: "risk-manager", role: AgentRoleRiskManager, fn: func(_ context.Context, input RiskJudgeInput) (RiskJudgeOutput, error) {
+		plan := input.TradingPlan
+		plan.StopLoss, plan.TakeProfit = 90, 110
+		return RiskJudgeOutput{FinalSignal: FinalSignal{Signal: PipelineSignalBuy, Confidence: 0.9}, StoredSignal: `{"action":"buy"}`, TradingPlan: plan}, nil
+	}}
+	runner := NewRunner(def, Dependencies{Persister: persister})
+
+	result, err := runner.RunStrategy(context.Background(), strategyWithDebateRounds(t, "AAPL", 1), GlobalSettings{})
+	if err != nil {
+		t.Fatalf("RunStrategy() error = %v, want HOLD completion", err)
+	}
+	if result.Run.Status != domain.PipelineStatusCompleted || result.Signal != domain.PipelineSignalHold {
+		t.Fatalf("status/signal = %s/%s, want completed HOLD", result.Run.Status, result.Signal)
+	}
+	if !strings.Contains(result.State.TradingPlan.Rationale, "risk/reward") {
+		t.Fatalf("rationale = %q, want gate reason", result.State.TradingPlan.Rationale)
+	}
+	if got := persister.eventKinds(); !containsEventKind(got, AgentEventKindPipelineHold) {
+		t.Fatalf("persisted event kinds = %v, want pipeline_hold", got)
+	}
+}
+
+func TestRunnerPrepareClampsPipelineBudgetAndDerivesDebateTimeout(t *testing.T) {
+	runner := NewRunner(defaultRunnerDefinition(), Dependencies{
+		Persister:           newRunnerSpyPersister(),
+		LLMCallTimeout:      30 * time.Minute,
+		MaxPipelineDuration: 2 * time.Hour,
+	})
+	prepared, err := runner.Prepare(strategyWithDebateRounds(t, "AAPL", 3), GlobalSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Runtime.PipelineTimeout != 2*time.Hour {
+		t.Fatalf("PipelineTimeout = %s, want clamped 2h", prepared.Runtime.PipelineTimeout)
+	}
+	// One debater per stage: (1 debater + judge) * 30m = 60m, equal to the
+	// configured 3600s so the smaller of the two (60m) applies.
+	if prepared.Runtime.DebateTimeout != time.Hour {
+		t.Fatalf("DebateTimeout = %s, want 1h", prepared.Runtime.DebateTimeout)
+	}
+
+	unclamped := NewRunner(defaultRunnerDefinition(), Dependencies{Persister: newRunnerSpyPersister()})
+	preparedDefault, err := unclamped.Prepare(strategyWithDebateRounds(t, "AAPL", 3), GlobalSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preparedDefault.Runtime.PipelineTimeout <= 2*time.Hour {
+		t.Fatalf("unclamped PipelineTimeout = %s, want derived formula above 2h", preparedDefault.Runtime.PipelineTimeout)
+	}
+}
+
+func TestRunnerDefaultDebateRoundsIsOne(t *testing.T) {
+	runner := NewRunner(defaultRunnerDefinition(), Dependencies{Persister: newRunnerSpyPersister()})
+	prepared, err := runner.Prepare(domain.Strategy{ID: uuid.New(), Ticker: "AAPL"}, GlobalSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Runtime.ResearchRounds != 1 || prepared.Runtime.RiskRounds != 1 {
+		t.Fatalf("rounds = %d/%d, want 1/1", prepared.Runtime.ResearchRounds, prepared.Runtime.RiskRounds)
+	}
+}
+
+func containsEventKind(kinds []AgentEventKind, want AgentEventKind) bool {
+	for _, kind := range kinds {
+		if kind == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunnerRunStrategy_RiskJudgeUpdatesCanonicalSignalAndPlan(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -309,4 +310,72 @@ func newTestClient() *Client {
 	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
 	client.SetL2Auth("0x0000000000000000000000000000000000000001", "test-key-id", validSecretKeyBase64(), "test-passphrase")
 	return client
+}
+
+func TestClientSignsPathWithoutQueryString(t *testing.T) {
+	t.Parallel()
+
+	fixed := time.Unix(1712000000, 0)
+	var gotSignature, gotQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSignature = r.Header.Get("POLY_SIGNATURE")
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("test-key-id", validSecretKeyBase64(), discardLogger())
+	client.SetL2Auth("0x0000000000000000000000000000000000000001", "test-key-id", validSecretKeyBase64(), "test-passphrase")
+	client.SetAPIBaseURL(server.URL)
+	client.setNowFunc(func() time.Time { return fixed })
+
+	if _, err := client.Get(context.Background(), "/v1/orders", url.Values{"market": []string{"btc-100k"}, "dry": []string{"1"}}); err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if gotQuery == "" || !strings.Contains(gotQuery, "market=btc-100k") {
+		t.Fatalf("request query = %q, want query preserved on the URL", gotQuery)
+	}
+	want, err := polyL2Signature(validSecretKeyBase64(), "1712000000", http.MethodGet, "/v1/orders", nil)
+	if err != nil {
+		t.Fatalf("polyL2Signature() error = %v", err)
+	}
+	if gotSignature != want {
+		t.Fatalf("POLY_SIGNATURE = %q, want path-only signature %q", gotSignature, want)
+	}
+}
+
+func TestDecodeL2SecretAcceptsURLSafeAndStandardBase64WithoutTruncation(t *testing.T) {
+	t.Parallel()
+
+	raw := make([]byte, 64)
+	for i := range raw {
+		raw[i] = byte(255 - i)
+	}
+	urlSafe := base64.URLEncoding.EncodeToString(raw)
+	standard := base64.StdEncoding.EncodeToString(raw)
+	rawURL := base64.RawURLEncoding.EncodeToString(raw)
+	for _, encoded := range []string{urlSafe, standard, rawURL} {
+		decoded, err := decodeL2Secret(encoded)
+		if err != nil {
+			t.Fatalf("decodeL2Secret(%q) error = %v", encoded, err)
+		}
+		if len(decoded) != 64 || string(decoded) != string(raw) {
+			t.Fatalf("decodeL2Secret(%q) = %d bytes, want untruncated 64", encoded, len(decoded))
+		}
+	}
+	if _, err := decodeL2Secret("   "); err == nil {
+		t.Fatal("decodeL2Secret() accepted empty secret")
+	}
+}
+
+func TestClientSetSignatureType(t *testing.T) {
+	t.Parallel()
+
+	client := NewClient("k", "s", discardLogger())
+	if err := client.SetSignatureType(2); err != nil || client.SignatureType() != 2 {
+		t.Fatalf("SetSignatureType(2) = %v, type = %d", err, client.SignatureType())
+	}
+	if err := client.SetSignatureType(3); err == nil {
+		t.Fatal("SetSignatureType(3) accepted out-of-range value")
+	}
 }

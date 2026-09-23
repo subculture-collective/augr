@@ -209,7 +209,7 @@ func TestAllocatorRespectsRunAndDayCaps(t *testing.T) {
 	}
 }
 
-func TestAllocatorCapsEventMarketsAtTwentyFive(t *testing.T) {
+func TestAllocatorCapsEventMarketsAtConfiguredNotional(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 6, 19, 15, 0, 0, 0, time.UTC)
@@ -230,8 +230,27 @@ func TestAllocatorCapsEventMarketsAtTwentyFive(t *testing.T) {
 		ExpiresAt:        now.Add(1 * time.Hour),
 	}}, PortfolioState{Equity: 100000, BuyingPower: 100000}, cfg)
 
+	// Default cap is max(25, 0.1% of equity) = 100 at 100k equity.
+	if got := res.Decisions[0].NotionalUSD; math.Abs(got-100) > 1e-9 {
+		t.Fatalf("notional = %v, want 100", got)
+	}
+	cfg.EventMarketMaxNotionalUSD = 25
+	res = AllocateShadow([]domain.Opportunity{{
+		ID:               uuid.New(),
+		StrategyID:       uuid.New(),
+		MarketType:       domain.MarketTypeKalshi,
+		Ticker:           "ELECTION",
+		Status:           domain.OpportunityStatusQueued,
+		Confidence:       0.98,
+		EdgePct:          0.12,
+		LiquidityUSD:     20_000,
+		SpreadPct:        0.01,
+		ProposedNotional: 100,
+		CreatedAt:        now,
+		ExpiresAt:        now.Add(1 * time.Hour),
+	}}, PortfolioState{Equity: 100000, BuyingPower: 100000}, cfg)
 	if got := res.Decisions[0].NotionalUSD; math.Abs(got-25) > 1e-9 {
-		t.Fatalf("notional = %v, want 25", got)
+		t.Fatalf("configured notional = %v, want 25", got)
 	}
 }
 

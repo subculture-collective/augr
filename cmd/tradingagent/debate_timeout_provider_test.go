@@ -90,11 +90,11 @@ func TestBuildRunnerDefinition_UsesEnvBoundedDebateTimeoutFallback(t *testing.T)
 		},
 	}
 
-	if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 5*time.Second {
+	if got := effectiveDebateCallTimeout(30*time.Second, 0, resolved); got != 5*time.Second {
 		t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 5*time.Second)
 	}
 
-	definition, err := buildRunnerDefinition(captureProvider{}, "openai", resolved, 30*time.Second, nil, slogDiscardLogger())
+	definition, err := buildRunnerDefinition(captureProvider{}, "openai", resolved, 30*time.Second, 0, nil, slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("buildRunnerDefinition() error = %v", err)
 	}
@@ -109,52 +109,52 @@ func TestBuildRunnerDefinition_UsesEnvBoundedDebateTimeoutFallback(t *testing.T)
 
 func TestEffectiveDebateCallTimeout(t *testing.T) {
 	t.Run("uses llm timeout default when no overrides", func(t *testing.T) {
-		t.Setenv("LLM_DEBATE_TIMEOUT", "")
+		debateTimeout := time.Duration(0)
 
 		resolved := agent.ResolvedConfig{}
-		if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 30*time.Second {
+		if got := effectiveDebateCallTimeout(30*time.Second, debateTimeout, resolved); got != 30*time.Second {
 			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 30*time.Second)
 		}
 	})
 
 	t.Run("uses env override when below cap", func(t *testing.T) {
-		t.Setenv("LLM_DEBATE_TIMEOUT", "45s")
+		debateTimeout := mustParseDuration(t, "45s")
 
 		resolved := agent.ResolvedConfig{
 			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 120},
 		}
-		if got := effectiveDebateCallTimeout(90*time.Second, resolved); got != 45*time.Second {
+		if got := effectiveDebateCallTimeout(90*time.Second, debateTimeout, resolved); got != 45*time.Second {
 			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 45*time.Second)
 		}
 	})
 
 	t.Run("uses env override when strategy override absent", func(t *testing.T) {
-		t.Setenv("LLM_DEBATE_TIMEOUT", "45s")
+		debateTimeout := mustParseDuration(t, "45s")
 
 		resolved := agent.ResolvedConfig{}
-		if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 45*time.Second {
+		if got := effectiveDebateCallTimeout(30*time.Second, debateTimeout, resolved); got != 45*time.Second {
 			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 45*time.Second)
 		}
 	})
 
 	t.Run("env override beats llm timeout when below cap", func(t *testing.T) {
-		t.Setenv("LLM_DEBATE_TIMEOUT", "45s")
+		debateTimeout := mustParseDuration(t, "45s")
 
 		resolved := agent.ResolvedConfig{
 			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 600},
 		}
-		if got := effectiveDebateCallTimeout(30*time.Second, resolved); got != 45*time.Second {
+		if got := effectiveDebateCallTimeout(30*time.Second, debateTimeout, resolved); got != 45*time.Second {
 			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 45*time.Second)
 		}
 	})
 
 	t.Run("caps timeout to half round timeout when above cap", func(t *testing.T) {
-		t.Setenv("LLM_DEBATE_TIMEOUT", "120s")
+		debateTimeout := mustParseDuration(t, "120s")
 
 		resolved := agent.ResolvedConfig{
 			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 120},
 		}
-		if got := effectiveDebateCallTimeout(90*time.Second, resolved); got != 60*time.Second {
+		if got := effectiveDebateCallTimeout(90*time.Second, debateTimeout, resolved); got != 60*time.Second {
 			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 60*time.Second)
 		}
 	})
@@ -163,8 +163,17 @@ func TestEffectiveDebateCallTimeout(t *testing.T) {
 		resolved := agent.ResolvedConfig{
 			PipelineConfig: agent.ResolvedPipelineConfig{DebateTimeoutSeconds: 600},
 		}
-		if got := effectiveDebateCallTimeout(300*time.Second, resolved); got != 300*time.Second {
+		if got := effectiveDebateCallTimeout(300*time.Second, 0, resolved); got != 300*time.Second {
 			t.Fatalf("effectiveDebateCallTimeout() = %s, want %s", got, 300*time.Second)
 		}
 	})
+}
+
+func mustParseDuration(t *testing.T, raw string) time.Duration {
+	t.Helper()
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		t.Fatalf("parse duration %q: %v", raw, err)
+	}
+	return d
 }

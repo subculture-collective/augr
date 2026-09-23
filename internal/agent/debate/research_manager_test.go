@@ -429,27 +429,29 @@ func TestParseInvestmentPlanWithInlineCodeFence(t *testing.T) {
 	}
 }
 
-func TestParseInvestmentPlanMissingKeyEvidence(t *testing.T) {
+// Empty evidence arrays are accepted; the judge logs a warning instead of
+// discarding an otherwise valid plan.
+func TestParseInvestmentPlanAcceptsMissingKeyEvidence(t *testing.T) {
 	input := `{"direction": "buy", "conviction": 5, "key_evidence": [], "acknowledged_risks": ["risk"], "rationale": "test"}`
 
-	_, err := ParseInvestmentPlan(input)
-	if err == nil {
-		t.Fatal("ParseInvestmentPlan() error = nil, want non-nil for missing key_evidence")
+	plan, err := ParseInvestmentPlan(input)
+	if err != nil {
+		t.Fatalf("ParseInvestmentPlan() error = %v, want empty key_evidence accepted", err)
 	}
-	if got := err.Error(); !contains(got, "missing required field: key_evidence") {
-		t.Fatalf("error = %q, want it to contain %q", got, "missing required field: key_evidence")
+	if len(plan.KeyEvidence) != 0 || plan.Direction != "buy" {
+		t.Fatalf("plan = %+v", plan)
 	}
 }
 
-func TestParseInvestmentPlanMissingAcknowledgedRisks(t *testing.T) {
+func TestParseInvestmentPlanAcceptsMissingAcknowledgedRisks(t *testing.T) {
 	input := `{"direction": "buy", "conviction": 5, "key_evidence": ["evidence"], "acknowledged_risks": [], "rationale": "test"}`
 
-	_, err := ParseInvestmentPlan(input)
-	if err == nil {
-		t.Fatal("ParseInvestmentPlan() error = nil, want non-nil for missing acknowledged_risks")
+	plan, err := ParseInvestmentPlan(input)
+	if err != nil {
+		t.Fatalf("ParseInvestmentPlan() error = %v, want empty acknowledged_risks accepted", err)
 	}
-	if got := err.Error(); !contains(got, "missing required field: acknowledged_risks") {
-		t.Fatalf("error = %q, want it to contain %q", got, "missing required field: acknowledged_risks")
+	if len(plan.AcknowledgedRisks) != 0 {
+		t.Fatalf("plan = %+v", plan)
 	}
 }
 

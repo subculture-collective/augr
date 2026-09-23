@@ -294,3 +294,84 @@ func reconSHA256(value []byte) string {
 	digest := sha256.Sum256(value)
 	return hex.EncodeToString(digest[:])
 }
+
+// internalLedgerHorizon is the fill horizon recorded on internal-ledger
+// self-reconciliation snapshots. No fills are compared, so it only has to
+// precede the checkpoint as-of.
+const internalLedgerHorizon = 24 * time.Hour
+
+// InternalLedgerReconciliationRecorder is implemented by the projection
+// repository so the projection-refresh job can attest the internal ledger
+// through its existing dependency without a new orchestrator field.
+type InternalLedgerReconciliationRecorder interface {
+	RecordInternalLedgerReconciliation(context.Context, uuid.UUID, uuid.UUID, time.Time) (*venuerecon.Run, error)
+}
+
+// RecordInternalLedgerReconciliation writes the venue reconciliation graph for
+// one internal-ledger checkpoint: reviewed policy, provider self-capture, local
+// snapshot bound to the checkpoint, and the run. It fails closed for any
+// account that is not venue "internal" without an external account ID, so
+// broker-backed accounts keep requiring a real provider capture.
+func (repo *ProjectionRepo) RecordInternalLedgerReconciliation(ctx context.Context, accountID, checkpointID uuid.UUID, now time.Time) (*venuerecon.Run, error) {
+	if repo == nil || repo.pool == nil || accountID == uuid.Nil || checkpointID == uuid.Nil {
+		return nil, fmt.Errorf("postgres: internal ledger reconciliation requires repository, account, and checkpoint")
+	}
+	var venueName string
+	var externalAccountID *string
+	if err := repo.pool.QueryRow(ctx, `SELECT venue,external_account_id FROM accounts WHERE id=$1`, accountID).Scan(&venueName, &externalAccountID); err != nil {
+		return nil, fmt.Errorf("postgres: load internal ledger account: %w", err)
+	}
+	if venueName != string(venuerecon.InternalLedgerProvider) || (externalAccountID != nil && *externalAccountID != "") {
+		return nil, fmt.Errorf("postgres: account %s is not the internal ledger venue; external venues require a provider capture", accountID)
+	}
+	checkpoint, err := repo.GetProjectionCheckpointByID(ctx, checkpointID)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load internal ledger checkpoint: %w", err)
+	}
+	if checkpoint.AccountID != accountID {
+		return nil, fmt.Errorf("postgres: checkpoint %s does not belong to account %s", checkpointID, accountID)
+	}
+	rows, err := repo.pool.Query(ctx, `SELECT id FROM ledger_transactions
+		WHERE account_id=$1 AND effective_at<=$3 AND observed_at<=$3
+		AND (effective_at,observed_at,id)<=(SELECT effective_at,observed_at,id FROM ledger_transactions WHERE id=$2 AND account_id=$1)
+		ORDER BY effective_at,observed_at,id`, accountID, checkpoint.ThroughTransactionID, checkpoint.AsOf)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load internal ledger membership: %w", err)
+	}
+	transactionIDs := make([]uuid.UUID, 0, checkpoint.TransactionCount)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		transactionIDs = append(transactionIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	createdAt := now.UTC().Truncate(time.Microsecond)
+	reconciliation, err := venuerecon.NewInternalLedgerReconciliation(venuerecon.InternalLedgerInput{
+		AccountID: accountID, Checkpoint: checkpoint, TransactionIDs: transactionIDs,
+		HorizonStart: checkpoint.AsOf.Add(-internalLedgerHorizon), CapturedAt: createdAt,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("postgres: build internal ledger reconciliation: %w", err)
+	}
+	recon := NewVenueReconciliationRepo(repo.pool)
+	artifact, err := reconciliation.Policy.NewArtifact(createdAt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := recon.RegisterVenueReconciliationPolicy(ctx, artifact); err != nil {
+		return nil, err
+	}
+	if err := recon.RecordVenueProviderSnapshot(ctx, reconciliation.Provider, createdAt); err != nil {
+		return nil, err
+	}
+	if err := recon.RecordVenueLocalSnapshot(ctx, reconciliation.Local, createdAt); err != nil {
+		return nil, err
+	}
+	return recon.RecordVenueReconciliationRun(ctx, reconciliation.Run, createdAt)
+}

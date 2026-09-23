@@ -51,7 +51,9 @@ func (o *JobOrchestrator) runPromotionEvaluation(ctx context.Context) error {
 	if snapshot.ProjectionWorkPending != 0 || snapshot.ProjectionWorkProcessing != 0 || snapshot.ProjectionWorkRetrying != 0 || snapshot.ProjectionWorkDegraded != 0 {
 		unavailable = append(unavailable, "projection_work_not_terminal")
 	}
+	paperPolicy, paperEvidence := o.promotionPaperValidation(ctx, accountID, scopeID, generatedAt)
 	readiness := promotion.EvaluateReadiness(promotion.ReadinessInput{
+		PaperValidation: paperEvidence, PaperValidationPolicy: paperPolicy,
 		ConfiguredAccountID: accountID, Account: account, ScopeID: scopeID, ScopeAccountID: inventory.ScopeAccountID,
 		EvidenceImmutable: inventory.ScopedArtifacts > 0, ScopedArtifacts: inventory.ScopedArtifacts, LegacyArtifacts: inventory.LegacyArtifacts,
 		ScopeMismatchCount: inventory.ScopeMismatchCount, MissingCanonicalLinks: inventory.MissingCanonicalLinks,
@@ -70,4 +72,29 @@ func (o *JobOrchestrator) runPromotionEvaluation(ctx context.Context) error {
 	summary, err := o.deps.PromotionEvaluation.EvaluateEligiblePromotions(ctx, accountID, scopeID, readiness)
 	o.SetLastSummary("promotion_evaluation", map[string]int{"ready": 1, "eligible": summary.Eligible, "approved": summary.Approved, "held": summary.Held})
 	return err
+}
+
+// PromotionPaperValidationSource is optionally implemented by the promotion
+// evidence source to read back the paper validation report for the configured
+// account scope. Without it the soft gate stays disabled.
+type PromotionPaperValidationSource interface {
+	PaperValidationPolicy() promotion.PaperValidationPolicy
+	PaperValidationEvidence(context.Context, uuid.UUID, uuid.UUID, time.Time) (promotion.PaperValidationEvidence, error)
+}
+
+func (o *JobOrchestrator) promotionPaperValidation(ctx context.Context, accountID, scopeID uuid.UUID, generatedAt time.Time) (promotion.PaperValidationPolicy, promotion.PaperValidationEvidence) {
+	source, ok := o.deps.PromotionEvidenceSource.(PromotionPaperValidationSource)
+	if !ok {
+		return promotion.DefaultPaperValidationPolicy(), promotion.PaperValidationEvidence{}
+	}
+	policy := source.PaperValidationPolicy()
+	if !policy.RequirePaperValidation {
+		return policy, promotion.PaperValidationEvidence{}
+	}
+	evidence, err := source.PaperValidationEvidence(ctx, accountID, scopeID, generatedAt)
+	if err != nil {
+		o.logger.Warn("promotion_evaluation: paper validation evidence unavailable", "error", err.Error())
+		return policy, promotion.PaperValidationEvidence{}
+	}
+	return policy, evidence
 }

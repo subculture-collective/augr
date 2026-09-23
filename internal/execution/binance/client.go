@@ -54,6 +54,13 @@ func NewClient(apiKey, apiSecret string, isTestnet bool, logger *slog.Logger) *C
 	baseURL := productionBaseURL
 	if isTestnet {
 		baseURL = testnetBaseURL
+		// BINANCE_PAPER_MODE=true routes to testnet.binance.vision, which only
+		// accepts keys issued by the testnet itself. Production keys fail with
+		// -2015 at request time; the constructor cannot verify them offline.
+		logger.Warn("binance: paper mode uses testnet.binance.vision; supply testnet-issued API keys (production keys are rejected)",
+			slog.String("base_url", baseURL),
+			slog.Bool("api_key_present", strings.TrimSpace(apiKey) != ""),
+		)
 	}
 
 	return &Client{

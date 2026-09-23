@@ -1,3 +1,11 @@
+// Package llm: provider_chain assembles the runtime Provider decorator stack.
+//
+// NewProviderChain wraps a primary provider, innermost to outermost, with
+// cache, fallback, retry, throttle, per-call timeout and budget layers. The
+// throttle layer is process-wide when a throttle key is set (see
+// WithThrottleKey): every chain built for the same provider name shares one
+// semaphore so LLM_THROTTLE_CONCURRENCY bounds concurrent calls across all
+// runs, not per chain.
 package llm
 
 import (
@@ -14,6 +22,7 @@ type chainConfig struct {
 	maxAttempts int
 	baseDelay   time.Duration
 	throttle    int
+	throttleKey string
 	cache       ResponseCache
 	budget      *Budget
 	callTimeout time.Duration
@@ -58,6 +67,15 @@ func WithThrottle(n int) ChainOption {
 			n = 1
 		}
 		c.throttle = n
+	}
+}
+
+// WithThrottleKey makes the throttle layer share the process-wide semaphore
+// registered under key (typically the provider name). Chains built without a
+// key use a private semaphore.
+func WithThrottleKey(key string) ChainOption {
+	return func(c *chainConfig) {
+		c.throttleKey = key
 	}
 }
 
@@ -162,7 +180,11 @@ func NewProviderChain(primary Provider, logger *slog.Logger, opts ...ChainOption
 
 	// Layer 4: throttle
 	if cfg.throttle > 0 {
-		p = NewThrottledProvider(p, cfg.throttle)
+		if cfg.throttleKey != "" {
+			p = NewThrottledProviderWithSemaphore(p, sharedThrottle(cfg.throttleKey, cfg.throttle))
+		} else {
+			p = NewThrottledProvider(p, cfg.throttle)
+		}
 	}
 
 	// Layer 5: per-call timeout

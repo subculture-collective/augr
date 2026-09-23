@@ -140,6 +140,9 @@ func TestDailyReviewUsesFixedAsOfAndReportsLiveScope(t *testing.T) {
 	if err == nil || !IsDegraded(err) {
 		t.Fatalf("dailyReview() = %v, want degraded", err)
 	}
+	if !strings.Contains(err.Error(), "without_runs=[CCC(c,"+strategyC.String()+")]") {
+		t.Fatalf("degraded detail = %q, want the strategy without runs named", err.Error())
+	}
 	if nowCalls != 1 {
 		t.Fatalf("now calls = %d, want 1", nowCalls)
 	}

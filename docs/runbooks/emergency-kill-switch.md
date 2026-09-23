@@ -11,7 +11,7 @@ type: runbook
 
 Use this runbook when trading must stop immediately because of a bad deployment, runaway strategy behavior, market data corruption, broker instability, or manual incident response. An active kill switch puts execution into **verified reduce-only mode**: new or increasing risk is blocked, while a close order may proceed only when the execution manager has found the matching open position, clamped the order to owned quantity, and attached an explicit close intent. A bare `SELL` is never inferred to be reduce-only. This service checks three mechanisms: API toggle, local file flag at `/tmp/tradingagent_kill`, and the `TRADING_AGENT_KILL=true` process environment variable.
 
-If persisted risk state cannot be loaded, startup fails closed into the same reduce-only mode. API activation and deactivation return an error when their state cannot be saved; the in-process brake still activates before that error is returned.
+If persisted risk state cannot be loaded, startup fails closed into the same reduce-only mode. That case is logged at ERROR, sets the kill-switch metric, sends the kill-switch alert, and appears as `kill_switch_restore_failed=true` on `GET /api/v1/accounts/{id}/risk/status` and as a failing `kill_switch` check on `GET /readyz`. API activation and deactivation return an error when their state cannot be saved; the in-process brake still activates before that error is returned.
 
 ## Steps
 
@@ -49,6 +49,9 @@ If persisted risk state cannot be loaded, startup fails closed into the same red
 ## Verification
 
 - `tradingagent ... risk status` shows `kill_switch.active=true`.
+- `GET /readyz` (unauthenticated) returns 503 with `kill_switch` in `failing`
+  while the switch is active; `/healthz` stays 200 because liveness is
+  separate from readiness.
 - The status payload lists the mechanism you used:
   - `api_toggle` for the CLI/API path
   - `file_flag` for `/tmp/tradingagent_kill`
@@ -66,14 +69,17 @@ If persisted risk state cannot be loaded, startup fails closed into the same red
 ## Rollback
 
 1. Confirm the triggering incident is mitigated, reconciliation is clean, and explicit approval to resume trading is documented. A hard emergency halt must never be cleared by a timer.
-2. Clear the API toggle:
+2. Clear the API toggle. Deactivation requires the admin key
+   (`ADMIN_API_KEY` on the service, sent as `X-Admin-Key`) and a non-empty
+   `reason`; without `ADMIN_API_KEY` the endpoint returns 503:
 
    ```bash
    curl -sS \
      -X POST \
      -H "Content-Type: application/json" \
      -H "X-API-Key: $TRADINGAGENT_API_KEY" \
-     -d '{"active":false}' \
+     -H "X-Admin-Key: $ADMIN_API_KEY" \
+     -d '{"active":false,"reason":"incident-2026-03-30 mitigated; reconciliation clean; approved by <name>"}' \
      "$TRADINGAGENT_API_URL/api/v1/risk/killswitch"
    ```
 

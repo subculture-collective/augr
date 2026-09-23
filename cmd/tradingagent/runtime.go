@@ -70,6 +70,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	provgov "github.com/PatrickFanella/get-rich-quick/internal/providergovernor"
 	"github.com/PatrickFanella/get-rich-quick/internal/recorder"
+	"github.com/PatrickFanella/get-rich-quick/internal/regime"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
 	"github.com/PatrickFanella/get-rich-quick/internal/risk"
@@ -598,6 +599,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("construct accepted economic writer: %w", err)
 	}
+	economicWriter = economicWriter.WithLogger(logger)
 	projectionOutbox := pgrepo.NewProjectionOutboxRepository(db.Pool)
 	kalshiProjectionRepo, closeKalshiProjectionDB := newRuntimeKalshiProjectionRepo(ctx, cfg.Brokers.Kalshi, cfg.Database.URL, logger)
 	var projectionWorker *pgrepo.ProjectionWorker
@@ -647,6 +649,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 
 	appMetrics := metrics.New()
+	notificationManager := newNotificationManager(cfg).WithLogger(logger)
+	logRuntimeConfigWarnings(cfg, logger)
 	paperEvaluation := runtimeDeps.paperEvaluation
 	appMetrics.SetPaperEvaluationProfile(string(paperEvaluation.Mode), paperEvaluation.StorageNamespace, paperEvaluation.EvidenceClass)
 	surfersMetricsOnce.Do(func() { surfersMetricsInst = observability.NewSurfersMetrics(prometheus.DefaultRegisterer) })
@@ -734,7 +738,10 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			MinLiquidity:               cfg.Risk.Polymarket.MinLiquidity,
 			MaxSpreadPct:               cfg.Risk.Polymarket.MaxSpreadPct,
 			MinDaysToResolution:        cfg.Risk.Polymarket.MinDaysToResolution,
-		}).WithStatePersister(ctx, pgrepo.NewRiskStatePersister(db.Pool))
+		}).
+			WithKillSwitchObserver(appMetrics.SetKillSwitchActive).
+			WithKillSwitchAlerter(notificationManager.RecordKillSwitchToggle).
+			WithStatePersister(ctx, pgrepo.NewRiskStatePersister(db.Pool))
 		return nil
 	}); err != nil {
 		return nil, nil, nil, err
@@ -833,6 +840,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		polymarketReadClient.SetGatewayBaseURL(cfg.Brokers.Polymarket.GatewayBaseURL)
 		if polymarketL2Configured(cfg.Brokers.Polymarket) && polymarketLiveExecutionAuthorized(cfg, runtimeDeps.executionAccount) {
 			polymarketReadClient.SetL2Auth(cfg.Brokers.Polymarket.Address, cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, cfg.Brokers.Polymarket.Passphrase)
+			if err := polymarketReadClient.SetSignatureType(cfg.Brokers.Polymarket.SignatureType); err != nil {
+				return nil, nil, nil, fmt.Errorf("polymarket signature type: %w", err)
+			}
 		}
 		deps.PolymarketClient = polymarketReadClient
 	}
@@ -883,8 +893,6 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		}
 	}
 	deps.MarketDataStatus = polymarketStatusSource{feed: func() *polymarketws.Feed { return polymarketFeed }, metrics: surfersMetrics}
-	notificationManager := newNotificationManager(cfg)
-
 	var sched *scheduler.Scheduler
 	teardown.stopScheduler = func() {
 		if sched != nil {
@@ -899,7 +907,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 	if strings.EqualFold(cfg.Environment, "smoke") {
 		pipeline := newSmokePipeline(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)
-		runner := newSmokeRunner(runRepo, snapshotRepo, decisionRepo, eventRepo, runRegistry, logger)
+		runner := newSmokeRunner(runRepo, snapshotRepo, decisionRepo, eventRepo, runRegistry, logger, cfg.LLM.CallTimeout, cfg.Features.SchedulerJobTimeout)
 		var strategyRunner api.StrategyRunner
 		if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
 			strategyRunner = newSmokeStrategyRunner(executionAccount, runner, runRepo, decisionRepo, orderRepo, positionRepo, tradeRepo, auditLogRepo, eventRepo, riskEngine, economicWriter, notificationManager, tradeDecisionRecorder, logger)
@@ -919,6 +927,8 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				scheduler.WithMetrics(appMetrics),
 				scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...),
 				scheduler.WithRunGroup(runGroup),
+				scheduler.WithReloadInterval(cfg.Features.SchedulerReloadInterval),
+				scheduler.WithRunOutcomeHook(runtimeSchedulerOutcomeHook(appMetrics)),
 				scheduler.WithStrategyExecution(func(ctx context.Context, strategy domain.Strategy) error {
 					_, err := runScheduledStrategy(ctx, strategyRepo, strategyRunner, strategy)
 					return err
@@ -987,6 +997,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		if cfg.Features.EnablePolymarketAutomation && polymarketL2Configured(cfg.Brokers.Polymarket) && polymarketLiveExecutionAuthorized(cfg, runtimeDeps.executionAccount) {
 			polymarketClient := polymarketexecution.NewClient(cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, logger)
 			polymarketClient.SetL2Auth(cfg.Brokers.Polymarket.Address, cfg.Brokers.Polymarket.KeyID, cfg.Brokers.Polymarket.SecretKey, cfg.Brokers.Polymarket.Passphrase)
+			if err := polymarketClient.SetSignatureType(cfg.Brokers.Polymarket.SignatureType); err != nil {
+				return nil, nil, nil, fmt.Errorf("polymarket signature type: %w", err)
+			}
 			polymarketClient.SetAPIBaseURL(cfg.Brokers.Polymarket.APIBaseURL)
 			polymarketClient.SetGatewayBaseURL(cfg.Brokers.Polymarket.GatewayBaseURL)
 			if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
@@ -1108,7 +1121,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				return pgrepo.LoadPipelineSignalPreparation(ctx, db.Pool, scope, plan)
 			}
 		}
-		portfolioAllocatorMode := portfolioAllocatorModeFromEnv()
+		portfolioAllocatorMode := portfolioAllocatorModeFromConfig(cfg)
 		if portfolioAllocatorMode == portfolio.AllocatorModePaper && (runtimeDeps.executionAccount.Environment() != domain.AccountEnvironmentPaperScored || cfg.Features.EnableLiveTrading) {
 			return nil, nil, nil, fmt.Errorf("portfolio allocator paper mode requires paper_scored account with live trading disabled")
 		}
@@ -1128,9 +1141,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		strategyRunner.portfolioAllocatorMode = portfolioAllocatorMode
 		deps.Runner = strategyRunner
 		var edgarProvider *edgar.Provider
-		edgarEmail := strings.TrimSpace(os.Getenv("SEC_EDGAR_APP_EMAIL"))
+		edgarEmail := cfg.SECEdgar.AppEmail
 		if edgarEmail != "" {
-			edgarAppName := strings.TrimSpace(os.Getenv("SEC_EDGAR_APP_NAME"))
+			edgarAppName := cfg.SECEdgar.AppName
 			if edgarAppName == "" {
 				edgarAppName = "Augr"
 			}
@@ -1218,7 +1231,14 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				nil,
 				riskEngine,
 				logger,
-				append([]scheduler.Option{scheduler.WithJobTimeout(cfg.Features.SchedulerJobTimeout), scheduler.WithMetrics(appMetrics), scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...), scheduler.WithRunGroup(runGroup)}, schedOpts...)...,
+				append([]scheduler.Option{
+					scheduler.WithJobTimeout(cfg.Features.SchedulerJobTimeout),
+					scheduler.WithMetrics(appMetrics),
+					scheduler.WithDisabledMarketTypes(disabledStrategyMarketTypes(cfg)...),
+					scheduler.WithRunGroup(runGroup),
+					scheduler.WithReloadInterval(cfg.Features.SchedulerReloadInterval),
+					scheduler.WithRunOutcomeHook(runtimeSchedulerOutcomeHook(appMetrics)),
+				}, schedOpts...)...,
 			)
 		}
 
@@ -1232,7 +1252,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			}
 			embeddingBaseURL := cfg.Embedding.BaseURL
 			if embeddingBaseURL == "" {
-				embeddingBaseURL = cfg.LLM.Providers.Ollama.BaseURL
+				embeddingBaseURL = embeddingBaseURLFromOllama(cfg.LLM.Providers.Ollama.BaseURL)
 			}
 			embeddingProvider, err := embedding.NewOllamaProvider(embedding.OllamaConfig{
 				BaseURL: embeddingBaseURL,
@@ -1241,260 +1261,286 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 				APIKey:  cfg.LLM.Providers.Ollama.APIKey,
 			})
 			if err != nil {
-				logger.Warn("automation: failed to create embedding provider", slog.Any("error", err))
-			} else {
-				var kalshiMarkProvider *kalshidata.Provider
-				if kalshiDataClient != nil {
-					if kalshiProjectionRepo != nil {
-						kalshiMarkProvider = kalshidata.NewProviderWithClient(kalshiDataClient, logger)
+				// The embedding provider is optional for the orchestrator; run every
+				// other automation job rather than skipping the orchestrator entirely.
+				logger.Warn("automation: embedding provider unavailable; continuing without semantic memory", slog.Any("error", err))
+				embeddingProvider = nil
+			}
+			var kalshiMarkProvider *kalshidata.Provider
+			if kalshiDataClient != nil {
+				if kalshiProjectionRepo != nil {
+					kalshiMarkProvider = kalshidata.NewProviderWithClient(kalshiDataClient, logger)
+				}
+			}
+			overnightBacktestRunRepo := pgrepo.NewOvernightBacktestRunRepo(db.Pool)
+			polymarketDiscoveryRunRepo := pgrepo.NewPolymarketDiscoveryRunRepo(db.Pool)
+			portfolioPaperProcessor := portfolio.NewPaperOrderManagerProcessor(portfolio.PaperOrderManagerProcessorDeps{
+				PrepareSignal: func(ctx context.Context, request portfolio.PaperOrderRequest) (execution.SignalOrderPreparation, error) {
+					if strategyRunner.preparePaperStockSignal == nil {
+						return nil, fmt.Errorf("canonical stock preparation is unavailable")
 					}
-				}
-				overnightBacktestRunRepo := pgrepo.NewOvernightBacktestRunRepo(db.Pool)
-				polymarketDiscoveryRunRepo := pgrepo.NewPolymarketDiscoveryRunRepo(db.Pool)
-				portfolioPaperProcessor := portfolio.NewPaperOrderManagerProcessor(portfolio.PaperOrderManagerProcessorDeps{
-					PrepareSignal: func(ctx context.Context, request portfolio.PaperOrderRequest) (execution.SignalOrderPreparation, error) {
-						if strategyRunner.preparePaperStockSignal == nil {
-							return nil, fmt.Errorf("canonical stock preparation is unavailable")
-						}
-						return strategyRunner.preparePaperStockSignal(ctx, request.Scope, request.Plan)
-					},
-					RiskEngine:       riskEngine,
-					PositionRepo:     positionRepo,
-					OrderRepo:        orderRepo,
-					TradeRepo:        tradeRepo,
-					AuditLogRepo:     auditLogRepo,
-					AgentEventRepo:   eventRepo,
-					DecisionRecorder: tradeDecisionRecorder,
-					OpportunityRepo:  opportunityRepo,
-					EconomicWriter:   strategyRunner.economicWriter,
-					Metrics:          appMetrics,
-					Logger:           logger,
-					PaperBroker:      strategyRunner.localPaperBroker,
+					return strategyRunner.preparePaperStockSignal(ctx, request.Scope, request.Plan)
+				},
+				RiskEngine:       riskEngine,
+				PositionRepo:     positionRepo,
+				OrderRepo:        orderRepo,
+				TradeRepo:        tradeRepo,
+				AuditLogRepo:     auditLogRepo,
+				AgentEventRepo:   eventRepo,
+				DecisionRecorder: tradeDecisionRecorder,
+				OpportunityRepo:  opportunityRepo,
+				EconomicWriter:   strategyRunner.economicWriter,
+				Metrics:          appMetrics,
+				Logger:           logger,
+				PaperBroker:      strategyRunner.localPaperBroker,
+			})
+			var portfolioOptionsProcessor portfolio.PaperOptionsOrderProcessor
+			if alpacaOptionsBroker != nil {
+				portfolioOptionsProcessor = portfolio.NewOptionsPaperOrderProcessor(portfolio.OptionsPaperOrderProcessorDeps{
+					Broker: alpacaOptionsBroker, OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo,
+					RiskEngine: riskEngine, EconomicWriter: strategyRunner.economicWriter, OpportunityRepo: opportunityRepo, Logger: logger,
 				})
-				var portfolioOptionsProcessor portfolio.PaperOptionsOrderProcessor
-				if alpacaOptionsBroker != nil {
-					portfolioOptionsProcessor = portfolio.NewOptionsPaperOrderProcessor(portfolio.OptionsPaperOrderProcessorDeps{
-						Broker: alpacaOptionsBroker, OrderRepo: orderRepo, PositionRepo: positionRepo, TradeRepo: tradeRepo,
-						RiskEngine: riskEngine, EconomicWriter: strategyRunner.economicWriter, OpportunityRepo: opportunityRepo, Logger: logger,
-					})
+			}
+			portfolioRiskRepo := pgrepo.NewPortfolioRiskRepo(db.Pool, accountID)
+			if alpacaAdapter != nil {
+				portfolioRiskRepo = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID, alpacaAdapter)
+			}
+			if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
+				internalCapital, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
+				if constructErr != nil {
+					return nil, nil, nil, fmt.Errorf("construct internal portfolio capital source: %w", constructErr)
 				}
-				portfolioRiskRepo := pgrepo.NewPortfolioRiskRepo(db.Pool, accountID)
-				if alpacaAdapter != nil {
-					portfolioRiskRepo = pgrepo.NewPortfolioRiskRepo(db.Pool, accountID, alpacaAdapter)
+				portfolioRiskRepo.WithInternalCapitalSource(internalCapital)
+			}
+			var generatedResearch *generativestrategy.BatchService
+			var generatedResearchPreparation *generativestrategy.PreparationBatchService
+			var generatedEvaluation *generativestrategy.EvaluationBatchService
+			var generatedRobustness *generativestrategy.RobustnessBatchService
+			var generatedDeployment *generativestrategy.DeploymentBatchService
+			var generatedProposal *generativestrategy.ProposalBatchService
+			if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
+				generatedRepo := pgrepo.NewGenerativeStrategyRepo(db.Pool)
+				researchPreparer, constructErr := generativestrategy.NewResearchPreparer(generatedRepo)
+				if constructErr != nil {
+					return nil, nil, nil, fmt.Errorf("construct generated research preparer: %w", constructErr)
+				}
+				generatedResearchPreparation, constructErr = generativestrategy.NewPreparationBatchService(generatedRepo, researchPreparer)
+				if constructErr != nil {
+					return nil, nil, nil, fmt.Errorf("construct generated research preparation batch: %w", constructErr)
+				}
+				generatedRobustness, constructErr = generativestrategy.NewRobustnessBatchService(generatedRepo, pgrepo.NewRobustnessRepo(db.Pool))
+				if constructErr != nil {
+					return nil, nil, nil, fmt.Errorf("construct generated robustness batch: %w", constructErr)
+				}
+				generatedDeployment, constructErr = generativestrategy.NewDeploymentBatchService(generatedRepo, generatedRepo)
+				if constructErr != nil {
+					return nil, nil, nil, fmt.Errorf("construct generated deployment batch: %w", constructErr)
+				}
+				if deps.LLMProvider != nil && len(sourceCommit) == 40 && len(sourceTreeSHA256) == 64 {
+					family, constructErr := generativestrategy.ReviewedDailyStockFamily()
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct reviewed generated strategy family: %w", constructErr)
+					}
+					model := strings.TrimSpace(cfg.LLM.DeepThinkModel)
+					if model == "" {
+						model = strings.TrimSpace(cfg.LLM.QuickThinkModel)
+					}
+					modelSource, constructErr := generativestrategy.NewModelProposalSource(
+						generatedRepo, family, cfg.LLM.DefaultProvider, deps.LLMProvider, model, sourceCommit, sourceTreeSHA256,
+					)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated proposal source: %w", constructErr)
+					}
+					proposalService, constructErr := generativestrategy.NewProposalService(generatedRepo)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated proposal service: %w", constructErr)
+					}
+					generatedProposal, constructErr = generativestrategy.NewProposalBatchService(modelSource, proposalService)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated proposal batch: %w", constructErr)
+					}
+				} else {
+					logger.Warn("generated proposals unavailable: exact compiler provenance or LLM provider is not configured")
 				}
 				if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
-					internalCapital, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
+					capitalState, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
 					if constructErr != nil {
-						return nil, nil, nil, fmt.Errorf("construct internal portfolio capital source: %w", constructErr)
+						return nil, nil, nil, fmt.Errorf("construct generated research capital source: %w", constructErr)
 					}
-					portfolioRiskRepo.WithInternalCapitalSource(internalCapital)
+					loader, constructErr := pgrepo.NewGeneratedExperimentEvidenceLoader(db.Pool, capitalState)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated research evidence loader: %w", constructErr)
+					}
+					runner, constructErr := experimentrun.NewRunner(loader, pgrepo.NewExperimentRunRepo(db.Pool))
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated research runner: %w", constructErr)
+					}
+					executor, constructErr := generativestrategy.NewExecutor(runner)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated research executor: %w", constructErr)
+					}
+					generatedResearch, constructErr = generativestrategy.NewBatchService(generatedRepo, executor)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated research batch: %w", constructErr)
+					}
+					evaluationSource, constructErr := pgrepo.NewGeneratedEvaluationSource(db.Pool, loader)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated evaluation source: %w", constructErr)
+					}
+					evaluationService, constructErr := evaluation.NewService(pgrepo.NewEvaluationRepo(db.Pool))
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated evaluation service: %w", constructErr)
+					}
+					generatedEvaluation, constructErr = generativestrategy.NewEvaluationBatchService(evaluationSource, evaluationService)
+					if constructErr != nil {
+						return nil, nil, nil, fmt.Errorf("construct generated evaluation batch: %w", constructErr)
+					}
+				} else {
+					logger.Warn("generated research unavailable: projection attestation is not configured")
 				}
-				var generatedResearch *generativestrategy.BatchService
-				var generatedResearchPreparation *generativestrategy.PreparationBatchService
-				var generatedEvaluation *generativestrategy.EvaluationBatchService
-				var generatedRobustness *generativestrategy.RobustnessBatchService
-				var generatedDeployment *generativestrategy.DeploymentBatchService
-				var generatedProposal *generativestrategy.ProposalBatchService
-				if discoveryScopeID != uuid.Nil && discoveryReadiness.StockCapabilityReady() {
-					generatedRepo := pgrepo.NewGenerativeStrategyRepo(db.Pool)
-					researchPreparer, constructErr := generativestrategy.NewResearchPreparer(generatedRepo)
-					if constructErr != nil {
-						return nil, nil, nil, fmt.Errorf("construct generated research preparer: %w", constructErr)
-					}
-					generatedResearchPreparation, constructErr = generativestrategy.NewPreparationBatchService(generatedRepo, researchPreparer)
-					if constructErr != nil {
-						return nil, nil, nil, fmt.Errorf("construct generated research preparation batch: %w", constructErr)
-					}
-					generatedRobustness, constructErr = generativestrategy.NewRobustnessBatchService(generatedRepo, pgrepo.NewRobustnessRepo(db.Pool))
-					if constructErr != nil {
-						return nil, nil, nil, fmt.Errorf("construct generated robustness batch: %w", constructErr)
-					}
-					generatedDeployment, constructErr = generativestrategy.NewDeploymentBatchService(generatedRepo, generatedRepo)
-					if constructErr != nil {
-						return nil, nil, nil, fmt.Errorf("construct generated deployment batch: %w", constructErr)
-					}
-					if deps.LLMProvider != nil && len(sourceCommit) == 40 && len(sourceTreeSHA256) == 64 {
-						family, constructErr := generativestrategy.ReviewedDailyStockFamily()
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct reviewed generated strategy family: %w", constructErr)
-						}
-						model := strings.TrimSpace(cfg.LLM.DeepThinkModel)
-						if model == "" {
-							model = strings.TrimSpace(cfg.LLM.QuickThinkModel)
-						}
-						modelSource, constructErr := generativestrategy.NewModelProposalSource(
-							generatedRepo, family, cfg.LLM.DefaultProvider, deps.LLMProvider, model, sourceCommit, sourceTreeSHA256,
-						)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated proposal source: %w", constructErr)
-						}
-						proposalService, constructErr := generativestrategy.NewProposalService(generatedRepo)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated proposal service: %w", constructErr)
-						}
-						generatedProposal, constructErr = generativestrategy.NewProposalBatchService(modelSource, proposalService)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated proposal batch: %w", constructErr)
-						}
-					} else {
-						logger.Warn("generated proposals unavailable: exact compiler provenance or LLM provider is not configured")
-					}
-					if attestor, configured := runtimeProjectionAttestor(cfg.Brokers.Kalshi); configured {
-						capitalState, constructErr := pgrepo.NewCanonicalExperimentCapitalStateSource(db.Pool, attestor, 5*time.Minute)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated research capital source: %w", constructErr)
-						}
-						loader, constructErr := pgrepo.NewGeneratedExperimentEvidenceLoader(db.Pool, capitalState)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated research evidence loader: %w", constructErr)
-						}
-						runner, constructErr := experimentrun.NewRunner(loader, pgrepo.NewExperimentRunRepo(db.Pool))
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated research runner: %w", constructErr)
-						}
-						executor, constructErr := generativestrategy.NewExecutor(runner)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated research executor: %w", constructErr)
-						}
-						generatedResearch, constructErr = generativestrategy.NewBatchService(generatedRepo, executor)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated research batch: %w", constructErr)
-						}
-						evaluationSource, constructErr := pgrepo.NewGeneratedEvaluationSource(db.Pool, loader)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated evaluation source: %w", constructErr)
-						}
-						evaluationService, constructErr := evaluation.NewService(pgrepo.NewEvaluationRepo(db.Pool))
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated evaluation service: %w", constructErr)
-						}
-						generatedEvaluation, constructErr = generativestrategy.NewEvaluationBatchService(evaluationSource, evaluationService)
-						if constructErr != nil {
-							return nil, nil, nil, fmt.Errorf("construct generated evaluation batch: %w", constructErr)
-						}
-					} else {
-						logger.Warn("generated research unavailable: projection attestation is not configured")
-					}
-				}
-				var orch *automation.JobOrchestrator
-				if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
-					optionSettlementState := &durableOptionSettlementState{
-						broker: strategyRunner.localPaperBroker,
-						rebuild: func(rebuildCtx context.Context) error {
-							if err := strategyRunner.localPaperBroker.RestoreAccount(paperStartingBalance); err != nil {
-								return err
-							}
-							return bootstrapPaperOptionsAccountLocked(rebuildCtx, executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, nil)
-						},
-					}
-					orch = automation.NewJobOrchestrator(automation.OrchestratorDeps{
-						ExecutionAccount:            executionAccount,
-						CanonicalAccountID:          executionAccount.AccountID(),
-						DiscoveryReadiness:          discoveryReadiness,
-						Universe:                    deps.Universe,
-						Polygon:                     polygonClientForAuto,
-						PolygonBulkSnapshotsEnabled: cfg.DataProviders.PolygonBulkSnapshotsEnabled,
-						DataService:                 dataService,
-						OperationalDailyProvider:    operationalDailyProvider,
-						DiscoveryDataService:        discoveryDataService,
-						AlpacaReconciler:            alpacaReconciler,
-						OptionsProvider:             deps.OptionsProvider,
-						DiscoveryOptionsProvider:    discoveryOptionsProvider,
-						LLMProvider:                 deps.LLMProvider,
-						LLMQuickModel:               cfg.LLM.QuickThinkModel,
-						GeneratorMetrics:            appMetrics,
-						TickerDiscovery: automation.TickerDiscoveryJobConfig{
-							Enabled:    cfg.Features.EnableTickerDiscovery,
-							Cron:       cfg.TickerDiscovery.Cron,
-							MinADV:     cfg.TickerDiscovery.MinADV,
-							MaxTickers: cfg.TickerDiscovery.MaxTickers,
-						},
-						HistoryRefreshWatchlistLimit: cfg.HistoryRefreshWatchlistLimit,
-						EmbeddingProvider:            embeddingProvider,
-						EventsProvider:               deps.EventsProvider,
-						StrategyRepo:                 strategyRepo,
-						PositionRepo:                 positionRepo,
-						OrderRepo:                    orderRepo,
-						TradeRepo:                    tradeRepo,
-						OptionSettlementRepo:         db,
-						OptionSettlementState:        optionSettlementState,
-						RunRepo:                      runRepo,
-						OpportunityRepo:              opportunityRepo,
-						AllocationDecisionRepo:       allocationDecisionRepo,
-						PortfolioAllocatorMode:       portfolioAllocatorMode,
-						PortfolioPaperProcessor:      portfolioPaperProcessor,
-						PortfolioOptionsProcessor:    portfolioOptionsProcessor,
-						PortfolioAccountBalance:      alpacaAdapter,
-						PortfolioAccountSnapshot:     portfolioRiskRepo,
-						PortfolioRiskState:           portfolioRiskRepo,
-						JobRunRepo:                   jobRunRepo,
-						JobControlRepo:               jobControlRepo,
-						OptionsScanRepo:              optionsScanRepo,
-						NewsFeedRepo:                 newsFeedRepo,
-						PolymarketAccountRepo:        polymarketAccountRepo,
-						PolymarketReconciler:         polymarketExecutionReconciler,
-						PredictionSettler:            predictionSettler,
-						PolymarketResolvedRepo:       polymarketResolvedRepo,
-						PolymarketWatchedRepo:        polymarketWatchedRepo,
-						PolymarketDiscoveryRuns:      polymarketDiscoveryRunRepo,
-						PolymarketCLOBURL:            cfg.Brokers.Polymarket.CLOBURL,
-						DisablePolymarketAutomation:  !cfg.Features.EnablePolymarketAutomation,
-						KalshiCatalog:                kalshiCatalog,
-						KalshiReconciler:             kalshiExecutionReconciler,
-						KalshiWatchedRepo:            pgrepo.NewKalshiWatchedMarketsRepo(db.Pool),
-						KalshiMarketSnapshotsRepo:    pgrepo.NewKalshiMarketSnapshotsRepo(db.Pool),
-						KalshiDiscoveryRuns:          pgrepo.NewKalshiDiscoveryRunRepo(db.Pool),
-						KalshiSettlementGateRepo:     pgrepo.NewKalshiSettlementGateRepo(db.Pool),
-						KalshiSettlementThreshold:    cfg.Brokers.Kalshi.SettlementGateThreshold,
-						KalshiSettlementDryRun:       cfg.Brokers.Kalshi.DryRun,
-						KalshiSettlementEnabled:      !cfg.Brokers.Kalshi.DryRun,
-						KalshiMarkProvider:           kalshiMarkProvider,
-						KalshiProjectionRepo:         kalshiProjectionRepo,
-						KalshiProjectionOutbox:       projectionOutbox,
-						KalshiMarkMaxAge:             cfg.Brokers.Kalshi.MarkMaxAge,
-						ReportArtifactRepo:           reportArtifactRepo,
-						BacktestConfigRepo:           backtestConfigRepo,
-						BacktestRunRepo:              backtestRunRepo,
-						DiscoveryRunRepo:             discoveryRunRepo,
-						OvernightBacktestRuns:        overnightBacktestRunRepo,
-						GeneratedResearch:            generatedResearch,
-						GeneratedResearchPreparation: generatedResearchPreparation,
-						GeneratedEvaluation:          generatedEvaluation,
-						GeneratedRobustness:          generatedRobustness,
-						GeneratedDeployment:          generatedDeployment,
-						ObservedOptionsCandidates:    pgrepo.NewObservedOptionsStrategyRepo(db.Pool),
-						OptionsSourceCommit:          sourceCommit,
-						OptionsSourceTreeSHA256:      sourceTreeSHA256,
-						GeneratedProposal:            generatedProposal,
-						PromotionEvaluation:          pgrepo.NewPromotionRepo(db.Pool),
-						PromotionAccountSource:       accountRepo,
-						PromotionProjectionSource:    projectionReader,
-						PromotionEvidenceSource:      cutoverEvidenceReader,
-						PromotionActivation:          pgrepo.NewPromotionRepo(db.Pool),
-						AutomaticShadowPromotion:     cfg.AutomaticShadowPromotion,
-						DiscoveryScopeID:             discoveryScopeID,
-						JobTimeout:                   cfg.Features.SchedulerJobTimeout,
-						StrategyTrigger:              sched,
-						Logger:                       logger,
-					})
-					return nil
-				}); err != nil {
-					return nil, nil, nil, err
-				}
-				orch.WithJobMetrics(appMetrics)
-				orch.WithReportMetrics(appMetrics)
-				orch.RegisterAll()
-				if edgarProvider != nil && deps.CopyTrading != nil {
-					orch.Register("copy_13f_sync", "Refresh subscribed 13F filings and rebalance active paper replicas", scheduler.ScheduleSpec{
-						Type: scheduler.ScheduleTypeMarketHours, Cron: "5 10 * * 1-5", SkipWeekends: true, SkipHolidays: true,
-					}, func(jobCtx context.Context) error {
-						summary, syncErr := deps.CopyTrading.Sync13FSubscriptions(jobCtx)
-						orch.SetLastSummary("copy_13f_sync", map[string]int{"subscriptions": summary.Subscriptions, "sources_checked": summary.SourcesChecked, "new_filings": summary.NewFilings, "rebalanced": summary.Rebalanced})
-						return syncErr
-					})
-				}
-				deps.Automation = orch
 			}
+			var orch *automation.JobOrchestrator
+			if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+				optionSettlementState := &durableOptionSettlementState{
+					broker: strategyRunner.localPaperBroker,
+					rebuild: func(rebuildCtx context.Context) error {
+						if err := strategyRunner.localPaperBroker.RestoreAccount(paperStartingBalance); err != nil {
+							return err
+						}
+						return bootstrapPaperOptionsAccountLocked(rebuildCtx, executionAccount, strategyRunner.localPaperBroker, paperAccountRepo, nil)
+					},
+				}
+				orch = automation.NewJobOrchestrator(automation.OrchestratorDeps{
+					ExecutionAccount:            executionAccount,
+					CanonicalAccountID:          executionAccount.AccountID(),
+					DiscoveryReadiness:          discoveryReadiness,
+					Universe:                    deps.Universe,
+					Polygon:                     polygonClientForAuto,
+					PolygonBulkSnapshotsEnabled: cfg.DataProviders.PolygonBulkSnapshotsEnabled,
+					DataService:                 dataService,
+					OperationalDailyProvider:    operationalDailyProvider,
+					DiscoveryDataService:        discoveryDataService,
+					AlpacaReconciler:            alpacaReconciler,
+					OptionsProvider:             deps.OptionsProvider,
+					DiscoveryOptionsProvider:    discoveryOptionsProvider,
+					LLMProvider:                 deps.LLMProvider,
+					LLMQuickModel:               cfg.LLM.QuickThinkModel,
+					GeneratorMetrics:            appMetrics,
+					TickerDiscovery: automation.TickerDiscoveryJobConfig{
+						Enabled:    cfg.Features.EnableTickerDiscovery,
+						Cron:       cfg.TickerDiscovery.Cron,
+						MinADV:     cfg.TickerDiscovery.MinADV,
+						MaxTickers: cfg.TickerDiscovery.MaxTickers,
+					},
+					HistoryRefreshWatchlistLimit: cfg.HistoryRefreshWatchlistLimit,
+					EmbeddingProvider:            embeddingProvider,
+					EventsProvider:               deps.EventsProvider,
+					StrategyRepo:                 strategyRepo,
+					PositionRepo:                 positionRepo,
+					OrderRepo:                    orderRepo,
+					TradeRepo:                    tradeRepo,
+					OptionSettlementRepo:         db,
+					OptionSettlementState:        optionSettlementState,
+					RunRepo:                      runRepo,
+					OpportunityRepo:              opportunityRepo,
+					AllocationDecisionRepo:       allocationDecisionRepo,
+					PortfolioAllocatorMode:       portfolioAllocatorMode,
+					PortfolioPaperProcessor:      portfolioPaperProcessor,
+					PortfolioOptionsProcessor:    portfolioOptionsProcessor,
+					PortfolioAccountBalance:      alpacaAdapter,
+					PortfolioAccountSnapshot:     portfolioRiskRepo,
+					PortfolioRiskState:           portfolioRiskRepo,
+					JobRunRepo:                   jobRunRepo,
+					JobControlRepo:               jobControlRepo,
+					OptionsScanRepo:              optionsScanRepo,
+					NewsFeedRepo:                 newsFeedRepo,
+					PolymarketAccountRepo:        polymarketAccountRepo,
+					PolymarketReconciler:         polymarketExecutionReconciler,
+					PredictionSettler:            predictionSettler,
+					PolymarketResolvedRepo:       polymarketResolvedRepo,
+					PolymarketWatchedRepo:        polymarketWatchedRepo,
+					PolymarketDiscoveryRuns:      polymarketDiscoveryRunRepo,
+					PolymarketCLOBURL:            cfg.Brokers.Polymarket.CLOBURL,
+					DisablePolymarketAutomation:  !cfg.Features.EnablePolymarketAutomation,
+					KalshiCatalog:                kalshiCatalog,
+					KalshiReconciler:             kalshiExecutionReconciler,
+					KalshiWatchedRepo:            pgrepo.NewKalshiWatchedMarketsRepo(db.Pool),
+					KalshiMarketSnapshotsRepo:    pgrepo.NewKalshiMarketSnapshotsRepo(db.Pool),
+					KalshiDiscoveryRuns:          pgrepo.NewKalshiDiscoveryRunRepo(db.Pool),
+					KalshiSettlementGateRepo:     pgrepo.NewKalshiSettlementGateRepo(db.Pool),
+					KalshiSettlementThreshold:    cfg.Brokers.Kalshi.SettlementGateThreshold,
+					KalshiSettlementDryRun:       cfg.Brokers.Kalshi.DryRun,
+					KalshiSettlementEnabled:      !cfg.Brokers.Kalshi.DryRun,
+					KalshiMarkProvider:           kalshiMarkProvider,
+					KalshiProjectionRepo:         kalshiProjectionRepo,
+					KalshiProjectionOutbox:       projectionOutbox,
+					KalshiMarkMaxAge:             cfg.Brokers.Kalshi.MarkMaxAge,
+					ReportArtifactRepo:           reportArtifactRepo,
+					BacktestConfigRepo:           backtestConfigRepo,
+					BacktestRunRepo:              backtestRunRepo,
+					DiscoveryRunRepo:             discoveryRunRepo,
+					OvernightBacktestRuns:        overnightBacktestRunRepo,
+					GeneratedResearch:            generatedResearch,
+					GeneratedResearchPreparation: generatedResearchPreparation,
+					GeneratedEvaluation:          generatedEvaluation,
+					GeneratedRobustness:          generatedRobustness,
+					GeneratedDeployment:          generatedDeployment,
+					ObservedOptionsCandidates:    pgrepo.NewObservedOptionsStrategyRepo(db.Pool),
+					OptionsSourceCommit:          sourceCommit,
+					OptionsSourceTreeSHA256:      sourceTreeSHA256,
+					GeneratedProposal:            generatedProposal,
+					PromotionEvaluation:          pgrepo.NewPromotionRepo(db.Pool),
+					PromotionAccountSource:       accountRepo,
+					PromotionProjectionSource:    projectionReader,
+					PromotionEvidenceSource:      cutoverEvidenceReader,
+					PromotionActivation:          pgrepo.NewPromotionRepo(db.Pool),
+					AutomaticShadowPromotion:     cfg.AutomaticShadowPromotion,
+					DiscoveryScopeID:             discoveryScopeID,
+					JobTimeout:                   cfg.Features.SchedulerJobTimeout,
+					AutoDisableCooldown:          cfg.Features.AutomationAutoDisableCooldown,
+					DisableMissedRunCatchUp:      !cfg.Features.AutomationMissedRunCatchUp,
+					RiskEngine:                   riskEngine,
+					RegimeRules: regime.RuleConfig{
+						MaxConsecutiveLosses: cfg.Risk.RegimeMaxConsecutiveLosses,
+						MinRollingWinRate:    cfg.Risk.RegimeMinRollingWinRate,
+					},
+					StrategyTrigger: sched,
+					Logger:          logger,
+					KalshiDiscovery: automation.KalshiDiscoveryConfig{
+						FetchLimit:      cfg.Brokers.Kalshi.DiscoveryFetchLimit,
+						MinVolume:       cfg.Brokers.Kalshi.DiscoveryMinVolume,
+						MinOpenInterest: cfg.Brokers.Kalshi.DiscoveryMinOpenInterest,
+						MaxSpreadPct:    cfg.Brokers.Kalshi.DiscoveryMaxSpreadPct,
+					},
+				})
+				return nil
+			}); err != nil {
+				return nil, nil, nil, err
+			}
+			orch.WithJobMetrics(appMetrics)
+			orch.WithReportMetrics(appMetrics)
+			orch.RegisterAll()
+			if err := runtimeConstructBound(runtimeDeps, func(executionAccount domain.ExecutionAccountBinding) error {
+				orch.RegisterOrderReconciliation(automation.OrderReconcileDeps{
+					ExecutionAccount: executionAccount,
+					Orders:           orderRepo,
+					Managers:         strategyRunner,
+					Logger:           logger,
+				})
+				return nil
+			}); err != nil {
+				return nil, nil, nil, err
+			}
+			if edgarProvider != nil && deps.CopyTrading != nil {
+				orch.Register("copy_13f_sync", "Refresh subscribed 13F filings and rebalance active paper replicas", scheduler.ScheduleSpec{
+					Type: scheduler.ScheduleTypeMarketHours, Cron: "5 10 * * 1-5", SkipWeekends: true, SkipHolidays: true,
+				}, func(jobCtx context.Context) error {
+					summary, syncErr := deps.CopyTrading.Sync13FSubscriptions(jobCtx)
+					orch.SetLastSummary("copy_13f_sync", map[string]int{"subscriptions": summary.Subscriptions, "sources_checked": summary.SourcesChecked, "new_filings": summary.NewFilings, "rebalanced": summary.Rebalanced})
+					return syncErr
+				})
+			}
+			deps.Automation = orch
 		}
 	}
 	deps.ResearchScanner = service.NewResearchScannerService(deps.OptionsProvider, deps.PolymarketClient, logger)
@@ -1584,8 +1630,37 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	apiCfg.Port = cfg.Server.Port
 	apiCfg.JWTSecret = cfg.Server.JWTSecret
 	apiCfg.RefreshTokenTTL = 24 * time.Hour
+	apiCfg.RateLimit = cfg.Server.RateLimitPerMinute
+	apiCfg.TrustedProxies = append([]string(nil), cfg.Server.TrustedProxies...)
+	if len(cfg.Server.CORSOrigins) > 0 {
+		apiCfg.CORSConfig.AllowedOrigins = append([]string(nil), cfg.Server.CORSOrigins...)
+	}
+	apiCfg.AdminAPIKey = cfg.AdminAPIKey
+	apiCfg.RedisRequired = cfg.Features.RedisRequired
 	canonicalAccountID := runtimeDeps.AccountID()
 	apiCfg.ProjectionAccountID = &canonicalAccountID
+	if sched != nil {
+		// Assign only when non-nil so the API's nil check sees a nil interface.
+		deps.Scheduler = sched
+	}
+
+	deps.Readiness = api.ReadinessDeps{
+		SchemaCheck: api.HealthCheckFunc(func(checkCtx context.Context) error {
+			current, err := runtimeCurrentSchemaVersion(checkCtx, db.Pool)
+			if err != nil {
+				return err
+			}
+			if !runtimeSchemaVersionCompatible(current) {
+				return fmt.Errorf("schema version %d is outside the supported range %d..%d", current, pgrepo.MinimumSupportedSchemaVersion, pgrepo.MaximumSupportedSchemaVersion)
+			}
+			return nil
+		}),
+		KillSwitch:        riskEngine,
+		SchedulerRequired: cfg.Features.EnableScheduler,
+		SchedulerPresent:  sched != nil,
+		Automation:        func() api.AutomationReadiness { return api.AutomationReadinessOf(deps.Automation) },
+		LLMConfigured:     deps.LLMProvider != nil,
+	}
 
 	deps.ReleaseReadiness = operations.SourceFunc(func(checkCtx context.Context) (operations.ReadinessReport, error) {
 		databaseReady := db.Pool.Ping(checkCtx) == nil
@@ -1607,8 +1682,11 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			PolymarketData:       cfg.Features.EnablePolymarketAutomation && deps.PolymarketClient != nil,
 			PolymarketSettlement: jobReady("polymarket_resolutions"),
 			KalshiData:           jobReady("kalshi_discovery"), KalshiSettlement: jobReady("kalshi_settlement"),
-			LiveTradingEnabled:   cfg.Features.EnableLiveTrading,
-			RecoveryDrillsPassed: strings.EqualFold(strings.TrimSpace(os.Getenv("RELEASE_DRILLS_VERIFIED")), "true"),
+			LiveTradingEnabled:           cfg.Features.EnableLiveTrading,
+			RecoveryDrillsPassed:         cfg.ReleaseDrillsVerified,
+			LiveTradingAllowedStrategies: cfg.LiveTradingAllowedStrategies,
+			LiveTradingAllowedBrokers:    cfg.LiveTradingAllowedBrokers,
+			AccountEnvironment:           string(runtimeDeps.Environment()),
 		}), nil
 	})
 	server, err := runtimeNewServer(apiCfg, deps, logger)
@@ -1626,7 +1704,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 	// Avoid the Go nil-interface trap: explicitly return a nil interface when
 	// there is no scheduler so that the caller's nil check works correctly.
-	staleRunTTL := loadStaleRunTTL(logger)
+	staleRunTTL := cfg.StaleRunTTL
 	var staleRunReconciler *agent.StaleRunReconciler
 	if staleRunTTL > 0 {
 		staleRunReconciler = agent.NewStaleRunReconciler(
@@ -1672,7 +1750,21 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 			if err := deps.Automation.Start(); err != nil {
 				return fmt.Errorf("start automation workers: %w", err)
 			}
-			logger.Info("automation: job orchestrator started", slog.Int("jobs", len(deps.Automation.Status())))
+			readiness := api.AutomationReadinessOf(deps.Automation)
+			if readiness.Degraded {
+				logger.Error("automation: job orchestrator started degraded; /readyz reports not ready",
+					slog.String("reason", readiness.Reason),
+					slog.Int("jobs", readiness.TotalJobs),
+					slog.Any("disabled_jobs", readiness.DisabledJobs))
+				if err := notificationManager.NotifyAutomationDegraded(ctx, readiness.Reason, readiness.DisabledJobs); err != nil {
+					logger.Warn("automation: degraded alert delivery failed", slog.Any("error", err))
+				}
+				return nil
+			}
+			logger.Info("automation: job orchestrator started",
+				slog.Int("jobs", readiness.TotalJobs),
+				slog.Int("disabled_jobs", len(readiness.DisabledJobs)),
+				slog.Int("unavailable_jobs", len(readiness.UnavailableJobs)))
 			return nil
 		}
 	}
@@ -1711,14 +1803,53 @@ func polymarketL2Configured(pm config.PolymarketConfig) bool {
 		strings.TrimSpace(pm.Passphrase) != ""
 }
 
-func portfolioAllocatorModeFromEnv() portfolio.AllocatorMode {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("PORTFOLIO_ALLOCATOR_MODE"))) {
-	case "paper":
+// portfolioAllocatorModeFromConfig maps the validated PORTFOLIO_ALLOCATOR_MODE
+// value; anything other than "paper" is shadow (no allocator orders).
+func portfolioAllocatorModeFromConfig(cfg config.Config) portfolio.AllocatorMode {
+	if cfg.PortfolioAllocatorMode == config.PortfolioAllocatorModePaper {
 		return portfolio.AllocatorModePaper
-	case "shadow", "":
-		return portfolio.AllocatorModeShadow
-	default:
-		return portfolio.AllocatorModeShadow
+	}
+	return portfolio.AllocatorModeShadow
+}
+
+// embeddingBaseURLFromOllama derives the embedding endpoint from
+// OLLAMA_BASE_URL. Deployments point the chat client at an OpenAI-compatible
+// "/v1" prefix, which the Ollama embeddings API does not use.
+func embeddingBaseURLFromOllama(ollamaBaseURL string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(ollamaBaseURL), "/")
+	return strings.TrimSuffix(trimmed, "/v1")
+}
+
+// runtimeSchedulerOutcomeHook records every scheduled-run outcome as a metric
+// so a strategy that is repeatedly skipped or rejected is visible without
+// reading logs.
+func runtimeSchedulerOutcomeHook(appMetrics *metrics.Metrics) scheduler.RunOutcomeHook {
+	return func(strategy domain.Strategy, outcome string, _ error) {
+		if appMetrics != nil {
+			appMetrics.RecordSchedulerStrategyOutcome(strategy.ID.String(), outcome)
+		}
+	}
+}
+
+// logRuntimeConfigWarnings reports configuration that silently limits what
+// the runtime does, so an operator sees it at startup rather than after a
+// quiet trading day.
+func logRuntimeConfigWarnings(cfg config.Config, logger *slog.Logger) {
+	if logger == nil {
+		return
+	}
+	for _, msg := range cfg.Deprecations {
+		logger.Warn(msg)
+	}
+	if portfolioAllocatorModeFromConfig(cfg) == portfolio.AllocatorModeShadow {
+		logger.Warn("allocator in shadow mode: no orders will be submitted by the allocator (set PORTFOLIO_ALLOCATOR_MODE=paper on a paper_scored account to enable paper orders)")
+	}
+	if cfg.Features.EnableTickerDiscovery && strings.TrimSpace(cfg.DiscoveryEvaluationScopeID) == "" {
+		logger.Warn("discovery jobs unavailable: ENABLE_TICKER_DISCOVERY=true but DISCOVERY_EVALUATION_SCOPE_ID is unset; discovery-dependent automation jobs will be omitted")
+	}
+	if !cfg.Brokers.Kalshi.Demo && cfg.Brokers.Kalshi.IsDemoHost() {
+		logger.Warn("KALSHI_DEMO=false but KALSHI_API_BASE_URL points at the demo exchange; the demo catalog's first page is zero-volume markets",
+			slog.String("kalshi_api_base_url", cfg.Brokers.Kalshi.APIBaseURL))
 	}
 }
 
@@ -1805,28 +1936,14 @@ func decodeAssetIDPayload(raw json.RawMessage) ([]string, bool) {
 	return nil, false
 }
 
-func loadStaleRunTTL(logger *slog.Logger) time.Duration {
-	const fallback = 50 * time.Minute
-	raw := strings.TrimSpace(os.Getenv("STALE_RUN_TTL"))
-	if raw == "" {
-		return fallback
-	}
-	ttl, err := time.ParseDuration(raw)
-	if err != nil || ttl <= 0 {
-		if logger != nil {
-			logger.Warn("invalid STALE_RUN_TTL, using default", slog.String("value", raw), slog.Duration("default", fallback))
-		}
-		return fallback
-	}
-	return ttl
-}
-
 func newNotificationManager(cfg config.Config) *notification.Manager {
-	notifiers := map[string]notification.Notifier{
-		notification.ChannelN8N: notification.NewWebhookNotifier(
+	notifiers := map[string]notification.Notifier{}
+
+	if cfg.Notifications.N8N.URL != "" {
+		notifiers[notification.ChannelN8N] = notification.NewWebhookNotifier(
 			cfg.Notifications.N8N.URL,
 			cfg.Notifications.N8N.Secret,
-		),
+		)
 	}
 
 	if cfg.Notifications.Telegram.BotToken != "" && cfg.Notifications.Telegram.ChatID != "" {
@@ -2307,6 +2424,8 @@ func newSmokeRunner(
 	eventRepo repository.AgentEventRepository,
 	runRegistry *agent.RunContextRegistry,
 	logger *slog.Logger,
+	llmCallTimeout time.Duration,
+	maxPipelineDuration time.Duration,
 ) *agent.Runner {
 	return agent.NewRunner(
 		agent.Definition{
@@ -2335,9 +2454,11 @@ func newSmokeRunner(
 			},
 		},
 		agent.Dependencies{
-			Persister:   &strategyVersionPersister{delegate: agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)},
-			Logger:      logger,
-			RunRegistry: runRegistry,
+			Persister:           &strategyVersionPersister{delegate: agent.NewRepoPersister(runRepo, snapshotRepo, decisionRepo, eventRepo, logger)},
+			Logger:              logger,
+			RunRegistry:         runRegistry,
+			LLMCallTimeout:      llmCallTimeout,
+			MaxPipelineDuration: maxPipelineDuration,
 		},
 	)
 }

@@ -74,6 +74,11 @@ func (f *FallbackProvider) Complete(ctx context.Context, request CompletionReque
 
 	secondaryCtx := ctx
 	if errors.Is(err, context.DeadlineExceeded) {
+		// A cancelled parent (shutdown, kill switch) must not be escaped by a
+		// detached fallback window, even when the primary reported a deadline.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, err
+		}
 		secondaryCtx, cancel := newFallbackContext(ctx)
 		defer cancel()
 		if f.metrics != nil {
@@ -104,7 +109,13 @@ func (f *FallbackProvider) Complete(ctx context.Context, request CompletionReque
 	return resp, err
 }
 
+// newFallbackContext returns a bounded context for the secondary attempt after
+// the primary timed out. It detaches only from a parent deadline; a cancelled
+// parent is returned as-is so shutdown cancellation still propagates.
 func newFallbackContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if errors.Is(parent.Err(), context.Canceled) {
+		return context.WithCancel(parent)
+	}
 	base := context.WithoutCancel(parent)
 	if deadline, ok := parent.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining > 0 {

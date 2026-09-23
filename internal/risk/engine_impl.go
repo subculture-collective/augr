@@ -48,6 +48,87 @@ type RiskEngineImpl struct {
 	portfolioSnapshotMu   sync.RWMutex
 	portfolioSnapshotFunc func(context.Context) (Portfolio, error)
 	persister             StatePersister // optional; nil = no DB persistence
+	hooksMu               sync.RWMutex
+	killSwitchObserver    func(active bool)
+	killSwitchAlerter     KillSwitchAlertFunc
+	restoreMu             sync.RWMutex
+	restoreFailed         bool
+	restoreError          string
+}
+
+// KillSwitchAlertFunc receives every API-toggle kill-switch transition and the
+// fail-closed activation that follows a persisted-state restore failure.
+type KillSwitchAlertFunc func(ctx context.Context, active bool, reason string, occurredAt time.Time) error
+
+// KillSwitchState is the operator-facing kill-switch snapshot used by
+// readiness and status endpoints. RestoreFailed reports that the engine armed
+// the switch because persisted risk state could not be loaded at startup.
+type KillSwitchState struct {
+	Active        bool                  `json:"active"`
+	Reason        string                `json:"reason,omitempty"`
+	Mechanisms    []KillSwitchMechanism `json:"mechanisms,omitempty"`
+	ActivatedAt   *time.Time            `json:"activated_at,omitempty"`
+	RestoreFailed bool                  `json:"restore_failed"`
+	RestoreError  string                `json:"restore_error,omitempty"`
+}
+
+// WithKillSwitchObserver registers a callback invoked with the API-toggle
+// state after every transition, including the startup restore. Attach it
+// before WithStatePersister so the startup value is published.
+func (e *RiskEngineImpl) WithKillSwitchObserver(fn func(active bool)) *RiskEngineImpl {
+	e.hooksMu.Lock()
+	e.killSwitchObserver = fn
+	e.hooksMu.Unlock()
+	return e
+}
+
+// WithKillSwitchAlerter registers the notification hook for kill-switch
+// transitions. Attach it before WithStatePersister so a restore failure alerts.
+func (e *RiskEngineImpl) WithKillSwitchAlerter(fn KillSwitchAlertFunc) *RiskEngineImpl {
+	e.hooksMu.Lock()
+	e.killSwitchAlerter = fn
+	e.hooksMu.Unlock()
+	return e
+}
+
+// KillSwitchState reports the effective kill-switch state across all
+// mechanisms plus restore diagnostics.
+func (e *RiskEngineImpl) KillSwitchState() KillSwitchState {
+	e.state.mu.RLock()
+	apiKS := e.state.ks
+	e.state.mu.RUnlock()
+	status := e.buildKillSwitchStatus(apiKS)
+
+	e.restoreMu.RLock()
+	defer e.restoreMu.RUnlock()
+	return KillSwitchState{
+		Active:        status.Active,
+		Reason:        status.Reason,
+		Mechanisms:    status.Mechanisms,
+		ActivatedAt:   status.ActivatedAt,
+		RestoreFailed: e.restoreFailed,
+		RestoreError:  e.restoreError,
+	}
+}
+
+// notifyKillSwitch publishes an API-toggle transition to the observer and the
+// alerter. Alert failures are logged; they never block the safety action.
+func (e *RiskEngineImpl) notifyKillSwitch(ctx context.Context, active bool, reason string, occurredAt time.Time) {
+	e.hooksMu.RLock()
+	observer := e.killSwitchObserver
+	alerter := e.killSwitchAlerter
+	e.hooksMu.RUnlock()
+	if observer != nil {
+		observer(active)
+	}
+	if alerter != nil {
+		if err := alerter(ctx, active, reason, occurredAt); err != nil {
+			e.logger.ErrorContext(ctx, "risk: kill switch alert delivery failed",
+				slog.Bool("active", active),
+				slog.String("reason", reason),
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 // defaultFileExists checks whether the given path exists on the filesystem.
@@ -363,7 +444,7 @@ func (e *RiskEngineImpl) IsKillSwitchActive(_ context.Context) (bool, error) {
 // ActivateKillSwitch activates the kill switch via the API toggle mechanism.
 func (e *RiskEngineImpl) ActivateKillSwitch(ctx context.Context, reason string) error {
 	e.state.mu.Lock()
-	e.activateKillSwitchLocked(reason)
+	status := e.activateKillSwitchLocked(reason)
 	snapshot := e.buildPersistedStateLocked()
 	e.state.mu.Unlock()
 
@@ -371,6 +452,11 @@ func (e *RiskEngineImpl) ActivateKillSwitch(ctx context.Context, reason string) 
 		slog.String("reason", reason),
 		slog.String("mechanism", KillSwitchMechanismAPI.String()),
 	)
+	activatedAt := e.currentTime()
+	if status.ActivatedAt != nil {
+		activatedAt = *status.ActivatedAt
+	}
+	e.notifyKillSwitch(ctx, true, reason, activatedAt)
 	return e.saveState(ctx, snapshot)
 }
 
@@ -385,6 +471,7 @@ func (e *RiskEngineImpl) DeactivateKillSwitch(ctx context.Context) error {
 	e.logger.InfoContext(ctx, "kill switch deactivated",
 		slog.String("mechanism", KillSwitchMechanismAPI.String()),
 	)
+	e.notifyKillSwitch(ctx, false, "API toggle cleared", e.currentTime())
 	return e.saveState(ctx, snapshot)
 }
 

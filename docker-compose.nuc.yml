@@ -111,7 +111,10 @@ services:
       APP_ENV: production
       APP_HOST: 0.0.0.0
       APP_PORT: 8080
-      ENABLE_POLYMARKET_AUTOMATION: "false"
+      # Polymarket automation stays off unless .env opts in; the runtime
+      # strips a trailing /v1 from OLLAMA_BASE_URL when deriving the
+      # embedding endpoint.
+      ENABLE_POLYMARKET_AUTOMATION: ${ENABLE_POLYMARKET_AUTOMATION:-false}
       DATABASE_URL: ${APP_DATABASE_URL:?APP_DATABASE_URL is required}
       OLLAMA_BASE_URL: http://10.0.0.50:11434/v1
       OPENCODE_BASE_URL: http://opencode:4096
@@ -123,6 +126,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # /healthz is liveness only (DB reachable; Redis advisory unless
+    # REDIS_REQUIRED=true). Trading readiness, including kill switch, schema,
+    # scheduler and automation state, is GET /readyz; poll it from the
+    # operator checklist rather than letting Docker restart the container
+    # for it.
     healthcheck:
       test:
         [

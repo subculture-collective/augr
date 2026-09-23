@@ -125,6 +125,11 @@ func BuildOpportunity(input OpportunityBuildInput, cfg OpportunityBuilderConfig)
 	if marketType != domain.MarketTypeOptions {
 		opportunity.ExpectedLossUSD = opportunity.ProposedNotional * opportunity.MaxLossPct
 	}
+	if marketType == domain.MarketTypeStock && opportunity.LiquidityUSD <= 0 {
+		// Stock plans populate Depth only for options; recover liquidity from
+		// evidence when a volume field is present.
+		opportunity.LiquidityUSD = LiquidityUSDFromEvidence(opportunity.Evidence, opportunity.EntryPrice)
+	}
 	if err := bindPromotedOpportunityLineage(opportunity, input.Strategy, input.Run); err != nil {
 		return nil, NoActionReasonUnknown, err
 	}

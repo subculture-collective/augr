@@ -2,7 +2,6 @@ package polymarket
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -41,12 +40,11 @@ func NewOrderTemplate(secret []byte, method, rawURL string, body []byte) (*Order
 	if err != nil {
 		return nil, fmt.Errorf("polymarket: parse url: %w", err)
 	}
+	// The signed path excludes the query string (for example the dry-run
+	// flag); it must match Client.buildURL so cached and ad-hoc signatures agree.
 	signingPath := parsedURL.EscapedPath()
 	if signingPath == "" {
 		signingPath = "/"
-	}
-	if parsedURL.RawQuery != "" {
-		signingPath += "?" + parsedURL.RawQuery
 	}
 
 	tmpl := &OrderTemplate{
@@ -90,12 +88,7 @@ func (t *OrderTemplate) SignAt(ts int64) string {
 	if t == nil {
 		return ""
 	}
-	secret := base64.URLEncoding.EncodeToString(t.secretKey)
-	sig, err := polyL2Signature(secret, fmt.Sprintf("%d", ts), t.method, t.path, t.body)
-	if err != nil {
-		return ""
-	}
-	return sig
+	return polyL2SignatureBytes(t.secretKey, fmt.Sprintf("%d", ts), t.method, t.path, t.body)
 }
 
 func (t *OrderTemplate) BodyLen() int {

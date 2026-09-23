@@ -115,15 +115,15 @@ func (p *Provider) Complete(ctx context.Context, request llm.CompletionRequest) 
 	if strings.TrimSpace(session.ID) == "" {
 		return nil, errors.New("opencode: create session response did not include an id")
 	}
-	requestInFlight := false
-	defer func() { p.cleanupSession(session.ID, requestInFlight) }()
+	cleanup := cleanupDelete
+	defer func() { p.cleanupSession(session.ID, cleanup) }()
 
 	system, transcript, err := buildPrompt(request)
 	if err != nil {
 		return nil, err
 	}
 	var completion messageResponse
-	requestInFlight = true
+	cleanup = cleanupAbortRequired
 	err = p.doJSON(ctx, http.MethodPost, "/session/"+url.PathEscape(session.ID)+"/message", map[string]any{
 		"agent": "augr-completion",
 		"model": map[string]string{
@@ -133,10 +133,22 @@ func (p *Provider) Complete(ctx context.Context, request llm.CompletionRequest) 
 		"system": system,
 		"parts":  []map[string]string{{"type": "text", "text": transcript}},
 	}, &completion)
+	switch {
+	case err == nil:
+		cleanup = cleanupDelete
+	case ctx.Err() != nil:
+		// Our context ended while OpenCode may still be retrying: the abort
+		// must be confirmed before the session storage is removed.
+		cleanup = cleanupAbortRequired
+	default:
+		// The server answered (HTTP status or transport failure); abort is a
+		// best-effort courtesy and the session is deleted either way so
+		// failed completions do not accumulate storage.
+		cleanup = cleanupAbortThenDelete
+	}
 	if err != nil {
 		return nil, fmt.Errorf("opencode: complete request: %w", err)
 	}
-	requestInFlight = false
 	if len(completion.Info.Error) > 0 && string(completion.Info.Error) != "null" {
 		return nil, fmt.Errorf("opencode: completion failed: %s", compactError(completion.Info.Error))
 	}
@@ -260,7 +272,7 @@ func (p *Provider) doJSON(ctx context.Context, method, path string, body, destin
 		return errors.New("response exceeded size limit")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, compactError(responseBody))
+		return &HTTPError{Status: resp.StatusCode, Body: compactError(responseBody)}
 	}
 	if destination == nil {
 		return nil
@@ -271,19 +283,58 @@ func (p *Provider) doJSON(ctx context.Context, method, path string, body, destin
 	return nil
 }
 
-func (p *Provider) cleanupSession(sessionID string, requestInFlight bool) {
+// cleanupMode selects how a session is torn down after a completion attempt.
+type cleanupMode int
+
+const (
+	// cleanupDelete removes the session; no request is outstanding.
+	cleanupDelete cleanupMode = iota
+	// cleanupAbortThenDelete aborts best-effort, then deletes regardless.
+	cleanupAbortThenDelete
+	// cleanupAbortRequired deletes only after a confirmed abort; an
+	// unconfirmed abort retains the session so a live retry loop keeps its
+	// storage.
+	cleanupAbortRequired
+)
+
+func (p *Provider) cleanupSession(sessionID string, mode cleanupMode) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	path := "/session/" + url.PathEscape(sessionID)
-	if requestInFlight {
+	if mode != cleanupDelete {
 		// Canceling the HTTP request does not stop OpenCode's retry loop.
-		// Abort before deleting its storage; retain it if abort is unconfirmed.
 		var stopped bool
-		if err := p.doJSON(ctx, http.MethodPost, path+"/abort", struct{}{}, &stopped); err != nil || !stopped {
+		err := p.doJSON(ctx, http.MethodPost, path+"/abort", struct{}{}, &stopped)
+		if mode == cleanupAbortRequired && (err != nil || !stopped) {
 			return
 		}
 	}
 	_ = p.doJSON(ctx, http.MethodDelete, path, struct{}{}, nil)
+}
+
+// HTTPError is a non-2xx response from the OpenCode server. It implements
+// StatusCode so the retry layer can classify it: 408/429/5xx are retried,
+// 401/403 and other 4xx are not.
+type HTTPError struct {
+	Status int
+	Body   string
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Status, e.Body) }
+
+// StatusCode returns the HTTP status.
+func (e *HTTPError) StatusCode() int { return e.Status }
+
+// Retryable reports whether the status is transient.
+func (e *HTTPError) Retryable() bool {
+	switch {
+	case e.Status == 401 || e.Status == 403:
+		return false
+	case e.Status == 408 || e.Status == 429 || e.Status >= 500:
+		return true
+	default:
+		return false
+	}
 }
 
 func compactError(raw []byte) string {

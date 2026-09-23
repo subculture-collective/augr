@@ -3,6 +3,7 @@ package kalshi
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -185,4 +186,72 @@ func kalshiStrategyWithMeta(t *testing.T, meta discoveryMeta) domain.Strategy {
 	}
 
 	return domain.Strategy{Ticker: "KXTEST-YESNO", MarketType: domain.MarketTypeKalshi, Config: raw}
+}
+
+func kalshiProxyStrategyAndSnapshot(t *testing.T) (domain.Strategy, Snapshot) {
+	t.Helper()
+	strategy := kalshiStrategyWithMeta(t, discoveryMeta{
+		Template:         "microstructure",
+		Direction:        "YES",
+		Confidence:       0.80,
+		FairProbability:  0.55,
+		Calibration:      "discovery_conviction_proxy_v1",
+		SourceReferences: []string{"kalshi_market:KXTEST-YESNO", "kalshi_snapshot:abc"},
+		TimeHorizon:      "days",
+		EntryPriceMax:    0.50,
+	})
+	snapshot := Snapshot{
+		Ticker: strategy.Ticker, Title: "Will test happen?", Status: "active",
+		BestBidYes: 0.45, BestAskYes: 0.47, BestBidNo: 0.53, BestAskNo: 0.55,
+		Volume: 1500, CloseTime: time.Now().UTC().Add(48 * time.Hour), FetchedAt: time.Now().UTC(),
+	}
+	return strategy, snapshot
+}
+
+func TestDeterministicNativeExecutor_ProxyCalibrationAllowedForPaper(t *testing.T) {
+	t.Parallel()
+	strategy, snapshot := kalshiProxyStrategyAndSnapshot(t)
+	for _, environment := range []domain.AccountEnvironment{domain.AccountEnvironmentPaperScored, domain.AccountEnvironmentPaperStress} {
+		scope, err := execution.NewNonRunExecutionScope(uuid.New(), environment, ledger.ExecutionOriginOperator, "executor-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision, err := DeterministicNativeExecutor{}.Execute(context.Background(), strategy, snapshot, scope)
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if decision.Signal != domain.PipelineSignalBuy || decision.Calibration != "discovery_conviction_proxy_v1" {
+			t.Fatalf("%s decision = %+v, want proxy calibration accepted for paper", environment, decision)
+		}
+	}
+}
+
+func TestDeterministicNativeExecutor_ProxyCalibrationHoldsForLive(t *testing.T) {
+	t.Parallel()
+	strategy, snapshot := kalshiProxyStrategyAndSnapshot(t)
+	for _, environment := range []domain.AccountEnvironment{domain.AccountEnvironmentLive, domain.AccountEnvironmentShadow} {
+		scope, err := execution.NewNonRunExecutionScope(uuid.New(), environment, ledger.ExecutionOriginOperator, "executor-test")
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision, err := DeterministicNativeExecutor{}.Execute(context.Background(), strategy, snapshot, scope)
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if decision.Signal != domain.PipelineSignalHold || !strings.Contains(decision.Reason, "paper accounts only") {
+			t.Fatalf("%s decision = %+v, want hold on proxy calibration", environment, decision)
+		}
+	}
+}
+
+func TestDeterministicNativeExecutor_ProxyCalibrationCanBeDisabledForPaper(t *testing.T) {
+	t.Parallel()
+	strategy, snapshot := kalshiProxyStrategyAndSnapshot(t)
+	decision, err := DeterministicNativeExecutor{DisallowProxyCalibrationForPaper: true}.Execute(context.Background(), strategy, snapshot, kalshiExecutorTestScope(t))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if decision.Signal != domain.PipelineSignalHold {
+		t.Fatalf("decision = %+v, want hold when proxy calibration disabled", decision)
+	}
 }

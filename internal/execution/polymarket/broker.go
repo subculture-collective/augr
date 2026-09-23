@@ -2,11 +2,11 @@ package polymarket
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -205,15 +205,9 @@ func (b *Broker) PrepareTemplate(order *domain.Order) (*OrderTemplate, error) {
 	if err != nil {
 		return nil, fmt.Errorf("polymarket: marshal order template: %w", err)
 	}
-	secret, err := base64.StdEncoding.DecodeString(b.client.secretKey)
+	secret, err := decodeL2Secret(b.client.secretKey)
 	if err != nil {
-		return nil, fmt.Errorf("polymarket: decode secret key: %w", err)
-	}
-	if len(secret) == 64 {
-		secret = secret[:32]
-	}
-	if len(secret) != 32 {
-		return nil, fmt.Errorf("polymarket: secret key must decode to %d or 64 bytes, got %d", 32, len(secret))
+		return nil, err
 	}
 	requestPath := "/v1/orders"
 	if b.DryRun {
@@ -418,6 +412,11 @@ func firstRetailTimestamp(values ...string) string {
 }
 
 // GetPositions returns current Polymarket positions mapped to domain positions.
+//
+// Positions are read from the public data-api by wallet address (the funder
+// address configured through SetL2Auth), while order submission and lookup
+// use the api.polymarket.us L2 credentials. The two identities must belong to
+// the same wallet, otherwise reconciliation compares unrelated books.
 func (b *Broker) GetPositions(ctx context.Context) ([]domain.Position, error) {
 	if b == nil || b.client == nil {
 		return nil, errors.New("polymarket: broker client is required")
@@ -614,23 +613,29 @@ func resolveOrderIntent(order *domain.Order) (string, error) {
 	return "", fmt.Errorf("polymarket: unsupported order side %q", order.Side)
 }
 
+// mapOrderStatus maps retail ORDER_STATE_* values and CLOB order statuses
+// (LIVE, OPEN, MATCHED, DELAYED, UNMATCHED) onto the domain status. Unknown
+// values map to submitted and are logged so a new provider state cannot
+// silently stall reconciliation.
 func mapOrderStatus(rawStatus string) (domain.OrderStatus, error) {
-	status := strings.TrimSpace(rawStatus)
+	status := strings.ToUpper(strings.TrimSpace(rawStatus))
+	status = strings.TrimPrefix(status, "ORDER_STATE_")
 	switch status {
 	case "":
 		return "", errors.New("polymarket: order status is required")
-	case "ORDER_STATE_PENDING_NEW", "ORDER_STATE_PENDING_REPLACE", "ORDER_STATE_PENDING_CANCEL", "ORDER_STATE_PENDING_RISK":
+	case "PENDING_NEW", "PENDING_REPLACE", "PENDING_CANCEL", "PENDING_RISK", "NEW", "LIVE", "OPEN", "DELAYED":
 		return domain.OrderStatusSubmitted, nil
-	case "ORDER_STATE_PARTIALLY_FILLED":
+	case "PARTIALLY_FILLED":
 		return domain.OrderStatusPartial, nil
-	case "ORDER_STATE_FILLED":
+	case "FILLED", "MATCHED":
 		return domain.OrderStatusFilled, nil
-	case "ORDER_STATE_CANCELED", "ORDER_STATE_EXPIRED":
+	case "CANCELED", "CANCELLED", "EXPIRED", "UNMATCHED":
 		return domain.OrderStatusCancelled, nil
-	case "ORDER_STATE_REJECTED":
+	case "REJECTED":
 		return domain.OrderStatusRejected, nil
 	default:
-		return "", fmt.Errorf("polymarket: unsupported order status %q", rawStatus)
+		slog.Default().Warn("polymarket: unknown order status; treating as submitted", slog.String("status", rawStatus))
+		return domain.OrderStatusSubmitted, nil
 	}
 }
 

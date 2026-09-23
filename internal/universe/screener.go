@@ -21,8 +21,14 @@ type PreMarketConfig struct {
 	VolumeWeight     float64 // default 0.4
 	MomentumWeight   float64 // default 0.3
 	VolatilityWeight float64 // default 0.3
-	now              func() time.Time
+	// MaxSkippedFraction is the share of requested tickers that may be
+	// skipped (stale, duplicate, unexpected or missing snapshots) before the
+	// whole screen fails. Zero means the default 0.25.
+	MaxSkippedFraction float64
+	now                func() time.Time
 }
+
+const defaultMaxSkippedFraction = 0.25
 
 // ScoredTicker is the result of the pre-market screener for a single ticker.
 type ScoredTicker struct {
@@ -45,7 +51,9 @@ func DefaultPreMarketConfig() PreMarketConfig {
 		VolumeWeight:     0.4,
 		MomentumWeight:   0.3,
 		VolatilityWeight: 0.3,
-		now:              time.Now,
+
+		MaxSkippedFraction: defaultMaxSkippedFraction,
+		now:                time.Now,
 	}
 }
 
@@ -86,6 +94,19 @@ func RunPreMarketScreen(
 	if cfg.now != nil {
 		now = cfg.now()
 	}
+	// Individual bad snapshots are skipped and counted; the screen fails only
+	// when too many tickers were unusable.
+	skipped := map[string]int{}
+	skippedTotal := 0
+	skip := func(kind, symbol string, attrs ...any) {
+		skipped[kind]++
+		if kind != "unexpected" {
+			// Unexpected symbols were never requested, so they do not count
+			// against the requested universe.
+			skippedTotal++
+		}
+		logger.Warn("screener: skipping ticker snapshot", append([]any{slog.String("reason", kind), slog.String("ticker", symbol)}, attrs...)...)
+	}
 	for i := 0; i < len(symbols); i += batchSize {
 		end := i + batchSize
 		if end > len(symbols) {
@@ -100,23 +121,30 @@ func RunPreMarketScreen(
 			requested[strings.ToUpper(strings.TrimSpace(symbol))] = struct{}{}
 		}
 		seen := make(map[string]struct{}, len(batch))
+		received := make(map[string]struct{}, len(batch))
 		for _, snapshot := range batch {
 			symbol := strings.ToUpper(strings.TrimSpace(snapshot.Ticker))
 			if _, ok := requested[symbol]; !ok {
-				return nil, fmt.Errorf("screener: snapshot batch %d returned unexpected ticker %q", i/batchSize+1, symbol)
+				skip("unexpected", symbol)
+				continue
 			}
+			received[symbol] = struct{}{}
 			if _, duplicate := seen[symbol]; duplicate {
-				return nil, fmt.Errorf("screener: snapshot batch %d returned duplicate ticker %q", i/batchSize+1, symbol)
+				skip("duplicate", symbol)
+				continue
 			}
 			if !currentEasternSnapshot(now, snapshot.UpdatedAt()) {
-				return nil, fmt.Errorf("screener: snapshot batch %d returned stale ticker %q updated_at=%s", i/batchSize+1, symbol, snapshot.UpdatedAt())
+				skip("stale", symbol, slog.Time("updated_at", snapshot.UpdatedAt()))
+				continue
 			}
 			seen[symbol] = struct{}{}
+			snapshots = append(snapshots, snapshot)
 		}
-		if len(seen) != len(requested) {
-			return nil, fmt.Errorf("screener: snapshot batch %d incomplete: requested=%d received=%d", i/batchSize+1, len(requested), len(seen))
+		for symbol := range requested {
+			if _, ok := received[symbol]; !ok {
+				skip("missing", symbol)
+			}
 		}
-		snapshots = append(snapshots, batch...)
 
 		// Rate limit pause between batches.
 		if end < len(symbols) {
@@ -128,7 +156,26 @@ func RunPreMarketScreen(
 		}
 	}
 
-	logger.Info("screener: received snapshots", slog.Int("count", len(snapshots)))
+	maxSkipped := cfg.MaxSkippedFraction
+	if maxSkipped <= 0 {
+		maxSkipped = defaultMaxSkippedFraction
+	}
+	if skippedTotal > 0 {
+		fraction := float64(skippedTotal) / float64(len(symbols))
+		if fraction > maxSkipped {
+			return nil, fmt.Errorf("screener: %d of %d tickers skipped (%.0f%% > %.0f%% allowed): stale=%d duplicate=%d unexpected=%d missing=%d",
+				skippedTotal, len(symbols), fraction*100, maxSkipped*100, skipped["stale"], skipped["duplicate"], skipped["unexpected"], skipped["missing"])
+		}
+		logger.Warn("screener: some snapshots skipped",
+			slog.Int("skipped", skippedTotal),
+			slog.Int("requested", len(symbols)),
+			slog.Int("stale", skipped["stale"]),
+			slog.Int("duplicate", skipped["duplicate"]),
+			slog.Int("unexpected", skipped["unexpected"]),
+			slog.Int("missing", skipped["missing"]),
+		)
+	}
+	logger.Info("screener: received snapshots", slog.Int("count", len(snapshots)), slog.Int("skipped", skippedTotal))
 
 	// 4. Score each snapshot.
 	scored := make([]ScoredTicker, 0, len(snapshots))
