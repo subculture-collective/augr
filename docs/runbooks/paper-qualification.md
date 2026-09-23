@@ -281,3 +281,11 @@ backup and rollback. This scrape restoration does not activate the gated paper
 ledger or paper-monitor timer.
 
 The opt-in SPY replacement is described in [SPY ETF evidence candidate](spy-etf-evidence.md). Its issuer probe and inactive proposal do not qualify the rejected corporate baseline or authorize a ledger.
+
+The September 23 live check also found that NUC's unbounded `docker logs --since`
+read omitted recent records while a finite tail returned them. The collector now
+requests at most 10,001 lines and refuses a window at that bound (or above 8 MB).
+With a verified registration receipt, current log collection starts at the
+requested observation window; old startup registrations come only from the
+instance-bound archive. An overflow is incomplete evidence, never a passing
+absence of manual triggers. This does not replay archived starts or completions.

@@ -212,12 +212,15 @@ class Runtime:
     def logs(self, since):
         # Docker writes application stderr to its stderr. Parse both privately.
         try:
-            run = subprocess.run(['docker', 'logs', '--since', since,
+            run = subprocess.run(['docker', 'logs', '--tail', '10001', '--since', since,
                                   self.config['containers']['app']['name']],
                                  capture_output=True, text=True, timeout=20)
         except (OSError, subprocess.TimeoutExpired):
             raise Refusal('logs_unavailable') from None
         require(run.returncode == 0, 'logs_unavailable')
+        lines = run.stdout.splitlines() + run.stderr.splitlines()
+        require(len(lines) < 10001 and len(run.stdout.encode()) + len(run.stderr.encode()) <= 8_000_000,
+                'logs_window_truncated')
         allowed = {
             'automation: scheduled job': 'registered',
             'automation: manual trigger': 'manual',
@@ -228,12 +231,12 @@ class Runtime:
             'scheduler: triggered strategy schedule': 'strategy_triggered',
         }
         result = []
-        for line in (run.stdout + '\n' + run.stderr).splitlines():
+        for line in lines:
             try:
                 item = json.loads(line)
             except ValueError:
                 continue
-            if item.get('msg') in allowed:
+            if isinstance(item, dict) and item.get('msg') in allowed:
                 row = {k: item[k] for k in ('time', 'name', 'job', 'cron', 'schedule',
                                            'strategy_id', 'enabled') if k in item}
                 row['event'] = allowed[item['msg']]
@@ -336,7 +339,9 @@ def collect(runtime, config, since, mode='dry-run', now=None):
         ('scheduler', lambda: sanitize_scheduler(json.loads(runtime.http(config['api_url'] + '/api/v1/automation/status', True)))),
         ('prometheus', lambda: sanitize_targets(json.loads(runtime.http(config['prometheus_url'] + '/api/v1/targets')), config)),
         ('metrics', lambda: sanitize_metrics(runtime.http(config['api_url'] + '/metrics'))),
-        ('scheduler_events', lambda: runtime.logs(report['containers']['app']['started_at'])),
+        ('scheduler_events', lambda: runtime.logs(
+            since if getattr(runtime, 'registration_receipt', None)
+            else report['containers']['app']['started_at'])),
     ):
         try:
             report['sections'][name] = action()
