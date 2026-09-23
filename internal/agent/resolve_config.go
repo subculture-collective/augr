@@ -77,6 +77,7 @@ type ResolvedRiskConfig struct {
 // ResolvedConfig is the fully-resolved strategy configuration. Every field has a
 // concrete value; no pointer fields are present. Use ResolveConfig to obtain one.
 type ResolvedConfig struct {
+	FundamentalsContract string
 	// LLMConfig holds the resolved LLM provider and model selection.
 	LLMConfig ResolvedLLMConfig
 	// PipelineConfig holds the resolved debate round and timeout settings.
@@ -131,6 +132,7 @@ func ResolveConfig(strategyConfig *StrategyConfig, globalSettings GlobalSettings
 	}
 
 	return ResolvedConfig{
+		FundamentalsContract: s.FundamentalsContract,
 		LLMConfig: ResolvedLLMConfig{
 			Provider:        resolveStringPtr(sLLM.Provider, gLLM.Provider, defaultLLMProvider),
 			DeepThinkModel:  resolveStringPtr(sLLM.DeepThinkModel, gLLM.DeepThinkModel, defaultLLMDeepThinkModel),
@@ -181,6 +183,9 @@ func resolveRequiredAgentRoles(strategy, global, selected []AgentRole) []AgentRo
 // Call after ResolveConfig to catch misconfigurations early rather than at
 // pipeline execution time.
 func ValidateResolvedConfig(rc ResolvedConfig) error {
+	if err := ValidateStrategyConfig(StrategyConfig{FundamentalsContract: rc.FundamentalsContract, RequiredAnalystRoles: rc.RequiredAnalystRoles, AnalystSelection: rc.AnalystSelection}); err != nil {
+		return err
+	}
 	if rc.LLMConfig.Provider == "" {
 		return fmt.Errorf("resolved config: provider must be non-empty")
 	}

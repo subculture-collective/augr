@@ -25,18 +25,19 @@ func (t Timeframe) String() string {
 
 // Fundamentals holds key financial fundamentals for a ticker.
 type Fundamentals struct {
-	Ticker           string    `json:"ticker"`
-	MarketCap        float64   `json:"market_cap"`
-	PERatio          float64   `json:"pe_ratio"`
-	EPS              float64   `json:"eps"`
-	Revenue          float64   `json:"revenue"`
-	RevenueGrowthYoY float64   `json:"revenue_growth_yoy"`
-	GrossMargin      float64   `json:"gross_margin"`
-	DebtToEquity     float64   `json:"debt_to_equity"`
-	FreeCashFlow     float64   `json:"free_cash_flow"`
-	DividendYield    float64   `json:"dividend_yield"`
-	MissingFields    []string  `json:"missing_fields,omitempty"`
-	FetchedAt        time.Time `json:"fetched_at"`
+	ETF              *ETFFundamentals `json:"etf,omitempty"`
+	Ticker           string           `json:"ticker"`
+	MarketCap        float64          `json:"market_cap"`
+	PERatio          float64          `json:"pe_ratio"`
+	EPS              float64          `json:"eps"`
+	Revenue          float64          `json:"revenue"`
+	RevenueGrowthYoY float64          `json:"revenue_growth_yoy"`
+	GrossMargin      float64          `json:"gross_margin"`
+	DebtToEquity     float64          `json:"debt_to_equity"`
+	FreeCashFlow     float64          `json:"free_cash_flow"`
+	DividendYield    float64          `json:"dividend_yield"`
+	MissingFields    []string         `json:"missing_fields,omitempty"`
+	FetchedAt        time.Time        `json:"fetched_at"`
 }
 
 // NewsArticle represents a single news item relevant to a ticker.

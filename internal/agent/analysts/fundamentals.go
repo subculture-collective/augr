@@ -27,6 +27,9 @@ func NewFundamentalsAnalyst(provider llm.Provider, providerName, model string, l
 		SystemPrompt: FundamentalsAnalystSystemPrompt,
 		SkipMessage:  "No fundamentals available for this asset type.",
 		BuildSystemPrompt: func(input agent.AnalysisInput) string {
+			if input.Fundamentals != nil && input.Fundamentals.ETF != nil {
+				return ETFFundamentalsSystemPrompt
+			}
 			return polymarketSystemPromptFor(input.PredictionMarket != nil)
 		},
 		BuildPrompt: func(input agent.AnalysisInput) (string, bool) {

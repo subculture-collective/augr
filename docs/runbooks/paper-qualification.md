@@ -279,3 +279,5 @@ versioned fragment. The full existing config/rules validated before reload, and
 the target read back `up`. Canonical host documentation records the configuration
 backup and rollback. This scrape restoration does not activate the gated paper
 ledger or paper-monitor timer.
+
+The opt-in SPY replacement is described in [SPY ETF evidence candidate](spy-etf-evidence.md). Its issuer probe and inactive proposal do not qualify the rejected corporate baseline or authorize a ledger.
