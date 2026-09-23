@@ -24,6 +24,8 @@ def parser():
     result.add_argument('--evidence-dir', type=Path, default=ROOT / 'var/qualification')
     result.add_argument('--since', help='ISO timestamp with timezone; defaults to the preceding 30 minutes')
     result.add_argument('--token-file', type=Path, help='mode-0600 normal operator session/access-token file; never printed')
+    result.add_argument('--registration-receipt', type=Path, help='checksummed startup registration receipt for this unchanged app instance')
+    result.add_argument('--session-date', help='reviewed market-session date for a new plan, YYYY-MM-DD')
     result.add_argument('--ledger', type=Path)
     result.add_argument('--go', type=Path, dest='go_file')
     result.add_argument('--receipt', type=Path)
@@ -39,7 +41,7 @@ def main():
     os.umask(0o077)
     args = parser().parse_args()
     config = load_config(args.config)
-    runtime = Runtime(config, args.token_file)
+    runtime = Runtime(config, args.token_file, args.registration_receipt)
     if args.command == 'login':
         from qualification.session import login
         require(sys.stdin.isatty() and sys.stderr.isatty(), 'login_requires_interactive_terminal')
@@ -78,7 +80,8 @@ def main():
     directory = save_receipt(evidence, report)
     print(directory)
     if args.command == 'plan':
-        write_json(directory / 'observer-plan.json', make_plan(config, report, args.token_file))
+        write_json(directory / 'observer-plan.json', make_plan(config, report, args.token_file,
+                   args.session_date, args.registration_receipt))
     elif args.command == 'init':
         require(args.go_file, 'go_file_required')
         initialize(ledger, json.loads(args.go_file.read_text()), report, config)

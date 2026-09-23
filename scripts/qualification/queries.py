@@ -18,7 +18,9 @@ COUNTERS = (
     'daily_fallback_rejected daily_fallback_provider_pages daily_fallback_cache_hits '
     'chains chain_insufficient setups fetch_failed persist_failed supported swept '
     'candidates generated validated deployed created reused invalid_scores '
-    'completed skipped running total missing coverage_bps'
+    'completed skipped running total missing coverage_bps all_unqualified base_unqualified '
+    'config_failed sweep_failed insufficient empty_results missing_base '
+    'optionable_coverage_bps chain_coverage_bps'
 ).split()
 COUNTER_SQL = """COALESCE((SELECT jsonb_object_agg(key,value) FROM jsonb_each(
  CASE WHEN jsonb_typeof(result)='object' THEN result ELSE '{}'::jsonb END)
@@ -54,7 +56,23 @@ def sections(since):
         'reports': f"SELECT id,strategy_id,status,provider,model,prompt_tokens,completion_tokens,latency_ms,created_at,completed_at FROM report_artifacts WHERE created_at >= {ts} ORDER BY created_at DESC LIMIT 501",
         'coverage': f"SELECT ticker,provider,timeframe,range_from,range_to,fetched_at FROM historical_ohlcv_coverage WHERE fetched_at >= {ts} ORDER BY fetched_at DESC LIMIT 501",
         'manual_strategy_runs': f"SELECT entity_id,created_at FROM audit_log WHERE event_type='strategy.manual_run' AND created_at >= {ts} ORDER BY created_at LIMIT 501",
+        'preparation_rejections': f"SELECT {PREPARATION_COLUMNS} FROM agent_events WHERE event_kind='strategy.preparation_rejected' AND created_at >= {ts} ORDER BY created_at DESC,id DESC LIMIT 501",
     }
+
+
+# Keep durable rejection reasons, never arbitrary event metadata or summaries.
+PREPARATION_COLUMNS = """id,strategy_id,origin_id AS execution_version_id,created_at,
+ CASE WHEN metadata->>'reason_code' IN ('news_coverage_insufficient','news_stale',
+ 'fundamentals_incomplete','fundamentals_invalid','market_data_stale',
+ 'market_data_unavailable','social_data_invalid','llm_provider_unavailable','preparation_failed')
+ THEN metadata->>'reason_code' ELSE 'unclassified' END AS reason_code"""
+
+
+def preparation_rejections(target, since, until):
+    return f"""SELECT {PREPARATION_COLUMNS} FROM agent_events
+ WHERE event_kind='strategy.preparation_rejected' AND strategy_id='{target}'::uuid
+ AND created_at >= TIMESTAMPTZ '{since}' AND created_at <= TIMESTAMPTZ '{until}'
+ ORDER BY created_at,id LIMIT 3"""
 
 
 def observed_runs(kind, target, since, until):

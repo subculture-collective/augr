@@ -792,7 +792,12 @@ func newLedgerIntegrationPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 		t.Fatalf("create ledger integration schema: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := adminPool.Exec(ctx, `DROP SCHEMA IF EXISTS `+identifier+` CASCADE`); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := retrySchemaCleanup(cleanupCtx, func() error {
+			_, err := adminPool.Exec(cleanupCtx, `DROP SCHEMA IF EXISTS `+identifier+` CASCADE`)
+			return err
+		}); err != nil {
 			t.Errorf("drop ledger integration schema: %v", err)
 		}
 	})

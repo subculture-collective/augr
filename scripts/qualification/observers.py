@@ -13,7 +13,7 @@ from .core import (UTC, Refusal, collect, digest, instant, lock, require,
                    save_receipt, stamp, write_json)
 
 
-def make_plan(config, report, token_file=None):
+def make_plan(config, report, token_file=None, session_date=None, registration_receipt=None):
     eastern = ZoneInfo(config['timezone'])
     chicago = ZoneInfo(config['display_timezone'])
     registered = {x.get('name'): x.get('cron') for x in report['sections'].get('scheduler_events', [])
@@ -21,6 +21,15 @@ def make_plan(config, report, token_file=None):
     jobs = {x['name']: x for x in report['sections'].get('scheduler', [])}
     controls = {x['job_name']: x['enabled'] for x in report['sections'].get('controls', [])}
     session_arg = shlex.quote(str(token_file or '/var/lib/augr-qualification/operator-token'))
+    archive_arg = (' --registration-receipt ' + shlex.quote(str(registration_receipt))) if registration_receipt else ''
+    try:
+        day = dt.date.fromisoformat(session_date or '2026-09-21')
+    except ValueError:
+        raise Refusal('invalid_session_date') from None
+    require(day.isoformat() in config['monitoring']['reviewed_calendar_dates']
+            and (day + dt.timedelta(days=1)).isoformat() in config['monitoring']['reviewed_calendar_dates']
+            and day.weekday() < 5, 'session_calendar_review_required')
+    offset = day - dt.date(2026, 9, 21)
     boundaries = [('strategy', '2026-09-21T10:00:00')]
     boundaries += [('options_scan', '2026-09-21T22:00:00'),
                    ('history_refresh', '2026-09-22T00:00:00'),
@@ -31,7 +40,7 @@ def make_plan(config, report, token_file=None):
                    ('options_discovery', '2026-09-22T06:30:00')]
     result = []
     for name, local in boundaries:
-        boundary = dt.datetime.fromisoformat(local).replace(tzinfo=eastern)
+        boundary = (dt.datetime.fromisoformat(local) + offset).replace(tzinfo=eastern)
         target = config['strategy']['id'] if name == 'strategy' else name
         kind = 'strategy' if name == 'strategy' else 'automation'
         if name == 'strategy':
@@ -53,11 +62,11 @@ def make_plan(config, report, token_file=None):
                        'chicago': boundary.astimezone(chicago).isoformat(),
                        'arm_by': stamp(boundary - dt.timedelta(minutes=5)),
                        'runtime_status': status,
-                       'command': f'./scripts/qualify-paper.py observe --kind {kind} --target {target} --due {stamp(boundary)} --token-file {session_arg} --evidence-dir /var/lib/augr-qualification/observations',
+                       'command': f'./scripts/qualify-paper.py observe --kind {kind} --target {target} --due {stamp(boundary)} --token-file {session_arg}{archive_arg} --evidence-dir /var/lib/augr-qualification/observations',
                        'deadline': stamp(boundary + dt.timedelta(seconds=config['monitoring']['job_timeout_seconds']))})
     return {'format': 1, 'created_from_receipt_sha256': digest(report),
             'timezone': config['timezone'], 'boundaries': result,
-            'calendar': '2026-09-21 NYSE trading day verified by pinned-source regression test; no runtime calendar endpoint',
+            'calendar': day.isoformat() + ' trading day within configured calendar review; no runtime calendar endpoint',
             'capability_review': config['capability_review_jobs'],
             'state': 'prepared_not_armed',
             'instruction': 'Recollect before arming; absent, disabled or unverified jobs require explicit review. Never trigger them to supply evidence.'}
@@ -109,7 +118,10 @@ def observe(runtime, config, kind, target, due, evidence_dir, clock=None,
                 require(recent_due(cron, boundary, config) == boundary, 'not_a_scheduled_boundary')
                 while clock.now() < boundary - dt.timedelta(seconds=lead):
                     clock.sleep(min(30, (boundary - dt.timedelta(seconds=lead) - clock.now()).total_seconds()))
-                report['precheck'] = collect(runtime, config, stamp(armed), 'prospective_precheck', clock.now())
+                # Arming may precede the boundary by days. Inspect a fresh,
+                # bounded window rather than accumulating every intervening job.
+                precheck_since = clock.now() - dt.timedelta(minutes=30)
+                report['precheck'] = collect(runtime, config, stamp(precheck_since), 'prospective_precheck', clock.now())
                 require(report['precheck'].get('baseline_sha256'), 'precheck_identity_failed')
                 require(clock.now() < boundary, 'missed_precheck_boundary')
                 require(report['precheck'].get('collection_status') == 'complete', 'precheck_evidence_incomplete')
@@ -140,10 +152,16 @@ def observe(runtime, config, kind, target, due, evidence_dir, clock=None,
                             require(instant(row['completed_at']) <= deadline, 'terminal_after_deadline')
                             require(row['status'] in ('ok', 'completed') and not row['error_present'], 'natural_run_failed')
                             break
-                    elif clock.now() >= admission_end:
-                        raise Refusal('missed_natural_run')
+                    else:
+                        if kind == 'strategy':
+                            rejected = runtime.db(queries.preparation_rejections(target, stamp(boundary), stamp(clock.now())))
+                            if rejected:
+                                report['preparation_rejections'] = rejected
+                                raise Refusal('strategy_preparation_rejected')
+                        if clock.now() >= admission_end:
+                            raise Refusal('missed_natural_run')
                     clock.sleep(poll)
-                logs = runtime.logs(stamp(armed))
+                logs = runtime.logs(stamp(precheck_since))
                 report['scheduler_events'] = logs
                 if kind == 'automation':
                     require(not any(x['event'] == 'manual' and x.get('job') == target for x in logs), 'manual_run_rejected')
@@ -151,12 +169,12 @@ def observe(runtime, config, kind, target, due, evidence_dir, clock=None,
                                 and abs((instant(x['time']) - instant(row['started_at'])).total_seconds()) < 5
                                 for x in logs), 'natural_trigger_unverified')
                 else:
-                    manual = runtime.db(queries.sections(stamp(armed))['manual_strategy_runs'])
+                    manual = runtime.db(queries.sections(stamp(precheck_since))['manual_strategy_runs'])
                     require(not any(x['entity_id'] == target for x in manual), 'manual_run_rejected')
                     require(any(x['event'] == 'strategy_triggered' and x.get('strategy_id') == target
                                 and abs((instant(x['time']) - instant(row['started_at'])).total_seconds()) < 10
                                 for x in logs), 'natural_trigger_unverified')
-                report['postcheck'] = collect(runtime, config, stamp(armed), 'prospective_postcheck', clock.now())
+                report['postcheck'] = collect(runtime, config, stamp(precheck_since), 'prospective_postcheck', clock.now())
                 require(report['postcheck'].get('baseline_sha256') == report['precheck']['baseline_sha256'], 'observation_baseline_drift')
                 require(report['postcheck']['collection_status'] == 'complete', 'postcheck_evidence_incomplete')
                 report['outcome'] = 'natural_terminal_evidence_collected'
