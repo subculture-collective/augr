@@ -115,9 +115,10 @@ def load_config(path):
 
 
 class Runtime:
-    def __init__(self, config, token_file=None):
+    def __init__(self, config, token_file=None, registration_receipt=None):
         self.config = config
         self.token_file = token_file
+        self.registration_receipt = registration_receipt
 
     def inspect(self):
         require(socket.gethostname().split('.')[0] == self.config['host'], 'wrong_host')
@@ -154,14 +155,37 @@ class Runtime:
     def db(self, sql, aggregate=True):
         if aggregate:
             sql = "SELECT COALESCE(json_agg(q),'[]'::json) FROM (" + sql + ') q'
-        output = command([
+        output = self.sql_output('BEGIN READ ONLY; ' + sql + '; COMMIT;')
+        try:
+            return json.loads(output)
+        except ValueError:
+            raise Refusal('invalid_database_response') from None
+
+    def sql_output(self, sql):
+        return command([
             'docker', 'exec', '-e',
             'PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=15000 -c lock_timeout=2000',
             self.config['containers']['postgres']['name'], 'psql', '-X', '-qAt',
             '-v', 'ON_ERROR_STOP=1', '-U', self.config['database_user'], '-d', self.config['database'],
-            '-c', 'BEGIN READ ONLY; ' + sql + '; COMMIT;'], timeout=25)
+            '-c', sql], timeout=25)
+
+    def db_section(self, sql):
+        if not sql.endswith('LIMIT 501'):
+            return self.db(sql)
+        # Fetch bounded pages from one snapshot. Separate OFFSET transactions
+        # could lose or duplicate rows while coverage records are refreshed.
+        query = sql.removesuffix('LIMIT 501')
+        statements = [
+            'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY',
+            'DECLARE qualification_rows NO SCROLL CURSOR FOR '
+            'SELECT row_to_json(q) FROM (' + query + ') q',
+            *(['FETCH FORWARD 500 FROM qualification_rows'] * 20),
+            'FETCH FORWARD 1 FROM qualification_rows',
+            'CLOSE qualification_rows', 'COMMIT',
+        ]
+        output = self.sql_output('; '.join(statements) + ';')
         try:
-            return json.loads(output)
+            return [json.loads(line) for line in output.splitlines() if line.strip()]
         except ValueError:
             raise Refusal('invalid_database_response') from None
 
@@ -214,7 +238,27 @@ class Runtime:
                                            'strategy_id', 'enabled') if k in item}
                 row['event'] = allowed[item['msg']]
                 result.append(row)
+        if self.registration_receipt:
+            result.extend(self.archived_registrations())
         return result
+
+    def archived_registrations(self):
+        path = Path(self.registration_receipt)
+        manifest = json.loads((path.parent / 'manifest.json').read_text())
+        checksum = file_hash(path)
+        require(manifest.get(path.name) == checksum, 'registration_receipt_checksum_mismatch')
+        report = json.loads(path.read_text())
+        require(report.get('collection_status') == 'complete'
+                and report.get('config_sha256') == digest(self.config), 'registration_receipt_invalid')
+        current = self.inspect()['app']
+        archived = report['containers']['app']
+        require(all(current[k] == archived[k] for k in
+                    ('id', 'image', 'revision', 'started_at', 'restarts')), 'registration_runtime_changed')
+        # Archive only startup registration evidence. Never replay old starts,
+        # completions, enabled state or manual-trigger evidence as current.
+        return [{**row, 'registration_receipt_sha256': checksum}
+                for row in report['sections'].get('scheduler_events', [])
+                if row.get('event') in ('registered', 'strategy_registered')]
 
 
 def validate_runtime(config, containers, identity, cohort):
@@ -279,9 +323,11 @@ def collect(runtime, config, since, mode='dry-run', now=None):
         return report
     for name, sql in queries.sections(since).items():
         try:
-            rows = runtime.db(sql)
+            reader = getattr(runtime, 'db_section', runtime.db)
+            rows = reader(sql)
             report['sections'][name] = rows
-            if len(rows) >= 501:
+            limit = 10001 if hasattr(runtime, 'db_section') else 501
+            if len(rows) >= limit:
                 report['blockers'].append('truncated_' + name)
         except Refusal:
             report['blockers'].append('query_failed_' + name)
@@ -387,6 +433,8 @@ def assess(report, config, now):
             findings.append('decision_integrity_' + row['id'])
         if row['live_order_id']:
             findings.append('live_order_link_' + row['id'])
+    for row in sections.get('preparation_rejections', []):
+        findings.append('strategy_preparation_rejected_' + row['id'])
     if not sections.get('metrics'):
         findings.append('provider_metrics_missing')
     for metric in sections.get('metrics', []):

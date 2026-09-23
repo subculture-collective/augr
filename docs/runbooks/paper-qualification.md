@@ -123,6 +123,25 @@ The two-hour default is inherited from the previous observer, not a trading gate
   --evidence-dir /var/lib/augr-qualification/observations
 ```
 
+For a new attempt within the reviewed calendar, pass `--session-date YYYY-MM-DD`
+to `plan`. A new date creates new observation slots; never delete the old slot
+journals to reuse a failed boundary. Dates outside the reviewed calendar fail.
+
+Prechecks cover the preceding 30 minutes, independently of when the process was
+armed. Postchecks cover that precheck window through completion. Large SQL
+sections use 500-row cursor pages in one read-only repeatable-read transaction,
+with a 10,000-row cap plus an overflow sentinel and a 25-second process deadline.
+Overflow remains incomplete evidence. A strategy rejected before a pipeline is
+created retains its allowlisted reason from `agent_events`.
+
+If Docker has rotated away startup registration logs, pass
+`--registration-receipt /absolute/receipt-directory/receipt.json` to `plan` and
+`observe`. This must be a checksummed, complete receipt from the same configuration
+and unchanged app ID, image, source revision, start time, and restart count.
+Only startup registration events are reused. Enabled state, natural starts,
+completions and manual-trigger checks are always collected afresh. A restart
+invalidates the archive. Generated observer commands carry this argument.
+
 Run each observer in an operator-owned persistent session or an explicitly named
 one-shot service. Record its PID/unit and evidence directory. The slot lock is
 keyed by kind, target and due timestamp. Duplicate ownership, late arming, missed
@@ -236,3 +255,27 @@ sudo systemctl disable --now augr-paper-monitor.timer
 ```
 
 The marker is archived, not deleted. No old failed monitor/ledger is resumed.
+
+## September 21–22 failed attempt and recovery
+
+All four observers armed Sunday but stopped at precheck. The original collector
+queried from arming time and hit its 500-row bound: 1,242 automation rows already
+existed by the first precheck. The sweep also overflowed coverage detail. Preserve
+those four receipts and journals under
+`/home/onnwee/.local/state/augr/qualification-observations/2026-09-21` on NUC.
+Their outcomes remain failures; the corrected tools do not reconstruct prospective
+passes from retrospective data.
+
+Loki and durable preparation events establish that SPY triggered on Monday and
+Tuesday, then failed the required fundamentals completeness check before pipeline
+creation. The strategy requires corporate fundamentals unavailable for this SPY
+input. Keep that gate and execution version intact pending a reviewed replacement.
+History and options runs retained provider/coverage failures. The sweep reported
+`all_unqualified=1`; this is a research result, not evidence that its fetch failed.
+No performance threshold or provider requirement was relaxed during recovery.
+
+Dozor's missing `augr-api` scrape job was restored on September 23 UTC from the
+versioned fragment. The full existing config/rules validated before reload, and
+the target read back `up`. Canonical host documentation records the configuration
+backup and rollback. This scrape restoration does not activate the gated paper
+ledger or paper-monitor timer.

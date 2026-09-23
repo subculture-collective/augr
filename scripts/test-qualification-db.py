@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 from qualification import queries
+from qualification.core import Runtime
 
 container = os.environ['DATABASE_CONTAINER']
 assert re.fullmatch(r'[0-9a-f]{12,64}', container)
@@ -23,4 +24,10 @@ for sql in statements:
 sql = "SELECT " + queries.COUNTER_SQL + " FROM (VALUES ('{\"selected\":251,\"provider_recoveries\":30,\"secret\":\"do-not-retain\",\"failed\":\"raw-error\"}'::jsonb)) v(result)"
 result = json.loads(subprocess.check_output(args+['-c',sql],text=True))
 assert result == {'selected':251,'provider_recoveries':30}, result
-print(f'{len(statements)} schema-114 queries compiled read-only; numeric allowlist fixture passed')
+runtime = Runtime({})
+runtime.sql_output = lambda sql: subprocess.check_output(args+['-c',sql],text=True,timeout=25)
+rows = runtime.db_section('SELECT n AS id FROM generate_series(1,1242) n ORDER BY n LIMIT 501')
+assert [row['id'] for row in rows] == list(range(1,1243))
+bounded = runtime.db_section('SELECT n AS id FROM generate_series(1,12000) n ORDER BY n LIMIT 501')
+assert len(bounded) == 10001 and bounded[-1]['id'] == 10001
+print(f'{len(statements)} schema-114 queries compiled read-only; numeric allowlist and paginated snapshot fixtures passed')

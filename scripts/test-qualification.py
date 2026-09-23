@@ -59,6 +59,8 @@ class Fixture:
             return copy.deepcopy(self.identity)
         if sql == queries.COHORT:
             return copy.deepcopy(self.cohort)
+        if 'FROM agent_events' in sql:
+            return []
         if 'LIMIT 3' in sql:
             if self.clock.now() < self.due or self.run_mode == 'missing':
                 return []
@@ -160,6 +162,81 @@ class QualificationTests(unittest.TestCase):
         report=self.report()
         self.assertIn('unavailable_scheduler',report['blockers'])
         self.assertIn('scheduler_not_enabled_options_scan',report['findings'])
+    def test_section_pages_share_one_read_only_snapshot(self):
+        output = '\n'.join(json.dumps({'id': n}) for n in range(1242))
+        with patch('qualification.core.command', return_value=output) as run:
+            rows = core.Runtime(self.config).db_section(
+                'SELECT id FROM automation_job_runs ORDER BY started_at DESC LIMIT 501')
+        self.assertEqual(len(rows), 1242)
+        sql = run.call_args.args[0][-1]
+        self.assertIn('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY', sql)
+        self.assertEqual(sql.count('FETCH FORWARD 500'), 20)
+        self.assertIn('FETCH FORWARD 1', sql)
+        self.assertNotIn('LIMIT 501', sql)
+        self.assertEqual(run.call_args.kwargs['timeout'], 25)
+
+    def test_large_complete_section_and_explicit_total_bound(self):
+        original = self.runtime.db
+        for count, expected in ((1242, 'complete'), (10001, 'incomplete')):
+            self.runtime.db_section = lambda sql: ([
+                {'id': str(n), 'status': 'ok', 'error_present': False}
+                for n in range(count)] if 'FROM automation_job_runs WHERE' in sql else original(sql))
+            report = self.report()
+            self.assertEqual(report['collection_status'], expected)
+            self.assertEqual(len(report['sections']['automation']), count)
+            self.assertEqual('truncated_automation' in report['blockers'], count == 10001)
+
+    def test_long_prearmed_wait_uses_fresh_precheck_window(self):
+        due = core.instant('2026-09-22T02:00:00Z')
+        clock = FakeClock(due-dt.timedelta(hours=27))
+        self.runtime.clock = clock
+        self.runtime.due = due
+        report, _ = observers.observe(self.runtime, self.config, 'automation',
+            'options_scan', core.stamp(due), self.root/'long-wait', clock=clock)
+        self.assertEqual(report['outcome'], 'natural_terminal_evidence_collected')
+        self.assertEqual(core.instant(report['precheck']['since']), due-dt.timedelta(minutes=32))
+        self.assertEqual(report['postcheck']['since'], report['precheck']['since'])
+
+    def test_strategy_preparation_rejection_is_retained_without_pipeline(self):
+        original = self.runtime.db
+        def rejected(sql, aggregate=True):
+            if 'FROM agent_events' in sql and 'LIMIT 3' in sql:
+                return [{'id': RUN_ID, 'reason_code': 'fundamentals_incomplete'}]
+            return original(sql, aggregate)
+        self.runtime.db = rejected
+        report, _ = self.observe(mode='missing', kind='strategy')
+        self.assertEqual(report['outcome'], 'strategy_preparation_rejected')
+        self.assertEqual(report['preparation_rejections'][0]['reason_code'], 'fundamentals_incomplete')
+
+    def test_archived_registration_never_replays_run_or_enabled_events(self):
+        report = self.report()
+        directory = core.save_receipt(self.root, report)
+        runtime = core.Runtime(self.config, registration_receipt=directory/'receipt.json')
+        with patch.object(runtime, 'inspect', return_value=self.runtime.inspect()):
+            rows = runtime.archived_registrations()
+        self.assertTrue(rows)
+        self.assertTrue(all(x['event'] in ('registered','strategy_registered') for x in rows))
+        self.assertTrue(all(x['registration_receipt_sha256'] for x in rows))
+        changed = self.runtime.inspect()
+        changed['app']['restarts'] += 1
+        with patch.object(runtime, 'inspect', return_value=changed):
+            with self.assertRaisesRegex(core.Refusal, 'registration_runtime_changed'):
+                runtime.archived_registrations()
+        (directory/'receipt.json').write_text('{}')
+        with self.assertRaisesRegex(core.Refusal, 'registration_receipt_checksum_mismatch'):
+            runtime.archived_registrations()
+
+    def test_new_plan_dates_require_review_and_preserve_archive_argument(self):
+        plan = observers.make_plan(self.config, self.report(), '/tmp/session',
+                                   '2026-09-23', '/tmp/old receipt/receipt.json')
+        self.assertEqual(plan['boundaries'][0]['due_at'], '2026-09-23T14:00:00+00:00')
+        self.assertEqual(plan['boundaries'][1]['due_at'], '2026-09-24T02:00:00+00:00')
+        import shlex
+        args = shlex.split(plan['boundaries'][0]['command'])
+        self.assertEqual(args[args.index('--registration-receipt')+1], '/tmp/old receipt/receipt.json')
+        for date in ('2026-09-26', '2026-10-01'):
+            with self.assertRaisesRegex(core.Refusal, 'session_calendar_review_required'):
+                observers.make_plan(self.config, self.report(), session_date=date)
     def test_database_command_is_read_only_explicit_and_bounded(self):
         with patch('qualification.core.command',return_value='[]') as run:
             core.Runtime(self.config).db('SELECT 1')
