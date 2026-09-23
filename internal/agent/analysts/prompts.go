@@ -171,6 +171,9 @@ Be precise with numbers. Reference the actual values from the provided data. If 
 // block that the LLM can analyze. When f is nil the prompt indicates that
 // fundamental data is not applicable (e.g., for crypto assets).
 func FormatFundamentalsAnalystUserPrompt(ticker string, f *data.Fundamentals) string {
+	if f != nil && f.ETF != nil {
+		return FormatETFFundamentalsUserPrompt(f.ETF)
+	}
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "Analyze the following fundamental data for %s.\n", sanitizeCell(ticker))

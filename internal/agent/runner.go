@@ -642,6 +642,15 @@ func applyInitialStateSeed(state *PipelineState, seed InitialStateSeed) {
 	}
 	if seed.Fundamentals != nil {
 		fundamentals := *seed.Fundamentals
+		if fundamentals.ETF != nil {
+			fund := *fundamentals.ETF
+			fund.Holdings = append([]data.ETFHolding(nil), fund.Holdings...)
+			if fund.GrossExpenseRatio != nil {
+				fee := *fund.GrossExpenseRatio
+				fund.GrossExpenseRatio = &fee
+			}
+			fundamentals.ETF = &fund
+		}
 		state.Fundamentals = &fundamentals
 	}
 	if seed.Social != nil {

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/data"
 )
 
 // knownLLMModels is the unexported set of model identifiers that
@@ -112,6 +114,8 @@ type StrategyRiskConfig struct {
 // "use the system default". AnalystSelection and PromptOverrides are slices/maps
 // whose nil zero-values already carry the "use default" semantic.
 type StrategyConfig struct {
+	// FundamentalsContract opts into a versioned ETF contract; empty retains corporate checks.
+	FundamentalsContract string `json:"fundamentals_contract,omitempty"`
 	// LLMConfig overrides LLM provider and model selection for this strategy.
 	LLMConfig *StrategyLLMConfig `json:"llm_config,omitempty"`
 	// PipelineConfig overrides debate rounds and timeouts for this strategy.
@@ -139,6 +143,22 @@ type StrategyConfig struct {
 // It returns an error describing the first invalid field encountered, or nil if
 // the config is fully valid.
 func ValidateStrategyConfig(cfg StrategyConfig) error {
+	if cfg.FundamentalsContract != "" && cfg.FundamentalsContract != data.SPYETFContractV1 {
+		return fmt.Errorf("unknown fundamentals_contract")
+	}
+	if cfg.FundamentalsContract != "" {
+		for _, role := range []AgentRole{AgentRoleMarketAnalyst, AgentRoleFundamentalsAnalyst, AgentRoleNewsAnalyst} {
+			found := false
+			for _, required := range cfg.RequiredAnalystRoles {
+				if role == required {
+					found = true
+				}
+			}
+			if !found {
+				return fmt.Errorf("ETF contract requires explicit market, fundamentals, and news analyst roles")
+			}
+		}
+	}
 	if err := validateLLMConfig(cfg.LLMConfig); err != nil {
 		return err
 	}

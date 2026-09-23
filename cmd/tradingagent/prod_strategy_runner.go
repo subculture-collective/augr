@@ -23,6 +23,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/api"
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
+	"github.com/PatrickFanella/get-rich-quick/internal/data/ssga"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/eventmarkets"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
@@ -84,7 +85,12 @@ type polymarketTickFeed interface {
 	Ticks(slug string) <-chan polymarketdata.Tick
 }
 
+type etfFundamentalsSource interface {
+	GetETFFundamentals(context.Context, string) (data.Fundamentals, error)
+}
+
 type realStrategyRunner struct {
+	etfSource               etfFundamentalsSource
 	stockCapture            stockEvidenceCapture
 	preparePaperStockSignal func(context.Context, execution.ExecutionScope, execution.TradingPlan) (execution.SignalOrderPreparation, error)
 
@@ -166,6 +172,7 @@ func newRealStrategyRunner(
 		cfg:                   cfg,
 		globals:               globalSettingsFromConfig(cfg),
 		dataService:           dataService,
+		etfSource:             ssga.NewProvider(),
 		runRepo:               runRepo,
 		snapshotRepo:          snapshotRepo,
 		decisionRepo:          decisionRepo,
@@ -240,6 +247,12 @@ func polymarketLiveExecutionAuthorized(cfg config.Config, account domain.Executi
 func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (*api.StrategyRunResult, error) {
 	if executionVersionID == uuid.Nil {
 		return nil, errors.New("strategy execution version ID is required")
+	}
+	if err := validateETFStrategyContract(strategy); err != nil {
+		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, executionVersionID, err); persistErr != nil {
+			return nil, errors.Join(err, persistErr)
+		}
+		return nil, err
 	}
 	group := r.strategyRunGroup()
 	if !group.HasLease(ctx) {
@@ -1797,6 +1810,8 @@ func strategyPreparationFailureReason(err error) string {
 		return "news_coverage_insufficient"
 	case strings.Contains(message, "newest direct news article is older"):
 		return "news_stale"
+	case strings.Contains(message, "etf fundamentals"):
+		return "etf_fundamentals_invalid"
 	case strings.Contains(message, "fundamentals completeness below threshold"):
 		return "fundamentals_incomplete"
 	case strings.Contains(message, "fundamentals unavailable"),
@@ -2132,6 +2147,29 @@ func pipelineSnapshotFromScope(scope execution.ExecutionScope, dataType string, 
 	}, nil
 }
 
+// Validate before dispatch so native/generated routes cannot ignore an ETF contract.
+func validateETFStrategyContract(strategy domain.Strategy) error {
+	if len(strategy.Config) == 0 {
+		return nil
+	}
+	var header struct {
+		Contract string `json:"fundamentals_contract"`
+	}
+	if err := json.Unmarshal(strategy.Config, &header); err != nil {
+		return fmt.Errorf("parse strategy input contract: %w", err)
+	}
+	if header.Contract == "" {
+		return nil
+	}
+	if header.Contract != data.SPYETFContractV1 || strategy.Ticker != "SPY" || strategy.MarketType.Normalize() != domain.MarketTypeStock || !strategy.IsPaper || generativestrategy.HasRuntimeBinding(strategy.Config) {
+		return errors.New("ETF fundamentals: contract requires the paper SPY analyst pipeline")
+	}
+	if _, err := parseStrategyConfig(strategy.Config); err != nil {
+		return fmt.Errorf("ETF fundamentals: %w", err)
+	}
+	return nil
+}
+
 func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig) (agent.InitialStateSeed, error) {
 	if r.dataService == nil {
 		return agent.InitialStateSeed{}, errors.New("market data service is required")
@@ -2156,7 +2194,22 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 		}
 	}
 
-	if fundamentals, err := r.dataService.GetFundamentals(ctx, strategy.MarketType, strategy.Ticker); err == nil {
+	if resolved.FundamentalsContract != "" {
+		if resolved.FundamentalsContract != data.SPYETFContractV1 || strategy.Ticker != "SPY" || strategy.MarketType.Normalize() != domain.MarketTypeStock || !strategy.IsPaper {
+			return agent.InitialStateSeed{}, errors.New("ETF fundamentals: contract requires paper SPY stock strategy")
+		}
+		if err := agent.ValidateResolvedConfig(resolved); err != nil {
+			return agent.InitialStateSeed{}, err
+		}
+		if r.etfSource == nil {
+			return agent.InitialStateSeed{}, errors.New("ETF fundamentals: source unavailable")
+		}
+		fundamentals, err := r.etfSource.GetETFFundamentals(ctx, strategy.Ticker)
+		if err != nil {
+			return agent.InitialStateSeed{}, fmt.Errorf("ETF fundamentals: %w", err)
+		}
+		seed.Fundamentals = &fundamentals
+	} else if fundamentals, err := r.dataService.GetFundamentals(ctx, strategy.MarketType, strategy.Ticker); err == nil {
 		seed.Fundamentals = &fundamentals
 	} else if ctxErr := contextErr(err); ctxErr != nil {
 		return agent.InitialStateSeed{}, ctxErr
@@ -2199,7 +2252,7 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 	}
 
 	r.logger.Debug("loadInitialState after social sentiment")
-	if err := validateRequiredAnalysisInputs(strategy, resolved.RequiredAnalystRoles, seed, to); err != nil {
+	if err := validateRequiredAnalysisInputsWithContract(strategy, resolved.RequiredAnalystRoles, seed, time.Now().UTC(), resolved.FundamentalsContract); err != nil {
 		return agent.InitialStateSeed{}, err
 	}
 	// Polymarket: load prediction market metadata for the market slug.
@@ -2220,6 +2273,10 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 }
 
 func validateRequiredAnalysisInputs(strategy domain.Strategy, required []agent.AgentRole, seed agent.InitialStateSeed, now time.Time) error {
+	return validateRequiredAnalysisInputsWithContract(strategy, required, seed, now, "")
+}
+
+func validateRequiredAnalysisInputsWithContract(strategy domain.Strategy, required []agent.AgentRole, seed agent.InitialStateSeed, now time.Time, contract string) error {
 	for _, role := range required {
 		switch role {
 		case agent.AgentRoleMarketAnalyst:
@@ -2230,7 +2287,17 @@ func validateRequiredAnalysisInputs(strategy domain.Strategy, required []agent.A
 				return fmt.Errorf("required analyst role %s: %w", role, err)
 			}
 		case agent.AgentRoleFundamentalsAnalyst:
-			if err := validateFundamentalsInput(strategy.Ticker, seed.Fundamentals, now); err != nil {
+			var err error
+			if contract == data.SPYETFContractV1 {
+				if seed.Fundamentals == nil {
+					err = errors.New("ETF fundamentals: unavailable")
+				} else {
+					err = data.ValidateSPYETFFundamentals(seed.Fundamentals.ETF, now)
+				}
+			} else {
+				err = validateFundamentalsInput(strategy.Ticker, seed.Fundamentals, now)
+			}
+			if err != nil {
 				return fmt.Errorf("required analyst role %s: %w", role, err)
 			}
 		case agent.AgentRoleNewsAnalyst:
@@ -2442,7 +2509,11 @@ func buildAnalysisAgents(provider llm.Provider, providerName string, resolved ag
 	model := strings.TrimSpace(resolved.LLMConfig.QuickThinkModel)
 	agents := make([]agent.AnalysisAgent, 0, len(roles))
 	for _, role := range roles {
-		agentImpl, err := newAnalysisAgent(provider, providerName, model, role, resolved.PromptOverrides[role], appMetrics, logger)
+		prompt := resolved.PromptOverrides[role]
+		if role == agent.AgentRoleFundamentalsAnalyst && resolved.FundamentalsContract == data.SPYETFContractV1 && strings.TrimSpace(prompt) == "" {
+			prompt = agentanalysts.ETFFundamentalsSystemPrompt
+		}
+		agentImpl, err := newAnalysisAgent(provider, providerName, model, role, prompt, appMetrics, logger)
 		if err != nil {
 			return nil, err
 		}

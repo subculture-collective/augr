@@ -63,7 +63,7 @@ def sections(since):
 # Keep durable rejection reasons, never arbitrary event metadata or summaries.
 PREPARATION_COLUMNS = """id,strategy_id,origin_id AS execution_version_id,created_at,
  CASE WHEN metadata->>'reason_code' IN ('news_coverage_insufficient','news_stale',
- 'fundamentals_incomplete','fundamentals_invalid','market_data_stale',
+ 'fundamentals_incomplete','fundamentals_invalid','etf_fundamentals_invalid','market_data_stale',
  'market_data_unavailable','social_data_invalid','llm_provider_unavailable','preparation_failed')
  THEN metadata->>'reason_code' ELSE 'unclassified' END AS reason_code"""
 
