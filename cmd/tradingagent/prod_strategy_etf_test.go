@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -75,5 +76,34 @@ func TestLoadETFInputsRejectsLiveWrongTickerAndUnavailableSource(t *testing.T) {
 	}
 	if source.calls != 1 {
 		t.Fatal("unexpected fetch count")
+	}
+}
+
+func TestETFRuntimeContractCannotBeIgnoredByAlternateDispatch(t *testing.T) {
+	raw := json.RawMessage(`{"fundamentals_contract":"spy-ssga-etf-v1","required_analyst_roles":["market_analyst","fundamentals_analyst","news_analyst"]}`)
+	valid := domain.Strategy{Ticker: "SPY", MarketType: domain.MarketTypeStock, IsPaper: true, Config: raw}
+	if err := validateETFStrategyContract(valid); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(*domain.Strategy){
+		func(s *domain.Strategy) { s.IsPaper = false },
+		func(s *domain.Strategy) { s.MarketType = domain.MarketTypeKalshi },
+		func(s *domain.Strategy) { s.Ticker = "QQQ" },
+		func(s *domain.Strategy) {
+			s.Config = json.RawMessage(`{"fundamentals_contract":"spy-ssga-etf-v1","required_analyst_roles":["market_analyst","fundamentals_analyst","news_analyst"],"generated_strategy":{}}`)
+		},
+		func(s *domain.Strategy) {
+			s.Config = json.RawMessage(`{"fundamentals_contract":"spy-ssga-etf-v1","required_analyst_roles":[]}`)
+		},
+		func(s *domain.Strategy) { s.Config = json.RawMessage(`{"fundamentals_contract":"unknown"}`) },
+	} {
+		strategy := valid
+		change(&strategy)
+		if err := validateETFStrategyContract(strategy); err == nil {
+			t.Fatal("ineligible contract ignored")
+		}
+	}
+	if err := validateETFStrategyContract(domain.Strategy{Ticker: "QQQ", MarketType: domain.MarketTypeStock, Config: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal("corporate default changed", err)
 	}
 }

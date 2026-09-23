@@ -45,7 +45,8 @@ Set `fundamentals_contract` to `spy-ssga-etf-v1` only on a new paper SPY strateg
 The stock market type, SPY ticker, USD currency, and ISIN `US78462F1030` must agree.
 The selected and explicitly required analysts must include market, fundamentals,
 and news. Empty or omitted contract retains the existing corporate checks.
-Unknown contracts and live ETF execution are refused.
+Unknown contracts, live ETF execution, and native/generated routes that bypass
+the analyst pipeline are refused before dispatch.
 
 The issuer parser converts dollar values marked in millions to USD and percentage
 values to fractions. It records **gross** expense ratio; it does not claim a net

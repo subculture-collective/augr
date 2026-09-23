@@ -248,6 +248,12 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 	if executionVersionID == uuid.Nil {
 		return nil, errors.New("strategy execution version ID is required")
 	}
+	if err := validateETFStrategyContract(strategy); err != nil {
+		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, executionVersionID, err); persistErr != nil {
+			return nil, errors.Join(err, persistErr)
+		}
+		return nil, err
+	}
 	group := r.strategyRunGroup()
 	if !group.HasLease(ctx) {
 		admittedCtx, lease, err := group.Admit(ctx)
@@ -2139,6 +2145,29 @@ func pipelineSnapshotFromScope(scope execution.ExecutionScope, dataType string, 
 		OriginType: string(originType), OriginID: originID, PipelineRunID: run.ID,
 		PipelineRunTradeDate: run.TradeDate, DataType: dataType, Payload: payload, CreatedAt: time.Now().UTC(),
 	}, nil
+}
+
+// Validate before dispatch so native/generated routes cannot ignore an ETF contract.
+func validateETFStrategyContract(strategy domain.Strategy) error {
+	if len(strategy.Config) == 0 {
+		return nil
+	}
+	var header struct {
+		Contract string `json:"fundamentals_contract"`
+	}
+	if err := json.Unmarshal(strategy.Config, &header); err != nil {
+		return fmt.Errorf("parse strategy input contract: %w", err)
+	}
+	if header.Contract == "" {
+		return nil
+	}
+	if header.Contract != data.SPYETFContractV1 || strategy.Ticker != "SPY" || strategy.MarketType.Normalize() != domain.MarketTypeStock || !strategy.IsPaper || generativestrategy.HasRuntimeBinding(strategy.Config) {
+		return errors.New("ETF fundamentals: contract requires the paper SPY analyst pipeline")
+	}
+	if _, err := parseStrategyConfig(strategy.Config); err != nil {
+		return fmt.Errorf("ETF fundamentals: %w", err)
+	}
+	return nil
 }
 
 func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy domain.Strategy, resolved agent.ResolvedConfig) (agent.InitialStateSeed, error) {
