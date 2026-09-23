@@ -208,6 +208,37 @@ class QualificationTests(unittest.TestCase):
         self.assertEqual(report['outcome'], 'strategy_preparation_rejected')
         self.assertEqual(report['preparation_rejections'][0]['reason_code'], 'fundamentals_incomplete')
 
+    def test_logs_use_finite_tail_and_refuse_incomplete_window(self):
+        from types import SimpleNamespace
+        runtime = core.Runtime(self.config)
+        since = '2026-09-23T03:58:00Z'
+        line = json.dumps({'time':'2026-09-23T04:00:00Z',
+                           'msg':'automation: job starting','job':'history_refresh'})
+        def current_tail(args, **kwargs):
+            self.assertEqual(args[:5], ['docker','logs','--tail','10001','--since'])
+            self.assertEqual(args[5], since)
+            return SimpleNamespace(returncode=0, stdout='', stderr=line+'\n[]\n')
+        with patch.object(core.subprocess, 'run', side_effect=current_tail):
+            rows = runtime.logs(since)
+        self.assertEqual(rows, [{'time':'2026-09-23T04:00:00Z',
+                                'event':'starting','job':'history_refresh'}])
+        with patch.object(core.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=(line+'\n')*10000, stderr='')):
+            self.assertEqual(len(runtime.logs(since)), 10000)
+        with patch.object(core.subprocess, 'run', return_value=SimpleNamespace(
+                returncode=0, stdout=(line+'\n')*10001, stderr='')):
+            with self.assertRaisesRegex(core.Refusal, 'logs_window_truncated'):
+                runtime.logs(since)
+
+    def test_archived_registration_uses_requested_live_log_window(self):
+        runtime = Fixture(self.config)
+        runtime.registration_receipt = Path('/unused/fixture-only.json')
+        since = core.stamp(NOW-dt.timedelta(minutes=30))
+        with patch.object(runtime, 'logs', wraps=runtime.logs) as logs:
+            report = core.collect(runtime, self.config, since, now=NOW)
+        self.assertEqual(report['collection_status'], 'complete')
+        logs.assert_called_once_with(since)
+
     def test_archived_registration_never_replays_run_or_enabled_events(self):
         report = self.report()
         directory = core.save_receipt(self.root, report)
