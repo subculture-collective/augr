@@ -132,8 +132,9 @@ func TestUpdateOrderThroughTransitionsWritesIntermediateHops(t *testing.T) {
 	if err := reconciler.updateOrderThroughTransitions(context.Background(), order, domain.OrderStatusPending); err != nil {
 		t.Fatal(err)
 	}
-	if len(repo.statuses) != 2 || repo.statuses[0] != domain.OrderStatusSubmitted || repo.statuses[1] != domain.OrderStatusFilled {
-		t.Fatalf("pending->filled wrote %v, want submitted then filled", repo.statuses)
+	// pending -> filled is a legal immediate-fill edge, so no intermediate hop is written.
+	if len(repo.statuses) != 1 || repo.statuses[0] != domain.OrderStatusFilled {
+		t.Fatalf("pending->filled wrote %v, want a single filled write", repo.statuses)
 	}
 
 	repo.statuses = nil

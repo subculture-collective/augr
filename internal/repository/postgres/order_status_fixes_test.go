@@ -51,7 +51,6 @@ func TestRequireOrderStatusTransitionEnforcesDomainStateMachine(t *testing.T) {
 		{domain.OrderStatusFilled, domain.OrderStatusSubmitted},
 		{domain.OrderStatusCancelled, domain.OrderStatusFilled},
 		{domain.OrderStatusSubmitted, domain.OrderStatusPending},
-		{domain.OrderStatusPending, domain.OrderStatusFilled},
 		{domain.OrderStatusSubmitted, domain.OrderStatus("bogus")},
 	}
 	for _, pair := range rejected {
