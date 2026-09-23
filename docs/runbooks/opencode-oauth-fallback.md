@@ -77,3 +77,20 @@ and primary recovery before considering the integration healthy.
 
 Do not copy `auth.json` into the repository, the app container, logs, support
 bundles, or backups that are not encrypted as secrets.
+
+## Quota failures and interrupted requests
+
+A healthy sidecar does not prove available inference quota. Inspect authenticated
+session status and the sidecar's private logs when completions time out. A
+`The usage limit has been reached` retry is a quota failure; switching between
+models on the same OAuth account does not establish independent capacity. Wait
+for available quota or qualify an existing local provider separately. Do not add
+a paid API fallback as part of this recovery.
+
+After an interrupted completion, Augr requests the documented session abort
+before deleting the temporary session. Cleanup uses its own five-second deadline
+so it still runs after caller cancellation. If abort fails or is not acknowledged,
+it retains the session instead of deleting storage beneath a retrying task. The
+original completion error remains the caller's result. Existing orphaned tasks
+need a separate, scoped recovery; deploying this client change does not prove
+that they have stopped or that quota is available.

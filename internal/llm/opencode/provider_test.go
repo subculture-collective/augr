@@ -3,6 +3,8 @@ package opencode_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -241,6 +243,101 @@ func TestProviderLiveOAuthIntegration(t *testing.T) {
 			}
 			if response.Model != model {
 				t.Fatalf("live response model = %q, want %q", response.Model, model)
+			}
+		})
+	}
+}
+
+// A dropped client request must not leave the server retrying against deleted data.
+func TestProviderCanceledCompletionAbortsBeforeDeletion(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var cleanup []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/session":
+			_, _ = w.Write([]byte(`{"id":"cancelled"}`))
+		case "/session/cancelled/message":
+			_, _ = io.Copy(io.Discard, r.Body)
+			cancel()
+			<-r.Context().Done()
+		case "/session/cancelled/abort":
+			mu.Lock()
+			cleanup = append(cleanup, "abort")
+			mu.Unlock()
+			_, _ = w.Write([]byte(`true`))
+		case "/session/cancelled":
+			if r.Method != http.MethodDelete {
+				t.Errorf("method = %s", r.Method)
+			}
+			mu.Lock()
+			cleanup = append(cleanup, "delete")
+			mu.Unlock()
+			_, _ = w.Write([]byte(`true`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	provider, err := opencode.NewProvider(opencode.Config{BaseURL: server.URL, Password: "secret", Model: "openai/gpt-5.6-terra"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Complete(ctx, llm.CompletionRequest{Messages: []llm.Message{{Role: "user", Content: "x"}}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want original cancellation", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(cleanup, ",") != "abort,delete" {
+		t.Fatalf("cleanup = %v", cleanup)
+	}
+}
+
+func TestProviderRetainsSessionWhenAbortIsUnconfirmed(t *testing.T) {
+	for _, response := range []string{`false`, `{"error":"unavailable"}`} {
+		t.Run(response, func(t *testing.T) {
+			t.Parallel()
+			var mu sync.Mutex
+			aborted, deleted := false, false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/session":
+					_, _ = w.Write([]byte(`{"id":"uncertain"}`))
+				case "/session/uncertain/message":
+					http.Error(w, "completion unavailable", http.StatusServiceUnavailable)
+				case "/session/uncertain/abort":
+					mu.Lock()
+					aborted = true
+					mu.Unlock()
+					if response != "false" {
+						w.WriteHeader(http.StatusServiceUnavailable)
+					}
+					_, _ = w.Write([]byte(response))
+				case "/session/uncertain":
+					mu.Lock()
+					deleted = true
+					mu.Unlock()
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			provider, err := opencode.NewProvider(opencode.Config{BaseURL: server.URL, Password: "secret", Model: "openai/gpt-5.6-terra"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = provider.Complete(context.Background(), llm.CompletionRequest{Messages: []llm.Message{{Role: "user", Content: "x"}}})
+			if err == nil || !strings.Contains(err.Error(), "completion unavailable") {
+				t.Fatalf("error = %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !aborted || deleted {
+				t.Fatalf("aborted=%v deleted=%v", aborted, deleted)
 			}
 		})
 	}
