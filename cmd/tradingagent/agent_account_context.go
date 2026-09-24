@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -50,4 +51,22 @@ func (r *realStrategyRunner) loadAgentAccountContext(ctx context.Context, strate
 		return nil, fmt.Errorf("agent account context: invalid broker values: %w", err)
 	}
 	return snapshot, nil
+}
+
+// accountContextForRun returns the broker snapshot for prompts. A broker read
+// failure yields nil, which the prompts render as "unavailable" rather than an
+// empty portfolio; it does not block the run, because execution re-reads the
+// account and applies risk limits on its own. Only cancellation is returned.
+func (r *realStrategyRunner) accountContextForRun(ctx context.Context, strategy domain.Strategy) (*agent.AccountContext, error) {
+	account, err := r.loadAgentAccountContext(ctx, strategy)
+	if err == nil {
+		return account, nil
+	}
+	if ctxErr := contextErr(err); ctxErr != nil {
+		return nil, ctxErr
+	}
+	if r.logger != nil {
+		r.logger.Warn("prod strategy runner: broker account context unavailable", slog.String("ticker", strategy.Ticker), slog.Any("error", err))
+	}
+	return nil, nil
 }

@@ -65,3 +65,21 @@ func TestLoadAgentAccountContext(t *testing.T) {
 		})
 	}
 }
+
+func TestAccountContextForRunDegradesBrokerFailureToUnavailable(t *testing.T) {
+	r := &realStrategyRunner{brokerCache: map[string]execution.Broker{"alpaca:paper": accountContextBroker{balanceErr: errors.New("timeout")}}, logger: slogDiscardLogger()}
+	r.cfg.Brokers.Alpaca = config.BrokerConfig{APIKey: "test", APISecret: "test", PaperMode: true}
+	strategy := domain.Strategy{Ticker: "SPY", MarketType: domain.MarketTypeStock, IsPaper: true}
+
+	got, err := r.accountContextForRun(context.Background(), strategy)
+	if err != nil || got != nil {
+		t.Fatalf("accountContextForRun() = %+v, %v; want nil context without blocking the run", got, err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	r.brokerCache["alpaca:paper"] = accountContextBroker{balanceErr: context.Canceled}
+	if _, err := r.accountContextForRun(cancelled, strategy); !errors.Is(err, context.Canceled) {
+		t.Fatalf("accountContextForRun() error = %v, want cancellation to propagate", err)
+	}
+}
