@@ -46,6 +46,13 @@ func Validate(cfg Config) error {
 		errs = append(errs, "at least one LLM provider must be configured (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, OLLAMA_BASE_URL + OLLAMA_API_KEY, or OPENCODE_BASE_URL + OPENCODE_SERVER_PASSWORD)")
 	}
 
+	validateBrokerCredentials(&errs, "BLUESKY_IDENTIFIER", cfg.DataProviders.Bluesky.Identifier, "BLUESKY_APP_PASSWORD", cfg.DataProviders.Bluesky.AppPassword)
+	if cfg.DataProviders.Bluesky.Identifier != "" {
+		u, err := url.Parse(cfg.DataProviders.Bluesky.PDSURL)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+			errs = append(errs, "BLUESKY_PDS_URL must be an HTTPS origin without credentials, path, query, or fragment")
+		}
+	}
 	if strings.TrimSpace(cfg.DataProviders.AlphaVantage.APIKey) != "" && cfg.DataProviders.AlphaVantage.RateLimitPerMinute <= 0 {
 		errs = append(errs, "ALPHA_VANTAGE_RATE_LIMIT_PER_MINUTE must be greater than 0")
 	}

@@ -183,8 +183,16 @@ type EmbeddingConfig struct {
 	Timeout time.Duration // Per-request timeout (default: 30s).
 }
 
+// BlueskyConfig contains optional PDS account credentials for authenticated search.
+type BlueskyConfig struct {
+	Identifier  string
+	AppPassword string
+	PDSURL      string
+}
+
 // DataProviderConfigs contains external data provider settings.
 type DataProviderConfigs struct {
+	Bluesky                     BlueskyConfig
 	Polygon                     DataProviderConfig
 	PolygonBulkSnapshotsEnabled bool
 	AlphaVantage                DataProviderConfig
@@ -192,18 +200,11 @@ type DataProviderConfigs struct {
 	FMP                         DataProviderConfig
 	NewsAPI                     DataProviderConfig
 	Tradier                     TradierConfig
-	Bluesky                     BlueskyConfig
 }
 
-// BlueskyConfig holds the app-password login Bluesky requires for post search.
-// Without both values the Bluesky social provider is not registered.
-type BlueskyConfig struct {
-	Identifier  string
-	AppPassword string
-	ServiceURL  string
-}
-
-// Configured reports whether both login values are present.
+// Configured reports whether both login values are present. Without them the
+// Bluesky social provider is not registered, because unauthenticated search
+// is refused.
 func (c BlueskyConfig) Configured() bool {
 	return strings.TrimSpace(c.Identifier) != "" && strings.TrimSpace(c.AppPassword) != ""
 }
@@ -903,6 +904,7 @@ func loadFromEnvironment() (Config, error) {
 			Timeout: embeddingTimeout,
 		},
 		DataProviders: DataProviderConfigs{
+			Bluesky:                     BlueskyConfig{Identifier: strings.TrimSpace(os.Getenv("BLUESKY_IDENTIFIER")), AppPassword: strings.TrimSpace(os.Getenv("BLUESKY_APP_PASSWORD")), PDSURL: getEnvString("BLUESKY_PDS_URL", "https://bsky.social")},
 			PolygonBulkSnapshotsEnabled: polygonBulkSnapshotsEnabled,
 			Polygon: DataProviderConfig{
 				APIKey: os.Getenv("POLYGON_API_KEY"),
@@ -921,11 +923,6 @@ func loadFromEnvironment() (Config, error) {
 			},
 			NewsAPI: DataProviderConfig{
 				APIKey: os.Getenv("NEWSAPI_API_KEY"),
-			},
-			Bluesky: BlueskyConfig{
-				Identifier:  os.Getenv("BLUESKY_IDENTIFIER"),
-				AppPassword: os.Getenv("BLUESKY_APP_PASSWORD"),
-				ServiceURL:  strings.TrimSpace(os.Getenv("BLUESKY_SERVICE_URL")),
 			},
 			Tradier: TradierConfig{
 				APIKey:  os.Getenv("TRADIER_API_KEY"),

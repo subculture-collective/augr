@@ -33,6 +33,8 @@ type Provider struct {
 	accessMu      sync.Mutex
 	accessRetryAt time.Time
 	accessErr     error
+	session       *sessionClient
+	limiter       *data.RateLimiter
 }
 
 var _ data.DataProvider = (*Provider)(nil)
@@ -72,6 +74,17 @@ func NewProvider(provider llm.Provider, model string, logger *slog.Logger) *Prov
 	}
 }
 
+// NewProviderWithAuth enables authenticated search when account credentials are
+// configured. Anonymous installations retain the public AppView path.
+func NewProviderWithAuth(provider llm.Provider, model string, logger *slog.Logger, config AuthConfig) *Provider {
+	p := NewProvider(provider, model, logger)
+	if config.Identifier != "" && config.AppPassword != "" {
+		p.session = newSessionClient(config)
+		p.limiter = data.NewRateLimiter(120, time.Minute)
+	}
+	return p
+}
+
 func (p *Provider) GetOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return nil, fmt.Errorf("bluesky: GetOHLCV: %w", data.ErrNotImplemented)
 }
@@ -108,7 +121,17 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 	if !to.IsZero() {
 		params.Set("until", to.UTC().Format(time.RFC3339Nano))
 	}
-	body, status, err := p.api.Get(ctx, "/xrpc/app.bsky.feed.searchPosts", params)
+	var body []byte
+	var status int
+	var err error
+	if p.session != nil {
+		if err = p.limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		body, status, err = p.session.search(ctx, params)
+	} else {
+		body, status, err = p.api.Get(ctx, "/xrpc/app.bsky.feed.searchPosts", params)
+	}
 	if err != nil {
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
 			accessErr := fmt.Errorf("bluesky: search access denied (HTTP %d); check authenticated PDS search configuration or service access policy: %w", status, err)

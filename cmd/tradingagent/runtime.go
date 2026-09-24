@@ -967,8 +967,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		stocktwitsData.Register(reg)
 		redditData.Register(reg)
 		if blueskyCfg := cfg.DataProviders.Bluesky; blueskyCfg.Configured() {
+			blueskyAuth := bluesky.AuthConfig{Identifier: blueskyCfg.Identifier, AppPassword: blueskyCfg.AppPassword, PDSURL: blueskyCfg.PDSURL}
 			reg.Bluesky = func(providerCfg data.ProviderConfig) data.DataProvider {
-				return bluesky.NewProvider(providerCfg.LLMProvider, providerCfg.LLMModel, providerCfg.Logger)
+				return bluesky.NewProviderWithAuth(providerCfg.LLMProvider, providerCfg.LLMModel, providerCfg.Logger, blueskyAuth)
 			}
 		} else {
 			logger.Info("bluesky social search disabled: Bluesky requires a login for post search; set BLUESKY_IDENTIFIER and BLUESKY_APP_PASSWORD to enable it")
