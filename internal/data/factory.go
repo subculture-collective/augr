@@ -507,7 +507,10 @@ func (s *DataService) GetSocialSentimentBySource(ctx context.Context, marketType
 			mu.Lock()
 			defer mu.Unlock()
 			results = append(results, snapshots...)
-			if err != nil {
+			// A source that does not offer social data for this account (for
+			// example Finnhub's free tier, which answers 403) is not a failure;
+			// counting it would mark every result partial and disable caching.
+			if err != nil && !errors.Is(err, ErrNotImplemented) {
 				failures = append(failures, fmt.Errorf("%T: %w", provider, err))
 				s.logger.Warn("social collector: provider failed", slog.String("ticker", ticker), slog.String("provider", fmt.Sprintf("%T", provider)), slog.Any("error", err))
 			}

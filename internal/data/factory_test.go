@@ -1121,3 +1121,30 @@ func TestSocialCollectionPreservesPartialResultsAndReportsFailures(t *testing.T)
 		t.Fatalf("successful empty query must remain empty: %v %v", got, err)
 	}
 }
+
+func TestDataServiceGetSocialSentimentIgnoresUnsupportedSources(t *testing.T) {
+	now := time.Date(2026, 9, 24, 14, 0, 0, 0, time.UTC)
+	from, to := now.Add(-2*time.Hour), now
+	working := &serviceStubProvider{sentiment: []SocialSentiment{{Ticker: "SPY", Bullish: 0.6, Bearish: 0.4, PostCount: 13, MeasuredAt: now.Add(-time.Minute)}}}
+	// Finnhub's free tier answers /stock/social-sentiment with 403, which its
+	// provider reports as ErrNotImplemented on every call.
+	unsupported := &serviceStubProvider{sentimentErr: fmt.Errorf("finnhub: GetSocialSentiment SPY: %w", ErrNotImplemented)}
+	cacheRepo := &fakeMarketDataCacheRepo{}
+	service := &DataService{
+		socialProviders: []DataProvider{working, unsupported},
+		cacheRepo:       cacheRepo,
+		logger:          discardLogger(),
+		now:             func() time.Time { return now },
+	}
+
+	got, err := service.GetSocialSentiment(context.Background(), domain.MarketTypeStock, "SPY", from, to)
+	if err != nil {
+		t.Fatalf("GetSocialSentiment() error = %v, want an unsupported source to be ignored", err)
+	}
+	if len(got) != 1 || got[0].Partial || got[0].PostCount != 13 {
+		t.Fatalf("GetSocialSentiment() = %#v, want one complete snapshot", got)
+	}
+	if cacheRepo.setCalls != 1 {
+		t.Fatalf("cache Set() calls = %d, want the complete result cached", cacheRepo.setCalls)
+	}
+}

@@ -23,6 +23,7 @@ type accountContextBroker struct {
 func (b accountContextBroker) GetAccountBalance(context.Context) (execution.Balance, error) {
 	return b.balance, b.balanceErr
 }
+
 func (b accountContextBroker) GetPositions(context.Context) ([]domain.Position, error) {
 	return b.positions, b.positionsErr
 }
