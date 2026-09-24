@@ -51,32 +51,24 @@ func TestDataProviderUnsupportedCapabilities(t *testing.T) {
 	}
 }
 
-func TestDataProviderStampsCurrentSnapshotInsideARecentWindow(t *testing.T) {
-	t.Parallel()
-
+func TestDataProviderUsesMessageTimeAndExcludesOutsideWindow(t *testing.T) {
 	provider := NewDataProvider(nil)
 	provider.client.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		body := `{"messages":[{"entities":{"sentiment":{"basic":"Bullish"}}},{"entities":{"sentiment":{"basic":"Bearish"}}}]}`
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		body := `{"messages":[
+   {"created_at":"2026-09-24T10:00:00Z","entities":{"sentiment":{"basic":"Bullish"}}},
+   {"created_at":"2026-09-24T10:30:00Z","entities":{"sentiment":{"basic":"Bearish"}}},
+   {"created_at":"2026-09-24T12:00:00Z","entities":{"sentiment":{"basic":"Bearish"}}},
+   {"created_at":"2026-09-23T10:00:00Z","entities":{"sentiment":{"basic":"Bearish"}}},
+   {"created_at":"invalid","entities":{"sentiment":{"basic":"Bearish"}}}]}`
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}
-
-	// The strategy runner fixes its window end before fetching bars, news,
-	// and fundamentals, so the social call runs seconds after "to".
-	to := time.Now().UTC().Add(-3 * time.Second)
-	got, err := provider.GetSocialSentiment(context.Background(), "SPY", to.Add(-7*24*time.Hour), to)
-	if err != nil {
-		t.Fatalf("GetSocialSentiment() error = %v", err)
+	from := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	to := from.Add(2 * time.Hour)
+	got, err := provider.GetSocialSentiment(context.Background(), "SPY", from, to)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got=%v err=%v", got, err)
 	}
-	if len(got) != 1 || !got[0].MeasuredAt.Equal(to) {
-		t.Fatalf("recent-window snapshot = %#v, want MeasuredAt at the window end %s", got, to)
-	}
-
-	historical := time.Now().UTC().Add(-time.Hour)
-	got, err = provider.GetSocialSentiment(context.Background(), "SPY", historical.Add(-time.Hour), historical)
-	if err != nil {
-		t.Fatalf("GetSocialSentiment() error = %v", err)
-	}
-	if len(got) != 1 || !got[0].MeasuredAt.After(historical) {
-		t.Fatalf("historical-window snapshot = %#v, want the real fetch time so it is not attributed to the past", got)
+	if got[0].PostCount != 2 || got[0].Score != 0 || !got[0].MeasuredAt.Equal(from.Add(90*time.Minute)) {
+		t.Fatalf("unexpected windowed sentiment: %+v", got[0])
 	}
 }

@@ -1095,3 +1095,29 @@ func TestDataServiceDownloadHistoricalOHLCVCoverageStopsAtLastReturnedBar(t *tes
 		t.Fatalf("coverage = %s..%s, want %s..%s", coverage[0].DateFrom, coverage[0].DateTo, from, lastBar)
 	}
 }
+
+func TestSocialCollectionPreservesPartialResultsAndReportsFailures(t *testing.T) {
+	now := time.Now().UTC()
+	failure := errors.New("search access denied")
+	good := &serviceStubProvider{sentiment: []SocialSentiment{{Ticker: "SPY", Source: "stocktwits", PostCount: 2, Bullish: 1, MeasuredAt: now}}}
+	bad := &serviceStubProvider{sentimentErr: failure}
+	cache := &fakeMarketDataCacheRepo{}
+	service := &DataService{socialProviders: []DataProvider{good, bad}, logger: discardLogger(), cacheRepo: cache}
+	got, err := service.GetSocialSentiment(context.Background(), domain.MarketTypeStock, "SPY", now.Add(-time.Hour), now)
+	if !errors.Is(err, failure) || len(got) != 1 || !got[0].Partial || got[0].Source != "stocktwits" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if cache.setCalls != 0 {
+		t.Fatal("partial coverage cached as complete")
+	}
+	service.socialProviders = []DataProvider{bad}
+	got, err = service.GetSocialSentimentBySource(context.Background(), domain.MarketTypeStock, "SPY", now.Add(-time.Hour), now)
+	if !errors.Is(err, failure) || len(got) != 0 {
+		t.Fatalf("outage hidden: got=%v err=%v", got, err)
+	}
+	service.socialProviders = []DataProvider{&serviceStubProvider{}}
+	got, err = service.GetSocialSentimentBySource(context.Background(), domain.MarketTypeStock, "SPY", now.Add(-time.Hour), now)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("successful empty query must remain empty: %v %v", got, err)
+	}
+}

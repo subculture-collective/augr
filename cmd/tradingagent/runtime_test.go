@@ -1928,10 +1928,7 @@ func (s *stubMarketDataService) GetNews(context.Context, domain.MarketType, stri
 }
 
 func (s *stubMarketDataService) GetSocialSentiment(context.Context, domain.MarketType, string, time.Time, time.Time) ([]data.SocialSentiment, error) {
-	if s.errSocial != nil {
-		return nil, s.errSocial
-	}
-	return s.social, nil
+	return s.social, s.errSocial
 }
 
 type stubPositionRepo struct{}
@@ -2615,4 +2612,17 @@ func TestBuildRunnerDefinition_RoleModelOverridesOnlyTheNamedRole(t *testing.T) 
 
 func slogDiscardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestLoadInitialStatePreservesPartialSocialCoverage(t *testing.T) {
+	now := time.Now().UTC()
+	runner := &realStrategyRunner{logger: slogDiscardLogger(), dataService: &stubMarketDataService{
+		ohlcv:     []domain.OHLCV{{Timestamp: now, Open: 100, High: 101, Low: 99, Close: 100, Volume: 100}},
+		social:    []data.SocialSentiment{{Ticker: "SPY", Source: "stocktwits", PostCount: 2, Score: 0.5, MeasuredAt: now}},
+		errSocial: errors.New("bluesky access denied"),
+	}}
+	seed, err := runner.loadInitialState(context.Background(), domain.Strategy{Ticker: "SPY", MarketType: domain.MarketTypeStock}, agent.ResolvedConfig{})
+	if err != nil || seed.Social == nil || !seed.Social.Partial || seed.Social.PostCount != 2 {
+		t.Fatalf("seed=%+v err=%v", seed.Social, err)
+	}
 }

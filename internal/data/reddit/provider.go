@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +27,7 @@ type Provider struct {
 	postsMu     sync.Mutex
 	posts       []RedditPost
 	postsAt     time.Time
+	postsErr    error
 }
 
 // Compile-time check that Provider satisfies data.DataProvider.
@@ -70,29 +74,29 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 		return nil, errors.New("reddit: provider is nil")
 	}
 
-	posts := p.cachedPosts(ctx)
+	posts, fetchErr := p.cachedPosts(ctx)
 	if len(posts) == 0 {
 		p.logger.Info("reddit: no posts fetched",
 			slog.String("ticker", ticker),
 			slog.Int("subreddits", len(p.subreddits)),
 		)
-		return nil, nil
+		return nil, fetchErr
 	}
 
 	// Filter posts to the requested time window. Reddit RSS returns ~25 most
-	// recent posts per subreddit, so we keep any post whose UpdatedAt is zero
-	// (unparseable) or falls within [from, to].
+	// recent posts per subreddit; only valid timestamps within [from, to] qualify.
 	fromUTC := from.UTC()
 	toUTC := to.UTC()
 	filtered := make([]RedditPost, 0, len(posts))
 	for _, post := range posts {
-		if post.UpdatedAt.IsZero() || (!post.UpdatedAt.Before(fromUTC) && !post.UpdatedAt.After(toUTC)) {
+		if !post.UpdatedAt.IsZero() && !post.UpdatedAt.Before(fromUTC) && !post.UpdatedAt.After(toUTC) {
 			filtered = append(filtered, post)
 		}
 	}
 
+	filtered = relevantPosts(ticker, filtered)
 	if len(filtered) == 0 {
-		return nil, nil
+		return nil, fetchErr
 	}
 
 	p.logger.Info("reddit: scoring posts for sentiment",
@@ -100,9 +104,10 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 		slog.Int("posts", len(filtered)),
 	)
 
-	result := ScorePosts(ctx, p.llmProvider, p.model, ticker, filtered, p.logger)
+	result, scoreErr := ScorePostsWithError(ctx, p.llmProvider, p.model, ticker, filtered, p.logger)
+	collectErr := errors.Join(fetchErr, scoreErr)
 	if result.Mentions == 0 {
-		return nil, nil
+		return nil, collectErr
 	}
 
 	total := result.Bullish + result.Bearish + result.Neutral
@@ -113,7 +118,7 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 		score = bullish - bearish
 	}
 
-	now := time.Now().UTC()
+	latest := filtered[0].UpdatedAt
 	return []data.SocialSentiment{{
 		Ticker:     ticker,
 		Source:     "reddit",
@@ -121,21 +126,51 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 		Bullish:    bullish,
 		Bearish:    bearish,
 		PostCount:  result.Mentions,
-		MeasuredAt: now,
-	}}, nil
+		MeasuredAt: latest,
+	}}, collectErr
 }
 
 // cachedPosts fetches the shared subreddit corpus once per scan window. A
 // social run scores many tickers against the same posts; refetching every feed
 // per ticker both wastes quota and triggers Reddit's provider-wide throttle.
-func (p *Provider) cachedPosts(ctx context.Context) []RedditPost {
+func (p *Provider) cachedPosts(ctx context.Context) ([]RedditPost, error) {
 	p.postsMu.Lock()
 	defer p.postsMu.Unlock()
 	if !p.postsAt.IsZero() && time.Since(p.postsAt) < 5*time.Minute {
-		return append([]RedditPost(nil), p.posts...)
+		return append([]RedditPost(nil), p.posts...), p.postsErr
 	}
-	posts := p.client.FetchSubreddits(ctx, p.subreddits)
+	posts, err := p.client.FetchSubredditsWithError(ctx, p.subreddits)
+	p.postsErr = err
 	p.posts = append(p.posts[:0], posts...)
 	p.postsAt = time.Now()
-	return append([]RedditPost(nil), posts...)
+	return append([]RedditPost(nil), posts...), err
+}
+
+// relevantPosts shares the classifier budget across feeds rather than letting
+// subreddit order consume it. Symbol matching is only a prefilter; the model
+// still checks relevance and rejects ambiguous symbols.
+func relevantPosts(ticker string, posts []RedditPost) []RedditPost {
+	ticker = strings.ToUpper(strings.TrimSpace(ticker))
+	if ticker == "" {
+		return nil
+	}
+	pattern := regexp.MustCompile(`(?i)(^|[^a-z0-9])\$?` + regexp.QuoteMeta(ticker) + `([^a-z0-9]|$)`)
+	seen := make(map[string]struct{})
+	var out []RedditPost
+	for _, post := range posts {
+		if !pattern.MatchString(post.Title + " " + post.Body) {
+			continue
+		}
+		key := post.URL
+		if key == "" {
+			key = post.Title + "\n" + post.Body
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, post)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out
 }

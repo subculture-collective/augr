@@ -2,158 +2,99 @@ package bluesky
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/llm"
 )
 
-func TestGetSocialSentimentLogsInOnceAndSearchesWithBearer(t *testing.T) {
+func TestGetSocialSentimentSearchesPublicAppView(t *testing.T) {
 	t.Parallel()
 
-	var logins, searches atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case sessionPath:
-			logins.Add(1)
-			var body map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body["identifier"] != "augr.bsky.social" || body["password"] != "app-pass" {
-				t.Errorf("login body = %v", body)
-			}
-			_, _ = w.Write([]byte(`{"accessJwt":"token-1"}`))
-		case searchPath:
-			searches.Add(1)
-			if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
-				t.Errorf("Authorization = %q", got)
-			}
-			if got := r.URL.Query().Get("q"); got != "$AAPL" {
-				t.Errorf("q = %q", got)
-			}
-			_, _ = w.Write([]byte(`{"posts":[]}`))
-		default:
-			t.Errorf("unexpected path %q", r.URL.Path)
+		if r.URL.Path != "/xrpc/app.bsky.feed.searchPosts" {
+			t.Errorf("path = %q", r.URL.Path)
 		}
+		if got := r.URL.Query().Get("q"); got != "$AAPL" {
+			t.Errorf("q = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"posts":[]}`))
 	}))
 	defer server.Close()
 
-	provider := NewProvider(nil, "", Credentials{Identifier: "augr.bsky.social", AppPassword: "app-pass", ServiceURL: server.URL}, nil)
-	for range 2 {
-		got, err := provider.GetSocialSentiment(context.Background(), " aapl ", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
-		if err != nil {
-			t.Fatalf("GetSocialSentiment() error = %v", err)
-		}
-		if len(got) != 0 {
-			t.Fatalf("GetSocialSentiment() = %v, want empty", got)
-		}
-	}
-	if logins.Load() != 1 || searches.Load() != 2 {
-		t.Fatalf("logins = %d searches = %d, want one login reused for two searches", logins.Load(), searches.Load())
-	}
-}
-
-func TestGetSocialSentimentLogsInAgainAfterExpiredToken(t *testing.T) {
-	t.Parallel()
-
-	var logins atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case sessionPath:
-			n := logins.Add(1)
-			_, _ = w.Write([]byte(`{"accessJwt":"token-` + string(rune('0'+n)) + `"}`))
-		case searchPath:
-			if r.Header.Get("Authorization") == "Bearer token-1" {
-				w.WriteHeader(http.StatusBadRequest)
-				_, _ = w.Write([]byte(`{"error":"ExpiredToken","message":"Token has expired"}`))
-				return
-			}
-			_, _ = w.Write([]byte(`{"posts":[]}`))
-		}
-	}))
-	defer server.Close()
-
-	provider := NewProvider(nil, "", Credentials{Identifier: "id", AppPassword: "pw", ServiceURL: server.URL}, nil)
-	if _, err := provider.GetSocialSentiment(context.Background(), "SPY", time.Now().Add(-time.Hour), time.Now()); err != nil {
+	provider := NewProvider(nil, "", nil)
+	provider.api.SetBaseURL(server.URL)
+	got, err := provider.GetSocialSentiment(context.Background(), " aapl ", time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	if err != nil {
 		t.Fatalf("GetSocialSentiment() error = %v", err)
 	}
-	if logins.Load() != 2 {
-		t.Fatalf("logins = %d, want a second login after ExpiredToken", logins.Load())
+	if len(got) != 0 {
+		t.Fatalf("GetSocialSentiment() = %v, want empty", got)
 	}
 }
 
-func TestGetSocialSentimentReportsLoginFailureWithoutSecrets(t *testing.T) {
-	t.Parallel()
+func TestSearchAccessDeniedIsNotEmptySentiment(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Query().Get("since") == "" || r.URL.Query().Get("until") == "" {
+			t.Error("missing search time bounds")
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	p := NewProvider(nil, "", nil)
+	p.api.SetBaseURL(server.URL)
+	got, err := p.GetSocialSentiment(context.Background(), "SPY", time.Now().Add(-time.Hour), time.Now())
+	if len(got) != 0 || err == nil || !strings.Contains(err.Error(), "authenticated PDS search") {
+		t.Fatalf("got=%v err=%v", got, err)
+	}
+	_, err = p.GetSocialSentiment(context.Background(), "AAPL", time.Now().Add(-time.Hour), time.Now())
+	if err == nil || calls != 1 {
+		t.Fatalf("denied search was retried per ticker: calls=%d err=%v", calls, err)
+	}
+}
 
+func TestSearchUsesPostTimeAndDeduplicates(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"AuthenticationRequired","message":"Invalid identifier or password"}`))
+		_, _ = w.Write([]byte(`{"posts":[
+   {"uri":"at://one","record":{"text":"$SPY","createdAt":"2026-09-24T10:00:00Z"}},
+   {"uri":"at://one","record":{"text":"$SPY","createdAt":"2026-09-24T10:00:00Z"}},
+   {"uri":"at://future","record":{"text":"$SPY","createdAt":"2026-09-24T12:00:00Z"}}]}`))
 	}))
 	defer server.Close()
-
-	provider := NewProvider(nil, "", Credentials{Identifier: "id", AppPassword: "secret-app-pass", ServiceURL: server.URL}, nil)
-	_, err := provider.GetSocialSentiment(context.Background(), "SPY", time.Now().Add(-time.Hour), time.Now())
-	if err == nil || !strings.Contains(err.Error(), "AuthenticationRequired") || strings.Contains(err.Error(), "secret-app-pass") {
-		t.Fatalf("GetSocialSentiment() error = %v, want the XRPC error without the password", err)
+	classifier := llm.ProviderFunc(func(_ context.Context, req llm.CompletionRequest) (*llm.CompletionResponse, error) {
+		if strings.Contains(req.Messages[1].Content, "2.") {
+			t.Error("duplicate or future post classified")
+		}
+		return &llm.CompletionResponse{Content: `[{"mentions_ticker":true,"sentiment":"bullish"}]`}, nil
+	})
+	p := NewProvider(classifier, "test", nil)
+	p.api.SetBaseURL(server.URL)
+	from := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	got, err := p.GetSocialSentiment(context.Background(), "SPY", from, from.Add(2*time.Hour))
+	if err != nil || len(got) != 1 || got[0].PostCount != 1 || !got[0].MeasuredAt.Equal(from.Add(time.Hour)) {
+		t.Fatalf("got=%+v err=%v", got, err)
 	}
 }
 
-func TestGetSocialSentimentRequiresCredentials(t *testing.T) {
-	t.Parallel()
-
-	provider := NewProvider(nil, "", Credentials{}, nil)
-	if _, err := provider.GetSocialSentiment(context.Background(), "SPY", time.Now().Add(-time.Hour), time.Now()); err == nil || !strings.Contains(err.Error(), "not configured") {
-		t.Fatalf("GetSocialSentiment() error = %v, want not configured", err)
-	}
-}
-
-func TestGetSocialSentimentResolvesSelfHostedServer(t *testing.T) {
-	t.Parallel()
-
-	var pdsLogins atomic.Int32
-	pds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case sessionPath:
-			pdsLogins.Add(1)
-			_, _ = w.Write([]byte(`{"accessJwt":"pds-token"}`))
-		case searchPath:
-			if r.Header.Get("Authorization") != "Bearer pds-token" {
-				t.Errorf("search Authorization = %q", r.Header.Get("Authorization"))
-			}
-			_, _ = w.Write([]byte(`{"posts":[]}`))
-		default:
-			t.Errorf("unexpected PDS path %q", r.URL.Path)
-		}
+func TestSearchReportsClassifierFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"posts":[{"uri":"at://one","record":{"text":"$SPY","createdAt":"2026-09-24T10:00:00Z"}}]}`))
 	}))
-	defer pds.Close()
-	directory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/xrpc/com.atproto.identity.resolveHandle":
-			if r.URL.Query().Get("handle") != "augr.example.com" {
-				t.Errorf("handle = %q", r.URL.Query().Get("handle"))
-			}
-			_, _ = w.Write([]byte(`{"did":"did:plc:abc123"}`))
-		case "/did:plc:abc123":
-			_, _ = w.Write([]byte(`{"service":[{"id":"#atproto_pds","type":"AtprotoPersonalDataServer","serviceEndpoint":"` + pds.URL + `/"}]}`))
-		default:
-			t.Errorf("unexpected directory path %q", r.URL.Path)
-		}
-	}))
-	defer directory.Close()
-
-	provider := NewProvider(nil, "", Credentials{Identifier: "@augr.example.com", AppPassword: "pw"}, nil)
-	provider.resolverURL = directory.URL
-	provider.plcURL = directory.URL
-	if _, err := provider.GetSocialSentiment(context.Background(), "SPY", time.Now().Add(-time.Hour), time.Now()); err != nil {
-		t.Fatalf("GetSocialSentiment() error = %v", err)
-	}
-	if pdsLogins.Load() != 1 {
-		t.Fatalf("PDS logins = %d, want login at the resolved server", pdsLogins.Load())
+	defer server.Close()
+	failure := errors.New("classifier unavailable")
+	classifier := llm.ProviderFunc(func(context.Context, llm.CompletionRequest) (*llm.CompletionResponse, error) { return nil, failure })
+	p := NewProvider(classifier, "test", nil)
+	p.api.SetBaseURL(server.URL)
+	from := time.Date(2026, 9, 24, 9, 0, 0, 0, time.UTC)
+	got, err := p.GetSocialSentiment(context.Background(), "SPY", from, from.Add(2*time.Hour))
+	if !errors.Is(err, failure) || len(got) != 0 {
+		t.Fatalf("hidden classifier failure: got=%v err=%v", got, err)
 	}
 }

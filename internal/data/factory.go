@@ -450,7 +450,7 @@ func (s *DataService) DownloadHistoricalOHLCVWithStats(
 }
 
 // GetSocialSentiment aggregates social sentiment from all configured social
-// providers (Finnhub, StockTwits, Reddit) concurrently, merges raw counts,
+// providers concurrently, merges counts with source provenance,
 // and caches the combined result.
 func (s *DataService) GetSocialSentiment(ctx context.Context, marketType domain.MarketType, ticker string, from, to time.Time) ([]SocialSentiment, error) {
 	fromUTC := from.UTC()
@@ -475,14 +475,14 @@ func (s *DataService) GetSocialSentiment(ctx context.Context, marketType domain.
 		}
 	}
 
-	snapshots := s.aggregateSocialSentiment(ctx, ticker, from, to)
+	snapshots, collectErr := s.aggregateSocialSentiment(ctx, ticker, from, to)
 	snapshots = normalizeSocialSentiment(snapshots, fromUTC, toUTC)
 
-	if cacheSelection.Enabled && len(snapshots) > 0 {
+	if cacheSelection.Enabled && len(snapshots) > 0 && collectErr == nil {
 		s.storeCached(ctx, key, snapshots, 30*time.Minute)
 	}
 
-	return snapshots, nil
+	return snapshots, collectErr
 }
 
 // GetSocialSentimentBySource returns normalized provider snapshots without
@@ -493,87 +493,51 @@ func (s *DataService) GetSocialSentimentBySource(ctx context.Context, marketType
 		return nil, err
 	}
 	if len(s.socialProviders) == 0 {
-		return nil, nil
+		return nil, ErrNoProviders
 	}
-
-	fromUTC, toUTC := from.UTC(), to.UTC()
-	var (
-		mu      sync.Mutex
-		results []SocialSentiment
-	)
+	var mu sync.Mutex
+	var results []SocialSentiment
+	var failures []error
 	g, gCtx := errgroup.WithContext(ctx)
 	for _, configured := range s.socialProviders {
 		provider := configured
 		g.Go(func() error {
-			snapshots, err := provider.GetSocialSentiment(gCtx, ticker, fromUTC, toUTC)
+			snapshots, err := provider.GetSocialSentiment(gCtx, ticker, from.UTC(), to.UTC())
+			snapshots = normalizeSocialSentiment(snapshots, from.UTC(), to.UTC())
+			mu.Lock()
+			defer mu.Unlock()
+			results = append(results, snapshots...)
 			if err != nil {
-				if !errors.Is(err, ErrNotImplemented) {
-					s.logger.Warn("social collector: provider failed", slog.String("ticker", ticker), slog.Any("error", err))
-				}
-				return nil
+				failures = append(failures, fmt.Errorf("%T: %w", provider, err))
+				s.logger.Warn("social collector: provider failed", slog.String("ticker", ticker), slog.String("provider", fmt.Sprintf("%T", provider)), slog.Any("error", err))
 			}
-			snapshots = normalizeSocialSentiment(snapshots, fromUTC, toUTC)
-			if len(snapshots) > 0 {
-				mu.Lock()
-				results = append(results, snapshots...)
-				mu.Unlock()
-			}
-			return nil
+			return nil // Preserve other providers and partial results.
 		})
 	}
 	_ = g.Wait()
+	if ctx.Err() != nil {
+		return results, ctx.Err()
+	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].MeasuredAt.Equal(results[j].MeasuredAt) {
 			return results[i].Source < results[j].Source
 		}
 		return results[i].MeasuredAt.Before(results[j].MeasuredAt)
 	})
-	return results, nil
+	return results, errors.Join(failures...)
 }
 
-// aggregateSocialSentiment calls GetSocialSentiment on each social provider
-// concurrently, collects all results, normalizes each to the time window, and
-// merges them by summing raw counts.
-func (s *DataService) aggregateSocialSentiment(ctx context.Context, ticker string, from, to time.Time) []SocialSentiment {
-	if len(s.socialProviders) == 0 {
-		return nil
+// aggregateSocialSentiment preserves usable observations when a source fails.
+// A partial result is not cached as complete coverage.
+func (s *DataService) aggregateSocialSentiment(ctx context.Context, ticker string, from, to time.Time) ([]SocialSentiment, error) {
+	snapshots, err := s.GetSocialSentimentBySource(ctx, domain.MarketTypeStock, ticker, from, to)
+	merged := mergeSocialSentiment([][]SocialSentiment{snapshots})
+	if err != nil {
+		for i := range merged {
+			merged[i].Partial = true
+		}
 	}
-
-	fromUTC := from.UTC()
-	toUTC := to.UTC()
-
-	var (
-		mu      sync.Mutex
-		results [][]SocialSentiment
-	)
-
-	g, gCtx := errgroup.WithContext(ctx)
-	for _, p := range s.socialProviders {
-		provider := p
-		g.Go(func() error {
-			snapshots, err := provider.GetSocialSentiment(gCtx, ticker, from, to)
-			if err != nil {
-				if !errors.Is(err, ErrNotImplemented) {
-					s.logger.Warn("social aggregator: provider failed",
-						slog.String("ticker", ticker),
-						slog.Any("error", err),
-					)
-				}
-				return nil // continue with other providers
-			}
-			// Normalize to time window before merging.
-			snapshots = normalizeSocialSentiment(snapshots, fromUTC, toUTC)
-			if len(snapshots) > 0 {
-				mu.Lock()
-				results = append(results, snapshots)
-				mu.Unlock()
-			}
-			return nil
-		})
-	}
-	_ = g.Wait() // errors already handled per-provider
-
-	return mergeSocialSentiment(results)
+	return merged, err
 }
 
 // mergeSocialSentiment combines multiple provider results by summing raw counts
@@ -592,6 +556,7 @@ func mergeSocialSentiment(results [][]SocialSentiment) []SocialSentiment {
 		bearishSum   float64
 		totalWeight  int
 		measuredAt   time.Time
+		sources      map[string]struct{}
 	}
 
 	dayMap := make(map[string]*dayCounts)
@@ -601,8 +566,14 @@ func mergeSocialSentiment(results [][]SocialSentiment) []SocialSentiment {
 			key := s.MeasuredAt.UTC().Format("2006-01-02")
 			d, exists := dayMap[key]
 			if !exists {
-				d = &dayCounts{ticker: s.Ticker, measuredAt: s.MeasuredAt}
+				d = &dayCounts{ticker: s.Ticker, measuredAt: s.MeasuredAt, sources: make(map[string]struct{})}
 				dayMap[key] = d
+			}
+			if s.Source != "" {
+				d.sources[s.Source] = struct{}{}
+			}
+			if s.MeasuredAt.After(d.measuredAt) {
+				d.measuredAt = s.MeasuredAt
 			}
 			weight := s.PostCount
 			if weight == 0 {
@@ -624,7 +595,13 @@ func mergeSocialSentiment(results [][]SocialSentiment) []SocialSentiment {
 			bearish = d.bearishSum / float64(d.totalWeight)
 			score = bullish - bearish
 		}
+		sources := make([]string, 0, len(d.sources))
+		for source := range d.sources {
+			sources = append(sources, source)
+		}
+		sort.Strings(sources)
 		merged = append(merged, SocialSentiment{
+			Source:       strings.Join(sources, ", "),
 			Ticker:       d.ticker,
 			Score:        score,
 			Bullish:      bullish,

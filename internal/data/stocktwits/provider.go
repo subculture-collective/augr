@@ -102,6 +102,11 @@ func (c *Client) GetTrending(ctx context.Context) ([]TrendingSymbol, error) {
 
 // GetSymbolSentiment returns sentiment for a specific symbol from its message stream.
 func (c *Client) GetSymbolSentiment(ctx context.Context, symbol string) (*SymbolSentiment, error) {
+	return c.GetSymbolSentimentWindow(ctx, symbol, time.Time{}, time.Time{})
+}
+
+// GetSymbolSentimentWindow scores only messages published in the requested window.
+func (c *Client) GetSymbolSentimentWindow(ctx context.Context, symbol string, from, to time.Time) (*SymbolSentiment, error) {
 	path := fmt.Sprintf("/streams/symbol/%s.json", symbol)
 	body, err := c.get(ctx, path)
 	if err != nil {
@@ -110,7 +115,8 @@ func (c *Client) GetSymbolSentiment(ctx context.Context, symbol string) (*Symbol
 
 	var resp struct {
 		Messages []struct {
-			Entities struct {
+			CreatedAt string `json:"created_at"`
+			Entities  struct {
 				Sentiment *struct {
 					Basic string `json:"basic"` // "Bullish" or "Bearish"
 				} `json:"sentiment"`
@@ -122,14 +128,28 @@ func (c *Client) GetSymbolSentiment(ctx context.Context, symbol string) (*Symbol
 	}
 
 	var bullish, bearish int
+	var latest time.Time
 	for _, msg := range resp.Messages {
+		at, parseErr := time.Parse(time.RFC3339Nano, msg.CreatedAt)
+		if !from.IsZero() || !to.IsZero() {
+			if parseErr != nil || (!from.IsZero() && at.Before(from)) || (!to.IsZero() && at.After(to)) {
+				continue
+			}
+		}
+
 		if msg.Entities.Sentiment == nil {
 			continue
 		}
 		switch msg.Entities.Sentiment.Basic {
 		case "Bullish":
+			if at.After(latest) {
+				latest = at
+			}
 			bullish++
 		case "Bearish":
+			if at.After(latest) {
+				latest = at
+			}
 			bearish++
 		}
 	}
@@ -140,13 +160,16 @@ func (c *Client) GetSymbolSentiment(ctx context.Context, symbol string) (*Symbol
 		score = float64(bullish) / float64(total)
 	}
 
+	if latest.IsZero() && from.IsZero() && to.IsZero() {
+		latest = time.Now().UTC()
+	}
 	return &SymbolSentiment{
 		Symbol:     symbol,
 		Bullish:    bullish,
 		Bearish:    bearish,
 		Total:      total,
 		Score:      score,
-		MeasuredAt: time.Now(),
+		MeasuredAt: latest,
 	}, nil
 }
 

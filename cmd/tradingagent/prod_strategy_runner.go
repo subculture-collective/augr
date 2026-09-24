@@ -2396,20 +2396,18 @@ func (r *realStrategyRunner) loadInitialState(ctx context.Context, strategy doma
 
 	r.logger.Debug("loadInitialState after news")
 	socialFrom := to.Add(-strategySocialLookback)
-	if snapshots, err := r.dataService.GetSocialSentiment(ctx, strategy.MarketType, strategy.Ticker, socialFrom, to); err == nil {
-		seed.Social = latestSocialSnapshot(snapshots)
-		if seed.Social == nil {
-			r.logger.Info("prod strategy runner: social sentiment empty for ticker",
-				slog.String("ticker", strategy.Ticker),
-			)
+	snapshots, socialErr := r.dataService.GetSocialSentiment(ctx, strategy.MarketType, strategy.Ticker, socialFrom, to)
+	if ctx.Err() != nil {
+		return agent.InitialStateSeed{}, ctx.Err()
+	}
+	seed.Social = latestSocialSnapshot(snapshots)
+	if socialErr != nil {
+		if seed.Social != nil {
+			seed.Social.Partial = true
 		}
-	} else if ctxErr := contextErr(err); ctxErr != nil {
-		return agent.InitialStateSeed{}, ctxErr
-	} else {
-		r.logger.Warn("prod strategy runner: social sentiment unavailable",
-			slog.String("ticker", strategy.Ticker),
-			slog.Any("error", err),
-		)
+		r.logger.Warn("prod strategy runner: social sentiment coverage incomplete", slog.String("ticker", strategy.Ticker), slog.Any("error", socialErr))
+	} else if seed.Social == nil {
+		r.logger.Info("prod strategy runner: social sentiment empty for ticker", slog.String("ticker", strategy.Ticker))
 	}
 
 	r.logger.Debug("loadInitialState after social sentiment")
