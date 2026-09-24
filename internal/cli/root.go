@@ -370,11 +370,15 @@ func (s *rootState) newServeCommand() *cobra.Command {
 			drainTimeout := cfg.ShutdownDrainTimeout
 			if drainTimeout >= forcedShutdownTimeout {
 				// The forced-exit timer must outlive the drain, or a slow run
-				// would trip it before cancellation even starts.
+				// would trip it before cancellation even starts. The default
+				// equals the forced timeout and is clamped silently; only an
+				// explicit larger value is worth a warning.
+				if drainTimeout > forcedShutdownTimeout {
+					logger.Warn("SHUTDOWN_DRAIN_TIMEOUT exceeds the forced shutdown timeout; clamped",
+						slog.Duration(drainTimeoutKey, forcedShutdownTimeout/2),
+						slog.Duration(shutdownTimeoutKey, forcedShutdownTimeout))
+				}
 				drainTimeout = forcedShutdownTimeout / 2
-				logger.Warn("SHUTDOWN_DRAIN_TIMEOUT exceeds the forced shutdown timeout; clamped",
-					slog.Duration(drainTimeoutKey, drainTimeout),
-					slog.Duration(shutdownTimeoutKey, forcedShutdownTimeout))
 			}
 			if err := runServerLifecycleWithHook(ctx, apiServer.Start, apiServer.Shutdown, func() {
 				inFlightCount := 0
