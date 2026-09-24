@@ -24,6 +24,7 @@ import (
 	polymarketexecution "github.com/PatrickFanella/get-rich-quick/internal/execution/polymarket"
 	"github.com/PatrickFanella/get-rich-quick/internal/generativestrategy"
 	"github.com/PatrickFanella/get-rich-quick/internal/instrument"
+	"github.com/PatrickFanella/get-rich-quick/internal/ledger"
 	"github.com/PatrickFanella/get-rich-quick/internal/metrics"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
@@ -1700,5 +1701,73 @@ func TestValidateFundamentalsInputUsesProviderMissingFieldMetadata(t *testing.T)
 	}
 	if err := validateFundamentalsInput("LOSS", fundamentals, now); err != nil {
 		t.Fatalf("valid negative and zero metrics rejected: %v", err)
+	}
+}
+
+type positionSnapshotRepo struct {
+	stubPositionRepo
+	owned   []domain.Position
+	account []domain.Position
+	err     error
+	filters []repository.PositionFilter
+}
+
+func (r *positionSnapshotRepo) GetByExecutionScope(_ context.Context, _ uuid.UUID, _ domain.AccountEnvironment, originType, _ string, filter repository.PositionFilter, _, _ int) ([]domain.Position, error) {
+	if originType != string(ledger.ExecutionOriginStrategyVersion) {
+		return nil, fmt.Errorf("unexpected origin %q", originType)
+	}
+	r.filters = append(r.filters, filter)
+	return r.owned, r.err
+}
+
+func (r *positionSnapshotRepo) GetOpenByAccount(context.Context, uuid.UUID, domain.AccountEnvironment, repository.PositionFilter, int, int) ([]domain.Position, error) {
+	return r.account, nil
+}
+
+func TestLoadPositionSnapshot(t *testing.T) {
+	t.Parallel()
+
+	versionID := uuid.New()
+	stock := domain.Strategy{Ticker: "SPY", MarketType: domain.MarketTypeStock}
+	closedAt := time.Now()
+	early := time.Date(2026, 9, 1, 14, 0, 0, 0, time.UTC)
+	late := early.AddDate(0, 0, 3)
+	newRunner := func(repo repository.PositionRepository) *realStrategyRunner {
+		return &realStrategyRunner{positionRepo: repo, executionAccount: testExecutionAccountBinding, logger: slogDiscardLogger()}
+	}
+
+	flat := newRunner(&positionSnapshotRepo{}).loadPositionSnapshot(context.Background(), stock, versionID)
+	if flat == nil || !flat.Known || flat.Quantity != 0 || !strings.Contains(flat.PromptText(), "FLAT") {
+		t.Fatalf("flat snapshot = %#v", flat)
+	}
+
+	repo := &positionSnapshotRepo{
+		owned: []domain.Position{
+			{Ticker: "SPY", Side: domain.PositionSideLong, Quantity: 10, AvgEntry: 700, OpenedAt: late},
+			{Ticker: "SPY", Side: domain.PositionSideLong, Quantity: 30, AvgEntry: 740, OpenedAt: early},
+			{Ticker: "SPY", Side: domain.PositionSideLong, Quantity: 5, AvgEntry: 600, ClosedAt: &closedAt},
+		},
+		account: []domain.Position{
+			{Ticker: "SPY", Side: domain.PositionSideLong, Quantity: 40},
+			{Ticker: "SPY", Side: domain.PositionSideLong, Quantity: 7},
+		},
+	}
+	long := newRunner(repo).loadPositionSnapshot(context.Background(), stock, versionID)
+	if long == nil || !long.Known || long.Quantity != 40 || long.AvgEntry != 730 || long.AccountQuantity != 47 || long.OpenedAt == nil || !long.OpenedAt.Equal(early) {
+		t.Fatalf("long snapshot = %#v", long)
+	}
+	if got := repo.filters[0]; got.Ticker != "SPY" || got.Side != domain.PositionSideLong {
+		t.Fatalf("position filter = %#v, want SPY long", got)
+	}
+
+	failed := newRunner(&positionSnapshotRepo{err: errors.New("db down")}).loadPositionSnapshot(context.Background(), stock, versionID)
+	if failed == nil || failed.Known || !strings.Contains(failed.PromptText(), "UNKNOWN") {
+		t.Fatalf("failed lookup snapshot = %#v", failed)
+	}
+
+	for _, marketType := range []domain.MarketType{domain.MarketTypeOptions, domain.MarketTypePolymarket} {
+		if got := newRunner(&positionSnapshotRepo{}).loadPositionSnapshot(context.Background(), domain.Strategy{Ticker: "X", MarketType: marketType}, versionID); got != nil {
+			t.Fatalf("%s snapshot = %#v, want nil", marketType, got)
+		}
 	}
 }

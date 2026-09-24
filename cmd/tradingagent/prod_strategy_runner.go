@@ -560,6 +560,73 @@ func (r *realStrategyRunner) runGeneratedStrategyNative(ctx context.Context, str
 	return &api.StrategyRunResult{Run: run, Signal: run.Signal}, nil
 }
 
+// loadPositionSnapshot reports what this strategy's execution scope holds in
+// its ticker, plus the account-wide quantity, so trader and risk prompts state
+// FLAT or LONG explicitly. It covers the market types whose SELL is gated on
+// an owned long (stock, crypto) and returns nil for the rest. A lookup failure
+// yields an unknown snapshot rather than failing the run.
+func (r *realStrategyRunner) loadPositionSnapshot(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) *agent.PositionSnapshot {
+	switch strategy.MarketType.Normalize() {
+	case domain.MarketTypeStock, domain.MarketTypeCrypto:
+	default:
+		return nil
+	}
+	snapshot := &agent.PositionSnapshot{Ticker: strategy.Ticker, AsOf: time.Now().UTC()}
+	scoped, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
+	if !ok || scoped == nil || executionVersionID == uuid.Nil {
+		r.logger.Warn("prod strategy runner: position context unavailable", slog.String("ticker", strategy.Ticker))
+		return snapshot
+	}
+	filter := repository.PositionFilter{Ticker: strategy.Ticker, Side: domain.PositionSideLong}
+	owned, err := scoped.GetByExecutionScope(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(),
+		string(ledger.ExecutionOriginStrategyVersion), executionVersionID.String(), filter, 100, 0)
+	if err != nil {
+		r.logger.Warn("prod strategy runner: position context lookup failed", slog.String("ticker", strategy.Ticker), slog.Any("error", err))
+		return snapshot
+	}
+	var cost, unrealized float64
+	haveUnrealized := false
+	for _, position := range owned {
+		if position.ClosedAt != nil || position.Quantity <= 0 {
+			continue
+		}
+		snapshot.Quantity += position.Quantity
+		cost += position.Quantity * position.AvgEntry
+		if position.UnrealizedPnL != nil {
+			unrealized += *position.UnrealizedPnL
+			haveUnrealized = true
+		}
+		if opened := position.OpenedAt; !opened.IsZero() && (snapshot.OpenedAt == nil || opened.Before(*snapshot.OpenedAt)) {
+			snapshot.OpenedAt = &opened
+		}
+	}
+	if snapshot.Quantity > 0 {
+		snapshot.AvgEntry = cost / snapshot.Quantity
+		if haveUnrealized {
+			snapshot.UnrealizedPnL = &unrealized
+		}
+	}
+	snapshot.AccountQuantity = snapshot.Quantity
+	if accountRepo, ok := r.positionRepo.(repository.AccountScopedPositionRepository); ok && accountRepo != nil {
+		held, err := accountRepo.GetOpenByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), filter, 100, 0)
+		if err != nil {
+			r.logger.Warn("prod strategy runner: account position lookup failed", slog.String("ticker", strategy.Ticker), slog.Any("error", err))
+		} else {
+			total := 0.0
+			for _, position := range held {
+				if position.ClosedAt == nil && position.Quantity > 0 {
+					total += position.Quantity
+				}
+			}
+			if total > snapshot.AccountQuantity {
+				snapshot.AccountQuantity = total
+			}
+		}
+	}
+	snapshot.Known = true
+	return snapshot
+}
+
 func (r *realStrategyRunner) generatedStrategyHolding(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID) (bool, error) {
 	repo, ok := r.positionRepo.(repository.ExecutionScopedPositionRepository)
 	if !ok || repo == nil {
@@ -1971,6 +2038,7 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 	if err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, err
 	}
+	prepared.InitialState.Position = r.loadPositionSnapshot(ctx, strategy, executionVersionID)
 
 	r.logger.Debug("prepareStrategyRun returning successfully")
 	return runner, prepared, strategyConfig, eventsCh, nil

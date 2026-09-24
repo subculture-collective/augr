@@ -807,3 +807,20 @@ func TestRiskManagerJudgeRisk(t *testing.T) {
 		t.Fatalf("CompletionTokens = %d, want 85", output.LLMResponse.Response.Usage.CompletionTokens)
 	}
 }
+
+func TestRiskManagerJudgeRiskStatesCurrentPosition(t *testing.T) {
+	mock := &mockProvider{response: &llm.CompletionResponse{Content: `{"action":"HOLD","confidence":6,"adjusted_position_size":0,"adjusted_stop_loss":0,"reasoning":"flat and extended"}`}}
+	rm := NewRiskManager(mock, "test-provider", "test-model", slog.Default())
+
+	_, err := rm.JudgeRisk(context.Background(), agent.RiskJudgeInput{
+		Ticker:      "SPY",
+		TradingPlan: agent.TradingPlan{Action: agent.PipelineSignalHold, Ticker: "SPY"},
+		Position:    &agent.PositionSnapshot{Ticker: "SPY", Known: true},
+	})
+	if err != nil {
+		t.Fatalf("JudgeRisk() error = %v", err)
+	}
+	if !strings.Contains(mock.lastReq.Messages[1].Content, "current_position:\nCurrent position in SPY: FLAT") {
+		t.Fatalf("risk manager prompt = %q, want the FLAT position section", mock.lastReq.Messages[1].Content)
+	}
+}

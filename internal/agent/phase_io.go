@@ -46,6 +46,9 @@ type TradingInput struct {
 	Ticker         string
 	InvestmentPlan string
 	AnalystReports map[AgentRole]string
+	// Position is the strategy's holding in Ticker at run start; nil when not
+	// applicable to the market type.
+	Position *PositionSnapshot
 }
 
 // TradingOutput is the result of the trader node's execution.
@@ -62,6 +65,7 @@ type RiskJudgeInput struct {
 	Rounds       []DebateRound
 	TradingPlan  TradingPlan
 	MarketReport string
+	Position     *PositionSnapshot
 }
 
 // RiskJudgeOutput is the result of the risk manager node's execution.
@@ -98,7 +102,7 @@ func debateInputFromState(state *PipelineState) DebateInput {
 	return DebateInput{
 		Ticker:         state.Ticker,
 		Rounds:         state.ResearchDebate.Rounds,
-		ContextReports: state.AnalystReports,
+		ContextReports: WithPositionContext(state.AnalystReports, state.Position),
 	}
 }
 
@@ -107,7 +111,7 @@ func researchJudgeInputFromState(state *PipelineState) DebateInput {
 	return DebateInput{
 		Ticker:         state.Ticker,
 		Rounds:         state.ResearchDebate.Rounds,
-		ContextReports: state.AnalystReports,
+		ContextReports: WithPositionContext(state.AnalystReports, state.Position),
 	}
 }
 
@@ -160,6 +164,7 @@ func tradingInputFromState(state *PipelineState) TradingInput {
 		Ticker:         state.Ticker,
 		InvestmentPlan: state.ResearchDebate.InvestmentPlan,
 		AnalystReports: state.AnalystReports,
+		Position:       state.Position,
 	}
 }
 
@@ -179,6 +184,7 @@ func riskJudgeInputFromState(state *PipelineState) RiskJudgeInput {
 		Rounds:       state.RiskDebate.Rounds,
 		TradingPlan:  state.TradingPlan,
 		MarketReport: state.AnalystReports[AgentRoleMarketAnalyst],
+		Position:     state.Position,
 	}
 }
 

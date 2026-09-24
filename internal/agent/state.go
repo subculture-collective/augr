@@ -68,6 +68,7 @@ type PipelineState struct {
 	Fundamentals         *data.Fundamentals    `json:"fundamentals,omitempty"`
 	Social               *data.SocialSentiment `json:"social,omitempty"`
 	PredictionMarket     *PredictionMarketData `json:"prediction_market,omitempty"`
+	Position             *PositionSnapshot     `json:"position,omitempty"`
 	AnalystReports       map[AgentRole]string  `json:"analyst_reports,omitempty"`
 	ResearchDebate       ResearchDebateState   `json:"research_debate"`
 	TradingPlan          TradingPlan           `json:"trading_plan"`

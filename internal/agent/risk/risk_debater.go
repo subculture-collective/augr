@@ -22,9 +22,9 @@ func executeRiskDebate(
 	input := agent.DebateInput{
 		Ticker: state.Ticker,
 		Rounds: state.RiskDebate.Rounds,
-		ContextReports: map[agent.AgentRole]string{
+		ContextReports: agent.WithPositionContext(map[agent.AgentRole]string{
 			agent.AgentRoleTrader: agent.MarshalTradingPlanSafe(state.TradingPlan),
-		},
+		}, state.Position),
 	}
 	output, err := debateRiskFromInput(ctx, debater, systemPrompt, providerName, input)
 	if err != nil {

@@ -121,6 +121,7 @@ func (r *RiskManager) Execute(ctx context.Context, state *agent.PipelineState) e
 		Rounds:       state.RiskDebate.Rounds,
 		TradingPlan:  state.TradingPlan,
 		MarketReport: state.AnalystReports[agent.AgentRoleMarketAnalyst],
+		Position:     state.Position,
 	}
 	output, err := r.JudgeRisk(ctx, input)
 	if output.StoredSignal != "" {
@@ -153,6 +154,7 @@ func (r *RiskManager) JudgeRisk(ctx context.Context, input agent.RiskJudgeInput)
 	if strings.TrimSpace(input.MarketReport) != "" {
 		contextReports[agent.AgentRoleMarketAnalyst] = input.MarketReport
 	}
+	contextReports = agent.WithPositionContext(contextReports, input.Position)
 
 	content, promptText, resp, err := r.CallWithContext(
 		ctx,

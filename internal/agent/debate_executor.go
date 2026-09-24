@@ -186,6 +186,7 @@ func (d *DebateExecutor) Execute(ctx context.Context, state *PipelineState) erro
 			Rounds:       d.debateRounds(state),
 			TradingPlan:  state.TradingPlan,
 			MarketReport: state.AnalystReports[AgentRoleMarketAnalyst],
+			Position:     state.Position,
 		}
 		result, err := rj.JudgeRisk(phaseCtx, input)
 		if err != nil {

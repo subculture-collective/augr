@@ -155,6 +155,7 @@ func (t *Trader) Execute(ctx context.Context, state *agent.PipelineState) error 
 		Ticker:         state.Ticker,
 		InvestmentPlan: state.ResearchDebate.InvestmentPlan,
 		AnalystReports: state.AnalystReports,
+		Position:       state.Position,
 	}
 	output, err := t.Trade(ctx, input)
 	if output.StoredOutput != "" {
@@ -308,6 +309,11 @@ func buildUserPromptFromInput(input agent.TradingInput) string {
 		b.WriteString(input.InvestmentPlan)
 	} else {
 		b.WriteString("No investment plan available.")
+	}
+
+	if position := input.Position.PromptText(); position != "" {
+		b.WriteString("\n\n")
+		b.WriteString(position)
 	}
 
 	b.WriteString("\n\nAnalyst Reports:\n")

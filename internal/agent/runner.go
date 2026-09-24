@@ -115,6 +115,7 @@ type InitialStateSeed struct {
 	Fundamentals     *data.Fundamentals
 	Social           *data.SocialSentiment
 	PredictionMarket *PredictionMarketData
+	Position         *PositionSnapshot
 }
 
 // PreparedRun is the immutable execution plan for one strategy run.
@@ -779,6 +780,10 @@ func applyInitialStateSeed(state *PipelineState, seed InitialStateSeed) {
 		pm := *seed.PredictionMarket
 		state.PredictionMarket = &pm
 	}
+	if seed.Position != nil {
+		position := *seed.Position
+		state.Position = &position
+	}
 }
 
 func cloneOHLCV(src []domain.OHLCV) []domain.OHLCV {
@@ -1062,10 +1067,10 @@ func (r *Runner) runDebateJudge(ctx context.Context, state *PipelineState, phase
 
 func (r *Runner) debateInputFromState(state *PipelineState, phase Phase) DebateInput {
 	if phase == PhaseRiskDebate {
-		return DebateInput{Ticker: state.Ticker, Rounds: state.RiskDebate.Rounds, ContextReports: map[AgentRole]string{
+		return DebateInput{Ticker: state.Ticker, Rounds: state.RiskDebate.Rounds, ContextReports: WithPositionContext(map[AgentRole]string{
 			AgentRoleTrader:        MarshalTradingPlanSafe(state.TradingPlan),
 			AgentRoleMarketAnalyst: state.AnalystReports[AgentRoleMarketAnalyst],
-		}}
+		}, state.Position)}
 	}
 	return debateInputFromState(state)
 }

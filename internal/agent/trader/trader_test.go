@@ -914,3 +914,19 @@ func TestTraderTrade(t *testing.T) {
 		t.Errorf("user prompt should reference input ticker MSFT, got: %q", userMsg)
 	}
 }
+
+func TestBuildUserPromptStatesCurrentPosition(t *testing.T) {
+	t.Parallel()
+
+	prompt := buildUserPromptFromInput(agent.TradingInput{
+		Ticker:         "SPY",
+		InvestmentPlan: `{"direction":"hold"}`,
+		Position:       &agent.PositionSnapshot{Ticker: "SPY", Known: true},
+	})
+	if !strings.Contains(prompt, "Current position in SPY: FLAT") {
+		t.Fatalf("trader prompt = %q, want the FLAT position statement", prompt)
+	}
+	if strings.Contains(buildUserPromptFromInput(agent.TradingInput{Ticker: "SPY"}), "Current position") {
+		t.Fatal("trader prompt rendered a position without a snapshot")
+	}
+}
