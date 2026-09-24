@@ -37,18 +37,24 @@ network.
    ```dotenv
    LLM_FALLBACK_PROVIDER=opencode
    LLM_DEFAULT_PROVIDER=opencode
-   LLM_DEEP_THINK_MODEL=openai/gpt-5.6-sol
-   LLM_QUICK_THINK_MODEL=openai/gpt-5.6-luna
+   LLM_DEEP_THINK_MODEL=openai/gpt-6-sol
+   LLM_QUICK_THINK_MODEL=openai/gpt-6-luna
    LLM_FALLBACK_PROVIDER=opencode
    LLM_FALLBACK_MODEL=openai/gpt-5.6-terra
    OPENCODE_BASE_URL=http://opencode:4096
    OPENCODE_SERVER_USERNAME=opencode
-   OPENCODE_MODEL=openai/gpt-5.6-terra
+   OPENCODE_MODEL=openai/gpt-6-sol
    ```
 
-All OpenCode models use `provider/model` form. Sol handles deep-think work,
-Luna handles high-volume quick-think work, and Terra is the balanced fallback
-for model-specific failures. This fallback does not protect against a complete
+All OpenCode models use `provider/model` form. GPT-6 Sol handles deep-think work,
+GPT-6 Luna handles high-volume quick-think work, and GPT-5.6 Terra is the
+fallback for model-specific failures. GPT-6 has no Terra tier, so the fallback
+stays on the previous generation. `openai/gpt-6-astra` is also available as a
+higher-cost deep-think option.
+
+OpenCode 1.18.32 predates GPT-6 Luna and Sol, so `ops/opencode/opencode.json`
+declares both under `provider.openai.models`. Remove that block once the pinned
+OpenCode image lists them in `opencode models openai`. This fallback does not protect against a complete
 OpenCode sidecar or OAuth outage.
 
 ## Verify

@@ -5,8 +5,8 @@ import "fmt"
 // Hardcoded defaults used as the final fallback in ResolveConfig.
 const (
 	defaultLLMProvider        = "opencode"
-	defaultLLMDeepThinkModel  = "openai/gpt-5.6-sol"
-	defaultLLMQuickThinkModel = "openai/gpt-5.6-luna"
+	defaultLLMDeepThinkModel  = "openai/gpt-6-sol"
+	defaultLLMQuickThinkModel = "openai/gpt-6-luna"
 	// One debate round keeps a run inside the scheduler job timeout with
 	// 30-minute LLM calls; strategies or globals may raise it.
 	defaultPipelineDebateRounds   = 1

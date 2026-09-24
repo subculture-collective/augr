@@ -20,6 +20,9 @@ var knownLLMModels = map[string]bool{
 	"openai/gpt-5.6-sol":   true,
 	"openai/gpt-5.6-terra": true,
 	"openai/gpt-5.6-luna":  true,
+	"openai/gpt-6-astra":   true,
+	"openai/gpt-6-sol":     true,
+	"openai/gpt-6-luna":    true,
 	// Anthropic
 	"claude-3-7-sonnet-latest": true,
 	// Google

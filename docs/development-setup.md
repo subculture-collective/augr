@@ -26,7 +26,7 @@ important startup requirements are:
 
 - `DATABASE_URL`, `JWT_SECRET`, and `PROJECTION_ACCOUNT_ID`.
 - One usable LLM provider. The current defaults route through OpenCode using
-  `openai/gpt-5.6-sol` for deep work and `openai/gpt-5.6-luna` for quick work.
+  `openai/gpt-6-sol` for deep work and `openai/gpt-6-luna` for quick work.
 - One primary market-data credential: Polygon, Alpha Vantage, Finnhub, or
   Financial Modeling Prep.
 

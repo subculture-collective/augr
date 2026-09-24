@@ -825,8 +825,8 @@ func loadFromEnvironment() (Config, error) {
 		},
 		LLM: LLMConfig{
 			DefaultProvider: getEnvString("LLM_DEFAULT_PROVIDER", "opencode"),
-			DeepThinkModel:  getEnvString("LLM_DEEP_THINK_MODEL", "openai/gpt-5.6-sol"),
-			QuickThinkModel: getEnvString("LLM_QUICK_THINK_MODEL", "openai/gpt-5.6-luna"),
+			DeepThinkModel:  getEnvString("LLM_DEEP_THINK_MODEL", "openai/gpt-6-sol"),
+			QuickThinkModel: getEnvString("LLM_QUICK_THINK_MODEL", "openai/gpt-6-luna"),
 			Timeout:         llmTimeout,
 			DebateTimeout:   llmDebateTimeout,
 			Providers: LLMProviderConfigs{
@@ -862,7 +862,7 @@ func loadFromEnvironment() (Config, error) {
 					BaseURL:  getEnvString("OPENCODE_BASE_URL", "http://localhost:4096"),
 					Username: getEnvString("OPENCODE_SERVER_USERNAME", "opencode"),
 					Password: os.Getenv("OPENCODE_SERVER_PASSWORD"),
-					Model:    getEnvString("OPENCODE_MODEL", "openai/gpt-5.6-terra"),
+					Model:    getEnvString("OPENCODE_MODEL", "openai/gpt-6-sol"),
 				},
 			},
 			FallbackProvider:     getEnvString("LLM_FALLBACK_PROVIDER", ""),
