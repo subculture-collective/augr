@@ -86,6 +86,10 @@ type StrategyLLMConfig struct {
 	DeepThinkModel *string `json:"deep_think_model,omitempty"`
 	// QuickThinkModel overrides the model used for fast-response tasks.
 	QuickThinkModel *string `json:"quick_think_model,omitempty"`
+	// RoleModels overrides the tier model for individual agent roles, for
+	// example {"risk_manager": "openai/gpt-6-astra"}. Entries replace global
+	// LLM_ROLE_MODELS entries for the same role.
+	RoleModels map[AgentRole]string `json:"role_models,omitempty"`
 }
 
 // StrategyPipelineConfig holds debate and timeout configuration for a strategy.
@@ -240,6 +244,21 @@ func validateLLMConfig(c *StrategyLLMConfig) error {
 		}
 		if provider != "" && !isModelValidForProvider(provider, model) {
 			return fmt.Errorf("llm_config.quick_think_model: model %q is not valid for provider %q", model, provider)
+		}
+	}
+	for role, rawModel := range c.RoleModels {
+		if !role.IsValid() {
+			return fmt.Errorf("llm_config.role_models: unknown agent role %q", role)
+		}
+		model := strings.TrimSpace(rawModel)
+		if model == "" {
+			return fmt.Errorf("llm_config.role_models.%s: model must be non-empty", role)
+		}
+		if constrained && !isKnownLLMModel(model) {
+			return fmt.Errorf("llm_config.role_models.%s: unknown model %q", role, model)
+		}
+		if provider != "" && !isModelValidForProvider(provider, model) {
+			return fmt.Errorf("llm_config.role_models.%s: model %q is not valid for provider %q", role, model, provider)
 		}
 	}
 	return nil

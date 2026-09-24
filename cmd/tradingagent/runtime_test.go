@@ -198,7 +198,7 @@ func TestRuntimeSchemaVersionRequiresRenamedOperatorUser(t *testing.T) {
 	for _, tt := range []struct {
 		version int
 		want    bool
-	}{{113, false}, {114, false}, {115, false}, {116, false}, {117, true}, {118, false}} {
+	}{{114, false}, {115, false}, {116, false}, {117, false}, {118, true}, {119, false}} {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
@@ -2570,6 +2570,47 @@ func TestBuildRunnerDefinition_AppliesPromptOverridesBeyondAnalysis(t *testing.T
 		t.Fatalf("JudgeRisk() error = %v", err)
 	}
 	assertPromptContains("risk_manager", riskOut.LLMResponse.PromptText, "custom risk manager prompt")
+}
+
+func TestBuildRunnerDefinition_RoleModelOverridesOnlyTheNamedRole(t *testing.T) {
+	t.Parallel()
+
+	resolved := agent.ResolvedConfig{
+		LLMConfig: agent.ResolvedLLMConfig{
+			QuickThinkModel: "openai/gpt-6-luna",
+			DeepThinkModel:  "openai/gpt-6-sol",
+			RoleModels:      map[agent.AgentRole]string{agent.AgentRoleRiskManager: "openai/gpt-6-astra"},
+		},
+	}
+
+	definition, err := buildRunnerDefinition(captureProvider{}, "opencode", resolved, 30*time.Second, 0, nil, slogDiscardLogger())
+	if err != nil {
+		t.Fatalf("buildRunnerDefinition() error = %v", err)
+	}
+
+	riskOut, err := definition.Risk.Judge.JudgeRisk(context.Background(), agent.RiskJudgeInput{Ticker: "SPY", TradingPlan: agent.TradingPlan{Ticker: "SPY"}})
+	if err != nil {
+		t.Fatalf("JudgeRisk() error = %v", err)
+	}
+	if got := riskOut.LLMResponse.Response.Model; got != "openai/gpt-6-astra" {
+		t.Fatalf("risk manager model = %q, want openai/gpt-6-astra", got)
+	}
+
+	traderOut, err := definition.Trader.Trade(context.Background(), agent.TradingInput{Ticker: "SPY", InvestmentPlan: `{"direction":"hold"}`})
+	if err != nil {
+		t.Fatalf("Trader.Trade() error = %v", err)
+	}
+	if got := traderOut.LLMResponse.Response.Model; got != "openai/gpt-6-sol" {
+		t.Fatalf("trader model = %q, want the deep tier model openai/gpt-6-sol", got)
+	}
+
+	judgeOut, err := definition.Research.Judge.JudgeResearch(context.Background(), agent.DebateInput{Ticker: "SPY"})
+	if err != nil {
+		t.Fatalf("JudgeResearch() error = %v", err)
+	}
+	if got := judgeOut.LLMResponse.Response.Model; got != "openai/gpt-6-sol" {
+		t.Fatalf("invest judge model = %q, want the deep tier model openai/gpt-6-sol", got)
+	}
 }
 
 func slogDiscardLogger() *slog.Logger {

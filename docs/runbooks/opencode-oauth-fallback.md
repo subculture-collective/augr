@@ -54,7 +54,14 @@ higher-cost deep-think option.
 
 OpenCode 1.18.32 predates GPT-6 Luna and Sol, so `ops/opencode/opencode.json`
 declares both under `provider.openai.models`. Remove that block once the pinned
-OpenCode image lists them in `opencode models openai`. This fallback does not protect against a complete
+OpenCode image lists them in `opencode models openai`.
+
+`LLM_ROLE_MODELS` overrides the tier model for named roles, for example
+`LLM_ROLE_MODELS=risk_manager=openai/gpt-6-astra`. The risk manager's action,
+confidence, position size, and stop loss override the trader's plan, so it is
+the single call where a stronger model has the most effect; it runs once per
+pipeline run with a short output. A strategy can set the same map as
+`llm_config.role_models`, and its entries win for their roles. This fallback does not protect against a complete
 OpenCode sidecar or OAuth outage.
 
 ## Verify

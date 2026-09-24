@@ -168,6 +168,10 @@ func Validate(cfg Config) error {
 		errs = append(errs, msg)
 	}
 
+	if _, err := ParseRoleModels(cfg.LLM.RoleModelsRaw); err != nil {
+		errs = append(errs, fmt.Sprintf("LLM_ROLE_MODELS: %v", err))
+	}
+
 	// Cross-field: fallback provider (if set) must have its API key.
 	if msg := validateFallbackProvider(cfg.LLM); msg != "" {
 		errs = append(errs, msg)

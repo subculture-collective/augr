@@ -121,6 +121,14 @@ type LLMConfig struct {
 	Timeout         time.Duration
 	Providers       LLMProviderConfigs
 
+	// RoleModels overrides the tier model for individual agent roles
+	// (LLM_ROLE_MODELS, e.g. "risk_manager=openai/gpt-6-astra"). Roles without
+	// an entry keep the deep or quick tier model.
+	RoleModels map[string]string
+	// RoleModelsRaw keeps the unparsed LLM_ROLE_MODELS value so Validate can
+	// report malformed entries.
+	RoleModelsRaw string
+
 	// DebateTimeout bounds one debate-round LLM call before the quick model
 	// retry (LLM_DEBATE_TIMEOUT). Zero disables the per-call timeout.
 	DebateTimeout time.Duration
@@ -827,6 +835,8 @@ func loadFromEnvironment() (Config, error) {
 			DefaultProvider: getEnvString("LLM_DEFAULT_PROVIDER", "opencode"),
 			DeepThinkModel:  getEnvString("LLM_DEEP_THINK_MODEL", "openai/gpt-6-sol"),
 			QuickThinkModel: getEnvString("LLM_QUICK_THINK_MODEL", "openai/gpt-6-luna"),
+			RoleModels:      parseRoleModelsLenient(os.Getenv("LLM_ROLE_MODELS")),
+			RoleModelsRaw:   os.Getenv("LLM_ROLE_MODELS"),
 			Timeout:         llmTimeout,
 			DebateTimeout:   llmDebateTimeout,
 			Providers: LLMProviderConfigs{

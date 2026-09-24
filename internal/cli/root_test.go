@@ -111,7 +111,7 @@ func TestCapitalLadderSchemaCompatibility(t *testing.T) {
 	for _, test := range []struct {
 		version int
 		wantErr bool
-	}{{version: 113, wantErr: true}, {version: 114, wantErr: true}, {version: 115, wantErr: true}, {version: 116, wantErr: true}, {version: 117}, {version: 118, wantErr: true}} {
+	}{{version: 113, wantErr: true}, {version: 114, wantErr: true}, {version: 115, wantErr: true}, {version: 116, wantErr: true}, {version: 117, wantErr: true}, {version: 118}, {version: 119, wantErr: true}} {
 		err := validateCapitalLadderSchemaVersion(test.version)
 		if (err != nil) != test.wantErr {
 			t.Errorf("validateCapitalLadderSchemaVersion(%d) error=%v, wantErr=%t", test.version, err, test.wantErr)

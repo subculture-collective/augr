@@ -2516,19 +2516,19 @@ func buildRunnerDefinition(provider llm.Provider, providerName string, resolved 
 		Analysis: analysisAgents,
 		Research: agent.ResearchDebateStage{
 			Debaters: []agent.DebateAgent{
-				agentdebate.NewBullResearcherWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleBullResearcher.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleBullResearcher, agentdebate.BullResearcherSystemPrompt), logger),
-				agentdebate.NewBearResearcherWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleBearResearcher.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleBearResearcher, agentdebate.BearResearcherSystemPrompt), logger),
+				agentdebate.NewBullResearcherWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleBullResearcher.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleBullResearcher, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleBullResearcher, agentdebate.BullResearcherSystemPrompt), logger),
+				agentdebate.NewBearResearcherWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleBearResearcher.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleBearResearcher, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleBearResearcher, agentdebate.BearResearcherSystemPrompt), logger),
 			},
-			Judge: agentdebate.NewResearchManagerWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleInvestJudge.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleInvestJudge, agentdebate.ResearchManagerSystemPrompt), logger),
+			Judge: agentdebate.NewResearchManagerWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleInvestJudge.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleInvestJudge, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleInvestJudge, agentdebate.ResearchManagerSystemPrompt), logger),
 		},
-		Trader: agenttrader.NewTraderWithPrompt(newLLMMetricsProvider(provider, providerName, agent.AgentRoleTrader.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleTrader, agenttrader.TraderSystemPrompt), logger),
+		Trader: agenttrader.NewTraderWithPrompt(newLLMMetricsProvider(provider, providerName, agent.AgentRoleTrader.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleTrader, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleTrader, agenttrader.TraderSystemPrompt), logger),
 		Risk: agent.RiskDebateStage{
 			Debaters: []agent.DebateAgent{
-				agentrisk.NewAggressiveRiskWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleAggressiveAnalyst.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleAggressiveAnalyst, agentrisk.AggressiveRiskSystemPrompt), logger),
-				agentrisk.NewConservativeRiskWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleConservativeAnalyst.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleConservativeAnalyst, agentrisk.ConservativeRiskSystemPrompt), logger),
-				agentrisk.NewNeutralRiskWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleNeutralAnalyst.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleNeutralAnalyst, agentrisk.NeutralRiskSystemPrompt), logger),
+				agentrisk.NewAggressiveRiskWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleAggressiveAnalyst.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleAggressiveAnalyst, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleAggressiveAnalyst, agentrisk.AggressiveRiskSystemPrompt), logger),
+				agentrisk.NewConservativeRiskWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleConservativeAnalyst.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleConservativeAnalyst, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleConservativeAnalyst, agentrisk.ConservativeRiskSystemPrompt), logger),
+				agentrisk.NewNeutralRiskWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleNeutralAnalyst.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleNeutralAnalyst, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleNeutralAnalyst, agentrisk.NeutralRiskSystemPrompt), logger),
 			},
-			Judge: agentrisk.NewRiskManagerWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleRiskManager.String(), appMetrics), providerName, deepModel, promptOverride(resolved.PromptOverrides, agent.AgentRoleRiskManager, agentrisk.RiskManagerSystemPrompt), logger),
+			Judge: agentrisk.NewRiskManagerWithPrompt(newLLMMetricsProvider(debateProvider, providerName, agent.AgentRoleRiskManager.String(), appMetrics), providerName, resolved.LLMConfig.ModelFor(agent.AgentRoleRiskManager, deepModel), promptOverride(resolved.PromptOverrides, agent.AgentRoleRiskManager, agentrisk.RiskManagerSystemPrompt), logger),
 		},
 	}, nil
 }
@@ -2596,7 +2596,7 @@ func buildAnalysisAgents(provider llm.Provider, providerName string, resolved ag
 		if role == agent.AgentRoleFundamentalsAnalyst && resolved.FundamentalsContract == data.SPYETFContractV1 && strings.TrimSpace(prompt) == "" {
 			prompt = agentanalysts.ETFFundamentalsSystemPrompt
 		}
-		agentImpl, err := newAnalysisAgent(provider, providerName, model, role, prompt, appMetrics, logger)
+		agentImpl, err := newAnalysisAgent(provider, providerName, resolved.LLMConfig.ModelFor(role, model), role, prompt, appMetrics, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -2774,6 +2774,15 @@ func globalSettingsFromConfig(cfg config.Config) agent.GlobalSettings {
 		}
 		if quick != "" {
 			llmConfig.QuickThinkModel = &quick
+		}
+	}
+	if len(cfg.LLM.RoleModels) > 0 {
+		if llmConfig == nil {
+			llmConfig = &agent.StrategyLLMConfig{}
+		}
+		llmConfig.RoleModels = make(map[agent.AgentRole]string, len(cfg.LLM.RoleModels))
+		for role, model := range cfg.LLM.RoleModels {
+			llmConfig.RoleModels[agent.AgentRole(role)] = model
 		}
 	}
 
