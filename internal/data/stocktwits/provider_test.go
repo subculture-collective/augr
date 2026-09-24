@@ -50,3 +50,33 @@ func TestDataProviderUnsupportedCapabilities(t *testing.T) {
 		t.Fatalf("GetNews() error = %v", err)
 	}
 }
+
+func TestDataProviderStampsCurrentSnapshotInsideARecentWindow(t *testing.T) {
+	t.Parallel()
+
+	provider := NewDataProvider(nil)
+	provider.client.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		body := `{"messages":[{"entities":{"sentiment":{"basic":"Bullish"}}},{"entities":{"sentiment":{"basic":"Bearish"}}}]}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	// The strategy runner fixes its window end before fetching bars, news,
+	// and fundamentals, so the social call runs seconds after "to".
+	to := time.Now().UTC().Add(-3 * time.Second)
+	got, err := provider.GetSocialSentiment(context.Background(), "SPY", to.Add(-7*24*time.Hour), to)
+	if err != nil {
+		t.Fatalf("GetSocialSentiment() error = %v", err)
+	}
+	if len(got) != 1 || !got[0].MeasuredAt.Equal(to) {
+		t.Fatalf("recent-window snapshot = %#v, want MeasuredAt at the window end %s", got, to)
+	}
+
+	historical := time.Now().UTC().Add(-time.Hour)
+	got, err = provider.GetSocialSentiment(context.Background(), "SPY", historical.Add(-time.Hour), historical)
+	if err != nil {
+		t.Fatalf("GetSocialSentiment() error = %v", err)
+	}
+	if len(got) != 1 || !got[0].MeasuredAt.After(historical) {
+		t.Fatalf("historical-window snapshot = %#v, want the real fetch time so it is not attributed to the past", got)
+	}
+}

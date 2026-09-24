@@ -44,9 +44,9 @@ func (p *DataProvider) GetNews(_ context.Context, _ string, _, _ time.Time) ([]d
 }
 
 // GetSocialSentiment returns sentiment for a ticker from StockTwits message
-// stream. The from/to parameters are accepted but ignored since StockTwits
-// returns current sentiment only.
-func (p *DataProvider) GetSocialSentiment(ctx context.Context, ticker string, _, _ time.Time) ([]data.SocialSentiment, error) {
+// stream. StockTwits returns current sentiment only, so from is ignored and
+// the snapshot is stamped with data.CurrentSnapshotAsOf against to.
+func (p *DataProvider) GetSocialSentiment(ctx context.Context, ticker string, _, to time.Time) ([]data.SocialSentiment, error) {
 	if p == nil {
 		return nil, fmt.Errorf("stocktwits: provider is nil")
 	}
@@ -74,6 +74,6 @@ func (p *DataProvider) GetSocialSentiment(ctx context.Context, ticker string, _,
 		Bullish:    bullRatio,
 		Bearish:    bearRatio,
 		PostCount:  sentiment.Total,
-		MeasuredAt: sentiment.MeasuredAt,
+		MeasuredAt: data.CurrentSnapshotAsOf(sentiment.MeasuredAt.UTC(), to.UTC()),
 	}}, nil
 }
