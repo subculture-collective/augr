@@ -64,6 +64,27 @@ pipeline run with a short output. A strategy can set the same map as
 `llm_config.role_models`, and its entries win for their roles. This fallback does not protect against a complete
 OpenCode sidecar or OAuth outage.
 
+## When to move off OpenCode
+
+Decision of 2026-09-24: keep OpenCode as the primary backend. Every Augr role
+is a tool-free completion, so OpenCode only supplies the ChatGPT login and an
+HTTP API; custom OpenCode skills or instructions would not change model
+behavior. The Codex CLI is not a candidate because it is an agentic harness
+that would spawn a process for each of the 12 calls in a run.
+
+Move to the direct OpenAI provider (`LLM_DEFAULT_PROVIDER=openai` with
+`OPENAI_API_KEY` and the same model names without the `openai/` prefix) when
+any of these holds:
+
+- subscription rate limits start rejecting or queueing pipeline calls;
+- an OAuth refresh failure costs a scheduled trading run;
+- a needed model is missing from the pinned OpenCode catalog for longer than a
+  config override can cover;
+- the ChatGPT plan terms rule out serving Augr through a third-party proxy.
+
+At list prices and the 2026-09-24 token counts, one run costs about $0.19 on
+the API, before any hidden reasoning tokens.
+
 ## Verify
 
 Start the service and app, then confirm health without printing the password:
