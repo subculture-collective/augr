@@ -84,6 +84,9 @@ type SizingConfig struct {
 	FractionPct     float64
 	MaxPositionUSDC float64
 	HalfKelly       bool
+	// FixedQuantity is the explicit unit quantity used by
+	// PositionSizingMethodFixedQuantity, for orders sized upstream.
+	FixedQuantity float64
 }
 
 // OrderManager orchestrates the full order lifecycle:
@@ -108,6 +111,46 @@ type OrderManager struct {
 	metrics          OrderMetricsRecorder
 	effectFence      func(context.Context) error
 	accountLocker    repository.ExecutionAccountLocker
+	maxResting       time.Duration
+}
+
+// DefaultMaxRestingDuration bounds how long a resting paper order is refreshed
+// by reconciliation before it is cancelled. Day orders expire at the end of the
+// trading session, so eight hours covers a regular session plus extended hours.
+const DefaultMaxRestingDuration = 8 * time.Hour
+
+// WithMaxRestingDuration overrides how long reconciliation lets a resting
+// non-live order stay open before cancelling it. Non-positive values restore
+// the default.
+func (m *OrderManager) WithMaxRestingDuration(limit time.Duration) *OrderManager {
+	if m == nil {
+		return nil
+	}
+	m.maxResting = limit
+	return m
+}
+
+func (m *OrderManager) maxRestingDuration() time.Duration {
+	if m == nil || m.maxResting <= 0 {
+		return DefaultMaxRestingDuration
+	}
+	return m.maxResting
+}
+
+// restingOrderExpired reports whether a resting order has been open longer
+// than the configured limit, measured from its submission (or creation).
+func (m *OrderManager) restingOrderExpired(order *domain.Order) bool {
+	if order == nil {
+		return false
+	}
+	anchor := order.CreatedAt
+	if order.SubmittedAt != nil && !order.SubmittedAt.IsZero() {
+		anchor = *order.SubmittedAt
+	}
+	if anchor.IsZero() {
+		return false
+	}
+	return m.currentTime().Sub(anchor) > m.maxRestingDuration()
 }
 
 // WithEffectFence requires an ownership check immediately before execution effects.
@@ -353,7 +396,7 @@ func (m *OrderManager) processSignal(
 	// symbols into broker orders; Alpaca will reject them and they are not
 	// actionable trades. Non-stock markets have different SELL semantics and are
 	// intentionally left to their market-specific execution/risk paths.
-	if signal.Signal == domain.PipelineSignalSell && marketType == domain.MarketTypeStock {
+	if signal.Signal == domain.PipelineSignalSell && (marketType == domain.MarketTypeStock || marketType == domain.MarketTypeCrypto) {
 		ownedQuantity, positionIDs, err := m.openLongPositions(ctx, scope, plan.Ticker)
 		if err != nil {
 			return err
@@ -502,8 +545,9 @@ func (m *OrderManager) processSignal(
 		FractionPct:   m.sizingConfig.FractionPct,
 		PricePerShare: plan.EntryPrice,
 		HalfKelly:     m.sizingConfig.HalfKelly,
+		FixedQuantity: m.sizingConfig.FixedQuantity,
 	})
-	if isPredictionMarket(marketType) {
+	if isPredictionMarket(marketType) && m.sizingConfig.Method != PositionSizingMethodFixedQuantity {
 		quantity = PolymarketPositionSize(PolymarketSizingParams{
 			AccountValue:    balance.Equity,
 			FractionPct:     m.sizingConfig.FractionPct,
@@ -520,7 +564,7 @@ func (m *OrderManager) processSignal(
 			quantity = quantizeKalshiContracts(quantity)
 		}
 	}
-	if signal.Signal == domain.PipelineSignalSell && marketType == domain.MarketTypeStock && stockExitMaxQuantity > 0 {
+	if signal.Signal == domain.PipelineSignalSell && (marketType == domain.MarketTypeStock || marketType == domain.MarketTypeCrypto) && stockExitMaxQuantity > 0 {
 		quantity = math.Min(quantity, stockExitMaxQuantity)
 		if plan.PositionSize > 0 {
 			quantity = math.Min(plan.PositionSize, stockExitMaxQuantity)
@@ -539,14 +583,24 @@ func (m *OrderManager) processSignal(
 		preparedOrderID, quantity = identity, resolvedQuantity
 	}
 	if quantity <= 0 {
-		m.logger.WarnContext(ctx, "calculated position size is zero", "ticker", plan.Ticker)
-		return fmt.Errorf("order_manager: calculated position size is zero for %s", plan.Ticker)
+		reason := "position_size_zero"
+		if plan.EntryPrice <= 0 || math.IsNaN(plan.EntryPrice) || math.IsInf(plan.EntryPrice, 0) {
+			reason = "entry_price_invalid"
+		}
+		m.logger.WarnContext(ctx, "calculated position size is zero", "ticker", plan.Ticker, "reason", reason, "entry_price", plan.EntryPrice, "equity", balance.Equity, "sizing_method", m.sizingConfig.Method)
+		if err := m.recordRejectedSizingDecision(ctx, scope, plan, marketType, reason); err != nil {
+			return err
+		}
+		return fmt.Errorf("order_manager: calculated position size is zero for %s (%s)", plan.Ticker, reason)
 	}
 
 	// 3. Check position limits via risk engine.
 	// Convert the position size (in units) into additional portfolio exposure (0–1 fraction)
 	// for the risk engine. This aligns with RiskEngine.CheckPositionLimits expectations.
 	if balance.Equity <= 0 {
+		if err := m.recordRejectedSizingDecision(ctx, scope, plan, marketType, "account_equity_nonpositive"); err != nil {
+			return err
+		}
 		return fmt.Errorf("order_manager: account equity is zero or negative for %s", plan.Ticker)
 	}
 
@@ -610,6 +664,12 @@ func (m *OrderManager) processSignal(
 	}
 	if copyRunID := scope.CopyOriginRunID(); copyRunID != uuid.Nil {
 		effectIdentity += ":copy:" + copyRunID.String()
+	}
+	if !hasRun && preparedOrderID == uuid.Nil {
+		// Operator, settlement, and reconciliation scopes have no run to make the
+		// effect key unique. Without a discriminator, two same-shaped orders for
+		// the same ticker on different days collide on the order primary key.
+		effectIdentity += ":at:" + nonRunEffectBucket(now)
 	}
 	order := &domain.Order{
 		ID:                       uuid.NewSHA1(uuid.NameSpaceURL, []byte(effectIdentity)),
@@ -749,10 +809,20 @@ func (m *OrderManager) processSignal(
 			return fmt.Errorf("order_manager: persist approved canonical command: %w", err)
 		}
 	}
-	if checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker); ok {
+	if preparedOrderID != uuid.Nil {
+		// Only canonically routed commands carry an execution_orders row. Orders
+		// that never went through signal preparation (Kalshi, Polymarket, crypto,
+		// options, unprepared stock) are dispatched without the canonical gate and
+		// their fills persist through the unprepared economic path.
+		checker, ok := m.economicWriter.(AcceptedOrderPreparationChecker)
+		if !ok {
+			return fmt.Errorf("order_manager: canonical preparation checker is required")
+		}
 		if err := checker.RequireAcceptedOrderPrepared(ctx, scope, order); err != nil {
 			return fmt.Errorf("order_manager: canonical routed order is not prepared: %w", err)
 		}
+	} else {
+		m.logger.InfoContext(ctx, "dispatching unprepared order outside the canonical route", "ticker", order.Ticker, "market_type", order.MarketType, "order_id", order.ID)
 	}
 
 	decision := m.newTradeDecision(scope, plan, order.MarketType, string(order.Side), quantity, quantity, domain.RiskDecisionApproved, nil, domain.TradeDecisionStatusCandidate)
@@ -862,6 +932,11 @@ func (m *OrderManager) processSignal(
 		return fmt.Errorf("order_manager: get order status: %w", err)
 	}
 	status := brokerResult.Status
+	if status == domain.OrderStatusPending {
+		// The broker acknowledged the submission; a provider "pending_*" status
+		// must not regress the durable submitted state.
+		status = domain.OrderStatusSubmitted
+	}
 	priorFilledQuantity := order.FilledQuantity
 	if brokerResult.FilledQuantity > priorFilledQuantity {
 		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
@@ -921,6 +996,21 @@ func (m *OrderManager) processSignal(
 
 		return nil
 	}
+}
+
+// nonRunEffectBucket discriminates durable effect identities for scopes without
+// a pipeline run. Orders created within the same UTC minute for the same
+// scope/ticker/side/type still dedupe; different minutes get distinct keys.
+func nonRunEffectBucket(now time.Time) string {
+	return now.UTC().Format("2006-01-02T15:04")
+}
+
+func (m *OrderManager) recordRejectedSizingDecision(ctx context.Context, scope ExecutionScope, plan TradingPlan, marketType domain.MarketType, reason string) error {
+	decision := m.newTradeDecision(scope, plan, marketType, strings.ToUpper(strings.TrimSpace(plan.Side)), plan.PositionSize, 0, domain.RiskDecisionRejected, []string{reason}, domain.TradeDecisionStatusRejected)
+	if len(decision.Evidence) == 0 {
+		decision.Evidence, _ = json.Marshal(map[string]any{"reason": reason, "ticker": plan.Ticker, "entry_price": plan.EntryPrice, "plan_position_size": plan.PositionSize})
+	}
+	return m.recordTradeDecision(ctx, scope, decision)
 }
 
 func sameOptionalFloat(left, right *float64) bool {
@@ -1304,9 +1394,10 @@ func SanitizedSubmittedOrder(order *domain.Order, externalID string, submittedAt
 	return &cp
 }
 
-// ReconcilePersistedOrder resolves an allocator-owned paper order without
-// submitting a replacement. Resting paper orders are cancelled so restart
-// recovery always reaches a durable terminal state.
+// ReconcilePersistedOrder resolves a persisted order against the broker without
+// submitting a replacement. Resting non-live orders are refreshed (status and
+// fills) until they have rested longer than the max-resting limit, after which
+// they are cancelled so recovery reaches a durable terminal state.
 func (m *OrderManager) ReconcilePersistedOrder(ctx context.Context, scope ExecutionScope, order *domain.Order) (domain.OrderStatus, error) {
 	if order == nil {
 		return "", fmt.Errorf("order_manager: persisted order is required")
@@ -1419,6 +1510,11 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		if m.liveTrading {
 			break
 		}
+		if !m.restingOrderExpired(order) {
+			m.logger.InfoContext(ctx, "resting order refreshed; within max-resting window", "order_id", order.ID, "ticker", order.Ticker, "broker_status", status, "filled_quantity", brokerResult.FilledQuantity, "max_resting", m.maxRestingDuration())
+			break
+		}
+		m.logger.WarnContext(ctx, "resting order exceeded max-resting window; cancelling", "order_id", order.ID, "ticker", order.Ticker, "broker_status", status, "max_resting", m.maxRestingDuration())
 		if err := m.fenceEffect(ctx); err != nil {
 			return "", err
 		}
@@ -1434,6 +1530,10 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 			return "", fmt.Errorf("order_manager: verify recovered paper cancellation: %w", err)
 		}
 	}
+	if status == domain.OrderStatusPending && order.Status == domain.OrderStatusSubmitted {
+		// A provider "pending_*" acknowledgement never regresses durable submission.
+		status = domain.OrderStatusSubmitted
+	}
 	order.Status = status
 	if err := m.fenceEffect(ctx); err != nil {
 		return "", err
@@ -1443,7 +1543,22 @@ func (m *OrderManager) reconcilePersistedOrderLocked(ctx context.Context, scope 
 		if err := m.orderRepo.Update(ctx, order); err != nil {
 			return "", fmt.Errorf("order_manager: persist reconciled live order: %w", err)
 		}
-	case domain.OrderStatusFilled, domain.OrderStatusPartial:
+	case domain.OrderStatusPartial:
+		if brokerResult.FilledQuantity <= order.FilledQuantity {
+			// Partial progress already recorded; refresh the status only.
+			if err := m.orderRepo.Update(ctx, order); err != nil {
+				return "", fmt.Errorf("order_manager: persist reconciled partial order: %w", err)
+			}
+			return status, nil
+		}
+		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
+		if err := validateRecoveredFillEvidence(order); err != nil {
+			return "", err
+		}
+		if err := m.handleFill(ctx, order, recoveredOrderPlan(order), scope, decisionID); err != nil {
+			return "", err
+		}
+	case domain.OrderStatusFilled:
 		order.FilledQuantity, order.FilledAvgPrice, order.FilledAt = brokerResult.FilledQuantity, cloneFloatPtr(brokerResult.FilledAvgPrice), cloneTimePtr(brokerResult.FilledAt)
 		if err := validateRecoveredFillEvidence(order); err != nil {
 			return "", err

@@ -149,7 +149,16 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 	if request.NotionalUSD <= 0 {
 		return PaperOrderResult{Skipped: true, Reason: "missing_notional_usd"}, nil
 	}
-	fractionPct := request.NotionalUSD / initialBalance
+	// The order manager has no explicit-quantity sizing method yet, so the
+	// allocator's notional is expressed as a fraction of the equity it was sized
+	// against (snapshot equity when supplied, else the configured balance).
+	// Upgrade path: switch to an explicit-quantity SizingConfig once the
+	// execution package exposes one.
+	sizingEquity := request.AccountEquityUSD
+	if sizingEquity <= 0 {
+		sizingEquity = initialBalance
+	}
+	fractionPct := request.NotionalUSD / sizingEquity
 	if fractionPct <= 0 {
 		return PaperOrderResult{Skipped: true, Reason: "missing_fraction_pct"}, nil
 	}
@@ -170,7 +179,7 @@ func (p *PaperOrderManagerProcessor) ProcessPaperOrder(ctx context.Context, requ
 		p.deps.TradeRepo,
 		p.deps.AuditLogRepo,
 		p.deps.AgentEventRepo,
-		execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: fractionPct},
+		paperSizingConfig(request, fractionPct),
 		p.deps.Logger,
 	).WithAcceptedOrderFillWriter(p.deps.EconomicWriter).WithLiveTrading(false)
 	if request.OpportunityID != uuid.Nil && request.ClaimID != uuid.Nil {
@@ -271,3 +280,13 @@ var (
 // Avoid an unused import regression when domain constants move; this also keeps
 // the file colocated with portfolio market semantics.
 var _ = domain.MarketTypeStock
+
+// paperSizingConfig prefers the allocator's explicit unit quantity so the order
+// manager submits exactly what the allocation decision reserved; it falls back
+// to the equity fraction only when no quantity was supplied.
+func paperSizingConfig(request PaperOrderRequest, fractionPct float64) execution.SizingConfig {
+	if request.Quantity > 0 {
+		return execution.SizingConfig{Method: execution.PositionSizingMethodFixedQuantity, FixedQuantity: request.Quantity}
+	}
+	return execution.SizingConfig{Method: execution.PositionSizingMethodFixedFractional, FractionPct: fractionPct}
+}

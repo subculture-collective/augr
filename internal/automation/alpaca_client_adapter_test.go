@@ -91,8 +91,8 @@ func TestAlpacaClientAdapterListOrders_MapsBrokerOrders(t *testing.T) {
 		if got := reqURL.Query().Get("limit"); got != "500" {
 			t.Fatalf("limit query = %q, want 500", got)
 		}
-		if got := reqURL.Query().Get("direction"); got != "desc" {
-			t.Fatalf("direction query = %q, want desc", got)
+		if got := reqURL.Query().Get("direction"); got != "asc" {
+			t.Fatalf("direction query = %q, want asc (cursor pagination walks forward)", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("request details were not captured")

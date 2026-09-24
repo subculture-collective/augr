@@ -200,7 +200,7 @@ func NewLocalSnapshot(input LocalSnapshotInput) (*LocalSnapshot, error) {
 	if err := input.Checkpoint.Validate(); err != nil {
 		return nil, fmt.Errorf("validate projection checkpoint: %w", err)
 	}
-	rule, ok := mustPolicyProvider(input.Provider)
+	rule, ok := providerRuleFor(nil, input.Provider)
 	if !ok || input.Namespace != rule.AuthoritativeFillNamespace || input.AccountID != input.Checkpoint.AccountID ||
 		!validEvidenceTime(input.HorizonStart) || !validEvidenceTime(input.HorizonEnd) ||
 		!input.HorizonStart.Before(input.HorizonEnd) || !input.HorizonEnd.Equal(input.Checkpoint.AsOf) {

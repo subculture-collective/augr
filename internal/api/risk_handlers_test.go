@@ -157,9 +157,8 @@ func TestHandleKillSwitchToggleRequiresReasonAndVerifiesStatus(t *testing.T) {
 }
 
 func TestHandleKillSwitchDeactivateRequiresAdminAndReason(t *testing.T) {
-	t.Setenv("ADMIN_API_KEY", "test-key")
 	riskEngine := &fakeKillSwitchRiskEngine{active: true, reason: "halted"}
-	srv := &Server{risk: riskEngine}
+	srv := &Server{risk: riskEngine, adminAPIKey: "test-key"}
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/risk/killswitch", bytes.NewBufferString(`{"active":false,"reason":"cleared after review"}`))
@@ -202,46 +201,40 @@ func TestHandleRiskBreakerReset(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{name: "missing scope", setup: func(t *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
-			t.Setenv("ADMIN_API_KEY", "test-key")
-			srv := &Server{}
+		{name: "missing scope", setup: func(_ *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
+			srv := &Server{adminAPIKey: "test-key"}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/risk/breaker/reset", bytes.NewBufferString(`{}`))
 			req.Header.Set("X-Admin-Key", "test-key")
 			return srv, req, httptest.NewRecorder()
 		}, wantStatus: http.StatusBadRequest, wantBody: `{"error":"missing_scope"}`},
-		{name: "nil breaker", setup: func(t *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
-			t.Setenv("ADMIN_API_KEY", "test-key")
-			srv := &Server{}
+		{name: "nil breaker", setup: func(_ *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
+			srv := &Server{adminAPIKey: "test-key"}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/risk/breaker/reset", bytes.NewBufferString(`{"scope":"global"}`))
 			req.Header.Set("X-Admin-Key", "test-key")
 			return srv, req, httptest.NewRecorder()
 		}, wantStatus: http.StatusServiceUnavailable, wantBody: `{"error":"risk breaker not configured"}`},
-		{name: "success", setup: func(t *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
-			t.Setenv("ADMIN_API_KEY", "test-key")
+		{name: "success", setup: func(_ *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
 			br := &fakeRiskBreaker{}
-			srv := &Server{riskBreaker: br}
+			srv := &Server{riskBreaker: br, adminAPIKey: "test-key"}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/risk/breaker/reset", bytes.NewBufferString(`{"scope":"strategy:abc"}`))
 			req.Header.Set("X-Admin-Key", "test-key")
 			return srv, req, httptest.NewRecorder()
 		}, wantStatus: http.StatusOK, wantBody: `{"scope":"strategy:abc","reset":true}`},
-		{name: "admin disabled", setup: func(t *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
-			t.Setenv("ADMIN_API_KEY", "")
+		{name: "admin disabled", setup: func(_ *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
 			srv := &Server{}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/risk/breaker/reset", bytes.NewBufferString(`{"scope":"global"}`))
 			req.Header.Set("X-Admin-Key", "test-key")
 			return srv, req, httptest.NewRecorder()
-		}, wantStatus: http.StatusServiceUnavailable, wantBody: `{"error":"ADMIN_API_KEY not configured"}`},
-		{name: "wrong key", setup: func(t *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
-			t.Setenv("ADMIN_API_KEY", "test-key")
-			srv := &Server{}
+		}, wantStatus: http.StatusServiceUnavailable, wantBody: `{"error":"ADMIN_API_KEY not configured: kill-switch deactivate and breaker reset are unavailable until it is set and the service restarted"}`},
+		{name: "wrong key", setup: func(_ *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
+			srv := &Server{adminAPIKey: "test-key"}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/risk/breaker/reset", bytes.NewBufferString(`{"scope":"global"}`))
 			req.Header.Set("X-Admin-Key", "wrong")
 			return srv, req, httptest.NewRecorder()
 		}, wantStatus: http.StatusUnauthorized, wantBody: `{"error":"admin key required"}`},
-		{name: "repo not found treated as success", setup: func(t *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
-			t.Setenv("ADMIN_API_KEY", "test-key")
+		{name: "repo not found treated as success", setup: func(_ *testing.T) (*Server, *http.Request, *httptest.ResponseRecorder) {
 			br := &fakeRiskBreaker{resetErr: repository.ErrNotFound}
-			srv := &Server{riskBreaker: br}
+			srv := &Server{riskBreaker: br, adminAPIKey: "test-key"}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/risk/breaker/reset", bytes.NewBufferString(`{"scope":"global"}`))
 			req.Header.Set("X-Admin-Key", "test-key")
 			return srv, req, httptest.NewRecorder()

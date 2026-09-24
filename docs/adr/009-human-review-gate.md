@@ -2,13 +2,13 @@
 title: "ADR-009: Human review gate before live trading"
 description: "Architecture decision record."
 status: "superseded"
-updated: "2026-08-14"
+updated: "2026-09-23"
 tags: [adr]
 ---
 
 # ADR-009: Human review gate before live trading
 
-- **Status:** superseded by [ADR-019](019-deterministic-ai-order-boundary.md)
+- **Status:** superseded by [ADR-019](019-deterministic-ai-order-boundary.md); not implemented. No approval queue, threshold tiers, or notification webhook exist in the codebase (checked 2026-09-23). The operative pre-trade controls are the kill switch (`internal/risk/kill_switch.go`, `RiskEngine.ActivateKillSwitch`), the durable risk breakers in `risk_breaker_state` (global and `strategy:<id>` scopes, tripped by the allocator job in `internal/automation/jobs_portfolio_allocator.go` and honoured by allocation and promotion activation), and the allocator mode gate (`portfolio.AllocatorMode.OwnsExecution`, only paper mode submits).
 - **Date:** 2026-03-27
 - **Deciders:** Engineering
 - **Technical Story:** [#112](https://github.com/PatrickFanella/get-rich-quick/issues/112)

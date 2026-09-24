@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -90,7 +91,7 @@ func NewClient(baseURL, apiKeyID, privateKeyPEMB64 string, logger *slog.Logger) 
 		now:         time.Now,
 		logger:      logger,
 		nowClock:    time.Now,
-		random:      mathrand.New(mathrand.NewSource(1)),
+		random:      mathrand.New(mathrand.NewSource(jitterSeed())),
 		sleeper:     func(ctx context.Context, d time.Duration) error { return (&provgov.ProviderGovernor{}).Sleep(ctx, d) },
 		maxAttempts: 3,
 		baseBackoff: 100 * time.Millisecond,
@@ -102,6 +103,17 @@ func NewClient(baseURL, apiKeyID, privateKeyPEMB64 string, logger *slog.Logger) 
 	}
 
 	return client, nil
+}
+
+// jitterSeed returns a per-instance seed so that backoff jitter is not
+// identical across processes. crypto/rand is preferred; the wall clock is the
+// fallback.
+func jitterSeed() int64 {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err == nil {
+		return int64(binary.LittleEndian.Uint64(buf[:]))
+	}
+	return time.Now().UnixNano()
 }
 
 // SetHTTPClient replaces the underlying HTTP client. This is primarily useful for testing.

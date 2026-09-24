@@ -65,3 +65,27 @@ func mustDecodeSecretBytes() []byte {
 	}
 	return seed
 }
+
+func TestOrderTemplate_SigningPathExcludesQuery(t *testing.T) {
+	t.Parallel()
+
+	secret := mustDecodeSecretBytes()
+	body := []byte(`{"marketSlug":"btc-100k"}`)
+	tmpl, err := NewOrderTemplate(secret, http.MethodPost, "https://api.polymarket.us/v1/orders?dry=1", body)
+	if err != nil {
+		t.Fatalf("NewOrderTemplate() error = %v", err)
+	}
+	if tmpl.SigningPath() != "/v1/orders" {
+		t.Fatalf("SigningPath() = %q, want path without query", tmpl.SigningPath())
+	}
+	if !strings.Contains(tmpl.URL(), "dry=1") {
+		t.Fatalf("URL() = %q, want query preserved", tmpl.URL())
+	}
+	want, err := polyL2Signature(base64URLSecret(secret), "1712000000", http.MethodPost, "/v1/orders", body)
+	if err != nil {
+		t.Fatalf("polyL2Signature() error = %v", err)
+	}
+	if got := tmpl.SignAt(1712000000); got != want {
+		t.Fatalf("SignAt() = %q, want %q", got, want)
+	}
+}

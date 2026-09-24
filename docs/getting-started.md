@@ -130,7 +130,12 @@ Never use that reset procedure against shared or deployed data.
 
 ```bash
 curl http://localhost:8080/healthz
+curl http://localhost:8080/readyz
 ```
+
+`/healthz` reports process liveness. `/readyz` returns 503 with a `failing`
+list until the schema, kill switch, scheduler, automation, and LLM checks
+pass, so use it to tell "running" from "able to trade".
 
 Confirm that `VITE_API_BASE_URL` matches the actual API and restart Vite after
 changing it. A browser CORS error is commonly a stale or unavailable API URL.

@@ -81,3 +81,27 @@ func TestScreenMarketsAllowsZeroBidButRequiresExecutableAsk(t *testing.T) {
 		t.Fatalf("rejected = %#v, want zero-ask candidate rejected", rejected)
 	}
 }
+
+func TestSummarizeRejectionsNormalizesNumbers(t *testing.T) {
+	t.Parallel()
+
+	got := SummarizeRejections([]ScreenRejection{
+		{Ticker: "A", Reasons: []string{"volume 232.00 below minimum 1000.00", "open interest 10.00 below minimum 500.00"}},
+		{Ticker: "B", Reasons: []string{"volume 0.00 below minimum 1000.00", `status "closed" is closed or settled`}},
+		{Ticker: "C", Reasons: []string{"YES spread 14.50% above maximum 12.00%", "volume 5.00 below minimum 1000.00"}},
+	})
+	if len(got) != 4 {
+		t.Fatalf("SummarizeRejections() = %#v, want 4 normalized reasons", got)
+	}
+	if got[0].Reason != "volume below minimum" || got[0].Count != 3 {
+		t.Fatalf("top reason = %#v", got[0])
+	}
+	for _, rc := range got[1:] {
+		if rc.Count != 1 {
+			t.Fatalf("reason %#v count = %d, want 1", rc, rc.Count)
+		}
+	}
+	if NormalizeRejectionReason(`status "closed" is closed or settled`) != "status is closed or settled" {
+		t.Fatalf("NormalizeRejectionReason() = %q", NormalizeRejectionReason(`status "closed" is closed or settled`))
+	}
+}

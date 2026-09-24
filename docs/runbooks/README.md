@@ -12,7 +12,9 @@ do not add generated incident reports to this directory.
 - Keep live trading disabled unless the specific procedure authorizes it.
 - Preserve backups, rollback artifacts, failed ledgers, and provider evidence.
 - For schema changes, migrate first, restart the app second, and verify exact
-  schema and health readbacks third.
+  schema and health readbacks third. `GET /healthz` is liveness; `GET /readyz`
+  reports trading readiness (schema, kill switch, scheduler, automation, LLM)
+  and lists failing checks in its 503 body.
 
 ## Safety and incidents
 

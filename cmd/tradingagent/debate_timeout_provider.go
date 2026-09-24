@@ -33,7 +33,10 @@ func newDebateTimeoutFallbackProvider(provider llm.Provider, fallbackModel strin
 }
 
 func (p *debateTimeoutFallbackProvider) Complete(ctx context.Context, request llm.CompletionRequest) (*llm.CompletionResponse, error) {
-	if p == nil || p.provider == nil || p.timeout <= 0 {
+	if p == nil || p.provider == nil {
+		return nil, errors.New("debate: LLM provider is not configured")
+	}
+	if p.timeout <= 0 {
 		return p.provider.Complete(ctx, request)
 	}
 

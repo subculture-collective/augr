@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/kalshidiscovery"
@@ -13,6 +15,109 @@ import (
 var kalshiDiscoverySpec = scheduler.ScheduleSpec{Type: scheduler.ScheduleTypeCron, Cron: "15 * * * *"}
 
 var kalshiDiscoveryRun = kalshidiscovery.Run
+
+// KalshiDiscoveryConfig holds the operator-tunable discovery settings. Zero
+// values fall back to DefaultKalshiDiscoveryConfig. Runtime may populate it
+// from config; until that wiring exists the job reads the KALSHI_DISCOVERY_*
+// environment variables through KalshiDiscoveryConfigFromEnv.
+type KalshiDiscoveryConfig struct {
+	FetchLimit      int     // total open markets fetched across catalog pages
+	MinVolume       float64 // screener minimum traded contracts
+	MinOpenInterest float64 // screener minimum open interest
+	MaxSpreadPct    float64 // screener maximum executable spread percent
+	MaxDeployments  int
+	MinConviction   float64
+}
+
+// DefaultKalshiDiscoveryConfig mirrors the previous hard-coded job settings
+// except FetchLimit, which now pages past the zero-volume first page.
+func DefaultKalshiDiscoveryConfig() KalshiDiscoveryConfig {
+	screener := kalshidiscovery.DefaultScreenerConfig()
+	return KalshiDiscoveryConfig{
+		FetchLimit:      500,
+		MinVolume:       screener.MinVolume,
+		MinOpenInterest: screener.MinOpenInterest,
+		MaxSpreadPct:    screener.MaxSpreadPct,
+		MaxDeployments:  1,
+		MinConviction:   0.70,
+	}
+}
+
+// kalshiDiscoveryLookupEnv is swapped in tests.
+var kalshiDiscoveryLookupEnv = os.LookupEnv
+
+// KalshiDiscoveryConfigFromEnv reads KALSHI_DISCOVERY_FETCH_LIMIT,
+// KALSHI_DISCOVERY_MIN_VOLUME, KALSHI_DISCOVERY_MIN_OPEN_INTEREST and
+// KALSHI_DISCOVERY_MAX_SPREAD_PCT over the defaults. Unparseable or
+// non-positive values keep the default and are logged.
+func KalshiDiscoveryConfigFromEnv(logger *slog.Logger) KalshiDiscoveryConfig {
+	cfg := DefaultKalshiDiscoveryConfig()
+	if logger == nil {
+		logger = slog.Default()
+	}
+	readInt := func(key string, dst *int) {
+		raw, ok := kalshiDiscoveryLookupEnv(key)
+		if !ok || strings.TrimSpace(raw) == "" {
+			return
+		}
+		value, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil || value <= 0 {
+			logger.Warn("kalshi_discovery: ignoring invalid env value", slog.String("key", key), slog.String("value", raw))
+			return
+		}
+		*dst = value
+	}
+	readFloat := func(key string, dst *float64) {
+		raw, ok := kalshiDiscoveryLookupEnv(key)
+		if !ok || strings.TrimSpace(raw) == "" {
+			return
+		}
+		value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if err != nil || value <= 0 {
+			logger.Warn("kalshi_discovery: ignoring invalid env value", slog.String("key", key), slog.String("value", raw))
+			return
+		}
+		*dst = value
+	}
+	readInt("KALSHI_DISCOVERY_FETCH_LIMIT", &cfg.FetchLimit)
+	readFloat("KALSHI_DISCOVERY_MIN_VOLUME", &cfg.MinVolume)
+	readFloat("KALSHI_DISCOVERY_MIN_OPEN_INTEREST", &cfg.MinOpenInterest)
+	readFloat("KALSHI_DISCOVERY_MAX_SPREAD_PCT", &cfg.MaxSpreadPct)
+	return cfg
+}
+
+func (c KalshiDiscoveryConfig) toRunConfig() kalshidiscovery.Config {
+	defaults := DefaultKalshiDiscoveryConfig()
+	if c.FetchLimit <= 0 {
+		c.FetchLimit = defaults.FetchLimit
+	}
+	if c.MinVolume <= 0 {
+		c.MinVolume = defaults.MinVolume
+	}
+	if c.MinOpenInterest <= 0 {
+		c.MinOpenInterest = defaults.MinOpenInterest
+	}
+	if c.MaxSpreadPct <= 0 {
+		c.MaxSpreadPct = defaults.MaxSpreadPct
+	}
+	if c.MaxDeployments <= 0 {
+		c.MaxDeployments = defaults.MaxDeployments
+	}
+	if c.MinConviction <= 0 {
+		c.MinConviction = defaults.MinConviction
+	}
+	screener := kalshidiscovery.DefaultScreenerConfig()
+	screener.MinVolume = c.MinVolume
+	screener.MinOpenInterest = c.MinOpenInterest
+	screener.MaxSpreadPct = c.MaxSpreadPct
+	return kalshidiscovery.Config{
+		DryRun:         false,
+		FetchLimit:     c.FetchLimit,
+		MaxDeployments: c.MaxDeployments,
+		MinConviction:  c.MinConviction,
+		Screener:       screener,
+	}
+}
 
 func (o *JobOrchestrator) registerKalshiDiscoveryJob() {
 	if o.deps.KalshiCatalog == nil || o.deps.StrategyRepo == nil || o.deps.KalshiWatchedRepo == nil || o.deps.KalshiMarketSnapshotsRepo == nil {
@@ -30,13 +135,8 @@ func (o *JobOrchestrator) kalshiDiscovery(ctx context.Context) error {
 		return fmt.Errorf("kalshi_discovery: catalog client not configured")
 	}
 
-	res, err := kalshiDiscoveryRun(ctx, kalshidiscovery.Config{
-		DryRun:         false,
-		FetchLimit:     50,
-		MaxDeployments: 1,
-		MinConviction:  0.70,
-		Screener:       kalshidiscovery.DefaultScreenerConfig(),
-	}, kalshidiscovery.Deps{
+	runCfg := KalshiDiscoveryConfigFromEnv(o.logger).toRunConfig()
+	res, err := kalshiDiscoveryRun(ctx, runCfg, kalshidiscovery.Deps{
 		Catalog:       o.deps.KalshiCatalog,
 		Strategies:    o.deps.StrategyRepo,
 		Watched:       o.deps.KalshiWatchedRepo,
@@ -58,6 +158,7 @@ func (o *JobOrchestrator) kalshiDiscovery(ctx context.Context) error {
 		summary["proposed"] = res.Proposed
 		summary["skipped"] = res.Skipped
 		summary["deployed"] = len(res.Deployed)
+		summary["rejected"] = res.Rejected
 		for _, deployed := range res.Deployed {
 			if deployed.Reused {
 				summary["reused"]++

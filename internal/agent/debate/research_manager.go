@@ -145,6 +145,12 @@ func (r *ResearchManager) JudgeResearch(ctx context.Context, input agent.DebateI
 			slog.String("direction", plan.Direction),
 			slog.Int("conviction", plan.Conviction),
 		)
+		if len(plan.KeyEvidence) == 0 || len(plan.AcknowledgedRisks) == 0 {
+			r.logger.Warn("research_manager: investment plan omitted evidence arrays",
+				slog.Int("key_evidence", len(plan.KeyEvidence)),
+				slog.Int("acknowledged_risks", len(plan.AcknowledgedRisks)),
+			)
+		}
 		if normalized, err := json.Marshal(plan); err == nil {
 			storedPlan = string(normalized)
 		}
@@ -188,13 +194,8 @@ func validateInvestmentPlan(plan *InvestmentPlanOutput) error {
 		return fmt.Errorf("investment plan conviction must be 1-10, got %d", plan.Conviction)
 	}
 
-	if len(plan.KeyEvidence) == 0 {
-		return fmt.Errorf("investment plan missing required field: key_evidence")
-	}
-
-	if len(plan.AcknowledgedRisks) == 0 {
-		return fmt.Errorf("investment plan missing required field: acknowledged_risks")
-	}
+	// key_evidence and acknowledged_risks may be empty; the caller logs a
+	// warning instead of discarding an otherwise valid plan.
 
 	if strings.TrimSpace(plan.Rationale) == "" {
 		return fmt.Errorf("investment plan missing required field: rationale")

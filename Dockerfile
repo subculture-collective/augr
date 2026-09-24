@@ -56,6 +56,10 @@ USER app:app
 
 EXPOSE 8080
 
+# Liveness only: /healthz reports DB reachability (Redis is advisory unless
+# REDIS_REQUIRED=true). Use GET /readyz for trading readiness; it is not a
+# container health check because an armed kill switch must not restart the
+# process.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${APP_PORT:-8080}/healthz || exit 1
 

@@ -198,12 +198,15 @@ func (repo *PromotionRepo) ProjectAuthoritativeActivation(ctx context.Context, d
 	if strategy.MarketType != domain.MarketTypeOptions && !readiness.Stock.Ready {
 		return nil, fmt.Errorf("postgres: stock promotion activation blocked: %s", readiness.Stock.Reason)
 	}
+	// Only the global breaker and this strategy's own scope block activation;
+	// another strategy's tripped scope is not this deployment's incident.
 	var breakerCount int
-	if err = tx.QueryRow(ctx, `SELECT count(*) FROM risk_breaker_state WHERE reset_at IS NULL`).Scan(&breakerCount); err != nil {
+	if err = tx.QueryRow(ctx, `SELECT count(*) FROM risk_breaker_state WHERE reset_at IS NULL AND scope=ANY($1)`,
+		[]string{domain.RiskBreakerScopeGlobal, domain.RiskBreakerScopeStrategy(strategy.ID.String())}).Scan(&breakerCount); err != nil {
 		return nil, err
 	}
 	if breakerCount != 0 {
-		return nil, fmt.Errorf("postgres: promotion activation blocked by %d open risk breaker(s)", breakerCount)
+		return nil, fmt.Errorf("postgres: promotion activation blocked by %d open risk breaker(s) in scope", breakerCount)
 	}
 
 	strategy.Status = domain.StrategyStatusActive

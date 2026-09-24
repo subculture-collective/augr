@@ -13,16 +13,19 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 	"github.com/PatrickFanella/get-rich-quick/internal/economicid"
 	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
+	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 )
 
 type PortfolioRiskRepo struct {
-	pool      *pgxpool.Pool
-	accountID uuid.UUID
-	source    balanceSource
-	internal  *CanonicalExperimentCapitalStateSource
+	pool           *pgxpool.Pool
+	accountID      uuid.UUID
+	source         balanceSource
+	internal       *CanonicalExperimentCapitalStateSource
+	drawdownWindow int
 }
 
 // WithInternalCapitalSource configures the separately attested internal-account
@@ -147,25 +150,51 @@ func (repo *PortfolioRiskRepo) LoadPortfolioRiskState(ctx context.Context, accou
 		return state, fmt.Errorf("postgres: portfolio risk state identity is incomplete")
 	}
 	var currentEquity, dayOpeningEquity, peakEquity float64
-	err := repo.pool.QueryRow(ctx, `SELECT current.equity::double precision,
-		COALESCE((SELECT equity::double precision FROM portfolio_account_snapshots day_open
-			WHERE day_open.account_id=current.account_id AND (day_open.observed_at AT TIME ZONE 'America/New_York')::date=(current.observed_at AT TIME ZONE 'America/New_York')::date
-			ORDER BY day_open.observed_at,day_open.id LIMIT 1),current.equity::double precision),
-		COALESCE((SELECT max(equity)::double precision FROM portfolio_account_snapshots peak WHERE peak.account_id=current.account_id AND peak.observed_at<=current.observed_at),current.equity::double precision)
-		FROM portfolio_account_snapshots current WHERE current.id=$1 AND current.account_id=$2`, accountSnapshotID, repo.accountID).
+	// Opening equity is the earliest snapshot on the NY trade date at or before
+	// 09:30 ET; when none exists (first run after the open) the last snapshot of
+	// the previous NY date is used so an after-hours snapshot never resets the
+	// daily-loss baseline mid-day. The peak is rolling over the configured
+	// drawdown window rather than all-time.
+	err := repo.pool.QueryRow(ctx, `WITH current AS (
+			SELECT id,account_id,observed_at,equity,(observed_at AT TIME ZONE 'America/New_York')::date AS ny_date
+			FROM portfolio_account_snapshots WHERE id=$1 AND account_id=$2)
+		SELECT current.equity::double precision,
+		COALESCE(
+			(SELECT day_open.equity::double precision FROM portfolio_account_snapshots day_open
+				WHERE day_open.account_id=current.account_id
+				AND (day_open.observed_at AT TIME ZONE 'America/New_York')::date=current.ny_date
+				AND (day_open.observed_at AT TIME ZONE 'America/New_York')::time<=time '09:30'
+				ORDER BY day_open.observed_at,day_open.id LIMIT 1),
+			(SELECT prior.equity::double precision FROM portfolio_account_snapshots prior
+				WHERE prior.account_id=current.account_id
+				AND (prior.observed_at AT TIME ZONE 'America/New_York')::date<current.ny_date
+				ORDER BY prior.observed_at DESC,prior.id DESC LIMIT 1),
+			current.equity::double precision),
+		COALESCE((SELECT max(peak.equity)::double precision FROM portfolio_account_snapshots peak
+			WHERE peak.account_id=current.account_id AND peak.observed_at<=current.observed_at
+			AND peak.observed_at>=current.observed_at-make_interval(days=>$3)),current.equity::double precision)
+		FROM current`, accountSnapshotID, repo.accountID, repo.drawdownWindowDays()).
 		Scan(&currentEquity, &dayOpeningEquity, &peakEquity)
 	if err != nil || currentEquity <= 0 || dayOpeningEquity <= 0 || peakEquity <= 0 {
 		return state, fmt.Errorf("postgres: load canonical equity history: %w", err)
 	}
 	state.DailyLossPct = math.Max(0, (dayOpeningEquity-currentEquity)/dayOpeningEquity)
 	state.DrawdownPct = math.Max(0, (peakEquity-currentEquity)/peakEquity)
+	// Only intents that reached the paper/live execution path count against
+	// the daily order budget; shadow selections submit nothing.
 	if err = repo.pool.QueryRow(ctx, `SELECT count(*) FROM allocation_decisions WHERE account_id=$1
 		AND (created_at AT TIME ZONE 'America/New_York')::date=($2::timestamptz AT TIME ZONE 'America/New_York')::date
-		AND action IN ('shadow_selected','paper_order_intent','executed')`, repo.accountID, asOf).Scan(&state.NewOrdersToday); err != nil {
+		AND mode IN ('paper','live') AND action IN ('paper_order_intent','executed')`, repo.accountID, asOf).Scan(&state.NewOrdersToday); err != nil {
 		return state, fmt.Errorf("postgres: count daily allocation selections: %w", err)
 	}
-	if err = repo.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM risk_breaker_state WHERE reset_at IS NULL)`).Scan(&state.CircuitBreakerOpen); err != nil {
-		return state, fmt.Errorf("postgres: load risk breaker state: %w", err)
+	// The account-level gate honours only the global breaker; per-strategy
+	// scopes are checked against the opportunity's own strategy in
+	// HasOpenBreaker so one tripped strategy does not freeze the whole book.
+	if state.CircuitBreakerOpen, err = repo.HasOpenBreaker(ctx, domain.RiskBreakerScopeGlobal); err != nil {
+		return state, err
+	}
+	if state.OpenBreakerScopes, err = repo.OpenBreakerScopes(ctx); err != nil {
+		return state, err
 	}
 	var internalID *uuid.UUID
 	if err := repo.pool.QueryRow(ctx, `SELECT internal_capital_snapshot_id FROM portfolio_account_snapshots WHERE id=$1 AND account_id=$2`, accountSnapshotID, repo.accountID).Scan(&internalID); err != nil {
@@ -228,3 +257,164 @@ func (repo *PortfolioRiskRepo) LoadPortfolioRiskState(ctx context.Context, accou
 }
 
 func digestBytes(raw []byte) string { sum := sha256.Sum256(raw); return hex.EncodeToString(sum[:]) }
+
+// WithDrawdownWindowDays overrides the rolling peak window used for the
+// drawdown limit. Zero or negative values keep portfolio.DefaultDrawdownWindowDays.
+func (repo *PortfolioRiskRepo) WithDrawdownWindowDays(days int) *PortfolioRiskRepo {
+	if repo != nil && days > 0 {
+		repo.drawdownWindow = days
+	}
+	return repo
+}
+
+func (repo *PortfolioRiskRepo) drawdownWindowDays() int {
+	if repo == nil || repo.drawdownWindow <= 0 {
+		return portfolio.DefaultDrawdownWindowDays
+	}
+	return repo.drawdownWindow
+}
+
+// HasOpenBreaker reports whether any of the given breaker scopes is tripped
+// and not yet reset. With no scopes it checks the global scope only.
+func (repo *PortfolioRiskRepo) HasOpenBreaker(ctx context.Context, scopes ...string) (bool, error) {
+	if repo == nil || repo.pool == nil {
+		return false, fmt.Errorf("postgres: portfolio risk repository is required")
+	}
+	if len(scopes) == 0 {
+		scopes = []string{domain.RiskBreakerScopeGlobal}
+	}
+	var open bool
+	if err := repo.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM risk_breaker_state WHERE reset_at IS NULL AND scope=ANY($1))`, scopes).Scan(&open); err != nil {
+		return false, fmt.Errorf("postgres: load risk breaker state: %w", err)
+	}
+	return open, nil
+}
+
+// OpenBreakerScopes lists every tripped, unreset breaker scope.
+func (repo *PortfolioRiskRepo) OpenBreakerScopes(ctx context.Context) ([]string, error) {
+	if repo == nil || repo.pool == nil {
+		return nil, fmt.Errorf("postgres: portfolio risk repository is required")
+	}
+	rows, err := repo.pool.Query(ctx, `SELECT scope FROM risk_breaker_state WHERE reset_at IS NULL ORDER BY scope`)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list open risk breakers: %w", err)
+	}
+	defer rows.Close()
+	scopes := make([]string, 0)
+	for rows.Next() {
+		var scope string
+		if err := rows.Scan(&scope); err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, rows.Err()
+}
+
+// The breaker methods delegate to the shared risk_breaker_state table so the
+// allocator job can construct risk.DrawdownBreaker/ConsecutiveLossBreaker from
+// its existing canonical risk-state dependency.
+func (repo *PortfolioRiskRepo) breakers() *RiskBreakerRepo { return NewRiskBreakerRepo(repo.pool) }
+
+func (repo *PortfolioRiskRepo) Trip(ctx context.Context, scope, reason string, trippedAt time.Time) error {
+	return repo.breakers().Trip(ctx, scope, reason, trippedAt)
+}
+
+func (repo *PortfolioRiskRepo) Reset(ctx context.Context, scope string, resetAt time.Time) error {
+	return repo.breakers().Reset(ctx, scope, resetAt)
+}
+
+func (repo *PortfolioRiskRepo) Get(ctx context.Context, scope string) (*domain.RiskBreakerState, error) {
+	return repo.breakers().Get(ctx, scope)
+}
+
+func (repo *PortfolioRiskRepo) ListTripped(ctx context.Context) ([]domain.RiskBreakerState, error) {
+	return repo.breakers().ListTripped(ctx)
+}
+
+var _ repository.RiskBreakerRepository = (*PortfolioRiskRepo)(nil)
+
+// CapitalLadderSteps returns step_pct for each strategy that has a ladder row.
+// Strategies without a row are absent and size at the full multiplier.
+func (repo *PortfolioRiskRepo) CapitalLadderSteps(ctx context.Context, strategyIDs []uuid.UUID) (map[uuid.UUID]float64, error) {
+	steps := make(map[uuid.UUID]float64, len(strategyIDs))
+	if repo == nil || repo.pool == nil || len(strategyIDs) == 0 {
+		return steps, nil
+	}
+	ids := make([]string, 0, len(strategyIDs))
+	for _, id := range strategyIDs {
+		if id != uuid.Nil {
+			ids = append(ids, id.String())
+		}
+	}
+	rows, err := repo.pool.Query(ctx, `SELECT strategy_id,step_pct FROM capital_ladder WHERE strategy_id=ANY($1)`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load capital ladder steps: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		var step float64
+		if err := rows.Scan(&raw, &step); err != nil {
+			return nil, err
+		}
+		id, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			continue
+		}
+		steps[id] = step
+	}
+	return steps, rows.Err()
+}
+
+// UpdateMetrics records fill/win/drawdown metrics for a laddered strategy; it
+// is a no-op for strategies without a ladder row.
+func (repo *PortfolioRiskRepo) UpdateMetrics(ctx context.Context, strategyID string, fillRate, winRate, drawdownPct float64) error {
+	if repo == nil || repo.pool == nil {
+		return fmt.Errorf("postgres: portfolio risk repository is required")
+	}
+	_, err := repo.pool.Exec(ctx, `UPDATE capital_ladder SET fill_rate=$2, win_rate=$3, drawdown_pct=$4, updated_at=NOW() WHERE strategy_id=$1`, strategyID, fillRate, winRate, drawdownPct)
+	if err != nil {
+		return fmt.Errorf("postgres: record capital ladder metrics: %w", err)
+	}
+	return nil
+}
+
+// StrategyTradeResult is one closed position outcome used by the
+// consecutive-loss breaker and ladder metrics.
+type StrategyTradeResult struct {
+	StrategyID  uuid.UUID
+	RealizedPnL float64
+	ClosedAt    time.Time
+}
+
+// RecentStrategyTradeResults lists closed positions for the canonical account
+// since the given time in close order, oldest first.
+func (repo *PortfolioRiskRepo) RecentStrategyTradeResults(ctx context.Context, since time.Time, limit int) ([]StrategyTradeResult, error) {
+	if repo == nil || repo.pool == nil || repo.accountID == uuid.Nil {
+		return nil, fmt.Errorf("postgres: portfolio risk repository is required")
+	}
+	if limit <= 0 || limit > 5000 {
+		limit = 500
+	}
+	rows, err := repo.pool.Query(ctx, `SELECT strategy_id,realized_pnl::double precision,closed_at FROM positions
+		WHERE account_id=$1 AND strategy_id IS NOT NULL AND closed_at IS NOT NULL AND closed_at>=$2
+		ORDER BY closed_at,id LIMIT $3`, repo.accountID, since.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: load closed strategy positions: %w", err)
+	}
+	defer rows.Close()
+	results := make([]StrategyTradeResult, 0)
+	for rows.Next() {
+		var result StrategyTradeResult
+		var pnl *float64
+		if err := rows.Scan(&result.StrategyID, &pnl, &result.ClosedAt); err != nil {
+			return nil, err
+		}
+		if pnl != nil {
+			result.RealizedPnL = *pnl
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}

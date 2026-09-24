@@ -38,6 +38,13 @@ type Server struct {
 	logger      *slog.Logger
 	dbHealth    HealthCheck
 	redisHealth HealthCheck
+	// redisRequired turns a failing Redis probe into a /healthz failure.
+	// Otherwise the probe is advisory (redis: degraded, HTTP 200).
+	redisRequired bool
+	// adminAPIKey guards kill-switch deactivation and breaker reset; empty
+	// disables those endpoints with HTTP 503.
+	adminAPIKey string
+	readiness   ReadinessDeps
 
 	// Repositories
 	strategies         repository.StrategyRepository
@@ -78,6 +85,7 @@ type Server struct {
 
 	// Automation
 	automation       *automation.JobOrchestrator
+	scheduler        SchedulerReloader
 	alpacaReconciler AlpacaAutomationReconciler
 	jobRunRepo       *pgrepo.JobRunRepo
 
@@ -217,6 +225,10 @@ type ServerConfig struct {
 	APIKeyRateLimit     int
 	APIKeyWindow        time.Duration
 	ProjectionAccountID *uuid.UUID
+	// AdminAPIKey is read once at construction; see Server.adminAPIKey.
+	AdminAPIKey string
+	// RedisRequired makes /healthz fail when the Redis probe fails.
+	RedisRequired bool
 }
 
 // DefaultServerConfig returns a sensible default server configuration.
@@ -267,24 +279,28 @@ type Deps struct {
 	Universe               *universe.Universe
 	UniverseRepo           universe.UniverseRepository
 	Automation             *automation.JobOrchestrator
-	AlpacaReconciler       AlpacaAutomationReconciler
-	JobRunRepo             *pgrepo.JobRunRepo
-	NewsFeedRepo           *pgrepo.NewsFeedRepo
-	MarketDataHistory      repository.HistoricalOHLCVRepository
-	Risk                   risk.RiskEngine
-	RiskBreaker            risk.Breaker
-	RiskBreakerLister      RiskBreakerLister
-	AccountBalance         AccountBalanceSource
-	PaperEvaluation        *domain.PaperEvaluationProfile
-	Settings               SettingsService
-	Prompts                *PromptSettingsService
-	Runner                 StrategyRunner
-	RunGroup               *runcontrol.Group
-	ResearchScanner        service.ResearchScannerService
-	CopyTrading            *copytrading.Service
-	DBHealth               HealthCheck
-	RedisHealth            HealthCheck
-	MetricsHandler         http.Handler
+	// Scheduler is optional; nil disables POST /api/v1/scheduler/reload.
+	Scheduler         SchedulerReloader
+	AlpacaReconciler  AlpacaAutomationReconciler
+	JobRunRepo        *pgrepo.JobRunRepo
+	NewsFeedRepo      *pgrepo.NewsFeedRepo
+	MarketDataHistory repository.HistoricalOHLCVRepository
+	Risk              risk.RiskEngine
+	RiskBreaker       risk.Breaker
+	RiskBreakerLister RiskBreakerLister
+	AccountBalance    AccountBalanceSource
+	PaperEvaluation   *domain.PaperEvaluationProfile
+	Settings          SettingsService
+	Prompts           *PromptSettingsService
+	Runner            StrategyRunner
+	RunGroup          *runcontrol.Group
+	ResearchScanner   service.ResearchScannerService
+	CopyTrading       *copytrading.Service
+	DBHealth          HealthCheck
+	RedisHealth       HealthCheck
+	MetricsHandler    http.Handler
+	// Readiness feeds GET /readyz. Zero value reports only DB health.
+	Readiness ReadinessDeps
 
 	// Signal intelligence (optional; nil = feature not enabled).
 	SignalStore            *signal.EventStore
@@ -389,6 +405,9 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		logger:                logger,
 		dbHealth:              deps.DBHealth,
 		redisHealth:           deps.RedisHealth,
+		redisRequired:         cfg.RedisRequired,
+		adminAPIKey:           strings.TrimSpace(cfg.AdminAPIKey),
+		readiness:             deps.Readiness,
 		strategies:            deps.Strategies,
 		runs:                  deps.Runs,
 		decisions:             deps.Decisions,
@@ -421,6 +440,7 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		universe:              deps.Universe,
 		universeRepo:          deps.UniverseRepo,
 		automation:            deps.Automation,
+		scheduler:             deps.Scheduler,
 		alpacaReconciler:      deps.AlpacaReconciler,
 		jobRunRepo:            deps.JobRunRepo,
 		newsFeedRepo:          deps.NewsFeedRepo,
@@ -490,10 +510,15 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 		r.Use(rl.Middleware)
 	}
 
-	// Health check
+	if s.adminAPIKey == "" {
+		logger.Warn("ADMIN_API_KEY unset: kill-switch deactivate and breaker reset unavailable")
+	}
+
+	// Health check (liveness) and readiness. Both are unauthenticated.
 	r.Get("/healthz", s.handleHealth)
 	r.Get("/health", s.handleHealth)
 	r.Get("/api/v1/health", s.handleHealth)
+	r.Get("/readyz", s.handleReady)
 	r.Get("/metrics", s.handleMetrics)
 
 	// WebSocket endpoint for real-time event streaming.
@@ -632,6 +657,11 @@ func NewServer(cfg ServerConfig, deps Deps, logger *slog.Logger) (*Server, error
 			})
 			rr.Post("/market/{type}/stop", s.handleMarketKillSwitch)
 			rr.Post("/market/{type}/resume", s.handleMarketKillSwitch)
+		})
+
+		// Scheduler
+		v1.Post("/scheduler/reload", func(w http.ResponseWriter, r *http.Request) {
+			s.requireAdmin(http.HandlerFunc(s.handleSchedulerReload)).ServeHTTP(w, r)
 		})
 
 		// Settings
@@ -895,12 +925,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp.Status = "degraded"
-		statusCode = http.StatusServiceUnavailable
 		switch result.dependency {
 		case "db":
 			resp.DB = "error"
+			statusCode = http.StatusServiceUnavailable
 		case "redis":
-			resp.Redis = "error"
+			// Redis only backs caches; an outage must not restart the container
+			// unless the operator opted in with REDIS_REQUIRED=true.
+			if s.redisRequired {
+				resp.Redis = "error"
+				statusCode = http.StatusServiceUnavailable
+			} else {
+				resp.Redis = "degraded"
+			}
 		}
 		s.logger.Info("health check failed", "dependency", result.dependency, "error", result.err)
 	}

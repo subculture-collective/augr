@@ -39,6 +39,14 @@ type PaperOrderRequest struct {
 	OpportunityID uuid.UUID
 	ClaimID       uuid.UUID
 	Opportunity   domain.Opportunity
+	// Quantity is the allocator's explicit unit count for the decision. The
+	// order manager currently sizes from a fraction of account equity; the
+	// processor derives that fraction so the executed quantity matches.
+	Quantity float64
+	// AccountEquityUSD is the canonical snapshot equity the allocator sized
+	// against. When zero the processor falls back to its configured
+	// InitialBalance.
+	AccountEquityUSD float64
 }
 
 type PaperOrderResult struct {
@@ -53,6 +61,9 @@ type PaperOrderResult struct {
 type PaperExecutorDeps struct {
 	Processor        PaperOrderProcessor
 	ExecutionAccount domain.ExecutionAccountBinding
+	// AccountEquityUSD is the canonical snapshot equity for this allocator run.
+	// Zero leaves quantity derivation to the processor's configured balance.
+	AccountEquityUSD float64
 }
 
 // PaperExecutionResult describes the allocator decision after paper execution.
@@ -165,7 +176,10 @@ func (e *PaperExecutor) ExecutePaperDecisionScoped(ctx context.Context, scope ex
 	if !hasRun || scope.AccountID() != opportunity.AccountID || scope.Environment() != opportunity.Environment || string(originType) != opportunity.OriginType || originID != opportunity.OriginID || run.ID != *opportunity.PipelineRunID || !run.TradeDate.Equal(*opportunity.PipelineRunTradeDate) {
 		return e.rejected("execution_scope_mismatch"), nil
 	}
-	request := PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD, ClaimID: decision.ExecutionClaimID, Opportunity: opportunity}
+	if decision.Quantity > 0 {
+		plan.PositionSize = decision.Quantity
+	}
+	request := PaperOrderRequest{Signal: finalSignal, Plan: plan, Scope: scope, NotionalUSD: decision.NotionalUSD, ClaimID: decision.ExecutionClaimID, Opportunity: opportunity, Quantity: decision.Quantity, AccountEquityUSD: e.deps.AccountEquityUSD}
 	if decision.OpportunityID != nil {
 		request.OpportunityID = *decision.OpportunityID
 	}

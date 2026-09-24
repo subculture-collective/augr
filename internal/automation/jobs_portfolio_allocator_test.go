@@ -1226,7 +1226,7 @@ func TestBuildPortfolioAllocatorStateUsesReservedOptionRiskAndCanonicalLimits(t 
 			ReconciliationID: uuid.NewString(), UnderlyingRisk: map[string]float64{"AAPL": 500},
 		}},
 	})
-	state, _, err := orch.buildPortfolioAllocatorState(context.Background(), portfolio.AllocatorModeShadow)
+	state, _, err := orch.buildPortfolioAllocatorState(context.Background(), portfolio.AllocatorModeShadow, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,9 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/robfig/cron/v3"
-
 	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/polygon"
@@ -29,12 +26,16 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/llm/embedding"
 	"github.com/PatrickFanella/get-rich-quick/internal/portfolio"
 	"github.com/PatrickFanella/get-rich-quick/internal/promotion"
+	"github.com/PatrickFanella/get-rich-quick/internal/regime"
 	"github.com/PatrickFanella/get-rich-quick/internal/repository"
 	pgrepo "github.com/PatrickFanella/get-rich-quick/internal/repository/postgres"
+	"github.com/PatrickFanella/get-rich-quick/internal/risk"
 	"github.com/PatrickFanella/get-rich-quick/internal/runcontrol"
 	"github.com/PatrickFanella/get-rich-quick/internal/scheduler"
 	"github.com/PatrickFanella/get-rich-quick/internal/strategycatalog"
 	"github.com/PatrickFanella/get-rich-quick/internal/universe"
+	"github.com/google/uuid"
+	"github.com/robfig/cron/v3"
 )
 
 // All cron expressions use Eastern time (America/New_York) so schedules
@@ -56,7 +57,34 @@ const (
 	defaultAutomationJobTimeout  = 2 * time.Hour
 	jobRunPersistenceTimeout     = 10 * time.Second
 	jobControlPersistenceTimeout = 5 * time.Second
+
+	// Auto-disabled jobs re-arm after a cooldown that doubles on every repeat
+	// auto-disable, bounded by maxAutoDisableCooldown.
+	defaultAutoDisableCooldown = time.Hour
+	maxAutoDisableCooldown     = 24 * time.Hour
+
+	// hydrateAttempts and defaultHydrateRetryBackoff bound startup retries
+	// against a slow or briefly unavailable database.
+	hydrateAttempts            = 3
+	defaultHydrateRetryBackoff = 500 * time.Millisecond
+
+	// stuckGrace is how far past the job timeout a run may go before it is
+	// reported as stuck. After abandonAfterTimeouts timeouts the in-memory
+	// claim is released so the schedule can proceed.
+	stuckGrace           = 10 * time.Minute
+	abandonAfterTimeouts = 2
+
+	defaultMissedRunCatchUpDelay = 30 * time.Second
+	missedRunLookback            = 45 * 24 * time.Hour
 )
+
+// OrchestratorHealth reports startup hydration problems that left the
+// orchestrator running with incomplete persisted state.
+type OrchestratorHealth struct {
+	Degraded bool       `json:"degraded"`
+	Reason   string     `json:"reason,omitempty"`
+	Since    *time.Time `json:"since,omitempty"`
+}
 
 // ErrJobControlPersistence identifies a failed durable enable/disable write.
 var ErrJobControlPersistence = errors.New("automation: job control persistence failed")
@@ -160,6 +188,24 @@ type AutomationJobRunRepository interface {
 	Summaries(context.Context) ([]pgrepo.JobRunSummary, error)
 }
 
+// stuckRunMarker is optionally implemented by the job run repository to flag
+// a running row whose job exceeded its timeout (*pgrepo.JobRunRepo does).
+type stuckRunMarker interface {
+	MarkStuck(ctx context.Context, id uuid.UUID, at time.Time, reason string) error
+}
+
+// autoDisableControlRepository is optionally implemented by the job control
+// repository to persist auto-disable provenance (*pgrepo.AutomationJobControlRepo does).
+type autoDisableControlRepository interface {
+	SetAutoDisabled(ctx context.Context, name, reason string, until time.Time) error
+}
+
+// detailedControlLister is optionally implemented by the job control
+// repository to expose auto-disable reason and cooldown expiry.
+type detailedControlLister interface {
+	ListDetailed(ctx context.Context) ([]pgrepo.AutomationJobControlDetail, error)
+}
+
 // StrategyTrigger triggers an immediate pipeline run for a strategy.
 // The scheduler satisfies this interface.
 type StrategyTrigger interface {
@@ -194,24 +240,31 @@ type OrchestratorDeps struct {
 	TickerDiscovery              TickerDiscoveryJobConfig
 	HistoryRefreshWatchlistLimit int
 	EmbeddingProvider            embedding.Provider // optional; nil = skip embedding during triage
-	EventsProvider               data.EventsProvider
-	StrategyRepo                 repository.StrategyRepository
-	PositionRepo                 repository.PositionRepository
-	OrderRepo                    repository.OrderRepository
-	TradeRepo                    repository.TradeRepository
-	OptionSettlementRepo         repository.OptionSettlementRepository
-	OptionSettlementState        execution.OptionSettlementState
-	OpportunityRepo              repository.OpportunityRepository
-	AllocationDecisionRepo       repository.AllocationDecisionRepository
-	RunRepo                      repository.PipelineRunRepository
-	JobRunRepo                   AutomationJobRunRepository
-	JobControlRepo               repository.AutomationJobControlRepository
-	OptionsScanRepo              *pgrepo.OptionsScanRepo
-	NewsFeedRepo                 *pgrepo.NewsFeedRepo
-	StrategyTrigger              StrategyTrigger                        // optional; nil = no event-driven triggers
-	PolymarketAccountRepo        repository.PolymarketAccountRepository // optional; nil = skip profiling job
-	PolymarketReconciler         *polymarketexecution.Reconciler        // optional; nil = skip reconciliation job
-	PredictionSettler            interface {
+	// RiskEngine, when set, receives ledger-derived daily P&L, drawdown, and
+	// loss-streak metrics from the portfolio allocator so the in-memory
+	// circuit breaker reflects the same evidence as the durable breakers.
+	RiskEngine risk.RiskEngine
+	// RegimeRules, when any threshold is set, pauses new allocations for a run
+	// whose recent results breach the rule set (zero value disables it).
+	RegimeRules            regime.RuleConfig
+	EventsProvider         data.EventsProvider
+	StrategyRepo           repository.StrategyRepository
+	PositionRepo           repository.PositionRepository
+	OrderRepo              repository.OrderRepository
+	TradeRepo              repository.TradeRepository
+	OptionSettlementRepo   repository.OptionSettlementRepository
+	OptionSettlementState  execution.OptionSettlementState
+	OpportunityRepo        repository.OpportunityRepository
+	AllocationDecisionRepo repository.AllocationDecisionRepository
+	RunRepo                repository.PipelineRunRepository
+	JobRunRepo             AutomationJobRunRepository
+	JobControlRepo         repository.AutomationJobControlRepository
+	OptionsScanRepo        *pgrepo.OptionsScanRepo
+	NewsFeedRepo           *pgrepo.NewsFeedRepo
+	StrategyTrigger        StrategyTrigger                        // optional; nil = no event-driven triggers
+	PolymarketAccountRepo  repository.PolymarketAccountRepository // optional; nil = skip profiling job
+	PolymarketReconciler   *polymarketexecution.Reconciler        // optional; nil = skip reconciliation job
+	PredictionSettler      interface {
 		PendingMarkets(context.Context, domain.MarketType) ([]string, error)
 		SettlePreview(context.Context, domain.MarketType, string) (*prediction.SettlementPreview, error)
 		PreviewMarket(context.Context, domain.MarketType, string) (int, error)
@@ -230,6 +283,7 @@ type OrchestratorDeps struct {
 		ListMarkets(context.Context, kalshidiscovery.ListOptions) ([]kalshidiscovery.MarketCandidate, string, error)
 		GetMarket(context.Context, string) (*kalshidiscovery.MarketCandidate, error)
 	}
+	KalshiDiscovery           KalshiDiscoveryConfig // optional; zero values use defaults/env
 	PortfolioAllocatorMode    portfolio.AllocatorMode
 	PortfolioPaperProcessor   portfolio.PaperOrderProcessor
 	PortfolioOptionsProcessor portfolio.PaperOptionsOrderProcessor
@@ -291,7 +345,16 @@ type OrchestratorDeps struct {
 	AutomaticShadowPromotion  bool
 	DiscoveryScopeID          uuid.UUID
 	JobTimeout                time.Duration
-	Logger                    *slog.Logger
+	// AutoDisableCooldown is the first re-arm delay after an auto-disable
+	// (default 1h; doubles per repeat up to 24h).
+	AutoDisableCooldown time.Duration
+	// DisableMissedRunCatchUp turns off the startup pass that runs daily or
+	// less frequent jobs whose latest scheduled fire was missed.
+	DisableMissedRunCatchUp bool
+	// MissedRunCatchUpDelay is how long after Start the catch-up pass waits
+	// (default 30s).
+	MissedRunCatchUpDelay time.Duration
+	Logger                *slog.Logger
 }
 
 // RegisteredJob tracks a single automated job and its runtime state.
@@ -315,6 +378,16 @@ type RegisteredJob struct {
 	SettlementGate      *SettlementGateStatus
 	Running             bool
 	Enabled             bool
+	// DisabledReason and DisabledUntil describe an auto-disable; DisabledUntil
+	// is nil for explicit operator disables.
+	DisabledReason   string
+	DisabledUntil    *time.Time
+	AutoDisableCount int
+	// runSeq identifies the current claim so a wedged run that is abandoned
+	// cannot clear a later claim when it finally returns.
+	runSeq       uint64
+	currentRunID uuid.UUID
+	stuckMarked  bool
 }
 
 // JobStatus is the read-only snapshot returned by Status.
@@ -334,6 +407,8 @@ type JobStatus struct {
 	StuckFor            *time.Duration        `json:"stuck_for,omitempty"`
 	Running             bool                  `json:"running"`
 	Enabled             bool                  `json:"enabled"`
+	DisabledReason      string                `json:"disabled_reason,omitempty"`
+	DisabledUntil       *time.Time            `json:"disabled_until,omitempty"`
 	SettlementGate      *SettlementGateStatus `json:"settlement_gate,omitempty"`
 }
 
@@ -384,6 +459,9 @@ type JobOrchestrator struct {
 	refreshedTickersMu  sync.RWMutex
 	refreshedTickers    []string
 	unavailableJobs     []UnavailableJob
+	hydrateRetryBackoff time.Duration
+	healthMu            sync.Mutex
+	health              OrchestratorHealth
 }
 
 // NewJobOrchestrator constructs a new orchestrator.
@@ -402,6 +480,8 @@ func NewJobOrchestrator(deps OrchestratorDeps) *JobOrchestrator {
 		logger: logger,
 		now:    time.Now,
 		runs:   runcontrol.NewGroup(),
+
+		hydrateRetryBackoff: defaultHydrateRetryBackoff,
 	}
 	if deps.DiscoveryReadiness != nil && !o.stockDiscoveryReady() {
 		reason := stockDiscoveryUnavailableReason(deps.DiscoveryReadiness)
@@ -673,7 +753,30 @@ func (o *JobOrchestrator) Start() error {
 	}
 	o.cron.Start()
 	o.logger.Info("automation: orchestrator started", slog.Int("jobs", len(o.jobs)))
+	if !o.deps.DisableMissedRunCatchUp {
+		go o.catchUpMissedRuns()
+	}
 	return nil
+}
+
+// Health reports whether startup hydration left the orchestrator degraded.
+func (o *JobOrchestrator) Health() OrchestratorHealth {
+	o.healthMu.Lock()
+	defer o.healthMu.Unlock()
+	h := o.health
+	h.Since = cloneTime(o.health.Since)
+	return h
+}
+
+func (o *JobOrchestrator) markDegraded(reason string) {
+	at := o.currentTime()
+	o.healthMu.Lock()
+	if o.health.Degraded {
+		o.health.Reason = o.health.Reason + "; " + reason
+	} else {
+		o.health = OrchestratorHealth{Degraded: true, Reason: reason, Since: &at}
+	}
+	o.healthMu.Unlock()
 }
 
 // Stop stops all jobs and the cron engine.
@@ -711,6 +814,8 @@ func (o *JobOrchestrator) Status() []JobStatus {
 			StuckFor:            stuckFor,
 			Running:             job.Running,
 			Enabled:             job.Enabled,
+			DisabledReason:      job.DisabledReason,
+			DisabledUntil:       cloneTime(job.DisabledUntil),
 			SettlementGate:      cloneSettlementGateStatus(job.SettlementGate),
 		}
 		job.mu.Unlock()
@@ -781,17 +886,50 @@ func claimManualJob(job *RegisteredJob, startedAt time.Time) error {
 	job.mu.Lock()
 	defer job.mu.Unlock()
 	if !job.Enabled {
+		if job.DisabledUntil != nil {
+			return fmt.Errorf("automation: job %q is auto-disabled until %s (%s)", job.Name, job.DisabledUntil.UTC().Format(time.RFC3339), job.DisabledReason)
+		}
 		return fmt.Errorf("automation: job %q is disabled", job.Name)
 	}
 	if job.Running {
 		return fmt.Errorf("automation: job %q is already running", job.Name)
 	}
-	job.Running = true
-	job.StartedAt = &startedAt
+	job.claimLocked(startedAt)
 	return nil
 }
 
+// claimLocked marks the job running and returns the claim sequence. Caller
+// holds job.mu.
+func (job *RegisteredJob) claimLocked(startedAt time.Time) uint64 {
+	job.runSeq++
+	job.Running = true
+	job.StartedAt = &startedAt
+	job.currentRunID = uuid.Nil
+	job.stuckMarked = false
+	return job.runSeq
+}
+
+// releaseClaim clears the running state only if seq is still the current
+// claim; an abandoned wedged run must not clear a newer claim.
+func (job *RegisteredJob) releaseClaim(seq uint64) {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	if job.runSeq != seq {
+		return
+	}
+	job.Running = false
+	job.StartedAt = nil
+	job.currentRunID = uuid.Nil
+}
+
+func (job *RegisteredJob) currentSeq() uint64 {
+	job.mu.Lock()
+	defer job.mu.Unlock()
+	return job.runSeq
+}
+
 func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *RegisteredJob, startedAt time.Time) {
+	seq := job.currentSeq()
 	// Require every dependency to have completed successfully in today's
 	// Eastern automation cycle, not merely to be idle at this instant.
 	if dep, reason := o.dependencyBlocker(job, startedAt); dep != "" {
@@ -799,12 +937,7 @@ func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *Register
 		return
 	}
 
-	defer func() {
-		job.mu.Lock()
-		job.Running = false
-		job.StartedAt = nil
-		job.mu.Unlock()
-	}()
+	defer job.releaseClaim(seq)
 	run, beginErr := o.beginRun(job, startedAt)
 	if beginErr != nil {
 		now := o.currentTime()
@@ -812,6 +945,7 @@ func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *Register
 		o.logger.Error("automation: failed to persist running job", slog.String("job", job.Name), slog.Any("error", beginErr))
 		return
 	}
+	o.setCurrentRun(job, seq, run)
 
 	o.logger.Info("automation: job starting", slog.String("job", job.Name))
 	start := time.Now()
@@ -848,11 +982,7 @@ func (o *JobOrchestrator) runClaimedDirect(parent context.Context, job *Register
 			o.metrics.RecordAutomationJobError(job.Name)
 		}
 		if job.ConsecutiveFailures >= autoDisableThreshold {
-			job.Enabled = false
-			o.logger.Error("automation: auto-disabled job after consecutive failures",
-				slog.String("job", job.Name),
-				slog.Int("consecutive_failures", job.ConsecutiveFailures),
-			)
+			o.autoDisableLocked(job, completedAt, fmt.Sprintf("%d consecutive failures; last: %s", job.ConsecutiveFailures, err.Error()))
 		}
 	default:
 		job.LastResult = "success"
@@ -905,6 +1035,11 @@ func (o *JobOrchestrator) SetEnabledBy(ctx context.Context, name string, enabled
 		}
 	}
 	job.Enabled = enabled
+	job.DisabledReason = ""
+	job.DisabledUntil = nil
+	if enabled {
+		job.AutoDisableCount = 0
+	}
 	if name == "kalshi_settlement" && o.deps.KalshiSettlementGateRepo != nil {
 		gateCtx, gateCancel := context.WithTimeout(ctx, jobControlPersistenceTimeout)
 		state, err := o.deps.KalshiSettlementGateRepo.Get(gateCtx, name)
@@ -955,21 +1090,24 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 
 	job.mu.Lock()
 	if !job.Enabled {
-		job.mu.Unlock()
-		return
+		if job.DisabledUntil == nil || now.Before(*job.DisabledUntil) {
+			job.mu.Unlock()
+			return
+		}
+		o.rearmLocked(job, now)
 	}
 	if !job.Schedule.ShouldFire(now) {
 		job.mu.Unlock()
 		return
 	}
 	if job.Running {
-		job.mu.Unlock()
-		o.logger.Warn("automation: skipping overlapping run", slog.String("job", job.Name))
-		return
+		if !o.handleOverlapLocked(job, now) {
+			job.mu.Unlock()
+			return
+		}
 	}
 	startedAt := now
-	job.Running = true
-	job.StartedAt = &startedAt
+	seq := job.claimLocked(startedAt)
 	job.mu.Unlock()
 
 	if dep, reason := o.dependencyBlocker(job, startedAt); dep != "" {
@@ -977,18 +1115,14 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 		return
 	}
 
-	defer func() {
-		job.mu.Lock()
-		job.Running = false
-		job.StartedAt = nil
-		job.mu.Unlock()
-	}()
+	defer job.releaseClaim(seq)
 	run, beginErr := o.beginRun(job, startedAt)
 	if beginErr != nil {
 		_ = o.applyRunPersistenceFailure(job, o.currentTime(), beginErr)
 		o.logger.Error("automation: failed to persist running job", slog.String("job", job.Name), slog.Any("error", beginErr))
 		return
 	}
+	o.setCurrentRun(job, seq, run)
 
 	o.logger.Info("automation: job starting", slog.String("job", job.Name))
 	start := time.Now()
@@ -1025,11 +1159,7 @@ func (o *JobOrchestrator) wrapAndRun(job *RegisteredJob) {
 			o.metrics.RecordAutomationJobError(job.Name)
 		}
 		if job.ConsecutiveFailures >= autoDisableThreshold {
-			job.Enabled = false
-			o.logger.Error("automation: auto-disabled job after consecutive failures",
-				slog.String("job", job.Name),
-				slog.Int("consecutive_failures", job.ConsecutiveFailures),
-			)
+			o.autoDisableLocked(job, completedAt, fmt.Sprintf("%d consecutive failures; last: %s", job.ConsecutiveFailures, err.Error()))
 		}
 	default:
 		job.LastError = ""
@@ -1204,21 +1334,149 @@ func (o *JobOrchestrator) applyRunPersistenceFailure(job *RegisteredJob, at time
 	job.LastErrorAt = &at
 	job.ConsecutiveFailures++
 	job.LastResult = "failed: run persistence"
-	disable := job.ConsecutiveFailures >= autoDisableThreshold
-	if disable {
-		job.Enabled = false
+	if job.ConsecutiveFailures >= autoDisableThreshold {
+		o.autoDisableLocked(job, at, fmt.Sprintf("%d consecutive failures; last: run persistence: %s", job.ConsecutiveFailures, persistErr.Error()))
 	}
 	job.mu.Unlock()
 	if o.metrics != nil {
 		o.metrics.RecordAutomationJobError(job.Name)
 	}
-	if disable {
-		o.logger.Error("automation: auto-disabled job after consecutive persistence failures",
-			slog.String("job", job.Name),
-			slog.Int("consecutive_failures", autoDisableThreshold),
-		)
-	}
 	return err
+}
+
+// autoDisableLocked disables a job after repeated failures, records the
+// reason and cooldown expiry, and persists the decision with
+// updated_by='auto-disable'. Caller holds job.mu.
+func (o *JobOrchestrator) autoDisableLocked(job *RegisteredJob, at time.Time, reason string) {
+	job.AutoDisableCount++
+	cooldown := o.autoDisableCooldown(job.AutoDisableCount)
+	until := at.Add(cooldown)
+	job.Enabled = false
+	job.DisabledReason = reason
+	job.DisabledUntil = &until
+	o.logger.Error("automation: auto-disabled job after consecutive failures",
+		slog.String("job", job.Name),
+		slog.Int("consecutive_failures", job.ConsecutiveFailures),
+		slog.Int("auto_disable_count", job.AutoDisableCount),
+		slog.Duration("cooldown", cooldown),
+		slog.Time("rearm_at", until.UTC()),
+		slog.String("reason", reason),
+	)
+	if o.deps.JobControlRepo == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), jobControlPersistenceTimeout)
+	defer cancel()
+	var err error
+	if repo, ok := o.deps.JobControlRepo.(autoDisableControlRepository); ok {
+		err = repo.SetAutoDisabled(ctx, job.Name, reason, until)
+	} else {
+		err = o.deps.JobControlRepo.SetEnabled(ctx, job.Name, false, pgrepo.AutoDisableActor)
+	}
+	if err != nil {
+		o.logger.Error("automation: failed to persist auto-disable", slog.String("job", job.Name), slog.Any("error", err))
+	}
+}
+
+func (o *JobOrchestrator) autoDisableCooldown(count int) time.Duration {
+	base := o.deps.AutoDisableCooldown
+	if base <= 0 {
+		base = defaultAutoDisableCooldown
+	}
+	cooldown := base
+	for i := 1; i < count && cooldown < maxAutoDisableCooldown; i++ {
+		cooldown *= 2
+	}
+	if cooldown > maxAutoDisableCooldown {
+		cooldown = maxAutoDisableCooldown
+	}
+	return cooldown
+}
+
+// rearmLocked re-enables an auto-disabled job whose cooldown expired and
+// persists the change with updated_by='auto-rearm'. Caller holds job.mu.
+func (o *JobOrchestrator) rearmLocked(job *RegisteredJob, now time.Time) {
+	o.logger.Warn("automation: re-arming auto-disabled job after cooldown",
+		slog.String("job", job.Name),
+		slog.Int("auto_disable_count", job.AutoDisableCount),
+		slog.String("reason", job.DisabledReason),
+		slog.Time("now", now.UTC()),
+	)
+	job.Enabled = true
+	job.ConsecutiveFailures = 0
+	job.DisabledReason = ""
+	job.DisabledUntil = nil
+	if o.deps.JobControlRepo == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), jobControlPersistenceTimeout)
+	defer cancel()
+	if err := o.deps.JobControlRepo.SetEnabled(ctx, job.Name, true, pgrepo.AutoRearmActor); err != nil {
+		o.logger.Error("automation: failed to persist auto re-arm", slog.String("job", job.Name), slog.Any("error", err))
+	}
+}
+
+// handleOverlapLocked is called when a tick finds the job still running. It
+// reports a run that exceeded its timeout by more than stuckGrace and, after
+// abandonAfterTimeouts timeouts, releases the in-memory claim so the schedule
+// can proceed. It returns true when the caller may claim a new run. Caller
+// holds job.mu.
+func (o *JobOrchestrator) handleOverlapLocked(job *RegisteredJob, now time.Time) bool {
+	timeout := o.deps.JobTimeout
+	if timeout <= 0 {
+		timeout = defaultAutomationJobTimeout
+	}
+	var stuckFor time.Duration
+	if job.StartedAt != nil {
+		stuckFor = now.Sub(*job.StartedAt)
+	}
+	if stuckFor <= timeout+stuckGrace {
+		o.logger.Warn("automation: skipping overlapping run", slog.String("job", job.Name), slog.Duration("running_for", stuckFor))
+		return false
+	}
+	reason := fmt.Sprintf("job ignored its %s timeout; running for %s", timeout, stuckFor.Truncate(time.Second))
+	if !job.stuckMarked {
+		job.stuckMarked = true
+		o.logger.Error("automation: job stuck past timeout",
+			slog.String("job", job.Name),
+			slog.Duration("stuck_for", stuckFor),
+			slog.Duration("timeout", timeout),
+		)
+		if marker, ok := o.deps.JobRunRepo.(stuckRunMarker); ok && job.currentRunID != uuid.Nil {
+			ctx, cancel := context.WithTimeout(context.Background(), jobRunPersistenceTimeout)
+			err := marker.MarkStuck(ctx, job.currentRunID, now.UTC(), reason)
+			cancel()
+			if err != nil {
+				o.logger.Error("automation: failed to mark job run stuck", slog.String("job", job.Name), slog.Any("error", err))
+			}
+		}
+	}
+	if stuckFor < time.Duration(abandonAfterTimeouts)*timeout {
+		o.logger.Error("automation: skipping overlapping run of stuck job", slog.String("job", job.Name), slog.Duration("stuck_for", stuckFor))
+		return false
+	}
+	o.logger.Error("automation: abandoning wedged run so the schedule can proceed",
+		slog.String("job", job.Name),
+		slog.Duration("stuck_for", stuckFor),
+	)
+	job.Running = false
+	job.StartedAt = nil
+	job.currentRunID = uuid.Nil
+	job.LastError = reason
+	job.LastErrorAt = &now
+	job.ErrorCount++
+	return true
+}
+
+func (o *JobOrchestrator) setCurrentRun(job *RegisteredJob, seq uint64, run *pgrepo.JobRun) {
+	if run == nil {
+		return
+	}
+	job.mu.Lock()
+	if job.runSeq == seq {
+		job.currentRunID = run.ID
+	}
+	job.mu.Unlock()
 }
 
 func (o *JobOrchestrator) completeRun(run *pgrepo.JobRun, job *RegisteredJob, completedAt time.Time, elapsed time.Duration, jobErr error) error {
@@ -1272,19 +1530,21 @@ func (o *JobOrchestrator) completeRun(run *pgrepo.JobRun, job *RegisteredJob, co
 }
 
 // hydrateFromDB loads historical run stats from the database to restore
-// counters after a server restart.
+// counters after a server restart. Persistence reads are retried; if they
+// still fail the orchestrator is marked degraded and keeps its jobs enabled
+// (run history is read-only state). Enablement comes only from
+// automation_job_controls, never from a run row's failure counter.
 func (o *JobOrchestrator) hydrateFromDB() {
 	if o.deps.JobRunRepo != nil {
 		recoveryAt := time.Now().UTC()
 		const recoveryReason = "automation process restarted before the job persisted a terminal outcome"
-		recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), jobRunPersistenceTimeout)
-		recovered, recoveryErr := o.deps.JobRunRepo.FailIncomplete(recoveryCtx, recoveryAt, recoveryReason)
-		recoveryCancel()
-		if recoveryErr != nil {
-			o.logger.Error("automation: failed to recover incomplete job runs", slog.Any("error", recoveryErr))
-			o.disableAllJobs()
-			return
-		} else if recovered > 0 {
+		var recovered int
+		recoveryErr := o.withHydrationRetry("recover incomplete job runs", jobRunPersistenceTimeout, func(ctx context.Context) error {
+			n, err := o.deps.JobRunRepo.FailIncomplete(ctx, recoveryAt, recoveryReason)
+			recovered = n
+			return err
+		})
+		if recoveryErr == nil && recovered > 0 {
 			o.logger.Warn("automation: recovered incomplete job runs", slog.Int("runs", recovered))
 		}
 	}
@@ -1303,68 +1563,111 @@ func (o *JobOrchestrator) hydrateFromDB() {
 	}
 
 	if o.deps.JobRunRepo != nil {
-		summaryCtx, summaryCancel := context.WithTimeout(context.Background(), jobRunPersistenceTimeout)
-		summaries, err := o.deps.JobRunRepo.Summaries(summaryCtx)
-		summaryCancel()
-		if err != nil {
-			o.logger.Warn("automation: failed to hydrate job stats from DB", slog.Any("error", err))
-			o.disableAllJobs()
-			return
+		var summaries []pgrepo.JobRunSummary
+		err := o.withHydrationRetry("hydrate job stats", jobRunPersistenceTimeout, func(ctx context.Context) error {
+			loaded, err := o.deps.JobRunRepo.Summaries(ctx)
+			summaries = loaded
+			return err
+		})
+		if err == nil {
+			o.applyRunSummaries(summaries)
 		}
-
-		for _, s := range summaries {
-			job, ok := o.jobs[s.JobName]
-			if !ok {
-				continue
-			}
-			dependencySkipped := isDependencySkippedOutcome(s.LastResult, s.LastDetail)
-			job.mu.Lock()
-			job.LastRun = s.LastRun
-			job.LastResult = s.LastResult
-			job.LastError = s.LastError
-			job.LastDetail = s.LastDetail
-			job.LastSummary = cloneSummary(s.LastSummary)
-			if dependencySkipped && strings.EqualFold(strings.TrimSpace(s.LastResult), "skipped") && s.LastDetail != "" {
-				job.LastResult = "skipped: " + s.LastDetail
-				job.LastError = ""
-			}
-			job.LastErrorAt = s.LastErrorAt
-			job.RunCount = s.RunCount
-			job.ErrorCount = s.ErrorCount
-			job.ConsecutiveFailures = s.ConsecutiveFailures
-			if strings.EqualFold(strings.TrimSpace(s.LastResult), "degraded") {
-				job.LastError = ""
-				job.LastErrorAt = nil
-				job.ConsecutiveFailures = 0
-			}
-			if shouldDisableAfterHydration(job.ConsecutiveFailures) && !dependencySkipped {
-				job.Enabled = false
-			}
-			job.mu.Unlock()
-			if s.JobName == "current_data_refresh" && s.LastSummary["closing_mode"] != 1 {
-				o.setRefreshedTickers(s.LastTickers)
-			}
-		}
-
-		o.logger.Info("automation: hydrated job stats from DB", slog.Int("jobs", len(summaries)))
 	}
 
-	// Explicit durable operator controls are authoritative over historical
-	// auto-disable state. Hydrate them last, but only after run-state recovery
-	// succeeds, so a storage failure still disables every job fail-closed.
+	// Explicit durable controls are the only source of enablement.
 	o.hydrateJobControls()
+}
+
+// withHydrationRetry runs fn up to hydrateAttempts times with linear backoff.
+// A final failure marks the orchestrator degraded and is logged at ERROR.
+func (o *JobOrchestrator) withHydrationRetry(op string, timeout time.Duration, fn func(context.Context) error) error {
+	var err error
+	for attempt := 1; attempt <= hydrateAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		err = fn(ctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if attempt < hydrateAttempts {
+			o.logger.Warn("automation: hydration step failed; retrying",
+				slog.String("step", op),
+				slog.Int("attempt", attempt),
+				slog.Any("error", err),
+			)
+			time.Sleep(o.hydrateRetryBackoff * time.Duration(attempt))
+		}
+	}
+	reason := fmt.Sprintf("%s: %v", op, err)
+	o.markDegraded(reason)
+	o.logger.Error("automation: hydration step failed after retries; continuing degraded",
+		slog.String("step", op),
+		slog.Int("attempts", hydrateAttempts),
+		slog.Any("error", err),
+	)
+	return err
+}
+
+func (o *JobOrchestrator) applyRunSummaries(summaries []pgrepo.JobRunSummary) {
+	for _, s := range summaries {
+		job, ok := o.jobs[s.JobName]
+		if !ok {
+			continue
+		}
+		dependencySkipped := isDependencySkippedOutcome(s.LastResult, s.LastDetail)
+		job.mu.Lock()
+		job.LastRun = s.LastRun
+		job.LastResult = s.LastResult
+		job.LastError = s.LastError
+		job.LastDetail = s.LastDetail
+		job.LastSummary = cloneSummary(s.LastSummary)
+		if dependencySkipped && strings.EqualFold(strings.TrimSpace(s.LastResult), "skipped") && s.LastDetail != "" {
+			job.LastResult = "skipped: " + s.LastDetail
+			job.LastError = ""
+		}
+		job.LastErrorAt = s.LastErrorAt
+		job.RunCount = s.RunCount
+		job.ErrorCount = s.ErrorCount
+		job.ConsecutiveFailures = s.ConsecutiveFailures
+		if strings.EqualFold(strings.TrimSpace(s.LastResult), "degraded") {
+			job.LastError = ""
+			job.LastErrorAt = nil
+			job.ConsecutiveFailures = 0
+		}
+		job.mu.Unlock()
+		if s.JobName == "current_data_refresh" && s.LastSummary["closing_mode"] != 1 {
+			o.setRefreshedTickers(s.LastTickers)
+		}
+	}
+
+	o.logger.Info("automation: hydrated job stats from DB", slog.Int("jobs", len(summaries)))
 }
 
 func (o *JobOrchestrator) hydrateJobControls() {
 	if o.deps.JobControlRepo == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), jobControlPersistenceTimeout)
-	defer cancel()
-	controls, err := o.deps.JobControlRepo.List(ctx)
+	var controls []pgrepo.AutomationJobControlDetail
+	err := o.withHydrationRetry("hydrate durable job controls", jobControlPersistenceTimeout, func(ctx context.Context) error {
+		if lister, ok := o.deps.JobControlRepo.(detailedControlLister); ok {
+			loaded, err := lister.ListDetailed(ctx)
+			controls = loaded
+			return err
+		}
+		loaded, err := o.deps.JobControlRepo.List(ctx)
+		if err != nil {
+			return err
+		}
+		controls = controls[:0]
+		for _, control := range loaded {
+			controls = append(controls, pgrepo.AutomationJobControlDetail{AutomationJobControl: control})
+		}
+		return nil
+	})
 	if err != nil {
-		o.disableAllJobs()
-		o.logger.Error("automation: failed to hydrate durable job controls; all jobs disabled", slog.Any("error", err))
+		// Fail open: without the control rows we cannot tell which jobs an
+		// operator disabled, and disabling everything silently has proven
+		// worse than running. Health() reports the degradation.
 		return
 	}
 	for _, control := range controls {
@@ -1374,20 +1677,141 @@ func (o *JobOrchestrator) hydrateJobControls() {
 		}
 		job.mu.Lock()
 		job.Enabled = control.Enabled
+		job.DisabledReason = ""
+		job.DisabledUntil = nil
+		if !control.Enabled {
+			job.DisabledReason = control.Reason
+			if control.UpdatedBy == pgrepo.AutoDisableActor {
+				job.DisabledUntil = cloneTime(control.AutoDisabledUntil)
+				if job.AutoDisableCount == 0 {
+					job.AutoDisableCount = 1
+				}
+			}
+		}
 		job.mu.Unlock()
 	}
 }
 
-func (o *JobOrchestrator) disableAllJobs() {
-	for _, job := range o.jobs {
-		job.mu.Lock()
-		job.Enabled = false
-		job.mu.Unlock()
+// catchUpMissedRuns runs, once and sequentially, every enabled daily-or-less-
+// frequent job whose most recent scheduled fire happened after its last run,
+// provided the schedule's session gate allows running now.
+func (o *JobOrchestrator) catchUpMissedRuns() {
+	ctx, lease, err := o.runs.Admit(context.Background())
+	if err != nil {
+		return
+	}
+	defer lease.Done()
+	delay := o.deps.MissedRunCatchUpDelay
+	if delay <= 0 {
+		delay = defaultMissedRunCatchUpDelay
+	}
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(delay):
+	}
+	for _, name := range o.RegisteredJobKeys() {
+		if ctx.Err() != nil {
+			return
+		}
+		job := o.jobs[name]
+		now := o.currentTime()
+		missedAt, missed := o.missedScheduledRun(job, now)
+		if !missed {
+			continue
+		}
+		if err := claimManualJob(job, now); err != nil {
+			o.logger.Info("automation: missed-run catch-up not admitted", slog.String("job", name), slog.Any("error", err))
+			continue
+		}
+		o.logger.Warn("automation: running missed scheduled job at startup",
+			slog.String("job", name),
+			slog.Time("missed_fire_at", missedAt.UTC()),
+		)
+		o.runClaimedDirect(ctx, job, now)
 	}
 }
 
-func shouldDisableAfterHydration(consecutiveFailures int) bool {
-	return consecutiveFailures >= autoDisableThreshold
+// missedScheduledRun reports whether the job's latest scheduled fire time is
+// newer than its last run and the job may run now.
+func (o *JobOrchestrator) missedScheduledRun(job *RegisteredJob, now time.Time) (time.Time, bool) {
+	if !isDailyOrLessFrequent(job.Schedule.Cron) {
+		return time.Time{}, false
+	}
+	job.mu.Lock()
+	enabled, running, lastRun, lastResult := job.Enabled, job.Running, cloneTime(job.LastRun), job.LastResult
+	job.mu.Unlock()
+	if !enabled || running || !job.Schedule.ShouldFire(now) {
+		return time.Time{}, false
+	}
+	prev, ok := previousScheduledFire(job.Schedule.Cron, now)
+	if !ok {
+		return time.Time{}, false
+	}
+	if lastRun != nil && successfulJobResult(lastResult) && !lastRun.Before(prev) {
+		return time.Time{}, false
+	}
+	return prev, true
+}
+
+// isDailyOrLessFrequent reports whether a five-field cron spec fires at most
+// once per day (fixed minute and hour).
+func isDailyOrLessFrequent(spec string) bool {
+	fields := strings.Fields(stripCronTZ(spec))
+	if len(fields) != 5 {
+		return false
+	}
+	return isCronInteger(fields[0]) && isCronInteger(fields[1])
+}
+
+func isCronInteger(field string) bool {
+	if field == "" {
+		return false
+	}
+	for _, r := range field {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func stripCronTZ(spec string) string {
+	spec = strings.TrimSpace(spec)
+	if strings.HasPrefix(spec, "CRON_TZ=") || strings.HasPrefix(spec, "TZ=") {
+		if i := strings.IndexAny(spec, " \t"); i >= 0 {
+			return strings.TrimSpace(spec[i:])
+		}
+	}
+	return spec
+}
+
+// previousScheduledFire returns the most recent fire time at or before now for
+// a standard cron spec evaluated in Eastern time.
+func previousScheduledFire(spec string, now time.Time) (time.Time, bool) {
+	schedule, err := cron.ParseStandard(spec)
+	if err != nil {
+		return time.Time{}, false
+	}
+	cursor := now.In(easternTime).Add(-missedRunLookback)
+	var prev time.Time
+	for i := 0; i < 400; i++ {
+		next := schedule.Next(cursor)
+		if next.IsZero() || next.After(now) {
+			break
+		}
+		prev = next
+		cursor = next
+	}
+	return prev, !prev.IsZero()
+}
+
+func cloneTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	clone := *t
+	return &clone
 }
 
 func isDependencySkippedOutcome(result, detail string) bool {

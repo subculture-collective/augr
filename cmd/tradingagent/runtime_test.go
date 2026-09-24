@@ -198,7 +198,7 @@ func TestRuntimeSchemaVersionRequiresRenamedOperatorUser(t *testing.T) {
 	for _, tt := range []struct {
 		version int
 		want    bool
-	}{{110, false}, {111, false}, {112, false}, {113, false}, {114, true}, {115, false}} {
+	}{{113, false}, {114, false}, {115, false}, {116, false}, {117, true}, {118, false}} {
 		if got := runtimeSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("runtimeSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
 		}
@@ -1543,9 +1543,14 @@ func TestNewNotificationManager_SkipsDiscordWhenUnconfigured(t *testing.T) {
 	if manager == nil {
 		t.Fatal("newNotificationManager() = nil")
 	}
+	if channels := manager.ConfiguredChannels(); len(channels) != 0 {
+		t.Fatalf("ConfiguredChannels() = %v, want none when no webhook URLs are set", channels)
+	}
 
-	if err := manager.RecordKillSwitchToggle(context.Background(), true, "manual test", time.Now()); err == nil {
-		t.Fatal("RecordKillSwitchToggle() error = nil, want missing discord notifier error")
+	// An unconfigured routed channel is a configuration gap, not a delivery
+	// failure: the alert is skipped with a DEBUG log and no error.
+	if err := manager.RecordKillSwitchToggle(context.Background(), true, "manual test", time.Now()); err != nil {
+		t.Fatalf("RecordKillSwitchToggle() error = %v, want nil", err)
 	}
 }
 
@@ -1709,7 +1714,7 @@ func TestSmokeStrategyRunnerReturnsCanonicalTerminalResultAndBlocksDownstream(t 
 		t.Run(tc.name, func(t *testing.T) {
 			winner := domain.PipelineRun{ID: uuid.New(), TradeDate: time.Now().UTC(), Status: tc.status, Signal: domain.PipelineSignalHold, ErrorMessage: "canonical winner"}
 			repo := &stubPipelineRunRepo{panicCreate: tc.panicCreate, receipt: &repository.PipelineRunFinalizationReceipt{Run: winner}}
-			core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
+			core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger(), 0, 0)
 			runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
 			result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, uuid.New())
 			if err == nil {
@@ -1727,7 +1732,7 @@ func TestSmokeStrategyRunnerReturnsCanonicalTerminalResultAndBlocksDownstream(t 
 
 func TestSmokeStrategyRunnerPostTerminalReadErrorReturnsCanonicalResult(t *testing.T) {
 	repo := &stubPipelineRunRepo{err: errors.New("run read unavailable")}
-	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
+	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger(), 0, 0)
 	runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
 
 	result, err := runner.RunStrategy(context.Background(), domain.Strategy{ID: uuid.New(), Ticker: "AAPL", Status: domain.StrategyStatusActive, IsPaper: true}, uuid.New())
@@ -1741,7 +1746,7 @@ func TestSmokeStrategyRunnerPostTerminalReadErrorReturnsCanonicalResult(t *testi
 
 func TestSmokeStrategyRunnerPersistsResolvedVersionOrigin(t *testing.T) {
 	repo := &stubPipelineRunRepo{err: errors.New("stop after run persistence")}
-	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger())
+	core := newSmokeRunner(repo, nil, nil, nil, nil, slogDiscardLogger(), 0, 0)
 	runner := &smokeStrategyRunner{executionAccount: testExecutionAccountBinding, runner: core, runRepo: repo, logger: slogDiscardLogger()}
 	versionID := uuid.New()
 	strategyID := uuid.New()
@@ -2506,7 +2511,7 @@ func TestBuildRunnerDefinition_AppliesPromptOverridesBeyondAnalysis(t *testing.T
 		},
 	}
 
-	definition, err := buildRunnerDefinition(captureProvider{}, "openai", resolved, 30*time.Second, nil, slogDiscardLogger())
+	definition, err := buildRunnerDefinition(captureProvider{}, "openai", resolved, 30*time.Second, 0, nil, slogDiscardLogger())
 	if err != nil {
 		t.Fatalf("buildRunnerDefinition() error = %v", err)
 	}

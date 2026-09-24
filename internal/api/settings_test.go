@@ -379,3 +379,71 @@ func TestUpdateSettingsRejectsUnknownDefaultProvider(t *testing.T) {
 		t.Fatalf("error = %q, want %q", body.Error, "invalid default provider: unsupported-provider")
 	}
 }
+
+func TestSettingsExposeOpenCodeWithoutPassword(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.Settings = NewMemorySettingsService(SettingsBootstrap{
+		LLM: llmSettingsState{
+			DefaultProvider: "opencode",
+			DeepThinkModel:  "openai/gpt-5.6-sol",
+			QuickThinkModel: "openai/gpt-5.6-luna",
+			Providers: llmProvidersState{
+				OpenAI:     providerState{Model: "gpt-5-mini"},
+				Anthropic:  providerState{Model: "claude-3-7-sonnet-latest"},
+				Google:     providerState{Model: "gemini-2.5-flash"},
+				OpenRouter: providerState{Model: "openai/gpt-4.1-mini"},
+				XAI:        providerState{Model: "grok-3-mini"},
+				Ollama:     providerState{Model: "llama3.2"},
+				OpenCode:   providerState{APIKey: "super-secret-password", BaseURL: "http://opencode:4096", Model: "openai/gpt-5.6-terra"},
+			},
+		},
+	})
+	srv := newTestServerWithDeps(t, deps)
+
+	rr := doRequest(t, srv, http.MethodGet, "/api/v1/settings", nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "super-secret-password") {
+		t.Fatal("settings response leaked the OpenCode password")
+	}
+	body := decodeJSON[SettingsResponse](t, rr)
+	oc := body.LLM.Providers.OpenCode
+	if !oc.BaseURLConfigured || oc.BaseURL != "http://opencode:4096" || !oc.ModelConfigured || oc.Model != "openai/gpt-5.6-terra" || !oc.PasswordConfigured {
+		t.Fatalf("opencode = %+v", oc)
+	}
+
+	payload := SettingsUpdateRequest{
+		LLM: LLMSettingsUpdateRequest{
+			DefaultProvider: "opencode",
+			DeepThinkModel:  "openai/gpt-5.6-sol",
+			QuickThinkModel: "openai/gpt-5.6-luna",
+			Providers: LLMProvidersUpdateRequest{
+				OpenAI:     LLMProviderUpdateRequest{Model: "gpt-5-mini"},
+				Anthropic:  LLMProviderUpdateRequest{Model: "claude-3-7-sonnet-latest"},
+				Google:     LLMProviderUpdateRequest{Model: "gemini-2.5-flash"},
+				OpenRouter: LLMProviderUpdateRequest{Model: "openai/gpt-4.1-mini"},
+				XAI:        LLMProviderUpdateRequest{Model: "grok-3-mini"},
+				Ollama:     OllamaProviderUpdateRequest{Model: "llama3.2"},
+				OpenCode:   &OpenCodeProviderUpdateRequest{BaseURL: "http://opencode:4097", Model: "openai/gpt-5.6-sol"},
+			},
+		},
+		Risk: domain.RiskSettings{MaxPositionSizePct: 10, MaxDailyLossPct: 2, MaxDrawdownPct: 10, MaxOpenPositions: 5, MaxTotalExposurePct: 80, MaxPerMarketExposurePct: 40, CircuitBreakerThresholdPct: 5, CircuitBreakerCooldownMin: 15},
+	}
+	rr = doRequest(t, srv, http.MethodPut, "/api/v1/settings", payload)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	updated := decodeJSON[SettingsResponse](t, rr)
+	if updated.LLM.DefaultProvider != "opencode" || updated.LLM.Providers.OpenCode.BaseURL != "http://opencode:4097" || updated.LLM.Providers.OpenCode.Model != "openai/gpt-5.6-sol" || !updated.LLM.Providers.OpenCode.PasswordConfigured {
+		t.Fatalf("updated = %+v", updated.LLM)
+	}
+
+	payload.LLM.Providers.OpenCode = &OpenCodeProviderUpdateRequest{Model: "not-qualified"}
+	rr = doRequest(t, srv, http.MethodPut, "/api/v1/settings", payload)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "provider/model form") {
+		t.Fatalf("PUT unqualified model status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}

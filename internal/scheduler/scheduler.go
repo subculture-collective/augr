@@ -24,9 +24,29 @@ const (
 	defaultStrategyPageSize       = 100
 	defaultBacktestConfigPageSize = 100
 	defaultJobTimeout             = 45 * time.Minute
+	defaultReloadInterval         = time.Minute
 )
 
-var ErrAlreadyStarted = errors.New("scheduler: already started")
+var (
+	ErrAlreadyStarted = errors.New("scheduler: already started")
+	ErrNotStarted     = errors.New("scheduler: not started")
+)
+
+// Strategy run outcome codes reported through WithRunOutcomeHook.
+const (
+	RunOutcomeCompleted       = "completed"
+	RunOutcomeExecutionFailed = "execution_failed"
+	RunOutcomeKillSwitch      = "kill_switch"
+	RunOutcomeMarketClosed    = "market_closed"
+	RunOutcomePaused          = "paused"
+	RunOutcomeSkipNextRun     = "skip_next_run"
+	RunOutcomeFetchFailed     = "fetch_failed"
+	RunOutcomeExecutorMissing = "executor_missing"
+)
+
+// RunOutcomeHook receives every scheduled strategy trigger's terminal outcome.
+// err is non-nil only for failure outcomes.
+type RunOutcomeHook func(strategy domain.Strategy, outcome string, err error)
 
 type pipelineExecutor interface {
 	Execute(ctx context.Context, strategyID uuid.UUID, ticker string) (*agent.PipelineState, error)
@@ -34,6 +54,7 @@ type pipelineExecutor interface {
 
 type cronEngine interface {
 	AddFunc(spec string, cmd func()) (cron.EntryID, error)
+	Remove(id cron.EntryID)
 	Start()
 	Stop() context.Context
 }
@@ -70,6 +91,24 @@ func WithJobTimeout(d time.Duration) Option {
 		if d > 0 {
 			s.jobTimeout = d
 		}
+	}
+}
+
+// WithReloadInterval sets how often the scheduler re-reads strategy schedules
+// from the repository and reconciles cron entries. Zero or negative disables
+// periodic reloads; Reload can still be called explicitly. Default: 60s.
+func WithReloadInterval(d time.Duration) Option {
+	return func(s *Scheduler) {
+		s.reloadInterval = d
+	}
+}
+
+// WithRunOutcomeHook records every scheduled strategy trigger's outcome
+// (completed, execution_failed, kill_switch, market_closed, paused,
+// skip_next_run, ...). The hook runs synchronously on the job goroutine.
+func WithRunOutcomeHook(hook RunOutcomeHook) Option {
+	return func(s *Scheduler) {
+		s.runOutcomeHook = hook
 	}
 }
 
@@ -155,6 +194,17 @@ type Scheduler struct {
 	strategySem           chan struct{} // limits concurrent strategy executions
 	disabledMarketTypes   map[domain.MarketType]struct{}
 	runGroup              *runcontrol.Group
+	reloadInterval        time.Duration
+	runOutcomeHook        RunOutcomeHook
+	strategyEntries       map[uuid.UUID]strategyEntry
+	reloadDone            chan struct{}
+}
+
+// strategyEntry tracks a registered strategy cron entry so reloads can diff
+// the current schedule against the repository.
+type strategyEntry struct {
+	entryID cron.EntryID
+	spec    string
 }
 
 type strategyScheduleKey struct {
@@ -182,9 +232,13 @@ func NewScheduler(
 		logger:       logger,
 		nowFunc:      time.Now,
 		newCron: func() cronEngine {
-			return cron.New()
+			// Bare specs are evaluated in America/New_York so strategy
+			// schedules follow the same market clock as automation jobs.
+			// A "CRON_TZ=<zone> ..." prefix still overrides per entry.
+			return cron.New(cron.WithLocation(newYorkLocation))
 		},
-		jobTimeout: defaultJobTimeout,
+		jobTimeout:     defaultJobTimeout,
+		reloadInterval: defaultReloadInterval,
 		riskMonitor: &riskMonitor{
 			riskEngine:   riskEngine,
 			pollInterval: defaultPollInterval,
@@ -244,60 +298,17 @@ func (s *Scheduler) Start() error {
 	s.cron = engine
 	s.ctx = runCtx
 	s.cancel = cancel
-	seenActiveStrategySchedules := make(map[strategyScheduleKey]uuid.UUID)
+	s.strategyEntries = make(map[uuid.UUID]strategyEntry)
 
-	for _, strategy := range strategies {
-		if s.marketTypeDisabled(strategy.MarketType) {
-			s.logger.Info("scheduler: retired market strategy not registered",
-				slog.String("strategy_id", strategy.ID.String()),
-				slog.String("market_type", strategy.MarketType.String()),
-			)
-			continue
-		}
-		spec := strings.TrimSpace(strategy.ScheduleCron)
-		if spec == "" {
-			continue
-		}
-
-		if strategy.Status == domain.StrategyStatusActive {
-			key := strategyScheduleKey{
-				Ticker:     strings.ToUpper(strings.TrimSpace(strategy.Ticker)),
-				MarketType: strategy.MarketType,
-				Schedule:   spec,
-			}
-			if owner, exists := seenActiveStrategySchedules[key]; exists {
-				s.logger.Warn("scheduler: duplicate active strategy schedule detected; skipping duplicate",
-					slog.String("strategy_id", strategy.ID.String()),
-					slog.String("existing_strategy_id", owner.String()),
-					slog.String("ticker", strategy.Ticker),
-					slog.String("market_type", strategy.MarketType.String()),
-					slog.String("schedule", spec),
-				)
-				continue
-			}
-			seenActiveStrategySchedules[key] = strategy.ID
-		}
-
-		strategy := strategy
-		entryID, err := engine.AddFunc(spec, func() {
-			s.runStrategy(strategy)
-		})
-		if err != nil {
+	for _, desired := range s.desiredStrategySchedules(strategies) {
+		if _, err := s.registerStrategyLocked(engine, desired.strategy, desired.spec); err != nil {
 			_, cancel := s.clearStateLocked()
 			if cancel != nil {
 				cancel()
 			}
-			return fmt.Errorf("scheduler: register strategy %s schedule %q: %w", strategy.ID, spec, err)
+			return fmt.Errorf("scheduler: register strategy %s schedule %q: %w", desired.strategy.ID, desired.spec, err)
 		}
-
 		registered++
-		s.logger.Info("scheduler: registered strategy schedule",
-			slog.String("strategy_id", strategy.ID.String()),
-			slog.String("ticker", strategy.Ticker),
-			slog.String("market_type", strategy.MarketType.String()),
-			slog.String("schedule", spec),
-			slog.Int("entry_id", int(entryID)),
-		)
 	}
 
 	for _, config := range backtests {
@@ -333,6 +344,12 @@ func (s *Scheduler) Start() error {
 
 	engine.Start()
 
+	if s.reloadInterval > 0 {
+		done := make(chan struct{})
+		s.reloadDone = done
+		go s.reloadLoop(runCtx, s.reloadInterval, done)
+	}
+
 	s.logger.Info("scheduler: started",
 		slog.Int("active_strategies", len(strategies)),
 		slog.Int("scheduled_backtests", len(backtests)),
@@ -340,6 +357,169 @@ func (s *Scheduler) Start() error {
 	)
 
 	return nil
+}
+
+type desiredStrategySchedule struct {
+	strategy domain.Strategy
+	spec     string
+}
+
+// desiredStrategySchedules filters loaded strategies down to the set that
+// should have a cron entry: enabled market type, non-empty schedule, and no
+// duplicate active (ticker, market, schedule) triple.
+func (s *Scheduler) desiredStrategySchedules(strategies []domain.Strategy) []desiredStrategySchedule {
+	seenActiveStrategySchedules := make(map[strategyScheduleKey]uuid.UUID)
+	desired := make([]desiredStrategySchedule, 0, len(strategies))
+	for _, strategy := range strategies {
+		if s.marketTypeDisabled(strategy.MarketType) {
+			s.logger.Debug("scheduler: retired market strategy not registered",
+				slog.String("strategy_id", strategy.ID.String()),
+				slog.String("market_type", strategy.MarketType.String()),
+			)
+			continue
+		}
+		spec := strings.TrimSpace(strategy.ScheduleCron)
+		if spec == "" {
+			continue
+		}
+
+		if strategy.Status == domain.StrategyStatusActive {
+			key := strategyScheduleKey{
+				Ticker:     strings.ToUpper(strings.TrimSpace(strategy.Ticker)),
+				MarketType: strategy.MarketType,
+				Schedule:   spec,
+			}
+			if owner, exists := seenActiveStrategySchedules[key]; exists {
+				s.logger.Warn("scheduler: duplicate active strategy schedule detected; skipping duplicate",
+					slog.String("strategy_id", strategy.ID.String()),
+					slog.String("existing_strategy_id", owner.String()),
+					slog.String("ticker", strategy.Ticker),
+					slog.String("market_type", strategy.MarketType.String()),
+					slog.String("schedule", spec),
+				)
+				continue
+			}
+			seenActiveStrategySchedules[key] = strategy.ID
+		}
+		desired = append(desired, desiredStrategySchedule{strategy: strategy, spec: spec})
+	}
+	return desired
+}
+
+// registerStrategyLocked adds a cron entry for the strategy and records it in
+// strategyEntries. Caller holds s.mu.
+func (s *Scheduler) registerStrategyLocked(engine cronEngine, strategy domain.Strategy, spec string) (cron.EntryID, error) {
+	entryID, err := engine.AddFunc(spec, func() {
+		s.runStrategy(strategy)
+	})
+	if err != nil {
+		return 0, err
+	}
+	s.strategyEntries[strategy.ID] = strategyEntry{entryID: entryID, spec: spec}
+	s.logger.Info("scheduler: registered strategy schedule",
+		slog.String("strategy_id", strategy.ID.String()),
+		slog.String("ticker", strategy.Ticker),
+		slog.String("market_type", strategy.MarketType.String()),
+		slog.String("schedule", spec),
+		slog.Int("entry_id", int(entryID)),
+	)
+	return entryID, nil
+}
+
+// Reload re-reads active and paused strategies and reconciles cron entries:
+// new schedules are added, deleted/retired/empty-schedule strategies are
+// removed, and changed specs are re-registered. Backtest schedules are not
+// reloaded. Safe to call from the API while the scheduler is running.
+func (s *Scheduler) Reload(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, running := s.runningContext(); !running {
+		return ErrNotStarted
+	}
+	strategies, err := s.loadActiveStrategies(ctx)
+	if err != nil {
+		return err
+	}
+	desired := s.desiredStrategySchedules(strategies)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	engine := s.cron
+	if engine == nil {
+		return ErrNotStarted
+	}
+
+	wanted := make(map[uuid.UUID]desiredStrategySchedule, len(desired))
+	for _, d := range desired {
+		wanted[d.strategy.ID] = d
+	}
+
+	added, removed, changed := 0, 0, 0
+	for id, entry := range s.strategyEntries {
+		want, ok := wanted[id]
+		if ok && want.spec == entry.spec {
+			continue
+		}
+		engine.Remove(entry.entryID)
+		delete(s.strategyEntries, id)
+		if ok {
+			changed++
+		} else {
+			removed++
+			s.logger.Info("scheduler: removed strategy schedule",
+				slog.String("strategy_id", id.String()),
+				slog.String("schedule", entry.spec),
+			)
+		}
+	}
+	for _, d := range desired {
+		if _, exists := s.strategyEntries[d.strategy.ID]; exists {
+			continue
+		}
+		if _, err := s.registerStrategyLocked(engine, d.strategy, d.spec); err != nil {
+			s.logger.Error("scheduler: reload failed to register strategy schedule",
+				slog.String("strategy_id", d.strategy.ID.String()),
+				slog.String("schedule", d.spec),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		added++
+	}
+	added -= changed
+	if added != 0 || removed != 0 || changed != 0 {
+		s.logger.Info("scheduler: strategy schedules reloaded",
+			slog.Int("added", added),
+			slog.Int("removed", removed),
+			slog.Int("changed", changed),
+			slog.Int("registered", len(s.strategyEntries)),
+		)
+	}
+	return nil
+}
+
+// RegisteredStrategyCount reports how many strategy cron entries are active.
+func (s *Scheduler) RegisteredStrategyCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.strategyEntries)
+}
+
+func (s *Scheduler) reloadLoop(ctx context.Context, interval time.Duration, done chan struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if err := s.Reload(ctx); err != nil && !errors.Is(err, ErrNotStarted) && ctx.Err() == nil {
+			s.logger.Error("scheduler: periodic strategy reload failed", slog.Any("error", err))
+		}
+	}
 }
 
 // TriggerStrategy triggers an immediate pipeline run for the given strategy,
@@ -450,10 +630,15 @@ func (s *Scheduler) Stop() {
 func (s *Scheduler) StopDispatch() {
 	s.mu.Lock()
 	engine, cancel := s.clearStateLocked()
+	reloadDone := s.reloadDone
+	s.reloadDone = nil
 	s.mu.Unlock()
 
 	if cancel != nil {
 		cancel()
+	}
+	if reloadDone != nil {
+		<-reloadDone
 	}
 	if engine == nil {
 		return
@@ -628,6 +813,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("strategy_id", strategy.ID.String()),
 			slog.Any("error", err),
 		)
+		s.reportOutcome(strategy, RunOutcomeFetchFailed, err)
 		return
 	}
 
@@ -636,6 +822,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("strategy_id", strategy.ID.String()),
 			slog.String("ticker", strategy.Ticker),
 		)
+		s.reportOutcome(*current, RunOutcomePaused, nil)
 		return
 	}
 
@@ -651,6 +838,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 				slog.Any("error", err),
 			)
 		}
+		s.reportOutcome(*current, RunOutcomeSkipNextRun, nil)
 		return
 	}
 
@@ -661,6 +849,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("ticker", current.Ticker),
 			slog.String("market_type", current.MarketType.String()),
 		)
+		s.reportOutcome(*current, RunOutcomeExecutorMissing, nil)
 		return
 	}
 
@@ -681,6 +870,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("strategy_id", strategy.ID.String()),
 			slog.Any("error", err),
 		)
+		s.reportOutcome(*current, RunOutcomeKillSwitch, err)
 		return
 	}
 	if killSwitchActive {
@@ -688,6 +878,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("strategy_id", strategy.ID.String()),
 			slog.String("ticker", strategy.Ticker),
 		)
+		s.reportOutcome(*current, RunOutcomeKillSwitch, nil)
 		return
 	}
 
@@ -698,6 +889,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("market_type", strategy.MarketType.String()),
 			slog.Time("checked_at", now.UTC()),
 		)
+		s.reportOutcome(*current, RunOutcomeMarketClosed, nil)
 		return
 	}
 
@@ -712,6 +904,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 				slog.String("ticker", current.Ticker),
 				slog.Any("error", err),
 			)
+			s.reportOutcome(*current, RunOutcomeExecutionFailed, err)
 			return
 		}
 
@@ -719,6 +912,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("strategy_id", current.ID.String()),
 			slog.String("ticker", current.Ticker),
 		)
+		s.reportOutcome(*current, RunOutcomeCompleted, nil)
 		return
 	}
 
@@ -728,6 +922,7 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 			slog.String("ticker", current.Ticker),
 			slog.Any("error", err),
 		)
+		s.reportOutcome(*current, RunOutcomeExecutionFailed, err)
 		return
 	}
 
@@ -735,6 +930,26 @@ func (s *Scheduler) executeAdmittedStrategy(parent context.Context, strategy dom
 		slog.String("strategy_id", current.ID.String()),
 		slog.String("ticker", current.Ticker),
 	)
+	s.reportOutcome(*current, RunOutcomeCompleted, nil)
+}
+
+// reportOutcome invokes the configured run outcome hook, containing panics so
+// a faulty recorder cannot take down the scheduler goroutine.
+func (s *Scheduler) reportOutcome(strategy domain.Strategy, outcome string, err error) {
+	hook := s.runOutcomeHook
+	if hook == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			s.logger.Error("scheduler: run outcome hook panicked",
+				slog.String("strategy_id", strategy.ID.String()),
+				slog.String("outcome", outcome),
+				slog.String("panic_type", fmt.Sprintf("%T", recovered)),
+			)
+		}
+	}()
+	hook(strategy, outcome, err)
 }
 
 func (s *Scheduler) schedulerContext() context.Context {
@@ -857,6 +1072,7 @@ func (s *Scheduler) clearStateLocked() (cronEngine, context.CancelFunc) {
 	s.cron = nil
 	s.ctx = nil
 	s.cancel = nil
+	s.strategyEntries = nil
 	return engine, cancel
 }
 

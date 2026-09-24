@@ -3,14 +3,18 @@ package binance
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
+	"github.com/PatrickFanella/get-rich-quick/internal/execution"
 )
 
 func TestBrokerSubmitOrder_MapsSupportedOrderTypes(t *testing.T) {
@@ -69,6 +73,11 @@ func TestBrokerSubmitOrder_MapsSupportedOrderTypes(t *testing.T) {
 				query  url.Values
 			}, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/api/v3/exchangeInfo" {
+					_, _ = w.Write([]byte(exchangeInfoJSON(r.URL.Query().Get("symbol"), "0.01", "0.01", "0.5", "10")))
+					return
+				}
 				requests <- struct {
 					method string
 					path   string
@@ -79,7 +88,6 @@ func TestBrokerSubmitOrder_MapsSupportedOrderTypes(t *testing.T) {
 					query:  r.URL.Query(),
 				}
 
-				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"symbol":"` + tt.wantQuery["symbol"] + `","orderId":12345}`))
 			}))
 			defer server.Close()
@@ -505,8 +513,12 @@ func TestBrokerGetAccountBalance_RejectsInvalidResponseFields(t *testing.T) {
 func TestBrokerSubmitOrder_DecodeResponse(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v3/exchangeInfo" {
+			_, _ = w.Write([]byte(exchangeInfoJSON("BTCUSDT", "0.00001", "0.00001", "0.01", "5")))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"symbol":  "BTCUSDT",
 			"orderId": 12345,
@@ -541,5 +553,213 @@ func assertFloatClose(t *testing.T, got, want, delta float64) {
 
 	if math.Abs(got-want) > delta {
 		t.Fatalf("value = %.12f, want %.12f (delta %.12f)", got, want, delta)
+	}
+}
+
+// exchangeInfoJSON builds a minimal /api/v3/exchangeInfo body for one symbol.
+func exchangeInfoJSON(symbol, stepSize, minQty, tickSize, minNotional string) string {
+	return `{"symbols":[{"symbol":"` + symbol + `","status":"TRADING","filters":[` +
+		`{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"1000000","tickSize":"` + tickSize + `"},` +
+		`{"filterType":"LOT_SIZE","minQty":"` + minQty + `","maxQty":"9000","stepSize":"` + stepSize + `"},` +
+		`{"filterType":"NOTIONAL","minNotional":"` + minNotional + `","applyMinToMarket":true}` +
+		`]}]}`
+}
+
+func newFilterTestBroker(t *testing.T, exchangeInfo string, onOrder func(w http.ResponseWriter, r *http.Request)) (*Broker, *int32) {
+	t.Helper()
+	var infoCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v3/exchangeInfo" {
+			atomic.AddInt32(&infoCalls, 1)
+			_, _ = w.Write([]byte(exchangeInfo))
+			return
+		}
+		onOrder(w, r)
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient("test-key", "test-secret", true, discardLogger())
+	client.SetBaseURL(server.URL)
+	return NewBroker(client), &infoCalls
+}
+
+func TestBrokerSubmitOrder_AppliesExchangeFiltersAndClientOrderID(t *testing.T) {
+	t.Parallel()
+
+	requests := make(chan url.Values, 4)
+	broker, infoCalls := newFilterTestBroker(t, exchangeInfoJSON("BTCUSDT", "0.001", "0.001", "0.1", "10"), func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.URL.Query()
+		_, _ = w.Write([]byte(`{"symbol":"BTCUSDT","orderId":77,"status":"NEW","executedQty":"0","cummulativeQuoteQty":"0"}`))
+	})
+
+	limit := 30123.456
+	order := &domain.Order{ClientOrderID: "client-abc", Ticker: "BTCUSDT", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 0.0123456, LimitPrice: &limit}
+	if _, err := broker.SubmitOrder(context.Background(), order); err != nil {
+		t.Fatalf("SubmitOrder() error = %v", err)
+	}
+	query := <-requests
+	if query.Get("quantity") != "0.012" || query.Get("price") != "30123.4" || query.Get("newClientOrderId") != "client-abc" || query.Get("newOrderRespType") != "FULL" {
+		t.Fatalf("submit query = %v", query)
+	}
+
+	// A sell rounds the price up so the order is never more aggressive.
+	sell := &domain.Order{ClientOrderID: "client-def", Ticker: "BTCUSDT", Side: domain.OrderSideSell, OrderType: domain.OrderTypeLimit, Quantity: 0.5, LimitPrice: &limit}
+	if _, err := broker.SubmitOrder(context.Background(), sell); err != nil {
+		t.Fatalf("SubmitOrder(sell) error = %v", err)
+	}
+	query = <-requests
+	if query.Get("price") != "30123.5" || query.Get("quantity") != "0.5" {
+		t.Fatalf("sell query = %v", query)
+	}
+	if got := atomic.LoadInt32(infoCalls); got != 1 {
+		t.Fatalf("exchangeInfo calls = %d, want 1 (cached)", got)
+	}
+}
+
+func TestBrokerSubmitOrder_RejectsBelowMinQtyAndMinNotional(t *testing.T) {
+	t.Parallel()
+
+	broker, _ := newFilterTestBroker(t, exchangeInfoJSON("ETHUSDT", "0.001", "0.01", "0.01", "10"), func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("order must not be submitted")
+		_, _ = w.Write([]byte(`{}`))
+	})
+
+	limit := 2000.0
+	_, err := broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "ETHUSDT", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 0.0015, LimitPrice: &limit})
+	if err == nil || !strings.Contains(err.Error(), "below minimum") {
+		t.Fatalf("SubmitOrder() minQty error = %v", err)
+	}
+	_, err = broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "ETHUSDT", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 0.02, LimitPrice: floatPtr(100)})
+	if err == nil || !strings.Contains(err.Error(), "notional") {
+		t.Fatalf("SubmitOrder() minNotional error = %v", err)
+	}
+	_, err = broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "ETHUSDT", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 0.0004})
+	if err == nil || !strings.Contains(err.Error(), "rounds to zero") {
+		t.Fatalf("SubmitOrder() step rounding error = %v", err)
+	}
+}
+
+func TestBrokerSubmitOrder_RejectsUnknownSymbolInExchangeInfo(t *testing.T) {
+	t.Parallel()
+
+	broker, _ := newFilterTestBroker(t, `{"symbols":[]}`, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	})
+	_, err := broker.SubmitOrder(context.Background(), &domain.Order{Ticker: "NOPEUSDT", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1})
+	if err == nil || !strings.Contains(err.Error(), "does not include symbol") {
+		t.Fatalf("SubmitOrder() error = %v", err)
+	}
+}
+
+func TestBrokerGetOrderStatusResult_ParsesFillEconomics(t *testing.T) {
+	t.Parallel()
+
+	broker, _ := newFilterTestBroker(t, `{}`, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("orderId") != "999" {
+			t.Errorf("orderId = %q", r.URL.Query().Get("orderId"))
+		}
+		_, _ = w.Write([]byte(`{"symbol":"ETHUSDT","orderId":999,"status":"PARTIALLY_FILLED","executedQty":"0.50000000","cummulativeQuoteQty":"1500.00000000","updateTime":1700000000000}`))
+	})
+	result, err := broker.GetOrderStatusResult(context.Background(), "ETHUSDT:999")
+	if err != nil {
+		t.Fatalf("GetOrderStatusResult() error = %v", err)
+	}
+	if result.Status != domain.OrderStatusPartial || result.FilledQuantity != 0.5 || result.FilledAvgPrice == nil || *result.FilledAvgPrice != 3000 {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.FilledAt == nil || result.FilledAt.UnixMilli() != 1700000000000 {
+		t.Fatalf("FilledAt = %v", result.FilledAt)
+	}
+	var _ execution.BrokerOrderStatusProvider = broker
+	var _ execution.BrokerClientOrderStatusProvider = broker
+}
+
+func TestBrokerOrderEconomics_UsesFillsWhenCumulativeMissing(t *testing.T) {
+	t.Parallel()
+
+	var response orderResponse
+	if err := json.Unmarshal([]byte(`{"orderId":1,"status":"FILLED","fills":[{"price":"100","qty":"1"},{"price":"110","qty":"1"}]}`), &response); err != nil {
+		t.Fatal(err)
+	}
+	result, err := orderEconomics(response)
+	if err != nil {
+		t.Fatalf("orderEconomics() error = %v", err)
+	}
+	if result.Status != domain.OrderStatusFilled || result.FilledQuantity != 2 || result.FilledAvgPrice == nil || *result.FilledAvgPrice != 105 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestBrokerGetOrderStatusByClientOrderID(t *testing.T) {
+	t.Parallel()
+
+	broker, _ := newFilterTestBroker(t, `{}`, func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		if query.Get("symbol") != "BTCUSDT" || query.Get("origClientOrderId") != "client-1" {
+			t.Errorf("query = %v", query)
+		}
+		if query.Get("origClientOrderId") == "client-1" {
+			_, _ = w.Write([]byte(`{"symbol":"BTCUSDT","orderId":55,"clientOrderId":"client-1","status":"FILLED","executedQty":"1","cummulativeQuoteQty":"20000"}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":-2013,"msg":"Order does not exist."}`))
+	})
+	externalID, status, err := broker.GetOrderStatusByClientOrderIDResult(context.Background(), "BTCUSDT:client-1")
+	if err != nil {
+		t.Fatalf("GetOrderStatusByClientOrderIDResult() error = %v", err)
+	}
+	if externalID != "BTCUSDT:55" || status.Status != domain.OrderStatusFilled || status.FilledQuantity != 1 || *status.FilledAvgPrice != 20000 {
+		t.Fatalf("result = %q %+v", externalID, status)
+	}
+	if _, _, err := broker.GetOrderStatusByClientOrderIDResult(context.Background(), "client-1"); err == nil {
+		t.Fatal("bare client order id was accepted without a symbol")
+	}
+}
+
+func TestBrokerGetOrderStatusByClientOrderID_NotFound(t *testing.T) {
+	t.Parallel()
+
+	broker, _ := newFilterTestBroker(t, `{}`, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"code":-2013,"msg":"Order does not exist."}`))
+	})
+	_, _, err := broker.GetOrderStatusByClientOrderIDResult(context.Background(), "BTCUSDT:missing")
+	if !errors.Is(err, execution.ErrBrokerOrderNotFound) {
+		t.Fatalf("error = %v, want ErrBrokerOrderNotFound", err)
+	}
+}
+
+func TestBrokerGetPositions_ExcludesQuoteAssets(t *testing.T) {
+	t.Parallel()
+
+	broker, _ := newFilterTestBroker(t, `{}`, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"balances":[{"asset":"USDT","free":"1500","locked":"0"},{"asset":"USDC","free":"20","locked":"0"},{"asset":"BTC","free":"0.5","locked":"0"}]}`))
+	})
+	positions, err := broker.GetPositions(context.Background())
+	if err != nil {
+		t.Fatalf("GetPositions() error = %v", err)
+	}
+	if len(positions) != 1 || positions[0].Ticker != "BTC" || positions[0].AvgEntry != 0 {
+		t.Fatalf("positions = %+v, want only BTC with unknown entry", positions)
+	}
+}
+
+func TestApplySymbolFiltersRounding(t *testing.T) {
+	t.Parallel()
+
+	filters := symbolFilters{Symbol: "X", StepSize: 0.1, MinQty: 0.1, TickSize: 0.5, MinNotional: 1}
+	price := 10.26
+	// 1.3/0.1 is 12.999999999999998 in floating point; the epsilon keeps it at 13 steps.
+	shaped, err := applySymbolFilters(&domain.Order{Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 1.3, LimitPrice: &price}, filters)
+	if err != nil {
+		t.Fatalf("applySymbolFilters() error = %v", err)
+	}
+	if shaped.Quantity != "1.3" || shaped.Price != "10" {
+		t.Fatalf("shaped = %+v", shaped)
+	}
+	shaped, err = applySymbolFilters(&domain.Order{Side: domain.OrderSideSell, OrderType: domain.OrderTypeLimit, Quantity: 2, LimitPrice: &price}, filters)
+	if err != nil || shaped.Price != "10.5" {
+		t.Fatalf("sell shaped = %+v err = %v", shaped, err)
 	}
 }

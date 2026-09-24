@@ -22,10 +22,18 @@ type Proposal struct {
 	WatchTerms       []string `json:"watch_terms"`
 	InvalidateIf     []string `json:"invalidate_if"`
 	SourceReferences []string `json:"source_references,omitempty"`
-	MaxSpreadPct     float64  `json:"max_spread_pct,omitempty"`
-	MinLiquidity     float64  `json:"min_liquidity,omitempty"`
-	StopPolicy       string   `json:"stop_policy,omitempty"`
-	TargetPolicy     string   `json:"target_policy,omitempty"`
+	// FairProbability is the proposal's probability estimate for the chosen
+	// side. Deterministic discovery fills it with a documented proxy (see
+	// Calibration); an LLM or model-backed generator may supply a real estimate.
+	FairProbability float64 `json:"fair_probability,omitempty"`
+	// Calibration names the method behind FairProbability. Values prefixed
+	// "discovery_conviction_proxy" are accepted by the native executor for paper
+	// accounts only.
+	Calibration  string  `json:"calibration,omitempty"`
+	MaxSpreadPct float64 `json:"max_spread_pct,omitempty"`
+	MinLiquidity float64 `json:"min_liquidity,omitempty"`
+	StopPolicy   string  `json:"stop_policy,omitempty"`
+	TargetPolicy string  `json:"target_policy,omitempty"`
 }
 
 // ValidateProposal checks the proposal contract and rejects stock/OHLCV-style language.

@@ -8,6 +8,9 @@ type RuntimeRiskState struct {
 	DrawdownPct        float64
 	NewOrdersToday     int
 	CircuitBreakerOpen bool
-	ReconciliationID   string
-	UnderlyingRisk     map[string]float64
+	// OpenBreakerScopes lists every tripped, unreset breaker scope so the
+	// allocator can reject only opportunities whose strategy scope is open.
+	OpenBreakerScopes []string
+	ReconciliationID  string
+	UnderlyingRisk    map[string]float64
 }

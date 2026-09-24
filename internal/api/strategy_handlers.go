@@ -132,13 +132,19 @@ func (s *Server) handleRunStrategy(w http.ResponseWriter, r *http.Request) {
 		runCtx = admittedCtx
 		release = lease.Done
 	}
+	requestID := CorrelationIDFromContext(r.Context())
+	actor := actorOf(r)
 	go func() {
 		if release != nil {
 			defer release()
 		}
 		result, err := s.runner.RunStrategy(runCtx, *strategy, executionVersionID)
 		if err != nil {
-			slog.Error("async strategy run failed", slog.String("strategy_id", id.String()), slog.String("error", err.Error()))
+			s.logger.Error("async strategy run failed",
+				slog.String("strategy_id", id.String()),
+				slog.String("request_id", requestID),
+				slog.String("error", err.Error()))
+			s.recordManualRunFailure(runCtx, *strategy, executionVersionID, requestID, actor, err)
 			return
 		}
 		if result != nil {
@@ -146,12 +152,12 @@ func (s *Server) handleRunStrategy(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	s.writeAuditLog(r.Context(), actorOf(r), "strategy.manual_run", "strategy", &id,
+	s.writeAuditLog(r.Context(), actor, "strategy.manual_run", "strategy", &id,
 		map[string]string{"ticker": strategy.Ticker})
-	respondJSON(w, http.StatusAccepted, map[string]string{
-		"status":      "accepted",
-		"strategy_id": id.String(),
-		"message":     "strategy run started",
+	respondJSON(w, http.StatusAccepted, StrategyRunAccepted{
+		Status:     "accepted",
+		StrategyID: id.String(),
+		Message:    "strategy run started",
 	})
 }
 
@@ -202,6 +208,7 @@ func (s *Server) handleCreateStrategy(w http.ResponseWriter, r *http.Request) {
 	strategy.ExecutionStrategyVersionID = &versionID
 	s.writeAuditLog(r.Context(), actorOf(r), "strategy.created", "strategy", &strategy.ID,
 		map[string]any{"ticker": strategy.Ticker, "market_type": strategy.MarketType, "is_paper": strategy.IsPaper})
+	s.reloadSchedulerAfterWrite(r.Context(), "strategy.create")
 	respondJSON(w, http.StatusCreated, strategy)
 }
 
@@ -272,6 +279,7 @@ func (s *Server) handleUpdateStrategy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeAuditLog(r.Context(), actorOf(r), "strategy.updated", "strategy", &id, strategyUpdateAuditDetails(before, *strategy))
+	s.reloadSchedulerAfterWrite(r.Context(), "strategy.updated")
 	respondJSON(w, http.StatusOK, strategy)
 }
 
@@ -339,6 +347,7 @@ func (s *Server) handleDeleteStrategy(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, "failed to delete strategy", ErrCodeInternal)
 		return
 	}
+	s.reloadSchedulerAfterWrite(r.Context(), "strategy.delete")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -503,4 +512,50 @@ func validateStrategyConfigPayload(raw domain.StrategyConfig) error {
 	}
 
 	return nil
+}
+
+// StrategyRunAccepted is the 202 receipt returned by POST /strategies/{id}/run.
+// The pipeline runs asynchronously; this body reports admission only.
+type StrategyRunAccepted struct {
+	Status     string `json:"status"`
+	StrategyID string `json:"strategy_id"`
+	Message    string `json:"message"`
+}
+
+// recordManualRunFailure persists a manual-run failure as an agent event so
+// the outcome is visible in the events feed and daily review, not only in logs.
+func (s *Server) recordManualRunFailure(ctx context.Context, strategy domain.Strategy, executionVersionID uuid.UUID, requestID, actor string, runErr error) {
+	if s.events == nil {
+		return
+	}
+	metadata, marshalErr := json.Marshal(map[string]string{
+		"error":      runErr.Error(),
+		"request_id": requestID,
+		"actor":      actor,
+		"ticker":     strategy.Ticker,
+	})
+	if marshalErr != nil {
+		metadata = nil
+	}
+	event := &domain.AgentEvent{
+		OriginType: "strategy_version",
+		OriginID:   executionVersionID.String(),
+		StrategyID: &strategy.ID,
+		EventKind:  "strategy.manual_run_failed",
+		Title:      "Manual strategy run failed",
+		Summary:    runErr.Error(),
+		Tags:       []string{"strategy", "manual_run", "failed"},
+		Metadata:   metadata,
+	}
+	if s.paperEvaluation != nil {
+		event.Environment = domain.AccountEnvironment(s.paperEvaluation.Mode)
+	}
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.events.Create(persistCtx, event); err != nil {
+		s.logger.Error("persist manual run failure event",
+			slog.String("strategy_id", strategy.ID.String()),
+			slog.String("request_id", requestID),
+			slog.String("error", err.Error()))
+	}
 }

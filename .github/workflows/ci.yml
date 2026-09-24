@@ -213,7 +213,6 @@ jobs:
           RISK_CIRCUIT_BREAKER_COOLDOWN=15m
           ENABLE_SCHEDULER=false
           ENABLE_REDIS_CACHE=false
-          ENABLE_AGENT_MEMORY=false
           ENABLE_LIVE_TRADING=false
           POSTGRES_USER=postgres
           POSTGRES_PASSWORD=postgres

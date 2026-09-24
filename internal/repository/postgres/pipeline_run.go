@@ -553,3 +553,39 @@ func marshalConfigSnapshot(cfg json.RawMessage) ([]byte, error) {
 
 	return cfg, nil
 }
+
+// ListByRefs returns the runs for the provided refs within the repository's
+// account, keyed by run id. Missing refs are absent from the result. It exists
+// so batch callers such as the portfolio allocator avoid one Get per
+// opportunity.
+func (r *PipelineRunRepo) ListByRefs(ctx context.Context, refs []domain.PipelineRunRef) (map[uuid.UUID]domain.PipelineRun, error) {
+	out := make(map[uuid.UUID]domain.PipelineRun, len(refs))
+	if len(refs) == 0 {
+		return out, nil
+	}
+	ids := make([]uuid.UUID, 0, len(refs))
+	for _, ref := range refs {
+		ids = append(ids, ref.ID)
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT `+pipelineRunSelectColumns+`
+		 FROM pipeline_runs
+		 WHERE id = ANY($1) AND account_id = $2`,
+		ids, r.accountID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: list pipeline runs by refs: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		run, err := scanPipelineRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: list pipeline runs by refs scan: %w", err)
+		}
+		out[run.ID] = *run
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list pipeline runs by refs rows: %w", err)
+	}
+	return out, nil
+}

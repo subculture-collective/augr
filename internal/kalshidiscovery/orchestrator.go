@@ -19,13 +19,21 @@ import (
 
 const (
 	defaultKalshiScheduleCron   = "0 */6 * * *"
-	defaultKalshiFetchLimit     = 100
+	defaultKalshiFetchLimit     = 500
 	defaultKalshiMaxDeployments = 3
 	defaultKalshiMinConviction  = 0.60
 	kalshiProposalTemplate      = "microstructure"
+	topRejectionReasonsLogged   = 5
+
+	// ProxyCalibration marks fair probabilities derived from the deterministic
+	// conviction/mid-price proxy rather than a calibrated model. The native
+	// executor accepts this prefix for paper accounts only.
+	ProxyCalibration = "discovery_conviction_proxy_v1"
 )
 
 // Config bundles the Kalshi discovery fetch, screening, and deployment settings.
+// FetchLimit is the total number of open markets fetched across catalog pages;
+// paging stops early once Screener.MaxCandidates candidates pass screening.
 type Config struct {
 	FetchLimit     int
 	Screener       ScreenerConfig
@@ -69,6 +77,11 @@ type Result struct {
 	Deployed   []DeployedStrategy `json:"deployed"`
 	Errors     []string           `json:"errors,omitempty"`
 	DryRun     bool               `json:"dry_run"`
+	// Rejected counts screener rejections; RejectionReasons aggregates the
+	// normalized reasons so operators can see why nothing passed.
+	Rejected         int           `json:"rejected"`
+	RejectionReasons []ReasonCount `json:"rejection_reasons,omitempty"`
+	Pages            int           `json:"pages"`
 }
 
 // Run executes a full Kalshi discovery pipeline.
@@ -100,19 +113,23 @@ func Run(ctx context.Context, cfg Config, deps Deps) (res *Result, err error) {
 	}
 
 	res = &Result{StartedAt: time.Now().UTC(), DryRun: cfg.DryRun}
+	summary := map[string]any{
+		"source":            "kalshi_discovery",
+		"dry_run":           cfg.DryRun,
+		"fetch_limit":       cfg.FetchLimit,
+		"max_deployments":   cfg.MaxDeployments,
+		"min_conviction":    cfg.MinConviction,
+		"schedule_cron":     cfg.ScheduleCron,
+		"max_candidates":    cfg.Screener.MaxCandidates,
+		"min_volume":        cfg.Screener.MinVolume,
+		"min_open_interest": cfg.Screener.MinOpenInterest,
+		"max_spread_pct":    cfg.Screener.MaxSpreadPct,
+		"min_days_to_close": cfg.Screener.MinDaysToClose,
+	}
 	run := &domain.KalshiDiscoveryRun{
 		StartedAt: res.StartedAt,
 		Status:    domain.KalshiDiscoveryStatusRunning,
-		Result: domain.KalshiDiscoveryResult{
-			Summary: mustJSON(map[string]any{
-				"source":          "kalshi_discovery",
-				"dry_run":         cfg.DryRun,
-				"fetch_limit":     cfg.FetchLimit,
-				"max_deployments": cfg.MaxDeployments,
-				"min_conviction":  cfg.MinConviction,
-				"schedule_cron":   cfg.ScheduleCron,
-			}),
-		},
+		Result:    domain.KalshiDiscoveryResult{Summary: mustJSON(summary)},
 	}
 	if !cfg.DryRun && deps.DiscoveryRuns != nil {
 		if createErr := deps.DiscoveryRuns.Create(ctx, run); createErr != nil {
@@ -127,6 +144,10 @@ func Run(ctx context.Context, cfg Config, deps Deps) (res *Result, err error) {
 			run.Result.Proposed = res.Proposed
 			run.Result.Deployed = len(res.Deployed)
 			run.Result.Errors = append([]string(nil), res.Errors...)
+			summary["pages"] = res.Pages
+			summary["rejected"] = res.Rejected
+			summary["rejection_reasons"] = res.RejectionReasons
+			run.Result.Summary = mustJSON(summary)
 			run.FinishedAt = ptrTime(time.Now().UTC())
 			if err != nil {
 				run.Status = domain.KalshiDiscoveryStatusFailed
@@ -142,44 +163,82 @@ func Run(ctx context.Context, cfg Config, deps Deps) (res *Result, err error) {
 	}
 
 	start := res.StartedAt
-	pageOpts := ListOptions{Limit: cfg.FetchLimit, Status: "open"}
+	now := time.Now().UTC()
+	pageOpts := ListOptions{Limit: normalizeLimit(cfg.FetchLimit), Status: "open"}
+	snapshotIDs := map[string]uuid.UUID{}
 	var all []MarketCandidate
+	acceptedSoFar := 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return res, err
-		}
-		page, cursor, fetchErr := deps.Catalog.ListMarkets(ctx, pageOpts)
-		if fetchErr != nil {
-			return res, fmt.Errorf("kalshidiscovery: fetch markets: %w", fetchErr)
 		}
 		remaining := cfg.FetchLimit - len(all)
 		if remaining <= 0 {
 			break
 		}
+		if remaining < pageOpts.Limit {
+			pageOpts.Limit = remaining
+		}
+		page, cursor, fetchErr := deps.Catalog.ListMarkets(ctx, pageOpts)
+		if fetchErr != nil {
+			return res, fmt.Errorf("kalshidiscovery: fetch markets: %w", fetchErr)
+		}
+		res.Pages++
 		if len(page) > remaining {
 			page = page[:remaining]
 		}
 		for _, candidate := range page {
 			all = append(all, candidate)
 			if !cfg.DryRun && deps.Snapshots != nil {
-				if snapErr := deps.Snapshots.Create(ctx, candidate.ToSnapshot()); snapErr != nil {
+				snapshot := candidate.ToSnapshot()
+				snapshot.ID = uuid.New()
+				if snapErr := deps.Snapshots.Create(ctx, snapshot); snapErr != nil {
 					res.Errors = append(res.Errors, fmt.Sprintf("snapshot %s: %v", candidate.Ticker, snapErr))
+				} else {
+					snapshotIDs[candidate.Ticker] = snapshot.ID
 				}
 			}
 		}
-		if strings.TrimSpace(cursor) == "" || len(all) >= cfg.FetchLimit {
+		// Stop paging once enough candidates pass the screener; the first
+		// pages of /markets are dominated by newly created zero-volume markets.
+		pageAccepted, _ := ScreenMarketsDetailed(page, ScreenerConfig{
+			MinVolume:       cfg.Screener.MinVolume,
+			MinOpenInterest: cfg.Screener.MinOpenInterest,
+			MaxSpreadPct:    cfg.Screener.MaxSpreadPct,
+			MinDaysToClose:  cfg.Screener.MinDaysToClose,
+			Categories:      cfg.Screener.Categories,
+		}, now)
+		acceptedSoFar += len(pageAccepted)
+		if cfg.Screener.MaxCandidates > 0 && acceptedSoFar >= cfg.Screener.MaxCandidates {
+			break
+		}
+		if strings.TrimSpace(cursor) == "" || len(page) == 0 || len(all) >= cfg.FetchLimit {
 			break
 		}
 		pageOpts.Cursor = cursor
 	}
 	res.FetchedAll = len(all)
 
-	accepted, rejected := ScreenMarketsDetailed(all, cfg.Screener, time.Now().UTC())
+	accepted, rejected := ScreenMarketsDetailed(all, cfg.Screener, now)
 	res.Screened = len(accepted)
-	if len(rejected) > 0 {
-		logger.Info("kalshidiscovery: candidates screened", slog.Int("fetched", len(all)), slog.Int("accepted", len(accepted)), slog.Int("rejected", len(rejected)))
-	} else {
-		logger.Info("kalshidiscovery: candidates screened", slog.Int("fetched", len(all)), slog.Int("accepted", len(accepted)))
+	res.Rejected = len(rejected)
+	res.RejectionReasons = SummarizeRejections(rejected)
+	logger.Info("kalshidiscovery: candidates screened",
+		slog.Int("fetched", len(all)),
+		slog.Int("pages", res.Pages),
+		slog.Int("accepted", len(accepted)),
+		slog.Int("rejected", len(rejected)),
+	)
+	for i, reason := range res.RejectionReasons {
+		if i >= topRejectionReasonsLogged {
+			break
+		}
+		logger.Info("kalshidiscovery: top rejection reason",
+			slog.Int("rank", i+1),
+			slog.String("reason", reason.Reason),
+			slog.Int("count", reason.Count),
+			slog.Int("rejected", len(rejected)),
+		)
 	}
 
 	if !cfg.DryRun && deps.Watched != nil {
@@ -199,6 +258,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) (res *Result, err error) {
 			res.Errors = append(res.Errors, fmt.Sprintf("proposal %s: %v", candidate.Ticker, buildErr))
 			continue
 		}
+		proposal.SourceReferences = appendSourceReferences(proposal.SourceReferences, candidate, snapshotIDs[candidate.Ticker])
 		res.Proposed++
 		if proposal.Conviction < cfg.MinConviction {
 			res.Skipped++
@@ -266,6 +326,8 @@ func DeployStrategy(
 				"entry_price_max":           proposal.EntryPriceMax,
 				"price_ceiling":             proposal.EntryPriceMax,
 				"source_references":         proposal.SourceReferences,
+				"fair_probability":          proposal.FairProbability,
+				"calibration":               proposal.Calibration,
 				"max_spread_pct":            proposal.MaxSpreadPct,
 				"min_liquidity":             proposal.MinLiquidity,
 				"stop_policy":               proposal.StopPolicy,
@@ -325,7 +387,10 @@ func buildDeterministicProposal(candidate MarketCandidate) (Proposal, error) {
 		watchTerms = []string{candidate.Ticker}
 	}
 	horizon := kalshiTimeHorizon(candidate)
+	fairProbability := proxyFairProbability(selectedBid, selectedAsk, conviction)
 	proposal := Proposal{
+		FairProbability:  fairProbability,
+		Calibration:      ProxyCalibration,
 		Template:         kalshiProposalTemplate,
 		Name:             kalshiStrategyName(candidate),
 		Summary:          fmt.Sprintf("Conservative microstructure setup for Kalshi market %s.", candidate.Ticker),
@@ -351,6 +416,39 @@ func buildDeterministicProposal(candidate MarketCandidate) (Proposal, error) {
 		proposal.EntryPriceMax = 1
 	}
 	return proposal, nil
+}
+
+// proxyFairProbability derives a fair probability for the selected side from
+// the executable mid price, nudged by conviction:
+//
+//	fair = clamp(mid + (conviction - 0.5) * 0.2, 0.01, 0.99)
+//
+// It is not a calibrated estimate. Conviction here is a liquidity/spread score,
+// so the nudge only expresses "tight, liquid markets deserve a small edge over
+// mid". The executor accepts this proxy for paper accounts only; live accounts
+// still require a calibrated fair probability from another source.
+func proxyFairProbability(bid, ask, conviction float64) float64 {
+	if ask <= 0 {
+		return 0
+	}
+	mid := ask
+	if bid > 0 && bid <= ask {
+		mid = (bid + ask) / 2
+	}
+	return round4(clamp(mid+(conviction-0.5)*0.2, 0.01, 0.99))
+}
+
+// appendSourceReferences adds the market URL and persisted snapshot id to the
+// proposal's evidence list so the executor can trace the input quote.
+func appendSourceReferences(refs []string, candidate MarketCandidate, snapshotID uuid.UUID) []string {
+	out := append([]string(nil), refs...)
+	if base := strings.TrimSpace(candidate.SourceURL); base != "" {
+		out = append(out, "kalshi_market_url:"+strings.TrimRight(base, "/")+"/markets/"+strings.TrimSpace(candidate.Ticker))
+	}
+	if snapshotID != uuid.Nil {
+		out = append(out, "kalshi_snapshot:"+snapshotID.String())
+	}
+	return compactStrings(out)
 }
 
 func chooseKalshiDirection(candidate MarketCandidate) (direction string, ask, bid float64) {

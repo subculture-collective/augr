@@ -54,7 +54,10 @@ func (s OrderStatus) String() string {
 
 // validOrderTransitions defines the legal order status transitions.
 var validOrderTransitions = map[OrderStatus][]OrderStatus{
-	OrderStatusPending:   {OrderStatusSubmitted, OrderStatusCancelled, OrderStatusRejected},
+	// pending may move straight to partial/filled: paper brokers and Alpaca's
+	// paper endpoint report an immediate fill on the first status read, so the
+	// submitted hop is not always observed.
+	OrderStatusPending:   {OrderStatusSubmitted, OrderStatusPartial, OrderStatusFilled, OrderStatusCancelled, OrderStatusRejected},
 	OrderStatusSubmitted: {OrderStatusPartial, OrderStatusFilled, OrderStatusCancelled, OrderStatusRejected},
 	OrderStatusPartial:   {OrderStatusFilled, OrderStatusCancelled},
 	OrderStatusFilled:    {},

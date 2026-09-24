@@ -3,6 +3,7 @@ package risk
 import (
 	"fmt"
 	"math"
+	"sort"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
 )
@@ -53,7 +54,15 @@ func (p marketExposurePolicy) check(ticker string, quantity float64, portfolio P
 		}
 	}
 
-	for market, exposure := range portfolio.MarketExposurePct {
+	// Iterate in a fixed order so the first violated market, and therefore the
+	// rejection reason, is deterministic.
+	markets := make([]domain.MarketType, 0, len(portfolio.MarketExposurePct))
+	for market := range portfolio.MarketExposurePct {
+		markets = append(markets, market)
+	}
+	sort.Slice(markets, func(i, j int) bool { return markets[i] < markets[j] })
+	for _, market := range markets {
+		exposure := portfolio.MarketExposurePct[market]
 		limit := p.limitForMarket(market)
 		if exposure > limit {
 			return false, fmt.Sprintf(

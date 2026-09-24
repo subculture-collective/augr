@@ -25,7 +25,15 @@ func (r *realStrategyRunner) configurePreparedStockCapture(prepared *agent.Prepa
 	if err := json.Unmarshal(strategy.Config, &config); err != nil {
 		return fmt.Errorf("stock capture requires strategy configuration: %w", err)
 	}
-	raw := config["canonical_signal_selection"]
+	raw, present := config["canonical_signal_selection"]
+	if !present || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		// Stock capture is opt-in. A strategy without a canonical selection runs
+		// without pinned evidence capture instead of failing preparation.
+		if r.logger != nil {
+			r.logger.Info("stock capture skipped: strategy has no canonical_signal_selection", "strategy_id", strategy.ID, "ticker", strategy.Ticker)
+		}
+		return nil
+	}
 	var selection pgrepo.CanonicalSignalSelection
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()

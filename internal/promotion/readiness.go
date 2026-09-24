@@ -24,6 +24,7 @@ const (
 	BlockReconciliationStale          = "reconciliation_stale"
 	BlockInventoryInvalid             = "inventory_invalid"
 	BlockUnavailableReason            = "valuation_unavailable"
+	BlockPaperValidationPending       = "paper_validation_pending"
 )
 
 // ReadinessInput contains only explicit, account-scoped evidence. Callers must
@@ -53,6 +54,66 @@ type ReadinessInput struct {
 	CheckpointMaxAge                time.Duration
 	ReconciliationMaxAge            time.Duration
 	UnavailableReasons              []string
+	// PaperValidation and PaperValidationPolicy form the optional soft gate;
+	// with the default policy the gate is not evaluated.
+	PaperValidation       PaperValidationEvidence
+	PaperValidationPolicy PaperValidationPolicy
+}
+
+// InternalLedgerVenue is the venue of the canonical internal paper ledger
+// account. It has no external account ID; its self-reconciliation evidence
+// carries the account's own UUID as the provider identity.
+const InternalLedgerVenue = "internal"
+
+// expectedReconciliationExternalAccountID is the provider account identity a
+// passing reconciliation must carry for the configured account.
+func expectedReconciliationExternalAccountID(account *domain.Account) string {
+	if account == nil {
+		return ""
+	}
+	if account.Venue == InternalLedgerVenue && account.ExternalAccountID == "" {
+		return account.ID.String()
+	}
+	return account.ExternalAccountID
+}
+
+// PaperValidationPolicy is the operational (non-canonical) soft gate that
+// requires a strategy's paper record to reach the 60-day validation plan's
+// minimums before promotion. It defaults to disabled so existing behaviour is
+// preserved until an operator enables it.
+type PaperValidationPolicy struct {
+	RequirePaperValidation bool
+	MinClosedTrades        int
+	MinCalendarDays        int
+}
+
+// DefaultPaperValidationPolicy mirrors papervalidation.DefaultThresholds for
+// trade count and calendar days with enforcement off.
+func DefaultPaperValidationPolicy() PaperValidationPolicy {
+	return PaperValidationPolicy{RequirePaperValidation: false, MinClosedTrades: 20, MinCalendarDays: 60}
+}
+
+// PaperValidationEvidence is the readback of the paper validation report for
+// the deployment's strategy.
+type PaperValidationEvidence struct {
+	Available    bool
+	ClosedTrades int
+	ElapsedDays  int
+	GoDecision   bool
+}
+
+func paperValidationSatisfied(evidence PaperValidationEvidence, policy PaperValidationPolicy) bool {
+	if !evidence.Available {
+		return false
+	}
+	minTrades, minDays := policy.MinClosedTrades, policy.MinCalendarDays
+	if minTrades <= 0 {
+		minTrades = 20
+	}
+	if minDays <= 0 {
+		minDays = 60
+	}
+	return evidence.GoDecision && evidence.ClosedTrades >= minTrades && evidence.ElapsedDays >= minDays
 }
 
 type Readiness struct {
@@ -103,8 +164,11 @@ func EvaluateReadiness(input ReadinessInput) Readiness {
 	}
 	if !input.ReconciliationAvailable {
 		add(BlockReconciliationMissing)
-	} else if !input.ReconciliationPassed || input.ReconciliationAccountID != input.ConfiguredAccountID || input.Account == nil || input.ReconciliationVenue != input.Account.Venue || input.ReconciliationExternalAccountID != input.Account.ExternalAccountID {
+	} else if !input.ReconciliationPassed || input.ReconciliationAccountID != input.ConfiguredAccountID || input.Account == nil || input.ReconciliationVenue != input.Account.Venue || input.ReconciliationExternalAccountID != expectedReconciliationExternalAccountID(input.Account) {
 		add(BlockReconciliationMismatch)
+	}
+	if input.PaperValidationPolicy.RequirePaperValidation && !paperValidationSatisfied(input.PaperValidation, input.PaperValidationPolicy) {
+		add(BlockPaperValidationPending)
 	}
 	if input.GeneratedAt.IsZero() || input.CheckpointMaxAge <= 0 || input.CheckpointGeneratedAt.IsZero() || input.CheckpointGeneratedAt.After(input.GeneratedAt) || input.GeneratedAt.Sub(input.CheckpointGeneratedAt) > input.CheckpointMaxAge {
 		add(BlockCheckpointStale)

@@ -49,12 +49,24 @@ type LLMSettingsResponse struct {
 
 // LLMProvidersResponse groups provider-specific settings.
 type LLMProvidersResponse struct {
-	OpenAI     LLMProviderResponse    `json:"openai"`
-	Anthropic  LLMProviderResponse    `json:"anthropic"`
-	Google     LLMProviderResponse    `json:"google"`
-	OpenRouter LLMProviderResponse    `json:"openrouter"`
-	XAI        LLMProviderResponse    `json:"xai"`
-	Ollama     OllamaProviderResponse `json:"ollama"`
+	OpenAI     LLMProviderResponse      `json:"openai"`
+	Anthropic  LLMProviderResponse      `json:"anthropic"`
+	Google     LLMProviderResponse      `json:"google"`
+	OpenRouter LLMProviderResponse      `json:"openrouter"`
+	XAI        LLMProviderResponse      `json:"xai"`
+	Ollama     OllamaProviderResponse   `json:"ollama"`
+	OpenCode   OpenCodeProviderResponse `json:"opencode"`
+}
+
+// OpenCodeProviderResponse describes the OpenCode OAuth service without
+// exposing its password. The password is configured only through the
+// OPENCODE_SERVER_PASSWORD environment variable.
+type OpenCodeProviderResponse struct {
+	BaseURL            string `json:"base_url,omitempty"`
+	BaseURLConfigured  bool   `json:"base_url_configured"`
+	Model              string `json:"model"`
+	ModelConfigured    bool   `json:"model_configured"`
+	PasswordConfigured bool   `json:"password_configured"`
 }
 
 // LLMProviderResponse represents a provider without exposing the raw secret.
@@ -117,6 +129,15 @@ type LLMProvidersUpdateRequest struct {
 	OpenRouter LLMProviderUpdateRequest    `json:"openrouter"`
 	XAI        LLMProviderUpdateRequest    `json:"xai"`
 	Ollama     OllamaProviderUpdateRequest `json:"ollama"`
+	// OpenCode is optional: omitting it keeps the configured base URL and model.
+	OpenCode *OpenCodeProviderUpdateRequest `json:"opencode,omitempty"`
+}
+
+// OpenCodeProviderUpdateRequest updates the OpenCode base URL and model. The
+// password cannot be changed through the API.
+type OpenCodeProviderUpdateRequest struct {
+	BaseURL string `json:"base_url,omitempty"`
+	Model   string `json:"model"`
 }
 
 // LLMProviderUpdateRequest captures editable fields for API-backed providers.
@@ -160,6 +181,7 @@ type llmProvidersState struct {
 	OpenRouter providerState
 	XAI        providerState
 	Ollama     providerState
+	OpenCode   providerState // APIKey holds the service password; never returned.
 }
 
 type providerState struct {
@@ -311,6 +333,11 @@ func NewMemorySettingsServiceFromConfig(cfg config.Config, currentSchemaVersion,
 					BaseURL: cfg.LLM.Providers.Ollama.BaseURL,
 					Model:   cfg.LLM.Providers.Ollama.Model,
 				},
+				OpenCode: providerState{
+					APIKey:  cfg.LLM.Providers.OpenCode.Password,
+					BaseURL: cfg.LLM.Providers.OpenCode.BaseURL,
+					Model:   cfg.LLM.Providers.OpenCode.Model,
+				},
 			},
 		},
 		Risk: domain.RiskSettings{
@@ -379,6 +406,7 @@ func (s *MemorySettingsService) getLocked() SettingsResponse {
 				OpenRouter: redactProvider(s.llm.Providers.OpenRouter),
 				XAI:        redactProvider(s.llm.Providers.XAI),
 				Ollama:     redactOllamaProvider(s.llm.Providers.Ollama),
+				OpenCode:   redactOpenCodeProvider(s.llm.Providers.OpenCode),
 			},
 		},
 		Risk: s.risk,
@@ -414,6 +442,10 @@ func (s *MemorySettingsService) Update(ctx context.Context, req SettingsUpdateRe
 	applyProviderUpdate(&s.llm.Providers.OpenRouter, req.LLM.Providers.OpenRouter)
 	applyProviderUpdate(&s.llm.Providers.XAI, req.LLM.Providers.XAI)
 	applyOllamaUpdate(&s.llm.Providers.Ollama, req.LLM.Providers.Ollama)
+	if req.LLM.Providers.OpenCode != nil {
+		s.llm.Providers.OpenCode.BaseURL = strings.TrimSpace(req.LLM.Providers.OpenCode.BaseURL)
+		s.llm.Providers.OpenCode.Model = strings.TrimSpace(req.LLM.Providers.OpenCode.Model)
+	}
 	s.risk = req.Risk
 	response := s.getLocked()
 
@@ -481,6 +513,16 @@ func redactOllamaProvider(provider providerState) OllamaProviderResponse {
 	}
 }
 
+func redactOpenCodeProvider(provider providerState) OpenCodeProviderResponse {
+	return OpenCodeProviderResponse{
+		BaseURL:            provider.BaseURL,
+		BaseURLConfigured:  strings.TrimSpace(provider.BaseURL) != "",
+		Model:              provider.Model,
+		ModelConfigured:    strings.TrimSpace(provider.Model) != "",
+		PasswordConfigured: strings.TrimSpace(provider.APIKey) != "",
+	}
+}
+
 func last4(value string) string {
 	trimmed := strings.TrimSpace(value)
 	if trimmed == "" {
@@ -498,7 +540,7 @@ func validateSettingsUpdate(req SettingsUpdateRequest) error {
 		return fmt.Errorf("default provider is required")
 	}
 	switch provider {
-	case "openai", "anthropic", "google", "openrouter", "xai", "ollama":
+	case "openai", "anthropic", "google", "openrouter", "xai", "ollama", "opencode":
 	default:
 		return fmt.Errorf("invalid default provider: %s", provider)
 	}
@@ -526,6 +568,14 @@ func validateSettingsUpdate(req SettingsUpdateRequest) error {
 	}
 	if strings.TrimSpace(req.LLM.Providers.Ollama.Model) == "" {
 		return fmt.Errorf("ollama model is required")
+	}
+	if oc := req.LLM.Providers.OpenCode; oc != nil {
+		if strings.TrimSpace(oc.Model) == "" {
+			return fmt.Errorf("opencode model is required")
+		}
+		if _, _, ok := strings.Cut(strings.TrimSpace(oc.Model), "/"); !ok {
+			return fmt.Errorf("opencode model must use provider/model form")
+		}
 	}
 
 	if req.Risk.MaxPositionSizePct < 0 || req.Risk.MaxPositionSizePct > 100 {

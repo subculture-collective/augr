@@ -27,15 +27,22 @@ type AutomationJobHealth struct {
 
 // AutomationHealthResponse is the response body for GET /api/v1/automation/health.
 type AutomationHealthResponse struct {
-	Jobs                []AutomationJobHealth          `json:"jobs"`
-	Healthy             bool                           `json:"healthy"`
-	TotalJobs           int                            `json:"total_jobs"`
-	FailingJobs         int                            `json:"failing_jobs"`
-	DegradedJobs        int                            `json:"degraded_jobs"`
-	BlockedJobs         int                            `json:"blocked_jobs"`
-	UnavailableJobs     []automation.UnavailableJob    `json:"unavailable_jobs"`
-	UnavailableJobCount int                            `json:"unavailable_job_count"`
-	DiscoveryReadiness  *automation.DiscoveryReadiness `json:"discovery_readiness,omitempty"`
+	Jobs                []AutomationJobHealth       `json:"jobs"`
+	Healthy             bool                        `json:"healthy"`
+	TotalJobs           int                         `json:"total_jobs"`
+	FailingJobs         int                         `json:"failing_jobs"`
+	DegradedJobs        int                         `json:"degraded_jobs"`
+	BlockedJobs         int                         `json:"blocked_jobs"`
+	UnavailableJobs     []automation.UnavailableJob `json:"unavailable_jobs"`
+	UnavailableJobCount int                         `json:"unavailable_job_count"`
+	// Degraded is true when the orchestrator cannot run its jobs (for example
+	// every job was disabled by a failed startup recovery). DisabledJobs lists
+	// the jobs currently disabled by recovery or operator control.
+	Degraded           bool                           `json:"degraded"`
+	DegradedReason     string                         `json:"degraded_reason,omitempty"`
+	DisabledJobs       []string                       `json:"disabled_jobs"`
+	OrchestratorHealth automation.OrchestratorHealth  `json:"orchestrator_health"`
+	DiscoveryReadiness *automation.DiscoveryReadiness `json:"discovery_readiness,omitempty"`
 }
 
 // handleGetAutomationStatus returns status for all registered jobs.
@@ -58,8 +65,9 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, _ *http.Reques
 
 	statuses := s.automation.Status()
 	unavailableJobs := s.automation.UnavailableJobs()
+	readiness := AutomationReadinessOf(s.automation)
 	jobs := make([]AutomationJobHealth, 0, len(statuses))
-	healthy := len(unavailableJobs) == 0
+	healthy := len(unavailableJobs) == 0 && !readiness.Degraded
 	failingJobs := 0
 	degradedJobs := 0
 	blockedJobs := 0
@@ -100,6 +108,10 @@ func (s *Server) handleGetAutomationHealth(w http.ResponseWriter, _ *http.Reques
 		BlockedJobs:         blockedJobs,
 		UnavailableJobs:     unavailableJobs,
 		UnavailableJobCount: len(unavailableJobs),
+		Degraded:            readiness.Degraded,
+		DegradedReason:      readiness.Reason,
+		DisabledJobs:        readiness.DisabledJobs,
+		OrchestratorHealth:  s.automation.Health(),
 		DiscoveryReadiness:  s.automation.DiscoveryReadiness(),
 	})
 }

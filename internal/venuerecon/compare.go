@@ -126,7 +126,7 @@ func Compare(input CompareInput) (*Run, error) {
 		return nil, err
 	}
 	results = append(results, positionResults...)
-	providerRule, ok := input.Policy.ProviderRule(provider.canonical.Provider)
+	providerRule, ok := providerRuleFor(input.Policy, provider.canonical.Provider)
 	if !ok || providerRule.AuthoritativeFillNamespace != provider.canonical.Namespace {
 		return nil, fmt.Errorf("provider fill namespace is not authorized by policy")
 	}

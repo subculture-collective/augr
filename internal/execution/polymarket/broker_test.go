@@ -2,6 +2,7 @@ package polymarket
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -756,4 +757,71 @@ func TestBrokerSubmitOrder_StrategyScopeBreaker(t *testing.T) {
 
 func floatPtr(value float64) *float64 {
 	return &value
+}
+
+func TestMapOrderStatusCoversCLOBStatesAndUnknown(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]domain.OrderStatus{
+		"LIVE":                         domain.OrderStatusSubmitted,
+		"OPEN":                         domain.OrderStatusSubmitted,
+		"DELAYED":                      domain.OrderStatusSubmitted,
+		"MATCHED":                      domain.OrderStatusFilled,
+		"UNMATCHED":                    domain.OrderStatusCancelled,
+		"ORDER_STATE_PENDING_NEW":      domain.OrderStatusSubmitted,
+		"ORDER_STATE_PARTIALLY_FILLED": domain.OrderStatusPartial,
+		"ORDER_STATE_FILLED":           domain.OrderStatusFilled,
+		"ORDER_STATE_CANCELED":         domain.OrderStatusCancelled,
+		"ORDER_STATE_REJECTED":         domain.OrderStatusRejected,
+		"live":                         domain.OrderStatusSubmitted,
+		"SOMETHING_NEW":                domain.OrderStatusSubmitted,
+	}
+	for raw, want := range cases {
+		got, err := mapOrderStatus(raw)
+		if err != nil {
+			t.Fatalf("mapOrderStatus(%q) error = %v", raw, err)
+		}
+		if got != want {
+			t.Fatalf("mapOrderStatus(%q) = %q, want %q", raw, got, want)
+		}
+	}
+	if _, err := mapOrderStatus(""); err == nil {
+		t.Fatal("mapOrderStatus(\"\") error = nil, want required error")
+	}
+}
+
+func TestPrepareTemplateSignatureMatchesAdHocClientSignature(t *testing.T) {
+	t.Parallel()
+
+	secret := make([]byte, 64)
+	for i := range secret {
+		secret[i] = byte(i * 3)
+	}
+	encoded := base64.URLEncoding.EncodeToString(secret)
+	client := NewClient("key-id", encoded, discardLogger())
+	client.SetL2Auth("0x0000000000000000000000000000000000000001", "key-id", encoded, "pass")
+	client.SetAPIBaseURL("https://api.polymarket.us")
+	broker := NewBroker(client)
+	broker.DryRun = true
+
+	price := 0.5
+	tmpl, err := broker.PrepareTemplate(&domain.Order{Ticker: "btc-100k", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, Quantity: 1, LimitPrice: &price, PredictionSide: "YES"})
+	if err != nil {
+		t.Fatalf("PrepareTemplate() error = %v", err)
+	}
+	if tmpl.SigningPath() != "/v1/orders" || !strings.Contains(tmpl.URL(), "dry=1") {
+		t.Fatalf("template path = %q url = %q", tmpl.SigningPath(), tmpl.URL())
+	}
+	// The ad-hoc client path decodes the same secret without truncation.
+	_, signingPath, err := client.buildURL(withDryRunQuery("/v1/orders"), nil, true)
+	if err != nil {
+		t.Fatalf("buildURL() error = %v", err)
+	}
+	want, err := polyL2Signature(encoded, "1712000000", http.MethodPost, signingPath, tmpl.body)
+	if err != nil {
+		t.Fatalf("polyL2Signature() error = %v", err)
+	}
+	if got := tmpl.SignAt(1712000000); got != want {
+		t.Fatalf("SignAt() = %q, want %q (template and client must sign identically)", got, want)
+	}
 }

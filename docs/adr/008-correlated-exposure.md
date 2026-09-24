@@ -2,13 +2,19 @@
 title: "ADR-008: Correlated asset exposure management"
 description: "Architecture decision record."
 status: "canonical"
-updated: "2026-04-03"
+updated: "2026-09-23"
 tags: [adr]
 ---
 
 # ADR-008: Correlated asset exposure management
 
-- **Status:** accepted (deferred implementation)
+- **Status:** accepted (deferred implementation). Correlated exposure is not implemented as of 2026-09-23: no sector, factor, or correlation input exists in `internal/portfolio` or `internal/risk`. The allocator caps exposure per ticker (`MaxPerPositionPct`), per market type (`MaxPerMarketPct`), and per options underlying (`same_underlying` cap); nothing groups tickers across sectors.
+
+### Where a same-sector cap would go
+
+- Data: a `Sector string` on `domain.Opportunity` populated by the opportunity builder (`internal/portfolio/opportunity_builder.go`) from the universe metadata, and a `SectorExposure map[string]float64` on `portfolio.PortfolioState` built in `buildPortfolioAllocatorState` (`internal/automation/jobs_portfolio_allocator.go`) from open positions.
+- Limit: a `MaxPerSectorPct` entry in `portfolio.AllocatorConfig`, applied in `sizeOpportunity` as a `sector_exposure` cap alongside `market_exposure`, and a `sector_exposure_exceeded` rejection reason in `portfolioRiskRejectionReasons`.
+- Evidence: the sector exposure map would join the canonical risk-state bytes in `portfolio.BindRiskStateEvidence` so decisions record the exposure they were sized against.
 - **Date:** 2026-03-27
 - **Deciders:** Engineering
 - **Technical Story:** [#111](https://github.com/PatrickFanella/get-rich-quick/issues/111)

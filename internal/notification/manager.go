@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 )
@@ -23,6 +27,7 @@ type Manager struct {
 	mu              sync.Mutex
 	rules           config.AlertRulesConfig
 	notifiers       map[string]Notifier
+	logger          *slog.Logger
 	dedupInterval   time.Duration
 	pipelineFailure int
 	active          map[string]bool
@@ -39,11 +44,29 @@ func NewManager(rules config.AlertRulesConfig, notifiers map[string]Notifier) *M
 	return &Manager{
 		rules:         rules,
 		notifiers:     clonedNotifiers,
+		logger:        slog.Default(),
 		dedupInterval: defaultDedupInterval,
 		active:        map[string]bool{},
 		recent:        map[string]time.Time{},
 		llmSamples:    map[string][]llmRequestSample{},
 	}
+}
+
+// WithLogger sets the logger used for skipped-channel diagnostics.
+func (m *Manager) WithLogger(logger *slog.Logger) *Manager {
+	if logger != nil {
+		m.logger = logger
+	}
+	return m
+}
+
+// ConfiguredChannels returns the channel names that have a notifier.
+func (m *Manager) ConfiguredChannels() []string {
+	channels := make([]string, 0, len(m.notifiers))
+	for channel := range m.notifiers {
+		channels = append(channels, channel)
+	}
+	return normalizeChannels(channels)
 }
 
 // RecordPipelineResult tracks pipeline successes and failures and alerts on consecutive failures.
@@ -239,6 +262,95 @@ func (m *Manager) RecordKillSwitchToggle(ctx context.Context, active bool, reaso
 	return nil
 }
 
+// RecordStrategyPreparationRejected alerts operators that a scheduled strategy
+// was rejected in preflight. It routes through the pipeline-failure channels
+// and deduplicates per strategy and reason code for the dedup interval, so a
+// strategy rejected on every scheduled run produces one alert per interval
+// rather than one per run.
+func (m *Manager) RecordStrategyPreparationRejected(ctx context.Context, strategyID, name, ticker, reasonCode string, occurredAt time.Time) error {
+	strategyID = strings.TrimSpace(strategyID)
+	name = strings.TrimSpace(name)
+	ticker = strings.TrimSpace(ticker)
+	reasonCode = strings.TrimSpace(reasonCode)
+	if reasonCode == "" {
+		reasonCode = "unspecified"
+	}
+	key := "preparation_rejected:" + strategyID + ":" + reasonCode
+	occurredAt = normalizeOccurredAt(occurredAt)
+	if !m.acquireRecent(key, occurredAt) {
+		return nil
+	}
+
+	label := name
+	if label == "" {
+		label = strategyID
+	}
+	alert := Alert{
+		Key:        key,
+		Title:      "Strategy preparation rejected",
+		Body:       fmt.Sprintf("Strategy %s (%s) was rejected in preflight: %s. The strategy will not trade until the cause is fixed.", label, ticker, reasonCode),
+		Severity:   SeverityWarning,
+		OccurredAt: occurredAt,
+		Metadata: map[string]string{
+			"strategy_id":   strategyID,
+			"strategy_name": name,
+			"ticker":        ticker,
+			"reason_code":   reasonCode,
+		},
+	}
+	if err := m.dispatch(ctx, alert, m.rules.PipelineFailure.Channels); err != nil {
+		m.clearRecent(key)
+		return err
+	}
+	return nil
+}
+
+// NotifyStrategyPreparationRejected is the UUID-typed form of
+// RecordStrategyPreparationRejected.
+func (m *Manager) NotifyStrategyPreparationRejected(ctx context.Context, strategyID uuid.UUID, ticker, reasonCode string) error {
+	return m.RecordStrategyPreparationRejected(ctx, uuidString(strategyID), "", ticker, reasonCode, time.Time{})
+}
+
+// NotifyAutomationDegraded alerts once per degradation that the automation
+// orchestrator disabled jobs (for example after a startup recovery failure).
+// Call ClearAutomationDegraded when the orchestrator recovers.
+func (m *Manager) NotifyAutomationDegraded(ctx context.Context, reason string, disabledJobs []string) error {
+	const activeKey = "automation_degraded"
+	if !m.markActive(activeKey) {
+		return nil
+	}
+
+	jobs := normalizeChannels(disabledJobs)
+	body := strings.TrimSpace(reason)
+	if body == "" {
+		body = "The automation orchestrator is degraded."
+	}
+	if len(jobs) > 0 {
+		body += " Disabled jobs: " + strings.Join(jobs, ", ") + "."
+	}
+	alert := Alert{
+		Key:        activeKey,
+		Title:      "Automation orchestrator degraded",
+		Body:       body,
+		Severity:   SeverityCritical,
+		OccurredAt: normalizeOccurredAt(time.Time{}),
+		Metadata: map[string]string{
+			"disabled_jobs":      strings.Join(jobs, ","),
+			"disabled_job_count": strconv.Itoa(len(jobs)),
+		},
+	}
+	if err := m.dispatch(ctx, alert, m.rules.PipelineFailure.Channels); err != nil {
+		m.clearActive(activeKey)
+		return err
+	}
+	return nil
+}
+
+// ClearAutomationDegraded re-arms the automation degraded alert.
+func (m *Manager) ClearAutomationDegraded() {
+	m.clearActive("automation_degraded")
+}
+
 // RecordDBConnectionState alerts once per outage and resets once the database recovers.
 func (m *Manager) RecordDBConnectionState(ctx context.Context, connected bool, connErr error, occurredAt time.Time) error {
 	const activeKey = "db_connection_loss"
@@ -340,7 +452,12 @@ func (m *Manager) dispatch(ctx context.Context, alert Alert, channels []string) 
 	for _, channel := range channels {
 		notifier, ok := m.notifiers[channel]
 		if !ok {
-			errs = append(errs, fmt.Errorf("no notifier configured for channel %q", channel))
+			// A channel routed by ALERT_*_CHANNELS but without credentials is
+			// a configuration gap, not a delivery failure: skip it quietly so
+			// the alert still reaches the configured channels.
+			m.logger.DebugContext(ctx, "notification: channel not configured, skipping",
+				slog.String("channel", channel),
+				slog.String("alert", alert.Key))
 			continue
 		}
 		if err := notifier.Notify(ctx, alert); err != nil {

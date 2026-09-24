@@ -405,8 +405,8 @@ func TestResolveConfig_HardcodedDefaults(t *testing.T) {
 	if got.LLMConfig.QuickThinkModel != "openai/gpt-5.6-luna" {
 		t.Errorf("QuickThinkModel = %q, want %q", got.LLMConfig.QuickThinkModel, "openai/gpt-5.6-luna")
 	}
-	if got.PipelineConfig.DebateRounds != 3 {
-		t.Errorf("DebateRounds = %d, want %d", got.PipelineConfig.DebateRounds, 3)
+	if got.PipelineConfig.DebateRounds != 1 {
+		t.Errorf("DebateRounds = %d, want %d", got.PipelineConfig.DebateRounds, 1)
 	}
 	if got.PipelineConfig.AnalysisTimeoutSeconds != 1800 {
 		t.Errorf("AnalysisTimeoutSeconds = %d, want %d", got.PipelineConfig.AnalysisTimeoutSeconds, 1800)
@@ -536,7 +536,7 @@ func TestResolveConfig_EdgeCases(t *testing.T) {
 				if got.LLMConfig.Provider != "opencode" || got.LLMConfig.DeepThinkModel != "openai/gpt-5.6-sol" || got.LLMConfig.QuickThinkModel != "openai/gpt-5.6-luna" {
 					t.Fatalf("LLM defaults = %+v", got.LLMConfig)
 				}
-				if got.PipelineConfig.DebateRounds != 3 || got.PipelineConfig.AnalysisTimeoutSeconds != 1800 || got.PipelineConfig.DebateTimeoutSeconds != 3600 {
+				if got.PipelineConfig.DebateRounds != 1 || got.PipelineConfig.AnalysisTimeoutSeconds != 1800 || got.PipelineConfig.DebateTimeoutSeconds != 3600 {
 					t.Fatalf("pipeline defaults = %+v", got.PipelineConfig)
 				}
 				if got.RiskConfig.PositionSizePct != 5.0 || got.RiskConfig.StopLossMultiplier != 1.5 || got.RiskConfig.TakeProfitMultiplier != 2.0 || got.RiskConfig.MinConfidence != 0.65 {

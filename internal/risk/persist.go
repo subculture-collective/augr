@@ -37,16 +37,27 @@ func (e *RiskEngineImpl) WithStatePersister(ctx context.Context, p StatePersiste
 	e.persister = p
 	state, err := p.Load(ctx)
 	if err != nil {
-		e.logger.Error("risk: failed to load persisted state, failing closed",
-			slog.String("error", err.Error()))
+		reason := "risk state restore failed: " + err.Error()
+		e.logger.ErrorContext(ctx, "risk: failed to load persisted state; kill switch armed (fail closed)",
+			slog.String("error", err.Error()),
+			slog.String("reason", reason),
+			slog.Bool("restore_failed", true))
+		e.restoreMu.Lock()
+		e.restoreFailed = true
+		e.restoreError = err.Error()
+		e.restoreMu.Unlock()
 		e.state.mu.Lock()
-		e.activateKillSwitchLocked("risk state restore failed: " + err.Error())
+		status := e.activateKillSwitchLocked(reason)
 		e.state.mu.Unlock()
+		activatedAt := e.currentTime()
+		if status.ActivatedAt != nil {
+			activatedAt = *status.ActivatedAt
+		}
+		e.notifyKillSwitch(ctx, true, reason, activatedAt)
 		return e
 	}
 
 	e.state.mu.Lock()
-	defer e.state.mu.Unlock()
 	if state.KillSwitch.Active {
 		e.state.ks = state.KillSwitch
 		e.logger.Warn("risk: restored active kill switch from persistent state",
@@ -59,6 +70,18 @@ func (e *RiskEngineImpl) WithStatePersister(ctx context.Context, p StatePersiste
 				slog.String("market_type", string(mt)),
 				slog.String("reason", mks.Reason))
 		}
+	}
+	restoredActive := e.state.ks.Active
+	e.state.mu.Unlock()
+
+	// Publish the restored value so the gauge is correct before the first
+	// pipeline run refreshes it; a restored activation was already alerted
+	// when it happened, so only the observer is invoked here.
+	e.hooksMu.RLock()
+	observer := e.killSwitchObserver
+	e.hooksMu.RUnlock()
+	if observer != nil {
+		observer(restoredActive)
 	}
 	return e
 }

@@ -212,11 +212,12 @@ func isRetryable(err error) bool {
 	if errors.As(err, &sc) {
 		code := sc.StatusCode()
 		switch {
-		case code == 429:
+		case code == 408 || code == 429:
 			return true
 		case code >= 500:
 			return true
 		default:
+			// 401/403 and other 4xx are not transient.
 			return false
 		}
 	}

@@ -1,5 +1,7 @@
 package execution
 
+import "math"
+
 // PositionSizingMethod identifies the supported position sizing approaches.
 type PositionSizingMethod string
 
@@ -7,6 +9,10 @@ const (
 	PositionSizingMethodATR             PositionSizingMethod = "atr"
 	PositionSizingMethodKelly           PositionSizingMethod = "kelly"
 	PositionSizingMethodFixedFractional PositionSizingMethod = "fixed_fractional"
+	// PositionSizingMethodFixedQuantity submits an explicit unit quantity that
+	// was already sized upstream (for example by the portfolio allocator), so
+	// the order manager does not re-derive it from a different equity source.
+	PositionSizingMethodFixedQuantity PositionSizingMethod = "fixed_quantity"
 )
 
 // PositionSizingParams contains the inputs needed by the position sizing dispatcher.
@@ -20,6 +26,9 @@ type PositionSizingParams struct {
 	FractionPct   float64
 	PricePerShare float64
 	HalfKelly     bool
+	// FixedQuantity is the explicit unit quantity used by
+	// PositionSizingMethodFixedQuantity.
+	FixedQuantity float64
 }
 
 // PolymarketSizingParams contains the inputs needed to size a Polymarket entry.
@@ -97,6 +106,11 @@ func CalculatePositionSize(method PositionSizingMethod, params PositionSizingPar
 		return size / params.PricePerShare
 	case PositionSizingMethodFixedFractional:
 		return FixedFractionalSize(params.AccountValue, params.FractionPct, params.PricePerShare)
+	case PositionSizingMethodFixedQuantity:
+		if params.FixedQuantity <= 0 || math.IsNaN(params.FixedQuantity) || math.IsInf(params.FixedQuantity, 0) {
+			return 0
+		}
+		return params.FixedQuantity
 	default:
 		return 0
 	}

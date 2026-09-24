@@ -123,7 +123,7 @@ func (repo *PortfolioRiskRepo) captureInternalAccountSnapshot(ctx context.Contex
 	if err != nil {
 		return result, fmt.Errorf("postgres: bind internal account snapshot: %w", err)
 	}
-	return portfolio.AccountSnapshot{ID: id, ObservedAt: observation.ObservedAt, Equity: observation.Equity.InexactFloat64(), BuyingPower: capacity.InexactFloat64()}, nil
+	return portfolio.AccountSnapshot{ID: id, ObservedAt: observation.ObservedAt, Equity: observation.Equity.InexactFloat64(), BuyingPower: capacity.InexactFloat64(), InternalAccount: true}, nil
 }
 
 type internalPortfolioCapitalCanonical struct {

@@ -118,9 +118,12 @@ func decodeJobRunResult(raw []byte) (map[string]int, []string, string, error) {
 				return nil, nil, "", fmt.Errorf("%s must be a string", jobRunDetailKey)
 			}
 		default:
+			// Counts are integers. Non-integer values (floats, strings,
+			// objects) written by older or foreign writers are skipped so one
+			// odd key cannot block orchestrator hydration.
 			var count int
 			if err := json.Unmarshal(value, &count); err != nil {
-				return nil, nil, "", fmt.Errorf("result count %q must be an integer: %w", key, err)
+				continue
 			}
 			counts[key] = count
 		}
@@ -190,7 +193,12 @@ func (r *JobRunRepo) Complete(ctx context.Context, run *JobRun) error {
 }
 
 // FailIncomplete marks rows left running by a prior app process as terminal
-// errors before scheduler state is hydrated.
+// errors before scheduler state is hydrated. Only rows started before
+// completedAt are touched, so a run admitted by a concurrently starting
+// process is not clobbered. A process restart is not a job failure: the
+// consecutive_failures counter is preserved, not incremented. The table has
+// no owner column; adding one (process instance id) would allow exact
+// per-process scoping.
 func (r *JobRunRepo) FailIncomplete(ctx context.Context, completedAt time.Time, reason string) (int, error) {
 	commandTag, err := r.pool.Exec(ctx,
 		`UPDATE automation_job_runs
@@ -198,15 +206,30 @@ func (r *JobRunRepo) FailIncomplete(ctx context.Context, completedAt time.Time, 
 		     completed_at = $1,
 		     duration_ns = GREATEST(0, (EXTRACT(EPOCH FROM ($1 - started_at)) * 1000000000)::bigint),
 		     error = $2,
-		     last_error_at = $1,
-		     consecutive_failures = consecutive_failures + 1
-		 WHERE completed_at IS NULL`,
+		     last_error_at = $1
+		 WHERE completed_at IS NULL AND started_at < $1`,
 		completedAt, reason,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("postgres: fail incomplete job runs: %w", err)
 	}
 	return int(commandTag.RowsAffected()), nil
+}
+
+// MarkStuck flags a still-running row whose job exceeded its timeout without
+// returning. completed_at stays NULL so the eventual completion (or the next
+// FailIncomplete recovery) still terminates the row.
+func (r *JobRunRepo) MarkStuck(ctx context.Context, id uuid.UUID, at time.Time, reason string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE automation_job_runs
+		 SET status = 'stuck', error = $2, last_error_at = $3
+		 WHERE id = $1 AND completed_at IS NULL`,
+		id, reason, at,
+	)
+	if err != nil {
+		return fmt.Errorf("postgres: mark job run stuck: %w", err)
+	}
+	return nil
 }
 
 // ListByJob returns recent runs for a specific job, newest first.
@@ -300,16 +323,37 @@ func scanJobRuns(rows jobRunRows) ([]JobRun, error) {
 	return runs, rows.Err()
 }
 
-// Summaries returns aggregate stats per job name, used to hydrate the orchestrator on startup.
+// Summaries returns aggregate stats per job name, used to hydrate the
+// orchestrator on startup. The latest row per job is selected with DISTINCT ON
+// ordered by started_at DESC so the (job_name, started_at DESC) index serves
+// the lookup in a single query.
 func (r *JobRunRepo) Summaries(ctx context.Context) ([]JobRunSummary, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT
-			job_name,
-			MAX(COALESCE(completed_at, started_at)) AS last_run,
-			COUNT(*) AS run_count,
-			COUNT(*) FILTER (WHERE status = 'error') AS error_count
-		 FROM automation_job_runs
-		 GROUP BY job_name`,
+			agg.job_name,
+			agg.last_run,
+			agg.run_count,
+			agg.error_count,
+			latest.status,
+			latest.error,
+			latest.last_error_at,
+			COALESCE(latest.consecutive_failures, 0),
+			latest.result
+		 FROM (
+			SELECT job_name,
+			       MAX(COALESCE(completed_at, started_at)) AS last_run,
+			       COUNT(*) AS run_count,
+			       COUNT(*) FILTER (WHERE status = 'error') AS error_count
+			FROM automation_job_runs
+			GROUP BY job_name
+		 ) agg
+		 JOIN (
+			SELECT DISTINCT ON (job_name)
+			       job_name, status, error, last_error_at, consecutive_failures, result
+			FROM automation_job_runs
+			ORDER BY job_name, started_at DESC
+		 ) latest USING (job_name)
+		 ORDER BY agg.job_name`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: job run summaries: %w", err)
@@ -318,56 +362,37 @@ func (r *JobRunRepo) Summaries(ctx context.Context) ([]JobRunSummary, error) {
 
 	var summaries []JobRunSummary
 	for rows.Next() {
-		var s JobRunSummary
-		if err := rows.Scan(&s.JobName, &s.LastRun, &s.RunCount, &s.ErrorCount); err != nil {
+		var (
+			s         JobRunSummary
+			status    string
+			errStr    *string
+			resultRaw []byte
+		)
+		if err := rows.Scan(&s.JobName, &s.LastRun, &s.RunCount, &s.ErrorCount, &status, &errStr, &s.LastErrorAt, &s.ConsecutiveFailures, &resultRaw); err != nil {
 			return nil, fmt.Errorf("postgres: scan job run summary: %w", err)
+		}
+		s.LastResult = status
+		if errStr != nil {
+			if status == "degraded" {
+				s.LastDetail = *errStr
+			} else {
+				s.LastError = *errStr
+			}
+		}
+		counts, tickers, detail, decodeErr := decodeJobRunResult(resultRaw)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("postgres: decode latest job run result for %q: %w", s.JobName, decodeErr)
+		}
+		s.LastTickers = tickers
+		s.LastSummary = counts
+		s.LastDetail = detail
+		if status == "degraded" && detail == "" && errStr != nil {
+			s.LastDetail = *errStr
 		}
 		summaries = append(summaries, s)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-
-	// Fill in last_result, last_error, last_error_at, and consecutive_failures
-	// from persisted columns on the most recent run per job.
-	for i, s := range summaries {
-		var status string
-		var errStr *string
-		var lastErrAt *time.Time
-		var consecutiveFailures int
-		var resultRaw []byte
-		err := r.pool.QueryRow(ctx,
-			`SELECT status, error, last_error_at, consecutive_failures, result
-			 FROM automation_job_runs
-			 WHERE job_name = $1
-			 ORDER BY COALESCE(completed_at, started_at) DESC, started_at DESC
-			 LIMIT 1`,
-			s.JobName,
-		).Scan(&status, &errStr, &lastErrAt, &consecutiveFailures, &resultRaw)
-		if err != nil {
-			return nil, fmt.Errorf("postgres: latest job run summary for %q: %w", s.JobName, err)
-		}
-		summaries[i].LastResult = status
-		if errStr != nil {
-			if status == "degraded" {
-				summaries[i].LastDetail = *errStr
-			} else {
-				summaries[i].LastError = *errStr
-			}
-		}
-		summaries[i].LastErrorAt = lastErrAt
-		summaries[i].ConsecutiveFailures = consecutiveFailures
-		counts, tickers, detail, decodeErr := decodeJobRunResult(resultRaw)
-		if decodeErr != nil {
-			return nil, fmt.Errorf("postgres: decode latest job run result for %q: %w", s.JobName, decodeErr)
-		}
-		summaries[i].LastTickers = tickers
-		summaries[i].LastSummary = counts
-		summaries[i].LastDetail = detail
-		if status == "degraded" && detail == "" && errStr != nil {
-			summaries[i].LastDetail = *errStr
-		}
-	}
-
 	return summaries, nil
 }

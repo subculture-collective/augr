@@ -152,9 +152,7 @@ func applyOrderFillTx(ctx context.Context, tx pgx.Tx, input repository.OrderFill
 	order.FilledQuantity = observedQuantity
 	now := input.Now.UTC()
 	order.FilledAt = &now
-	if order.Status != domain.OrderStatusPartial && order.Status != domain.OrderStatusFilled && order.Status != domain.OrderStatusCancelled && order.Status != domain.OrderStatusRejected {
-		order.Status = domain.OrderStatusFilled
-	}
+	order.Status = fillOrderStatus(order.Status, observedQuantity, persistedQuantity)
 	if tag, err := tx.Exec(ctx, `UPDATE orders SET filled_quantity=$1,filled_avg_price=$2,status=$3,filled_at=$4,external_id=COALESCE(NULLIF($6,''),external_id),broker=COALESCE(NULLIF($7,''),broker),submitted_at=COALESCE(submitted_at,$8) WHERE id=$5 AND account_id=$9 AND environment=$10 AND origin_type=$11 AND origin_id=$12`, order.FilledQuantity, observedAvgPrice, order.Status, order.FilledAt, order.ID, strings.TrimSpace(order.ExternalID), strings.TrimSpace(order.Broker), order.SubmittedAt, order.AccountID, order.Environment, order.OriginType, order.OriginID); err != nil {
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: update filled order: %w", err)
 	} else if tag.RowsAffected() != 1 {
@@ -324,6 +322,20 @@ func applyOrderFillTx(ctx context.Context, tx pgx.Tx, input repository.OrderFill
 		return repository.OrderFillResult{}, fmt.Errorf("postgres: finalize fill idempotency: %w", err)
 	}
 	return repository.OrderFillResult{OrderID: order.ID, PositionID: positionID, Position: position, TradeID: trade.ID, Trade: trade, CreatedAt: trade.CreatedAt}, nil
+}
+
+// fillOrderStatus derives the durable order status from the cumulative
+// observed fill. Terminal broker statuses (cancelled/rejected with a partial
+// fill) are preserved; otherwise an incomplete fill is partial, not filled.
+func fillOrderStatus(current domain.OrderStatus, observedQuantity, orderQuantity float64) domain.OrderStatus {
+	switch current {
+	case domain.OrderStatusCancelled, domain.OrderStatusRejected:
+		return current
+	}
+	if orderQuantity > 0 && observedQuantity < orderQuantity && !numeric8Equal(observedQuantity, orderQuantity) {
+		return domain.OrderStatusPartial
+	}
+	return domain.OrderStatusFilled
 }
 
 func (db *DB) ResolveOrderFillCommit(ctx context.Context, input repository.OrderFillInput) (repository.OrderFillResult, bool, error) {

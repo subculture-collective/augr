@@ -450,8 +450,10 @@ func TestHealthEndpointRedisDown(t *testing.T) {
 
 	rr := doRequest(t, srv, http.MethodGet, "/healthz", nil)
 
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	// Redis is advisory by default: the probe is reported but the container
+	// stays healthy so a cache outage does not restart trading.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 	body := decodeJSON[map[string]string](t, rr)
 	if body["status"] != "degraded" {
@@ -460,14 +462,39 @@ func TestHealthEndpointRedisDown(t *testing.T) {
 	if body["db"] != "ok" {
 		t.Fatalf("db = %q, want %q", body["db"], "ok")
 	}
-	if body["redis"] != "error" {
-		t.Fatalf("redis = %q, want %q", body["redis"], "error")
+	if body["redis"] != "degraded" {
+		t.Fatalf("redis = %q, want %q", body["redis"], "degraded")
 	}
 	if dbHealth.calls.Load() != 1 {
 		t.Fatalf("db health calls = %d, want 1", dbHealth.calls.Load())
 	}
 	if redisHealth.calls.Load() != 1 {
 		t.Fatalf("redis health calls = %d, want 1", redisHealth.calls.Load())
+	}
+}
+
+func TestHealthEndpointRedisDownFailsWhenRequired(t *testing.T) {
+	t.Parallel()
+
+	deps := testDeps()
+	deps.DBHealth = &stubHealthCheck{}
+	deps.RedisHealth = &stubHealthCheck{err: errors.New("redis unavailable")}
+	cfg := DefaultServerConfig()
+	cfg.JWTSecret = "test-jwt-secret"
+	cfg.ProjectionAccountID = &testAPIAccountID
+	cfg.RedisRequired = true
+	srv, err := NewServer(cfg, deps, slog.Default())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	rr := doRequest(t, srv, http.MethodGet, "/healthz", nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+	}
+	body := decodeJSON[map[string]string](t, rr)
+	if body["redis"] != "error" {
+		t.Fatalf("redis = %q, want %q", body["redis"], "error")
 	}
 }
 
@@ -501,8 +528,8 @@ func TestHealthEndpointUsesSharedTimeout(t *testing.T) {
 	if body["db"] != "error" {
 		t.Fatalf("db = %q, want %q", body["db"], "error")
 	}
-	if body["redis"] != "error" {
-		t.Fatalf("redis = %q, want %q", body["redis"], "error")
+	if body["redis"] != "degraded" {
+		t.Fatalf("redis = %q, want %q", body["redis"], "degraded")
 	}
 	if elapsed >= maxExpectedElapsed {
 		t.Fatalf("elapsed = %v, want < %v", elapsed, maxExpectedElapsed)
@@ -530,6 +557,8 @@ func TestHealthEndpointLogsFailuresAtInfo(t *testing.T) {
 	deps.DBHealth = &stubHealthCheck{err: errors.New("db unavailable")}
 	deps.RedisHealth = &stubHealthCheck{}
 	srv := newTestServerWithDepsAndLogger(t, deps, logger)
+	// Construction logs the ADMIN_API_KEY warning; only request logs matter here.
+	logOutput.Reset()
 
 	rr := doRequest(t, srv, http.MethodGet, "/healthz", nil)
 

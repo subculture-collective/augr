@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -320,7 +322,7 @@ func mapSubmitOrderRequest(order *domain.Order) (submitOrderRequest, error) {
 
 	request := submitOrderRequest{
 		Symbol:        symbol,
-		Qty:           formatFloat(order.Quantity),
+		Qty:           formatQuantity(order.Quantity),
 		Side:          side,
 		Type:          orderType,
 		TimeInForce:   defaultTimeInForce,
@@ -335,7 +337,7 @@ func mapSubmitOrderRequest(order *domain.Order) (submitOrderRequest, error) {
 		// limit while retaining the internal strategy intent.
 		if order.LimitPrice != nil && *order.LimitPrice > 0 {
 			request.Type = domain.OrderTypeLimit.String()
-			request.LimitPrice = formatFloat(*order.LimitPrice)
+			request.LimitPrice = formatPrice(*order.LimitPrice)
 			request.ExtendedHours = true
 		}
 		return request, nil
@@ -343,13 +345,13 @@ func mapSubmitOrderRequest(order *domain.Order) (submitOrderRequest, error) {
 		if order.LimitPrice == nil {
 			return submitOrderRequest{}, errors.New("alpaca: limit order requires limit price")
 		}
-		request.LimitPrice = formatFloat(*order.LimitPrice)
+		request.LimitPrice = formatPrice(*order.LimitPrice)
 		request.ExtendedHours = true
 	case domain.OrderTypeStop:
 		if order.StopPrice == nil {
 			return submitOrderRequest{}, errors.New("alpaca: stop order requires stop price")
 		}
-		request.StopPrice = formatFloat(*order.StopPrice)
+		request.StopPrice = formatPrice(*order.StopPrice)
 	case domain.OrderTypeStopLimit:
 		if order.LimitPrice == nil {
 			return submitOrderRequest{}, errors.New("alpaca: stop limit order requires limit price")
@@ -357,8 +359,8 @@ func mapSubmitOrderRequest(order *domain.Order) (submitOrderRequest, error) {
 		if order.StopPrice == nil {
 			return submitOrderRequest{}, errors.New("alpaca: stop limit order requires stop price")
 		}
-		request.LimitPrice = formatFloat(*order.LimitPrice)
-		request.StopPrice = formatFloat(*order.StopPrice)
+		request.LimitPrice = formatPrice(*order.LimitPrice)
+		request.StopPrice = formatPrice(*order.StopPrice)
 	case domain.OrderTypeTrailingStop:
 		// Until domain.Order exposes dedicated Alpaca trail fields, trailing stops
 		// reuse StopPrice for trail_price and LimitPrice for trail_percent.
@@ -368,7 +370,7 @@ func mapSubmitOrderRequest(order *domain.Order) (submitOrderRequest, error) {
 			return submitOrderRequest{}, errors.New("alpaca: trailing stop order requires either StopPrice (trail_price) or LimitPrice (trail_percent), but not both or neither")
 		}
 		if useStopPriceForTrail {
-			request.TrailPrice = formatFloat(*order.StopPrice)
+			request.TrailPrice = formatPrice(*order.StopPrice)
 		} else {
 			request.TrailPercent = formatFloat(*order.LimitPrice)
 		}
@@ -384,25 +386,79 @@ func formatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
 
+// Alpaca price and quantity precision rules:
+//   - prices at or above $1.00 accept at most two decimals (sub-penny rejected);
+//   - prices below $1.00 accept at most four decimals;
+//   - fractional stock quantities accept at most nine decimals.
+const (
+	alpacaPriceDecimalsAtOrAboveOneDollar = 2
+	alpacaPriceDecimalsBelowOneDollar     = 4
+	alpacaQuantityDecimals                = 9
+)
+
+// roundPrice applies Alpaca's sub-penny rule to a limit, stop, or trail price.
+func roundPrice(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return value
+	}
+	decimals := alpacaPriceDecimalsAtOrAboveOneDollar
+	if math.Abs(value) < 1 {
+		decimals = alpacaPriceDecimalsBelowOneDollar
+	}
+	return roundToDecimals(value, decimals)
+}
+
+// roundQuantity limits a stock quantity to Alpaca's fractional precision.
+func roundQuantity(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return value
+	}
+	return roundToDecimals(value, alpacaQuantityDecimals)
+}
+
+func roundToDecimals(value float64, decimals int) float64 {
+	rounded, err := strconv.ParseFloat(strconv.FormatFloat(value, 'f', decimals, 64), 64)
+	if err != nil {
+		return value
+	}
+	return rounded
+}
+
+// formatPrice renders a price with Alpaca's decimal rule and no trailing zeros.
+func formatPrice(value float64) string {
+	return formatFloat(roundPrice(value))
+}
+
+// formatQuantity renders a quantity with at most nine decimals and no
+// trailing zeros.
+func formatQuantity(value float64) string {
+	return formatFloat(roundQuantity(value))
+}
+
+// mapOrderStatus maps an Alpaca order status onto the domain status. Every
+// documented status is listed explicitly. An unrecognised status is treated as
+// still open (submitted) and logged, so a new provider status never breaks
+// order polling or reconciliation.
 func mapOrderStatus(rawStatus string) (domain.OrderStatus, error) {
 	status := strings.ToLower(strings.TrimSpace(rawStatus))
 	switch status {
 	case "":
 		return "", errors.New("alpaca: order status is required")
-	case "accepted_for_bidding", "calculated", "held", "pending_cancel", "pending_new", "pending_replace":
+	case "pending_new", "pending_review", "pending_cancel", "pending_replace", "accepted_for_bidding", "calculated", "held":
 		return domain.OrderStatusPending, nil
-	case "accepted", "done_for_day", "new", "replaced", "stopped", "suspended":
+	case "new", "accepted", "replaced", "stopped", "suspended", "done_for_day":
 		return domain.OrderStatusSubmitted, nil
 	case "partially_filled":
 		return domain.OrderStatusPartial, nil
 	case "filled":
 		return domain.OrderStatusFilled, nil
-	case "canceled", "expired":
+	case "canceled", "cancelled", "expired":
 		return domain.OrderStatusCancelled, nil
 	case "rejected":
 		return domain.OrderStatusRejected, nil
 	default:
-		return "", fmt.Errorf("alpaca: unsupported order status %q", rawStatus)
+		slog.Default().Warn("alpaca: unknown order status mapped to submitted", "status", rawStatus)
+		return domain.OrderStatusSubmitted, nil
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -23,7 +24,19 @@ type AlpacaClientAdapter struct {
 	client *alpacaexec.Client
 	broker *alpacaexec.Broker
 	logger *slog.Logger
+
+	// fillWatermarkMu guards the in-memory fill watermark. The first ListFills
+	// in a process walks the full history; later calls start one day before
+	// the newest fill already reconciled so late-arriving activities are
+	// still observed without re-walking every page.
+	fillWatermarkMu sync.Mutex
+	fillWatermark   time.Time
 }
+
+const (
+	alpacaOrdersPageSize    = 500
+	alpacaFillLookbackSlack = 24 * time.Hour
+)
 
 type alpacaOrderResponse struct {
 	ID             string `json:"id"`
@@ -90,27 +103,49 @@ func (a *AlpacaClientAdapter) ListOrders(ctx context.Context) ([]BrokerOrderSnap
 		return nil, errors.New("alpaca: reconciliation client is required")
 	}
 
-	responseBody, err := a.client.Get(ctx, "/v2/orders", url.Values{
-		"status":    {"all"},
-		"limit":     {"500"},
-		"direction": {"desc"},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("alpaca: list orders: %w", err)
-	}
-
-	var response []alpacaOrderResponse
-	if err := json.Unmarshal(responseBody, &response); err != nil {
-		return nil, fmt.Errorf("alpaca: decode orders response: %w", err)
-	}
-
-	orders := make([]BrokerOrderSnapshot, 0, len(response))
-	for _, raw := range response {
-		order, err := mapAlpacaOrderSnapshot(raw)
-		if err != nil {
-			return nil, err
+	var (
+		orders []BrokerOrderSnapshot
+		after  string
+		seen   = map[string]struct{}{}
+	)
+	for {
+		params := url.Values{
+			"status":    {"all"},
+			"limit":     {strconv.Itoa(alpacaOrdersPageSize)},
+			"direction": {"asc"},
 		}
-		orders = append(orders, order)
+		if after != "" {
+			params.Set("after", after)
+		}
+		responseBody, err := a.client.Get(ctx, "/v2/orders", params)
+		if err != nil {
+			return nil, fmt.Errorf("alpaca: list orders: %w", err)
+		}
+
+		var response []alpacaOrderResponse
+		if err := json.Unmarshal(responseBody, &response); err != nil {
+			return nil, fmt.Errorf("alpaca: decode orders response: %w", err)
+		}
+
+		newest := ""
+		for _, raw := range response {
+			if _, dup := seen[raw.ID]; dup {
+				continue
+			}
+			seen[raw.ID] = struct{}{}
+			order, err := mapAlpacaOrderSnapshot(raw)
+			if err != nil {
+				return nil, err
+			}
+			orders = append(orders, order)
+			if strings.TrimSpace(raw.SubmittedAt) != "" {
+				newest = raw.SubmittedAt
+			}
+		}
+		if len(response) < alpacaOrdersPageSize || newest == "" || newest == after {
+			break
+		}
+		after = newest
 	}
 	return orders, nil
 }
@@ -123,11 +158,22 @@ func (a *AlpacaClientAdapter) ListFills(ctx context.Context) ([]BrokerFillSnapsh
 	var (
 		fills     []BrokerFillSnapshot
 		pageToken string
+		newest    time.Time
 	)
+	a.fillWatermarkMu.Lock()
+	watermark := a.fillWatermark
+	a.fillWatermarkMu.Unlock()
+	after := ""
+	if !watermark.IsZero() {
+		after = watermark.Add(-alpacaFillLookbackSlack).UTC().Format(time.RFC3339Nano)
+	}
 	for {
 		params := url.Values{
 			"direction": {"desc"},
 			"page_size": {strconv.Itoa(alpacaActivitiesPageSize)},
+		}
+		if after != "" {
+			params.Set("after", after)
 		}
 		if strings.TrimSpace(pageToken) != "" {
 			params.Set("page_token", pageToken)
@@ -152,12 +198,22 @@ func (a *AlpacaClientAdapter) ListFills(ctx context.Context) ([]BrokerFillSnapsh
 				return nil, err
 			}
 			fills = append(fills, fill)
+			if fill.ExecutedAt.After(newest) {
+				newest = fill.ExecutedAt
+			}
 		}
 
 		if len(response) < alpacaActivitiesPageSize {
 			break
 		}
 		pageToken = response[len(response)-1].ID
+	}
+	if !newest.IsZero() {
+		a.fillWatermarkMu.Lock()
+		if newest.After(a.fillWatermark) {
+			a.fillWatermark = newest
+		}
+		a.fillWatermarkMu.Unlock()
 	}
 	return fills, nil
 }

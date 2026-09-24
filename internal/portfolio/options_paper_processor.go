@@ -51,7 +51,9 @@ func (processor *OptionsPaperOrderProcessor) ProcessPaperOptionsOrder(ctx contex
 	if opportunity.MarketType != domain.MarketTypeOptions || decision.ExecutionRoute != "alpaca_mleg" || decision.Quantity <= 0 || decision.Quantity != math.Floor(decision.Quantity) {
 		return PaperOrderResult{Skipped: true, Reason: "invalid_defined_risk_option_decision"}, nil
 	}
-	if decision.ReservedRiskUSD != decision.Quantity*opportunity.MaxLossPerUnit || decision.ReservedCapitalUSD != decision.Quantity*opportunity.RequiredCapitalUnit {
+	// Reserved amounts round-trip through NUMERIC columns; compare with a
+	// relative tolerance rather than exact float equality.
+	if !approxEqual(decision.ReservedRiskUSD, decision.Quantity*opportunity.MaxLossPerUnit) || !approxEqual(decision.ReservedCapitalUSD, decision.Quantity*opportunity.RequiredCapitalUnit) {
 		return PaperOrderResult{Skipped: true, Reason: "option_allocation_risk_mismatch"}, nil
 	}
 	preflight, ok := processor.deps.Broker.(paperOptionsAccountPreflight)
@@ -233,3 +235,18 @@ var (
 	_ PaperOptionsOrderProcessor = (*OptionsPaperOrderProcessor)(nil)
 	_ PaperOrderReconciler       = (*OptionsPaperOrderProcessor)(nil)
 )
+
+// reservedAmountRelativeTolerance bounds the drift allowed between an
+// allocator-computed reservation and its database round-trip.
+const reservedAmountRelativeTolerance = 1e-6
+
+func approxEqual(a, b float64) bool {
+	if a == b {
+		return true
+	}
+	scale := math.Max(math.Abs(a), math.Abs(b))
+	if scale == 0 {
+		return false
+	}
+	return math.Abs(a-b) <= scale*reservedAmountRelativeTolerance
+}

@@ -407,7 +407,7 @@ func TestParseFinalSignalValidJSON(t *testing.T) {
 		t.Fatalf("Action = %q, want %q", signal.Action, "BUY")
 	}
 	if signal.Confidence != 8 {
-		t.Fatalf("Confidence = %d, want 8", signal.Confidence)
+		t.Fatalf("Confidence = %v, want 8", signal.Confidence)
 	}
 	if signal.AdjustedPositionSize != 75 {
 		t.Fatalf("AdjustedPositionSize = %v, want 75", signal.AdjustedPositionSize)
@@ -437,7 +437,7 @@ func TestParseFinalSignalWithCodeFences(t *testing.T) {
 		t.Fatalf("Action = %q, want %q", signal.Action, "SELL")
 	}
 	if signal.Confidence != 6 {
-		t.Fatalf("Confidence = %d, want 6", signal.Confidence)
+		t.Fatalf("Confidence = %v, want 6", signal.Confidence)
 	}
 }
 
@@ -505,8 +505,8 @@ func TestParseFinalSignalConfidenceOutOfRange(t *testing.T) {
 			input: `{"action": "BUY", "confidence": 0, "adjusted_position_size": 50, "adjusted_stop_loss": 240, "reasoning": "test"}`,
 		},
 		{
-			name:  "confidence too high",
-			input: `{"action": "BUY", "confidence": 11, "adjusted_position_size": 50, "adjusted_stop_loss": 240, "reasoning": "test"}`,
+			name:  "confidence negative",
+			input: `{"action": "BUY", "confidence": -2, "adjusted_position_size": 50, "adjusted_stop_loss": 240, "reasoning": "test"}`,
 		},
 	}
 
@@ -602,7 +602,7 @@ func TestParseFinalSignalWithInlineCodeFence(t *testing.T) {
 		t.Fatalf("Action = %q, want %q", signal.Action, "BUY")
 	}
 	if signal.Confidence != 7 {
-		t.Fatalf("Confidence = %d, want 7", signal.Confidence)
+		t.Fatalf("Confidence = %v, want 7", signal.Confidence)
 	}
 }
 

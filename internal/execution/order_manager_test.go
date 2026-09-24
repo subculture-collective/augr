@@ -834,6 +834,20 @@ type testAcceptedOrderFillWriter struct {
 	orders    *mockOrderRepo
 	positions *mockPositionRepo
 	trades    *mockTradeRepo
+
+	// prepared lists order identities that have a canonical routed command.
+	// Orders outside the set fail the preparation gate, mirroring the
+	// PostgreSQL planner's execution_orders lookup.
+	prepared       map[uuid.UUID]bool
+	preparedChecks int
+}
+
+func (writer *testAcceptedOrderFillWriter) RequireAcceptedOrderPrepared(_ context.Context, _ execution.ExecutionScope, order *domain.Order) error {
+	writer.preparedChecks++
+	if order == nil || !writer.prepared[order.ID] {
+		return fmt.Errorf("canonical routed order is not prepared: %w", execution.ErrAcceptedOrderNotPrepared)
+	}
+	return nil
 }
 
 func (writer *testAcceptedOrderFillWriter) ApplyAcceptedOrderFill(ctx context.Context, scope execution.ExecutionScope, input repository.OrderFillInput) (repository.OrderFillResult, error) {
@@ -2812,7 +2826,7 @@ func TestProcessSignal_SellSignalWithoutOpenLongPositionSkipped(t *testing.T) {
 	}
 }
 
-func TestProcessSignal_NonStockSellWithoutOpenLongIsNotStockGuarded(t *testing.T) {
+func TestProcessSignal_CryptoSellWithoutOpenLongIsGuarded(t *testing.T) {
 	broker := &mockBroker{}
 	riskEng := &mockRiskEngine{}
 	orderRepo := &mockOrderRepo{}
@@ -2833,22 +2847,17 @@ func TestProcessSignal_NonStockSellWithoutOpenLongIsNotStockGuarded(t *testing.T
 	if err != nil {
 		t.Fatalf("ProcessSignal() unexpected error: %v", err)
 	}
-	if len(orderRepo.orders) != 1 {
-		t.Fatalf("expected non-stock sell to continue to order path, got %d orders", len(orderRepo.orders))
+	if len(orderRepo.orders) != 0 {
+		t.Fatalf("expected unowned crypto sell to be skipped, got %d orders", len(orderRepo.orders))
 	}
-	if orderRepo.orders[0].MarketType != domain.MarketTypeCrypto {
-		t.Fatalf("order market type = %s, want crypto", orderRepo.orders[0].MarketType)
-	}
-	if len(recorder.decisions) == 0 {
-		t.Fatal("expected recorded decision")
+	if len(recorder.decisions) != 1 || !slices.Contains(recorder.decisions[0].RiskReasons, "unowned_sell_no_open_long") {
+		t.Fatalf("decisions = %+v, want one unowned_sell_no_open_long rejection", recorder.decisions)
 	}
 	if recorder.decisions[0].MarketType != domain.MarketTypeCrypto {
 		t.Fatalf("decision market type = %s, want crypto", recorder.decisions[0].MarketType)
 	}
-	for _, decision := range recorder.decisions {
-		if decision.Status == domain.TradeDecisionStatusRejected && slices.Contains(decision.RiskReasons, "unowned_sell_no_open_long") {
-			t.Fatalf("expected no stock-ownership rejection decision for non-stock sell, got %+v", decision)
-		}
+	if recorder.decisions[0].Status != domain.TradeDecisionStatusRejected || recorder.decisions[0].Side != domain.OrderSideSell {
+		t.Fatalf("decision = %+v, want rejected sell", recorder.decisions[0])
 	}
 }
 

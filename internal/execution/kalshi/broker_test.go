@@ -124,7 +124,8 @@ func TestBrokerSubmitOrder_WrapsClientError(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeLiveClient{createErr: errors.New("boom")}
-	_, err := NewBroker(client).SubmitOrder(context.Background(), &domain.Order{ClientOrderID: uuid.NewString(), Ticker: "KX-EXAMPLE", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeMarket, Quantity: 1, PredictionSide: "YES"})
+	limit := 0.45
+	_, err := NewBroker(client).SubmitOrder(context.Background(), &domain.Order{ClientOrderID: uuid.NewString(), Ticker: "KX-EXAMPLE", Side: domain.OrderSideBuy, OrderType: domain.OrderTypeLimit, LimitPrice: &limit, Quantity: 1, PredictionSide: "YES"})
 	if err == nil || !strings.Contains(err.Error(), "kalshi: submit order:") {
 		t.Fatalf("SubmitOrder() error = %v, want wrapped client error", err)
 	}

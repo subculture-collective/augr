@@ -442,6 +442,7 @@ func (m *mockRiskEngine) firstContext() (context.Context, bool) {
 type fakeCronEngine struct {
 	mu      sync.Mutex
 	jobs    []func()
+	removed []cron.EntryID
 	started atomic.Bool
 	wg      sync.WaitGroup
 }
@@ -451,6 +452,16 @@ func (f *fakeCronEngine) AddFunc(_ string, cmd func()) (cron.EntryID, error) {
 	defer f.mu.Unlock()
 	f.jobs = append(f.jobs, cmd)
 	return cron.EntryID(len(f.jobs)), nil
+}
+
+func (f *fakeCronEngine) Remove(id cron.EntryID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, id)
+	idx := int(id) - 1
+	if idx >= 0 && idx < len(f.jobs) {
+		f.jobs[idx] = nil
+	}
 }
 
 func (f *fakeCronEngine) Start() {
@@ -476,10 +487,17 @@ func (f *fakeCronEngine) Run(index int) {
 	job()
 }
 
+// jobCount reports live (not removed) entries.
 func (f *fakeCronEngine) jobCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.jobs)
+	n := 0
+	for _, job := range f.jobs {
+		if job != nil {
+			n++
+		}
+	}
+	return n
 }
 
 func testLogger() *slog.Logger {

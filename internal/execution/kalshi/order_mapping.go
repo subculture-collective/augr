@@ -2,6 +2,7 @@ package kalshi
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"strings"
 
@@ -65,7 +66,9 @@ func mapCreateOrderRequest(order *domain.Order) (CreateOrderRequest, error) {
 			req.NoPrice = &cents
 		}
 	case domain.OrderTypeMarket:
-		req.Type = "market"
+		// Market orders stay disabled until the wire format is smoke-tested in
+		// the Kalshi sandbox; reject at planning so nothing reaches the API.
+		return CreateOrderRequest{}, fmt.Errorf("kalshi: market orders are disabled until sandbox smoke-tested")
 	default:
 		return CreateOrderRequest{}, fmt.Errorf("kalshi: unsupported order type %q", order.OrderType)
 	}
@@ -84,19 +87,25 @@ func mapPredictionSide(raw string) (string, error) {
 	}
 }
 
+// mapOrderStatus maps a Kalshi order status onto the domain status. Unknown
+// values map to submitted (the order is assumed still working) and are logged
+// so a wire-format change cannot silently stall reconciliation.
 func mapOrderStatus(raw string) (domain.OrderStatus, error) {
 	switch status := strings.ToLower(strings.TrimSpace(raw)); status {
 	case "resting", "open", "pending":
 		return domain.OrderStatusSubmitted, nil
 	case "executed", "filled":
 		return domain.OrderStatusFilled, nil
-	case "partially_executed", "partial":
+	case "partially_executed", "partial", "partially_filled":
 		return domain.OrderStatusPartial, nil
-	case "canceled", "cancelled", "cancelled_by_user":
+	case "canceled", "cancelled", "cancelled_by_user", "canceled_by_user", "expired":
 		return domain.OrderStatusCancelled, nil
 	case "rejected":
 		return domain.OrderStatusRejected, nil
+	case "":
+		return "", fmt.Errorf("kalshi: order status is required")
 	default:
-		return "", fmt.Errorf("kalshi: unsupported order status %q", raw)
+		slog.Default().Warn("kalshi: unknown order status; treating as submitted", slog.String("status", raw))
+		return domain.OrderStatusSubmitted, nil
 	}
 }

@@ -2,6 +2,7 @@ package kalshidiscovery
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,61 @@ type ScreenerConfig struct {
 type ScreenRejection struct {
 	Ticker  string   `json:"ticker"`
 	Reasons []string `json:"reasons"`
+}
+
+// ReasonCount is one normalized rejection reason and how many candidates hit it.
+type ReasonCount struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+
+var (
+	rejectionNumberPattern = regexp.MustCompile(`-?\d+(\.\d+)?%?`)
+	rejectionQuotePattern  = regexp.MustCompile(`"[^"]*"`)
+	rejectionSpacePattern  = regexp.MustCompile(`\s+`)
+)
+
+// NormalizeRejectionReason strips candidate-specific numbers and quoted values
+// so that reasons such as "volume 232.00 below minimum 1000.00" collapse to one
+// key ("volume below minimum") for aggregation.
+func NormalizeRejectionReason(reason string) string {
+	out := rejectionQuotePattern.ReplaceAllString(reason, "")
+	out = rejectionNumberPattern.ReplaceAllString(out, "")
+	out = strings.ReplaceAll(out, "()", "")
+	out = rejectionSpacePattern.ReplaceAllString(out, " ")
+	return strings.TrimSpace(out)
+}
+
+// SummarizeRejections counts normalized rejection reasons across all rejected
+// candidates, sorted by descending count then reason text. A candidate that
+// fails several filters contributes to each reason once.
+func SummarizeRejections(rejected []ScreenRejection) []ReasonCount {
+	counts := map[string]int{}
+	for _, rejection := range rejected {
+		seen := map[string]struct{}{}
+		for _, reason := range rejection.Reasons {
+			key := NormalizeRejectionReason(reason)
+			if key == "" {
+				continue
+			}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			counts[key]++
+		}
+	}
+	out := make([]ReasonCount, 0, len(counts))
+	for reason, count := range counts {
+		out = append(out, ReasonCount{Reason: reason, Count: count})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Reason < out[j].Reason
+	})
+	return out
 }
 
 // DefaultScreenerConfig returns conservative but useful screening defaults.

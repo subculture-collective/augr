@@ -111,7 +111,7 @@ func TestCapitalLadderSchemaCompatibility(t *testing.T) {
 	for _, test := range []struct {
 		version int
 		wantErr bool
-	}{{version: 110, wantErr: true}, {version: 111, wantErr: true}, {version: 112, wantErr: true}, {version: 113, wantErr: true}, {version: 114}, {version: 115, wantErr: true}} {
+	}{{version: 113, wantErr: true}, {version: 114, wantErr: true}, {version: 115, wantErr: true}, {version: 116, wantErr: true}, {version: 117}, {version: 118, wantErr: true}} {
 		err := validateCapitalLadderSchemaVersion(test.version)
 		if (err != nil) != test.wantErr {
 			t.Errorf("validateCapitalLadderSchemaVersion(%d) error=%v, wantErr=%t", test.version, err, test.wantErr)
@@ -193,8 +193,11 @@ func TestCLICommands(t *testing.T) {
 			created.UpdatedAt = now
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(created)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/strategies/"+strategyID.String():
+			_ = json.NewEncoder(w).Encode(strategy)
 		case r.Method == http.MethodPost && r.URL.Path == accountBase+"/strategies/"+strategyID.String()+"/run":
-			_ = json.NewEncoder(w).Encode(runResult)
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(api.StrategyRunAccepted{Status: "accepted", StrategyID: strategyID.String(), Message: "strategy run started"})
 		case r.Method == http.MethodGet && r.URL.Path == accountBase+"/portfolio/summary":
 			_ = json.NewEncoder(w).Encode(portfolioSummary{
 				OpenPositions: 1,
@@ -291,8 +294,41 @@ func TestCLICommands(t *testing.T) {
 		if output.Strategy.ID != strategyID {
 			t.Fatalf("strategy id = %s, want %s", output.Strategy.ID, strategyID)
 		}
-		if output.Result.Run.ID != runID {
-			t.Fatalf("run id = %s, want %s", output.Result.Run.ID, runID)
+		if output.Accepted.Status != "accepted" || output.Accepted.StrategyID != strategyID.String() || output.Accepted.Message != "strategy run started" {
+			t.Fatalf("accepted receipt = %+v", output.Accepted)
+		}
+	})
+
+	t.Run("run command prints the admission receipt as a table", func(t *testing.T) {
+		stdout, _, err := executeCLI(t, nil, "--api-url", server.URL, "run", "AAPL")
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		for _, want := range []string{"Status", "accepted", "Message", "strategy run started", strategyID.String()} {
+			if !strings.Contains(stdout, want) {
+				t.Fatalf("stdout missing %q:\n%s", want, stdout)
+			}
+		}
+	})
+
+	t.Run("strategies run triggers by id", func(t *testing.T) {
+		stdout, _, err := executeCLI(t, nil, "--api-url", server.URL, "--format", "json", "strategies", "run", strategyID.String())
+		if err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		var output runOutput
+		if err := json.Unmarshal([]byte(stdout), &output); err != nil {
+			t.Fatalf("stdout is not valid JSON: %v\n%s", err, stdout)
+		}
+		if output.Strategy.ID != strategyID || output.Accepted.Status != "accepted" {
+			t.Fatalf("output = %+v", output)
+		}
+	})
+
+	t.Run("strategies run rejects a malformed id", func(t *testing.T) {
+		_, _, err := executeCLI(t, nil, "--api-url", server.URL, "strategies", "run", "not-a-uuid")
+		if err == nil || !strings.Contains(err.Error(), "invalid strategy id") {
+			t.Fatalf("Execute() error = %v, want invalid strategy id", err)
 		}
 	})
 

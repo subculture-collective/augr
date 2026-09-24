@@ -39,6 +39,10 @@ const (
 	AgentEventKindPipelineCompleted    AgentEventKind = "pipeline_completed"
 	AgentEventKindPipelineFailed       AgentEventKind = "pipeline_failed"
 	AgentEventKindPipelineCancelled    AgentEventKind = "pipeline_cancelled"
+	// AgentEventKindPipelineHold records a run that was converted to HOLD by
+	// the runner (missing required analyst, unparseable judge output, or an
+	// execution-gate rejection) instead of failing.
+	AgentEventKindPipelineHold AgentEventKind = "pipeline_hold"
 )
 
 // String returns the string representation of an AgentEventKind.

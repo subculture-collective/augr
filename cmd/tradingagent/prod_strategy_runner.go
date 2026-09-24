@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +20,7 @@ import (
 	"github.com/PatrickFanella/get-rich-quick/internal/agent/rules"
 	agenttrader "github.com/PatrickFanella/get-rich-quick/internal/agent/trader"
 	"github.com/PatrickFanella/get-rich-quick/internal/api"
+	"github.com/PatrickFanella/get-rich-quick/internal/automation"
 	"github.com/PatrickFanella/get-rich-quick/internal/config"
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/data/ssga"
@@ -134,7 +134,22 @@ type realStrategyRunner struct {
 	polymarketWorkerStop   context.CancelFunc
 	polymarketWorkerWG     sync.WaitGroup
 	hub                    *api.Hub // nil until wired; optional WebSocket broadcast
+
+	// brokerCache holds one HTTP-backed broker per (kind, mode) so each run does
+	// not construct a fresh Alpaca/Binance client.
+	brokerCacheMu sync.Mutex
+	brokerCache   map[string]execution.Broker
+
+	// riskSnapshotOnce installs the risk status snapshot source exactly once.
+	riskSnapshotOnce sync.Once
 }
+
+// Polymarket tick workers retire when their position closes or the feed goes
+// quiet. Tests shorten these.
+var (
+	polymarketWorkerCheckInterval = 5 * time.Minute
+	polymarketWorkerIdleTimeout   = time.Hour
+)
 
 func newRealStrategyRunner(
 	executionAccount domain.ExecutionAccountBinding,
@@ -197,7 +212,7 @@ func newRealStrategyRunner(
 		polymarketWorkerStop:  workerStop,
 		localPaperBroker:      newConfiguredPaperBroker(cfg.Paper, logger),
 	}
-	runner.setRiskPortfolioSnapshotSource(runner.localPaperBroker)
+	runner.installRiskPortfolioSnapshotSource()
 
 	// Wire Polymarket client if credentials are configured.
 	pm := cfg.Brokers.Polymarket
@@ -249,6 +264,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 		return nil, errors.New("strategy execution version ID is required")
 	}
 	if err := validateETFStrategyContract(strategy); err != nil {
+		err = preparationRejectionError(err)
 		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, executionVersionID, err); persistErr != nil {
 			return nil, errors.Join(err, persistErr)
 		}
@@ -278,6 +294,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 
 	runner, prepared, strategyConfig, eventsCh, err := r.prepareStrategyRun(ctx, strategy, executionVersionID)
 	if err != nil {
+		err = preparationRejectionError(err)
 		if persistErr := r.recordStrategyPreparationFailure(ctx, strategy, executionVersionID, err); persistErr != nil {
 			return nil, recognizedRunControlError(ctx, errors.Join(err, persistErr))
 		}
@@ -413,9 +430,7 @@ func (r *realStrategyRunner) RunStrategy(ctx context.Context, strategy domain.St
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, run, finalSignal, tradingPlan, opportunitySpread); err != nil {
-		return canonical, err
-	}
+	r.recordPortfolioOpportunityNonFatal(ctx, strategy, run, finalSignal, tradingPlan, opportunitySpread)
 
 	// Notification delivery is an optional side effect and must not monopolize a
 	// scheduler execution slot when a webhook is slow or rate limited.
@@ -1076,9 +1091,7 @@ func (r *realStrategyRunner) runPolymarketNative(ctx context.Context, strategy d
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan, nil); err != nil {
-		return canonical, err
-	}
+	r.recordPortfolioOpportunityNonFatal(ctx, strategy, &run, finalSignal, tradingPlan, nil)
 	orders, err := loadResultOrders(ctx, r.orderRepo, domain.PipelineRunRef{ID: run.ID, TradeDate: run.TradeDate})
 	if err != nil {
 		return canonical, err
@@ -1228,9 +1241,7 @@ func (r *realStrategyRunner) runKalshiNative(ctx context.Context, strategy domai
 			return canonical, err
 		}
 	}
-	if err := r.recordPortfolioOpportunity(ctx, strategy, &run, finalSignal, tradingPlan, nil); err != nil {
-		return canonical, err
-	}
+	r.recordPortfolioOpportunityNonFatal(ctx, strategy, &run, finalSignal, tradingPlan, nil)
 
 	var orders []domain.Order
 	if r.orderRepo != nil {
@@ -1715,7 +1726,11 @@ func (r *realStrategyRunner) ensurePolymarketTickWorker(slug string) {
 	r.polymarketWorkerWG.Add(1)
 	go func() {
 		defer r.polymarketWorkerWG.Done()
+		defer r.polymarketWorkers.Delete(slug)
 		ticks := r.polymarketFeed.Ticks(slug)
+		check := time.NewTicker(polymarketWorkerCheckInterval)
+		defer check.Stop()
+		lastTick := time.Now()
 		for {
 			select {
 			case <-r.polymarketWorkerCtx.Done():
@@ -1724,10 +1739,50 @@ func (r *realStrategyRunner) ensurePolymarketTickWorker(slug string) {
 				if !ok {
 					return
 				}
+				lastTick = time.Now()
 				r.polymarketStopGuard.OnTick(r.polymarketWorkerCtx, tick)
+			case <-check.C:
+				if reason := r.polymarketWorkerRetireReason(r.polymarketWorkerCtx, slug, lastTick); reason != "" {
+					r.runnerLogger().InfoContext(r.polymarketWorkerCtx, "polymarket tick worker retired", "slug", slug, "reason", reason)
+					return
+				}
 			}
 		}
 	}()
+}
+
+// polymarketWorkerRetireReason reports why a tick worker should stop: the slug
+// has no open position, or the feed has been silent past the idle timeout.
+// An empty string keeps the worker alive.
+func (r *realStrategyRunner) polymarketWorkerRetireReason(ctx context.Context, slug string, lastTick time.Time) string {
+	if open, known := r.polymarketSlugHasOpenPosition(ctx, slug); known && !open {
+		return "position_closed"
+	}
+	if polymarketWorkerIdleTimeout > 0 && time.Since(lastTick) > polymarketWorkerIdleTimeout {
+		return "feed_idle"
+	}
+	return ""
+}
+
+// polymarketSlugHasOpenPosition checks both outcome tickers for the slug. The
+// second result is false when the position repository cannot answer.
+func (r *realStrategyRunner) polymarketSlugHasOpenPosition(ctx context.Context, slug string) (bool, bool) {
+	repo, ok := r.positionRepo.(repository.AccountScopedPositionRepository)
+	if !ok || r.positionRepo == nil {
+		return false, false
+	}
+	for _, side := range []string{"YES", "NO"} {
+		positions, err := repo.GetOpenByAccount(ctx, r.executionAccount.AccountID(), r.executionAccount.Environment(), repository.PositionFilter{Ticker: slug + ":" + side}, 1, 0)
+		if err != nil {
+			return false, false
+		}
+		for _, position := range positions {
+			if position.ClosedAt == nil && position.Quantity > 0 {
+				return true, true
+			}
+		}
+	}
+	return false, true
 }
 
 func (r *realStrategyRunner) stopPolymarketTickWorkers() {
@@ -1776,8 +1831,23 @@ func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Contex
 		return errors.New("record strategy preparation failure: agent event repository is required")
 	}
 
+	reasonCode := strategyPreparationFailureReason(preparationErr)
+	r.runnerLogger().WarnContext(ctx, "strategy preparation rejected in preflight; no run or order will be produced",
+		"strategy_id", strategy.ID, "strategy_name", strategy.Name, "ticker", strategy.Ticker, "market_type", strategy.MarketType,
+		"execution_version_id", executionVersionID, "reason_code", reasonCode, "error", preparationErr)
+	if r.metrics != nil {
+		r.metrics.RecordStrategyPreparationRejected(strategy.Ticker, reasonCode)
+	}
+	if r.notificationManager != nil {
+		notifyCtx, cancelNotify := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		if notifyErr := r.notificationManager.RecordStrategyPreparationRejected(notifyCtx, strategy.ID.String(), strategy.Name, strategy.Ticker, reasonCode, time.Now().UTC()); notifyErr != nil {
+			r.runnerLogger().WarnContext(ctx, "preparation rejection notification failed (non-fatal)", "error", notifyErr, "strategy_id", strategy.ID)
+		}
+		cancelNotify()
+	}
+
 	metadata, err := json.Marshal(map[string]string{
-		"reason_code": strategyPreparationFailureReason(preparationErr),
+		"reason_code": reasonCode,
 	})
 	if err != nil {
 		return fmt.Errorf("record strategy preparation failure: marshal metadata: %w", err)
@@ -1801,6 +1871,20 @@ func (r *realStrategyRunner) recordStrategyPreparationFailure(ctx context.Contex
 		return fmt.Errorf("record strategy preparation failure: persist event: %w", err)
 	}
 	return nil
+}
+
+// preparationRejectionError prefixes the scheduler-facing error with the
+// bounded reason code so operators see why the strategy was rejected without
+// reading agent events. The original error is wrapped and remains inspectable.
+func preparationRejectionError(err error) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	code := strategyPreparationFailureReason(err)
+	if strings.HasPrefix(err.Error(), "preparation rejected ["+code+"]") {
+		return err
+	}
+	return fmt.Errorf("preparation rejected [%s]: %w", code, err)
 }
 
 func strategyPreparationFailureReason(err error) string {
@@ -1849,7 +1933,7 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 	}
 	provider = runtimeLLMComposer.WrapProviderChain(provider, r.cfg.LLM, r.metrics, r.logger, r.llmBudget)
 
-	definition, err := buildRunnerDefinition(provider, resolved.LLMConfig.Provider, resolved, r.cfg.LLM.Timeout, r.metrics, r.logger)
+	definition, err := buildRunnerDefinition(provider, resolved.LLMConfig.Provider, resolved, r.cfg.LLM.Timeout, r.cfg.LLM.DebateTimeout, r.metrics, r.logger)
 	if err != nil {
 		return nil, agent.PreparedRun{}, nil, nil, err
 	}
@@ -1868,6 +1952,11 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 		Events:      eventsCh,
 		Logger:      r.logger,
 		RunRegistry: r.runRegistry,
+		// Bound the debate budget by the per-call timeout and clamp the whole
+		// pipeline to the scheduler job timeout so a run cannot outlive the
+		// job that owns it.
+		LLMCallTimeout:      r.cfg.LLM.CallTimeout,
+		MaxPipelineDuration: r.cfg.Features.SchedulerJobTimeout,
 	})
 
 	prepared, err := runner.Prepare(strategy, r.globals)
@@ -2413,7 +2502,7 @@ func usesStockOHLCVAnalysis(strategy domain.Strategy) bool {
 	return !eventmarkets.IsEventMarket(strategy.MarketType) && strategy.MarketType.Normalize() != domain.MarketTypeOptions
 }
 
-func buildRunnerDefinition(provider llm.Provider, providerName string, resolved agent.ResolvedConfig, llmTimeout time.Duration, appMetrics *metrics.Metrics, logger *slog.Logger) (agent.Definition, error) {
+func buildRunnerDefinition(provider llm.Provider, providerName string, resolved agent.ResolvedConfig, llmTimeout, debateTimeout time.Duration, appMetrics *metrics.Metrics, logger *slog.Logger) (agent.Definition, error) {
 	analysisAgents, err := buildAnalysisAgents(provider, providerName, resolved, appMetrics, logger)
 	if err != nil {
 		return agent.Definition{}, err
@@ -2421,7 +2510,7 @@ func buildRunnerDefinition(provider llm.Provider, providerName string, resolved 
 
 	deepModel := strings.TrimSpace(resolved.LLMConfig.DeepThinkModel)
 	quickModel := strings.TrimSpace(resolved.LLMConfig.QuickThinkModel)
-	debateProvider := newDebateTimeoutFallbackProvider(provider, quickModel, effectiveDebateCallTimeout(llmTimeout, resolved), logger)
+	debateProvider := newDebateTimeoutFallbackProvider(provider, quickModel, effectiveDebateCallTimeout(llmTimeout, debateTimeout, resolved), logger)
 
 	return agent.Definition{
 		Analysis: analysisAgents,
@@ -2444,10 +2533,13 @@ func buildRunnerDefinition(provider llm.Provider, providerName string, resolved 
 	}, nil
 }
 
-func effectiveDebateCallTimeout(llmTimeout time.Duration, resolved agent.ResolvedConfig) time.Duration {
+// effectiveDebateCallTimeout picks the per-call debate timeout: the configured
+// LLM_DEBATE_TIMEOUT (debateTimeout, parsed by config.Load) when set, else the
+// general LLM timeout, capped by the strategy's per-round debate budget.
+func effectiveDebateCallTimeout(llmTimeout, debateTimeout time.Duration, resolved agent.ResolvedConfig) time.Duration {
 	callTimeout := llmTimeout
-	if timeout := globalDebateCallTimeout(); timeout > 0 {
-		callTimeout = timeout
+	if debateTimeout > 0 {
+		callTimeout = debateTimeout
 	}
 
 	roundTimeout := time.Duration(resolved.PipelineConfig.DebateTimeoutSeconds) * time.Second
@@ -2463,15 +2555,6 @@ func effectiveDebateCallTimeout(llmTimeout time.Duration, resolved agent.Resolve
 		return maximumCallTimeout
 	}
 	return callTimeout
-}
-
-func globalDebateCallTimeout() time.Duration {
-	if t := os.Getenv("LLM_DEBATE_TIMEOUT"); t != "" {
-		if d, err := time.ParseDuration(t); err == nil {
-			return d
-		}
-	}
-	return 0
 }
 
 func promptOverride(overrides map[agent.AgentRole]string, role agent.AgentRole, fallback string) string {
@@ -2715,7 +2798,7 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 	if err != nil {
 		return nil, err
 	}
-	r.setRiskPortfolioSnapshotSource(broker)
+	r.installRiskPortfolioSnapshotSource()
 
 	return execution.NewOrderManager(
 		broker,
@@ -2729,6 +2812,76 @@ func (r *realStrategyRunner) newOrderManager(ctx context.Context, strategy domai
 		applyPolymarketSizingCap(strategy.MarketType, sizingConfigForStrategy(ctx, strategy, strategyConfig, resolved, r.positionRepo, r.logger, scope), r.cfg.Risk.Polymarket.MaxPositionUSDC),
 		r.logger,
 	).WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!strategy.IsPaper).WithAcceptedOrderFillWriter(r.economicWriter), nil
+}
+
+// OrderManagerForOrder builds an order manager whose broker matches a
+// persisted order so the order_reconcile job can refresh it through
+// ReconcilePersistedOrder. Sizing is irrelevant for reconciliation.
+func (r *realStrategyRunner) OrderManagerForOrder(_ context.Context, order domain.Order) (automation.OrderReconcileManager, error) {
+	if r == nil {
+		return nil, errors.New("order reconcile: runner is required")
+	}
+	isPaper := r.executionAccount.Environment() != domain.AccountEnvironmentLive
+	strategy := domain.Strategy{ID: uuid.Nil, Ticker: order.Ticker, MarketType: order.MarketType.Normalize(), IsPaper: isPaper}
+	if order.StrategyID != nil {
+		strategy.ID = *order.StrategyID
+	}
+	broker, brokerName, err := r.newBrokerForStrategy(strategy)
+	if err != nil {
+		return nil, err
+	}
+	if persistedBroker := strings.ToLower(strings.TrimSpace(order.Broker)); persistedBroker != "" && persistedBroker != brokerName {
+		return nil, fmt.Errorf("order reconcile: order %s was submitted to %q but the runtime resolves %q for %s", order.ID, persistedBroker, brokerName, strategy.MarketType)
+	}
+	gate, err := r.liveGateForStrategy(strategy)
+	if err != nil {
+		return nil, err
+	}
+	manager := execution.NewOrderManager(broker, brokerName, r.riskEngine, r.positionRepo, r.orderRepo, r.tradeRepo, r.auditLogRepo, r.eventRepo, execution.SizingConfig{}, r.runnerLogger()).
+		WithMetrics(r.metrics).WithDecisionRecorder(r.tradeDecisionRecorder).WithLiveGate(gate).WithLiveTrading(!isPaper).WithAcceptedOrderFillWriter(r.economicWriter)
+	if r.metrics == nil {
+		manager = manager.WithMetrics(nil)
+	}
+	return manager, nil
+}
+
+// recordPortfolioOpportunityNonFatal records the opportunity after the signal
+// already executed. Bookkeeping failures are logged, never returned, so a
+// successful execution result is not reported as a run failure.
+func (r *realStrategyRunner) recordPortfolioOpportunityNonFatal(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, finalSignal execution.FinalSignal, plan execution.TradingPlan, optionSpread *domain.OptionSpread) {
+	if err := r.recordPortfolioOpportunity(ctx, strategy, run, finalSignal, plan, optionSpread); err != nil {
+		runID := uuid.Nil
+		if run != nil {
+			runID = run.ID
+		}
+		r.runnerLogger().WarnContext(ctx, "portfolio opportunity bookkeeping failed after execution (non-fatal)", "error", err, "strategy_id", strategy.ID, "ticker", strategy.Ticker, "run_id", runID)
+	}
+}
+
+func (r *realStrategyRunner) runnerLogger() *slog.Logger {
+	if r == nil || r.logger == nil {
+		return slog.Default()
+	}
+	return r.logger
+}
+
+// llmPlanNotionalSanityMultiple bounds how far an LLM-produced position size
+// may exceed account equity before it is treated as a dollar amount.
+const llmPlanNotionalSanityMultiple = 10.0
+
+// normalizePlanPositionSize enforces the TradingPlan.PositionSize contract:
+// the value is a quantity in shares/units/contracts, never dollars. When an
+// LLM trader plan implies a notional above ten times account equity, the value
+// is treated as dollars and converted to units.
+func normalizePlanPositionSize(plan execution.TradingPlan, equity float64) (execution.TradingPlan, bool) {
+	if plan.DecisionMetadata == nil || equity <= 0 || plan.EntryPrice <= 0 || plan.PositionSize <= 0 {
+		return plan, false
+	}
+	if plan.PositionSize*plan.EntryPrice <= equity*llmPlanNotionalSanityMultiple {
+		return plan, false
+	}
+	plan.PositionSize /= plan.EntryPrice
+	return plan, true
 }
 
 func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, strategy domain.Strategy, run *domain.PipelineRun, finalSignal execution.FinalSignal, plan execution.TradingPlan, optionSpread *domain.OptionSpread) error {
@@ -2747,7 +2900,29 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 	if run == nil || run.ID == uuid.Nil || run.Status != domain.PipelineStatusCompleted || run.Signal != finalSignal.Signal {
 		return fmt.Errorf("portfolio opportunity: source run is not durably completed with matching signal")
 	}
+	lineage, lineageErr := optionalActivePromotionLineage(strategy.Config, run.AccountID)
+	if lineageErr != nil || lineage == nil {
+		// Only promoted strategies feed the allocator. Unpromoted strategies
+		// executed directly and have nothing for the allocator to consider.
+		r.runnerLogger().InfoContext(ctx, "portfolio opportunity skipped: strategy has no active promotion lineage", "strategy_id", strategy.ID, "ticker", strategy.Ticker, "run_id", run.ID, "lineage_error", lineageErr)
+		return nil
+	}
+	if plan.DecisionMetadata != nil {
+		if broker, _, brokerErr := r.newBrokerForStrategy(strategy); brokerErr == nil && broker != nil {
+			if balance, balanceErr := broker.GetAccountBalance(ctx); balanceErr == nil {
+				original := plan.PositionSize
+				if normalized, converted := normalizePlanPositionSize(plan, balance.Equity); converted {
+					r.runnerLogger().WarnContext(ctx, "LLM plan position_size looks like dollars; converting to units", "strategy_id", strategy.ID, "ticker", plan.Ticker, "position_size", original, "entry_price", plan.EntryPrice, "equity", balance.Equity, "converted_units", normalized.PositionSize)
+					plan = normalized
+				}
+			} else {
+				r.runnerLogger().WarnContext(ctx, "portfolio opportunity: account balance unavailable; skipping position size sanity check", "error", balanceErr, "strategy_id", strategy.ID)
+			}
+		}
+	}
 	maxLossPct := opportunityMaxLossPct(finalSignal.Signal, plan.EntryPrice, plan.StopLoss)
+	// TradingPlan.PositionSize is a unit quantity (shares/contracts), so
+	// notional is size × price.
 	proposedNotional := plan.PositionSize * plan.EntryPrice
 	scope, err := executionScopeFromPersistedRun(run, strategy)
 	if err != nil {
@@ -2791,12 +2966,13 @@ func (r *realStrategyRunner) recordPortfolioOpportunity(ctx context.Context, str
 }
 
 func (r *realStrategyRunner) portfolioAllocatorOwnsPaperExecution(strategy domain.Strategy, signal domain.PipelineSignal) bool {
-	if r == nil || !strategy.IsPaper || r.portfolioAllocatorMode != portfolio.AllocatorModePaper && r.portfolioAllocatorMode != portfolio.AllocatorModeShadow {
+	if r == nil || !strategy.IsPaper || !r.portfolioAllocatorMode.OwnsExecution() {
 		return false
 	}
-	// Promoted paper strategies always route through the allocator. In shadow
-	// mode that authority records replayable decisions and makes no broker call;
-	// in paper mode it owns the one approved submission path.
+	// Promoted paper strategies route through the allocator only when the
+	// allocator mode owns execution (paper). Shadow mode records replayable
+	// decisions and makes no broker call, so promoted strategies keep their
+	// direct execution path instead of trading nowhere.
 	if _, err := domain.ParseActivePromotionExecutionLineage(strategy.Config, r.executionAccount.AccountID()); err != nil {
 		return false
 	}
@@ -2980,27 +3156,62 @@ func (r *realStrategyRunner) refreshExecutionMetrics(ctx context.Context) {
 	}
 }
 
+// cachedBroker returns the broker stored under key, constructing it once.
+func (r *realStrategyRunner) cachedBroker(key string, build func() execution.Broker) execution.Broker {
+	r.brokerCacheMu.Lock()
+	defer r.brokerCacheMu.Unlock()
+	if r.brokerCache == nil {
+		r.brokerCache = make(map[string]execution.Broker)
+	}
+	if broker, ok := r.brokerCache[key]; ok && broker != nil {
+		return broker
+	}
+	broker := build()
+	r.brokerCache[key] = broker
+	return broker
+}
+
+func (r *realStrategyRunner) alpacaBroker(paperMode bool) execution.Broker {
+	key := "alpaca:live"
+	if paperMode {
+		key = "alpaca:paper"
+	}
+	return r.cachedBroker(key, func() execution.Broker {
+		return alpacaexecution.NewBroker(alpacaexecution.NewClient(
+			r.cfg.Brokers.Alpaca.APIKey,
+			r.cfg.Brokers.Alpaca.APISecret,
+			paperMode,
+			r.logger,
+		))
+	})
+}
+
+func (r *realStrategyRunner) binanceBroker(paperMode bool) execution.Broker {
+	key := "binance:live"
+	if paperMode {
+		key = "binance:paper"
+	}
+	return r.cachedBroker(key, func() execution.Broker {
+		return binanceexecution.NewBroker(binanceexecution.NewClient(
+			r.cfg.Brokers.Binance.APIKey,
+			r.cfg.Brokers.Binance.APISecret,
+			paperMode,
+			r.logger,
+		))
+	})
+}
+
 func (r *realStrategyRunner) newBrokerForStrategy(strategy domain.Strategy) (execution.Broker, string, error) {
 	marketType := strategy.MarketType.Normalize()
 	if strategy.IsPaper {
 		switch marketType {
 		case domain.MarketTypeStock:
 			if hasBrokerCredentials(r.cfg.Brokers.Alpaca) && r.cfg.Brokers.Alpaca.PaperMode {
-				return alpacaexecution.NewBroker(alpacaexecution.NewClient(
-					r.cfg.Brokers.Alpaca.APIKey,
-					r.cfg.Brokers.Alpaca.APISecret,
-					true,
-					r.logger,
-				)), "alpaca", nil
+				return r.alpacaBroker(true), "alpaca", nil
 			}
 		case domain.MarketTypeCrypto:
 			if hasBrokerCredentials(r.cfg.Brokers.Binance) && r.cfg.Brokers.Binance.PaperMode {
-				return binanceexecution.NewBroker(binanceexecution.NewClient(
-					r.cfg.Brokers.Binance.APIKey,
-					r.cfg.Brokers.Binance.APISecret,
-					true,
-					r.logger,
-				)), "binance", nil
+				return r.binanceBroker(true), "binance", nil
 			}
 		case domain.MarketTypePolymarket:
 			// Polymarket has no separate paper-trading mode; use local paper broker.
@@ -3017,12 +3228,7 @@ func (r *realStrategyRunner) newBrokerForStrategy(strategy domain.Strategy) (exe
 		if !hasBrokerCredentials(r.cfg.Brokers.Alpaca) {
 			return nil, "", errors.New("alpaca broker credentials are required for live stock trading")
 		}
-		return alpacaexecution.NewBroker(alpacaexecution.NewClient(
-			r.cfg.Brokers.Alpaca.APIKey,
-			r.cfg.Brokers.Alpaca.APISecret,
-			false,
-			r.logger,
-		)), "alpaca", nil
+		return r.alpacaBroker(false), "alpaca", nil
 	case domain.MarketTypeCrypto:
 		if !r.cfg.Features.EnableLiveTrading {
 			return nil, "", fmt.Errorf("live trading is disabled for strategy %s", strategy.Name)
@@ -3030,12 +3236,7 @@ func (r *realStrategyRunner) newBrokerForStrategy(strategy domain.Strategy) (exe
 		if !hasBrokerCredentials(r.cfg.Brokers.Binance) {
 			return nil, "", errors.New("binance broker credentials are required for live crypto trading")
 		}
-		return binanceexecution.NewBroker(binanceexecution.NewClient(
-			r.cfg.Brokers.Binance.APIKey,
-			r.cfg.Brokers.Binance.APISecret,
-			false,
-			r.logger,
-		)), "binance", nil
+		return r.binanceBroker(false), "binance", nil
 	case domain.MarketTypePolymarket:
 		if !r.cfg.Features.EnableLiveTrading {
 			return nil, "", fmt.Errorf("live trading is disabled for strategy %s", strategy.Name)
@@ -3116,18 +3317,36 @@ func newConfiguredPaperBroker(cfg config.PaperConfig, logger *slog.Logger) *pape
 	return broker
 }
 
-func (r *realStrategyRunner) setRiskPortfolioSnapshotSource(broker execution.Broker) {
-	if broker == nil || r == nil || r.positionRepo == nil {
+// riskStatusBroker resolves the broker whose equity backs risk status
+// reporting. The choice is stable for the runner lifetime: the configured stock
+// broker for the execution environment, or the local paper broker.
+func (r *realStrategyRunner) riskStatusBroker() execution.Broker {
+	if r == nil {
+		return nil
+	}
+	isPaper := r.executionAccount.Environment() != domain.AccountEnvironmentLive
+	broker, _, err := r.newBrokerForStrategy(domain.Strategy{MarketType: domain.MarketTypeStock, IsPaper: isPaper})
+	if err != nil || broker == nil {
+		return r.fallbackPaperBroker()
+	}
+	return broker
+}
+
+// installRiskPortfolioSnapshotSource wires the risk engine status snapshot
+// once at construction. Order managers build their own per-broker snapshots
+// for pre-trade checks, so no per-run mutation of the shared engine is needed.
+func (r *realStrategyRunner) installRiskPortfolioSnapshotSource() {
+	if r == nil || r.positionRepo == nil {
 		return
 	}
-
 	engineImpl, ok := r.riskEngine.(*risk.RiskEngineImpl)
 	if !ok {
 		return
 	}
-
-	engineImpl.SetPortfolioSnapshotFunc(func(ctx context.Context) (risk.Portfolio, error) {
-		return execution.BuildRiskPortfolioSnapshot(ctx, r.executionAccount, broker, r.positionRepo)
+	r.riskSnapshotOnce.Do(func() {
+		engineImpl.SetPortfolioSnapshotFunc(func(ctx context.Context) (risk.Portfolio, error) {
+			return execution.BuildRiskPortfolioSnapshot(ctx, r.executionAccount, r.riskStatusBroker(), r.positionRepo)
+		})
 	})
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -369,7 +370,7 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 				existing.FilledQuantity, existing.FilledAvgPrice, existing.FilledAt, existing.Status = priorFilledQuantity, priorFilledAvgPrice, priorFilledAt, priorStatus
 			}
 			if changed {
-				if err := r.orderRepo.Update(ctx, existing); err != nil {
+				if err := r.updateOrderThroughTransitions(ctx, existing, priorStatus); err != nil {
 					return summary, fmt.Errorf("alpaca_reconcile: update order %s: %w", snapshot.ExternalID, err)
 				}
 				summary.OrdersUpdated++
@@ -380,9 +381,10 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 			if strings.TrimSpace(existing.ExternalID) != "" && existing.ExternalID != snapshot.ExternalID {
 				return summary, fmt.Errorf("alpaca_reconcile: client order %s is already bound to %s", snapshot.ClientOrderID, existing.ExternalID)
 			}
+			priorStatus := existing.Status
 			existing.ExternalID = snapshot.ExternalID
 			applyOrderSnapshot(existing, snapshot, strategyID)
-			if err := r.orderRepo.Update(ctx, existing); err != nil {
+			if err := r.updateOrderThroughTransitions(ctx, existing, priorStatus); err != nil {
 				return summary, fmt.Errorf("alpaca_reconcile: bind accepted client order %s: %w", snapshot.ClientOrderID, err)
 			}
 			orderByExternalID[snapshot.ExternalID] = existing
@@ -445,9 +447,16 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 			continue
 		}
 		existing.ClosedAt = &closedAt
-		if existing.UnrealizedPnL != nil {
-			existing.RealizedPnL += *existing.UnrealizedPnL
+		if realized, matchedQuantity, ok := realizedPnLFromClosingFills(*existing, fills); ok {
+			existing.RealizedPnL += realized
 			existing.UnrealizedPnL = nil
+			r.logger.InfoContext(ctx, "alpaca_reconcile: closed local position from broker closing fills", "ticker", ticker, "position_id", existing.ID, "matched_quantity", matchedQuantity, "realized_pnl", realized)
+		} else {
+			r.logger.WarnContext(ctx, "alpaca_reconcile: closing local position absent from broker without matching closing fills; carrying last unrealized P&L into realized", "ticker", ticker, "position_id", existing.ID, "quantity", existing.Quantity)
+			if existing.UnrealizedPnL != nil {
+				existing.RealizedPnL += *existing.UnrealizedPnL
+				existing.UnrealizedPnL = nil
+			}
 		}
 		if err := r.positionRepo.Update(ctx, existing); err != nil {
 			return summary, fmt.Errorf("alpaca_reconcile: close missing broker position %s: %w", ticker, err)
@@ -567,6 +576,64 @@ func (r *AlpacaReconciler) reconcileLocked(ctx context.Context) (AlpacaReconcile
 	}
 
 	return summary, nil
+}
+
+// updateOrderThroughTransitions persists an order whose status may have
+// jumped more than one step since the last reconciliation (for example a
+// locally pending order the broker already filled). The order repository
+// enforces the domain state machine, so intermediate hops are written first.
+func (r *AlpacaReconciler) updateOrderThroughTransitions(ctx context.Context, order *domain.Order, priorStatus domain.OrderStatus) error {
+	target := order.Status
+	if priorStatus == domain.OrderStatusSubmitted && target == domain.OrderStatusPending {
+		// A provider "pending_*" acknowledgement never regresses durable submission.
+		order.Status = domain.OrderStatusSubmitted
+		return r.orderRepo.Update(ctx, order)
+	}
+	if priorStatus == domain.OrderStatusPending && target != priorStatus && !priorStatus.CanTransitionTo(target) && domain.OrderStatusSubmitted.CanTransitionTo(target) {
+		order.Status = domain.OrderStatusSubmitted
+		if err := r.orderRepo.Update(ctx, order); err != nil {
+			return fmt.Errorf("persist intermediate submitted status: %w", err)
+		}
+		order.Status = target
+	}
+	return r.orderRepo.Update(ctx, order)
+}
+
+// realizedPnLFromClosingFills derives realized P&L for a position the broker no
+// longer holds from the closing-side fills observed after it was opened. It
+// reports false when no closing fill matches, so the caller can fall back.
+func realizedPnLFromClosingFills(position domain.Position, fills []BrokerFillSnapshot) (float64, float64, bool) {
+	closingSide := domain.OrderSideSell
+	if position.Side == domain.PositionSideShort {
+		closingSide = domain.OrderSideBuy
+	}
+	remaining := position.Quantity
+	realized := 0.0
+	matched := 0.0
+	for _, fill := range fills {
+		if remaining <= 0 {
+			break
+		}
+		if fill.Ticker != position.Ticker || fill.Side != closingSide || fill.Quantity <= 0 {
+			continue
+		}
+		if !position.OpenedAt.IsZero() && fill.ExecutedAt.Before(position.OpenedAt) {
+			continue
+		}
+		quantity := math.Min(fill.Quantity, remaining)
+		if position.Side == domain.PositionSideShort {
+			realized += (position.AvgEntry - fill.Price) * quantity
+		} else {
+			realized += (fill.Price - position.AvgEntry) * quantity
+		}
+		realized -= fill.Fee
+		remaining -= quantity
+		matched += quantity
+	}
+	if matched <= 0 {
+		return 0, 0, false
+	}
+	return realized, matched, true
 }
 
 func (r *AlpacaReconciler) bindImportedOwnership(accountID *uuid.UUID, environment *domain.AccountEnvironment, originType, originID *string) {

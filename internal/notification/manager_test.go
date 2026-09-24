@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,5 +275,84 @@ func testAlertRules() config.AlertRulesConfig {
 		DBConnection: config.ImmediateAlertRuleConfig{
 			Channels: []string{ChannelEmail, ChannelPagerDuty},
 		},
+	}
+}
+
+func TestManagerSkipsUnconfiguredChannelsWithoutError(t *testing.T) {
+	t.Parallel()
+
+	telegram := &recordingNotifier{}
+	rules := testAlertRules()
+	rules.KillSwitch.Channels = []string{ChannelTelegram, ChannelEmail, ChannelDiscord}
+	manager := NewManager(rules, map[string]Notifier{ChannelTelegram: telegram})
+
+	if err := manager.RecordKillSwitchToggle(context.Background(), true, "manual", time.Now()); err != nil {
+		t.Fatalf("RecordKillSwitchToggle() error = %v, want nil when only some channels are configured", err)
+	}
+	if len(telegram.alerts) != 1 {
+		t.Fatalf("len(telegram.alerts) = %d, want 1", len(telegram.alerts))
+	}
+	if got := manager.ConfiguredChannels(); len(got) != 1 || got[0] != ChannelTelegram {
+		t.Fatalf("ConfiguredChannels() = %v", got)
+	}
+}
+
+func TestManagerNotifyStrategyPreparationRejectedRoutesAndDedups(t *testing.T) {
+	t.Parallel()
+
+	telegram := &recordingNotifier{}
+	rules := testAlertRules()
+	rules.PipelineFailure.Channels = []string{ChannelTelegram}
+	manager := NewManager(rules, map[string]Notifier{ChannelTelegram: telegram})
+	strategyID := uuid.New()
+
+	for range 2 {
+		if err := manager.NotifyStrategyPreparationRejected(context.Background(), strategyID, "AAPL", "fundamentals_missing"); err != nil {
+			t.Fatalf("NotifyStrategyPreparationRejected() error = %v", err)
+		}
+	}
+	if err := manager.RecordStrategyPreparationRejected(context.Background(), strategyID.String(), "AAPL Trend", "AAPL", "stale_quote", time.Now()); err != nil {
+		t.Fatalf("RecordStrategyPreparationRejected() error = %v", err)
+	}
+	if len(telegram.alerts) != 2 {
+		t.Fatalf("len(telegram.alerts) = %d, want 2 (dedup per strategy+reason)", len(telegram.alerts))
+	}
+	alert := telegram.alerts[0]
+	if alert.Key != "preparation_rejected:"+strategyID.String()+":fundamentals_missing" {
+		t.Fatalf("alert key = %q", alert.Key)
+	}
+	if alert.Severity != SeverityWarning || alert.Metadata["strategy_id"] != strategyID.String() || alert.Metadata["reason_code"] != "fundamentals_missing" || alert.Metadata["ticker"] != "AAPL" {
+		t.Fatalf("alert = %+v", alert)
+	}
+	if telegram.alerts[1].Metadata["strategy_name"] != "AAPL Trend" || !strings.Contains(telegram.alerts[1].Body, "AAPL Trend") {
+		t.Fatalf("named alert = %+v", telegram.alerts[1])
+	}
+}
+
+func TestManagerNotifyAutomationDegradedAlertsOncePerDegradation(t *testing.T) {
+	t.Parallel()
+
+	telegram := &recordingNotifier{}
+	rules := testAlertRules()
+	rules.PipelineFailure.Channels = []string{ChannelTelegram}
+	manager := NewManager(rules, map[string]Notifier{ChannelTelegram: telegram})
+
+	for range 2 {
+		if err := manager.NotifyAutomationDegraded(context.Background(), "startup recovery failed", []string{"options_scan", "kalshi_discovery"}); err != nil {
+			t.Fatalf("NotifyAutomationDegraded() error = %v", err)
+		}
+	}
+	if len(telegram.alerts) != 1 {
+		t.Fatalf("len(telegram.alerts) = %d, want 1", len(telegram.alerts))
+	}
+	if telegram.alerts[0].Severity != SeverityCritical || telegram.alerts[0].Metadata["disabled_job_count"] != "2" {
+		t.Fatalf("alert = %+v", telegram.alerts[0])
+	}
+	manager.ClearAutomationDegraded()
+	if err := manager.NotifyAutomationDegraded(context.Background(), "again", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(telegram.alerts) != 2 {
+		t.Fatalf("len(telegram.alerts) = %d, want 2 after clear", len(telegram.alerts))
 	}
 }

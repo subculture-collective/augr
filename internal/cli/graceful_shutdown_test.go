@@ -272,7 +272,7 @@ func TestShutdownGuard_LogsStructuredLifecycleMessages(t *testing.T) {
 		inFlightPipelineRunsKey: float64(3),
 		shutdownSignalKey:       syscall.SIGTERM.String(),
 	})
-	assertLogEntry(t, entries[1], "INFO", "waiting for in-flight pipeline runs", map[string]any{
+	assertLogEntry(t, entries[1], "INFO", "draining in-flight pipeline runs before cancellation", map[string]any{
 		inFlightPipelineRunsKey: float64(3),
 	})
 	assertLogEntry(t, entries[2], "INFO", "shutdown complete", nil)
@@ -381,7 +381,7 @@ func TestShutdownGuard_StopDoesNotLogCompletion(t *testing.T) {
 		inFlightPipelineRunsKey: float64(1),
 		shutdownSignalKey:       syscall.SIGTERM.String(),
 	})
-	assertLogEntry(t, entries[1], "INFO", "waiting for in-flight pipeline runs", map[string]any{
+	assertLogEntry(t, entries[1], "INFO", "draining in-flight pipeline runs before cancellation", map[string]any{
 		inFlightPipelineRunsKey: float64(1),
 	})
 }
@@ -719,4 +719,42 @@ func TestNewAPIServerDependencyTypeContractIsCorrect(t *testing.T) {
 		t.Fatal("NewAPIServer was not called")
 	}
 	cleanup()
+}
+
+func TestDrainInFlightRunsWaitsThenReportsCancellation(t *testing.T) {
+	t.Parallel()
+
+	sched := newMockScheduler()
+	sched.inFlight.Store(2)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		sched.inFlight.Store(0)
+	}()
+	if remaining := drainInFlightRuns(logger, sched, 5*time.Second); remaining != 0 {
+		t.Fatalf("drainInFlightRuns() = %d, want 0 after runs finish", remaining)
+	}
+	entries := parseLogEntries(t, buf.String())
+	if len(entries) != 1 || entries[0]["msg"] != "in-flight pipeline runs drained" {
+		t.Fatalf("entries = %v", entries)
+	}
+
+	buf.Reset()
+	sched.inFlight.Store(1)
+	if remaining := drainInFlightRuns(logger, sched, 300*time.Millisecond); remaining != 1 {
+		t.Fatalf("drainInFlightRuns() = %d, want 1 after timeout", remaining)
+	}
+	entries = parseLogEntries(t, buf.String())
+	if len(entries) != 1 {
+		t.Fatalf("entries = %v", entries)
+	}
+	assertLogEntry(t, entries[0], "WARN", "drain timeout elapsed; cancelling remaining in-flight pipeline runs (cause: shutdown)", map[string]any{
+		inFlightPipelineRunsKey: float64(1),
+	})
+
+	if remaining := drainInFlightRuns(logger, nil, time.Second); remaining != 0 {
+		t.Fatalf("drainInFlightRuns(nil) = %d, want 0", remaining)
+	}
 }

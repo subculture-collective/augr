@@ -45,6 +45,8 @@ type Metrics struct {
 	PositionsOpen                      prometheus.Gauge
 	CircuitBreakerState                prometheus.Gauge
 	KillSwitchActive                   prometheus.Gauge
+	StrategyPreparationRejectedTotal   *prometheus.CounterVec
+	SchedulerStrategyOutcomesTotal     *prometheus.CounterVec
 	PaperEvaluationProfile             *prometheus.GaugeVec
 	LLMRetryTotal                      *prometheus.CounterVec
 	LLMBudgetExhaustedTotal            prometheus.Counter
@@ -238,6 +240,16 @@ func New() *Metrics {
 			Help: "Kill switch state: 1 = active, 0 = inactive.",
 		}),
 
+		StrategyPreparationRejectedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "tradingagent_strategy_preparation_rejected_total",
+			Help: "Scheduled strategy runs rejected in preflight, by ticker and bounded reason code.",
+		}, []string{"ticker", "reason_code"}),
+
+		SchedulerStrategyOutcomesTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "scheduler_strategy_outcomes_total",
+			Help: "Scheduled strategy run outcomes (completed, execution_failed, kill_switch, market_closed, paused, skip_next_run, fetch_failed, executor_missing).",
+		}, []string{"outcome"}),
+
 		PaperEvaluationProfile: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "tradingagent_paper_evaluation_profile_info",
 			Help: "Active paper evidence namespace; exactly one label set should have value 1.",
@@ -306,6 +318,8 @@ func New() *Metrics {
 		m.PositionsOpen,
 		m.CircuitBreakerState,
 		m.KillSwitchActive,
+		m.StrategyPreparationRejectedTotal,
+		m.SchedulerStrategyOutcomesTotal,
 		m.PaperEvaluationProfile,
 		m.LLMRetryTotal,
 		m.LLMBudgetExhaustedTotal,
@@ -520,6 +534,31 @@ func (m *Metrics) SetKillSwitchActive(active bool) {
 	} else {
 		m.KillSwitchActive.Set(0)
 	}
+}
+
+// RecordStrategyPreparationRejected counts a preflight rejection so a strategy
+// that never trades is visible on the dashboard, not only in agent events.
+func (m *Metrics) RecordStrategyPreparationRejected(ticker, reasonCode string) {
+	if m == nil || m.StrategyPreparationRejectedTotal == nil {
+		return
+	}
+	if reasonCode == "" {
+		reasonCode = "unspecified"
+	}
+	m.StrategyPreparationRejectedTotal.WithLabelValues(ticker, reasonCode).Inc()
+}
+
+// RecordSchedulerStrategyOutcome counts a scheduled-run outcome. The strategy
+// ID is accepted for call-site symmetry with the scheduler hook but is not a
+// label, to keep cardinality bounded.
+func (m *Metrics) RecordSchedulerStrategyOutcome(_, outcome string) {
+	if m == nil || m.SchedulerStrategyOutcomesTotal == nil {
+		return
+	}
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	m.SchedulerStrategyOutcomesTotal.WithLabelValues(outcome).Inc()
 }
 
 // SetPaperEvaluationProfile exposes the active evidence namespace without

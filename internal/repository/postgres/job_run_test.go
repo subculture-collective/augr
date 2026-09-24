@@ -143,6 +143,18 @@ func TestJobRunResultJSONBackwardCompatibility(t *testing.T) {
 	}
 }
 
+func TestJobRunResultSkipsNonIntegerCounts(t *testing.T) {
+	t.Parallel()
+
+	counts, _, _, err := decodeJobRunResult([]byte(`{"processed":1.5,"label":"x","nested":{"a":1},"ok":3}`))
+	if err != nil {
+		t.Fatalf("decodeJobRunResult error = %v", err)
+	}
+	if len(counts) != 1 || counts["ok"] != 3 {
+		t.Fatalf("counts = %v, want only ok=3", counts)
+	}
+}
+
 func TestJobRunResultJSONRejectsMalformedPayloads(t *testing.T) {
 	t.Parallel()
 
@@ -155,7 +167,6 @@ func TestJobRunResultJSONRejectsMalformedPayloads(t *testing.T) {
 		`{"_detail":"first","_detail":"second"}`,
 		`{"_tickers":[],"_tickers":[]}`,
 		`{"processed":1,"processed":2}`,
-		`{"processed":1.5}`,
 		`{"processed":1} {"other":2}`,
 		`[]`,
 		`null`,
@@ -376,7 +387,7 @@ func TestJobRunLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orphans) != 1 || orphans[0].Status != "error" || orphans[0].CompletedAt == nil || orphans[0].Error != "process restarted" || orphans[0].ConsecutiveFailures != 1 {
+	if len(orphans) != 1 || orphans[0].Status != "error" || orphans[0].CompletedAt == nil || orphans[0].Error != "process restarted" || orphans[0].ConsecutiveFailures != 0 {
 		t.Fatalf("recovered row = %+v", orphans)
 	}
 	summaries, err = repo.Summaries(ctx)

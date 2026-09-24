@@ -18,6 +18,11 @@ const (
 	defaultTimeHorizon  = "days"
 	defaultEntryType    = "limit"
 	minimumNativeEdge   = 0.02
+
+	// proxyCalibrationPrefix marks fair probabilities derived by discovery from
+	// the conviction/mid-price proxy (kalshidiscovery.ProxyCalibration). They
+	// are not calibrated estimates and are only accepted for paper accounts.
+	proxyCalibrationPrefix = "discovery_conviction_proxy"
 )
 
 var supportedNativeTemplates = map[string]struct{}{
@@ -33,12 +38,34 @@ type NativeDecision = prediction.NativeDecision
 
 // DeterministicNativeExecutor converts discovery metadata into a conservative
 // executable decision. It never submits orders directly.
-type DeterministicNativeExecutor struct{}
+type DeterministicNativeExecutor struct {
+	// DisallowProxyCalibrationForPaper turns off the paper-only acceptance of
+	// "discovery_conviction_proxy*" calibrations. The zero value keeps proxy
+	// calibrations allowed for paper_scored/paper_stress scopes; live and
+	// shadow scopes always require a real calibration.
+	DisallowProxyCalibrationForPaper bool
+}
+
+// calibrationAcceptable reports whether the metadata calibration passes the
+// executor gate for the given account environment.
+func (e DeterministicNativeExecutor) calibrationAcceptable(calibration string, environment domain.AccountEnvironment) bool {
+	normalized := strings.ToLower(strings.TrimSpace(calibration))
+	if normalized == "" || strings.Contains(normalized, "uncalibrated") {
+		return false
+	}
+	if strings.HasPrefix(normalized, proxyCalibrationPrefix) {
+		if e.DisallowProxyCalibrationForPaper {
+			return false
+		}
+		return environment == domain.AccountEnvironmentPaperScored || environment == domain.AccountEnvironmentPaperStress
+	}
+	return true
+}
 
 // Execute builds a buy/hold decision from strategy discovery metadata and the
 // current YES/NO quote. Malformed or unsupported metadata is converted to a
 // safe hold decision.
-func (DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scope execution.ExecutionScope) (result NativeDecision, err error) {
+func (e DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.Strategy, snapshot Snapshot, scope execution.ExecutionScope) (result NativeDecision, err error) {
 	if scope.AccountID() == [16]byte{} || !scope.Environment().IsValid() {
 		return NativeDecision{}, errors.New("kalshi native executor: valid execution scope is required")
 	}
@@ -85,7 +112,13 @@ func (DeterministicNativeExecutor) Execute(ctx context.Context, strategy domain.
 	}
 	fairProbability := meta.FairProbability
 	calibration := strings.TrimSpace(meta.Calibration)
-	if fairProbability <= 0 || fairProbability > 1 || calibration == "" || strings.Contains(strings.ToLower(calibration), "uncalibrated") || len(meta.SourceReferences) == 0 {
+	if fairProbability <= 0 || fairProbability > 1 || calibration == "" || len(meta.SourceReferences) == 0 {
+		return holdDecisionWithMeta(meta, "kalshi native executor: calibrated fair probability is required"), nil
+	}
+	if !e.calibrationAcceptable(calibration, scope.Environment()) {
+		if strings.HasPrefix(strings.ToLower(calibration), proxyCalibrationPrefix) {
+			return holdDecisionWithMeta(meta, "kalshi native executor: proxy calibration is accepted for paper accounts only"), nil
+		}
 		return holdDecisionWithMeta(meta, "kalshi native executor: calibrated fair probability is required"), nil
 	}
 

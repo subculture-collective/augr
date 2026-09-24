@@ -130,25 +130,45 @@ func ExtractJSONObject(content string) (string, error) {
 	return "", errors.New("failed to extract JSON object: incomplete object")
 }
 
+// ParseError reports that model output could not be turned into the expected
+// structured value. Stage is "extract", "decode" or "validate". Callers use
+// errors.As to convert a structured-output failure into a HOLD instead of a
+// failed run.
+type ParseError struct {
+	Stage string
+	Err   error
+}
+
+func (e *ParseError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes the underlying cause.
+func (e *ParseError) Unwrap() error { return e.Err }
+
+// IsParseError reports whether err wraps a *ParseError.
+func IsParseError(err error) bool {
+	var parseErr *ParseError
+	return errors.As(err, &parseErr)
+}
+
 // Parse strips code fences from content, unmarshals the JSON into T, and
 // runs the supplied validation function. It returns the parsed value or a
-// descriptive error.
+// *ParseError. Unknown JSON fields are ignored: models add commentary keys
+// and an extra field must not discard an otherwise valid decision.
 func Parse[T any](content string, validate func(*T) error) (*T, error) {
 	cleaned, err := ExtractJSONObject(content)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		return nil, &ParseError{Stage: "extract", Err: fmt.Errorf("failed to parse JSON: %w", err)}
 	}
 
 	var result T
 	decoder := json.NewDecoder(strings.NewReader(cleaned))
-	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		return nil, &ParseError{Stage: "decode", Err: fmt.Errorf("failed to parse JSON: %w", err)}
 	}
 
 	if validate != nil {
 		if err := validate(&result); err != nil {
-			return nil, err
+			return nil, &ParseError{Stage: "validate", Err: err}
 		}
 	}
 

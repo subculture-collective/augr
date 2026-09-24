@@ -42,6 +42,35 @@ func TestRiskBreakerRepoIntegration_CRUD(t *testing.T) {
 	if !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("Get() after Reset error = %v, want ErrNotFound", err)
 	}
+	var storedResetAt *time.Time
+	if err := pool.QueryRow(ctx, `SELECT reset_at FROM risk_breaker_state WHERE scope = $1`, domain.RiskBreakerScopeGlobal).Scan(&storedResetAt); err != nil {
+		t.Fatalf("row after Reset error = %v, want retained audit row", err)
+	}
+	if storedResetAt == nil || !storedResetAt.Equal(resetAt.Truncate(time.Microsecond)) {
+		t.Fatalf("reset_at = %v, want %v", storedResetAt, resetAt)
+	}
+	open, err := repo.HasOpenBreaker(ctx, domain.RiskBreakerScopeGlobal, domain.RiskBreakerScopeStrategy("none"))
+	if err != nil || open {
+		t.Fatalf("HasOpenBreaker() after Reset = %t, %v; want false", open, err)
+	}
+	if err := repo.Trip(ctx, domain.RiskBreakerScopeGlobal, "again", time.Now().UTC()); err != nil {
+		t.Fatalf("re-Trip() error = %v", err)
+	}
+	open, err = repo.HasOpenBreaker(ctx, domain.RiskBreakerScopeGlobal)
+	if err != nil || !open {
+		t.Fatalf("HasOpenBreaker() after re-trip = %t, %v; want true", open, err)
+	}
+	list, err := repo.ListTripped(ctx)
+	if err != nil || len(list) != 1 || list[0].Reason != "again" {
+		t.Fatalf("ListTripped() after re-trip = %+v, %v", list, err)
+	}
+}
+
+func TestRiskBreakerRepo_HasOpenBreakerWithoutScopes(t *testing.T) {
+	open, err := (&RiskBreakerRepo{}).HasOpenBreaker(context.Background())
+	if err != nil || open {
+		t.Fatalf("HasOpenBreaker() = %t, %v; want false without scopes", open, err)
+	}
 }
 
 func TestRiskBreakerRepo_ResetMissingScopeIsIdempotent(t *testing.T) {
