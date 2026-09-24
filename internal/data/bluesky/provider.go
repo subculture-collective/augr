@@ -21,10 +21,11 @@ import (
 )
 
 const (
-	defaultServiceURL = "https://bsky.social"
-	defaultLimit      = 50
-	searchPath        = "/xrpc/app.bsky.feed.searchPosts"
-	sessionPath       = "/xrpc/com.atproto.server.createSession"
+	defaultResolverURL = "https://bsky.social"
+	defaultPLCURL      = "https://plc.directory"
+	defaultLimit       = 50
+	searchPath         = "/xrpc/app.bsky.feed.searchPosts"
+	sessionPath        = "/xrpc/com.atproto.server.createSession"
 )
 
 // Credentials is the app-password login Bluesky requires for post search.
@@ -33,7 +34,8 @@ type Credentials struct {
 	Identifier  string
 	AppPassword string
 	// ServiceURL is the account's PDS; it proxies app.bsky.* calls to the
-	// AppView. Defaults to https://bsky.social.
+	// AppView. When empty, the PDS is resolved from the handle's DID document,
+	// which is required for accounts hosted outside bsky.social.
 	ServiceURL string
 }
 
@@ -42,7 +44,8 @@ type Credentials struct {
 // signal.
 type Provider struct {
 	http        *http.Client
-	serviceURL  string
+	resolverURL string
+	plcURL      string
 	credentials Credentials
 	limiter     *data.RateLimiter
 	provider    llm.Provider
@@ -50,6 +53,7 @@ type Provider struct {
 	logger      *slog.Logger
 
 	mu          sync.Mutex
+	serviceURL  string
 	accessToken string
 }
 
@@ -81,13 +85,11 @@ func NewProvider(provider llm.Provider, model string, credentials Credentials, l
 	if logger == nil {
 		logger = slog.Default()
 	}
-	serviceURL := strings.TrimRight(strings.TrimSpace(credentials.ServiceURL), "/")
-	if serviceURL == "" {
-		serviceURL = defaultServiceURL
-	}
 	return &Provider{
 		http:        &http.Client{Timeout: 15 * time.Second},
-		serviceURL:  serviceURL,
+		resolverURL: defaultResolverURL,
+		plcURL:      defaultPLCURL,
+		serviceURL:  strings.TrimRight(strings.TrimSpace(credentials.ServiceURL), "/"),
 		credentials: credentials,
 		limiter:     data.NewRateLimiter(120, time.Minute),
 		provider:    provider,
@@ -170,7 +172,10 @@ func (p *Provider) search(ctx context.Context, params url.Values) ([]byte, error
 		if err := p.limiter.Wait(ctx); err != nil {
 			return nil, fmt.Errorf("wait for rate limiter: %w", err)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.serviceURL+searchPath+"?"+params.Encode(), nil)
+		p.mu.Lock()
+		serviceURL := p.serviceURL
+		p.mu.Unlock()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, serviceURL+searchPath+"?"+params.Encode(), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -200,8 +205,15 @@ func (p *Provider) session(ctx context.Context, renew bool) (string, error) {
 	if p.accessToken != "" && !renew {
 		return p.accessToken, nil
 	}
+	if p.serviceURL == "" {
+		serviceURL, err := p.resolveServiceURL(ctx)
+		if err != nil {
+			return "", fmt.Errorf("resolve account server: %w", err)
+		}
+		p.serviceURL = serviceURL
+	}
 	payload, err := json.Marshal(map[string]string{
-		"identifier": strings.TrimSpace(p.credentials.Identifier),
+		"identifier": strings.TrimPrefix(strings.TrimSpace(p.credentials.Identifier), "@"),
 		"password":   strings.TrimSpace(p.credentials.AppPassword),
 	})
 	if err != nil {
@@ -211,6 +223,7 @@ func (p *Provider) session(ctx context.Context, renew bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	req.Header.Set("User-Agent", "augr/1.0 social-research")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	status, body, err := p.do(req)
@@ -229,6 +242,64 @@ func (p *Provider) session(ctx context.Context, renew bool) (string, error) {
 	}
 	p.accessToken = created.AccessJwt
 	return p.accessToken, nil
+}
+
+// resolveServiceURL finds the account's PDS: handle -> DID via
+// com.atproto.identity.resolveHandle, then the #atproto_pds service in the DID
+// document (plc.directory for did:plc, /.well-known/did.json for did:web).
+func (p *Provider) resolveServiceURL(ctx context.Context) (string, error) {
+	identifier := strings.TrimPrefix(strings.TrimSpace(p.credentials.Identifier), "@")
+	did := identifier
+	if !strings.HasPrefix(did, "did:") {
+		var resolved struct {
+			DID string `json:"did"`
+		}
+		if err := p.getJSON(ctx, p.resolverURL+"/xrpc/com.atproto.identity.resolveHandle?"+url.Values{"handle": {identifier}}.Encode(), &resolved); err != nil {
+			return "", fmt.Errorf("resolve handle: %w", err)
+		}
+		did = resolved.DID
+	}
+	var documentURL string
+	switch {
+	case strings.HasPrefix(did, "did:plc:"):
+		documentURL = p.plcURL + "/" + did
+	case strings.HasPrefix(did, "did:web:"):
+		documentURL = "https://" + strings.TrimPrefix(did, "did:web:") + "/.well-known/did.json"
+	default:
+		return "", fmt.Errorf("unsupported DID method in %q", did)
+	}
+	var document struct {
+		Service []struct {
+			ID              string `json:"id"`
+			ServiceEndpoint string `json:"serviceEndpoint"`
+		} `json:"service"`
+	}
+	if err := p.getJSON(ctx, documentURL, &document); err != nil {
+		return "", fmt.Errorf("load DID document: %w", err)
+	}
+	for _, service := range document.Service {
+		if service.ID == "#atproto_pds" && strings.TrimSpace(service.ServiceEndpoint) != "" {
+			return strings.TrimRight(strings.TrimSpace(service.ServiceEndpoint), "/"), nil
+		}
+	}
+	return "", errors.New("DID document has no #atproto_pds service")
+}
+
+func (p *Provider) getJSON(ctx context.Context, rawURL string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "augr/1.0 social-research")
+	status, body, err := p.do(req)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return statusError(status, body)
+	}
+	return json.Unmarshal(body, out)
 }
 
 func (p *Provider) do(req *http.Request) (int, []byte, error) {

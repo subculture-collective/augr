@@ -110,3 +110,50 @@ func TestGetSocialSentimentRequiresCredentials(t *testing.T) {
 		t.Fatalf("GetSocialSentiment() error = %v, want not configured", err)
 	}
 }
+
+func TestGetSocialSentimentResolvesSelfHostedServer(t *testing.T) {
+	t.Parallel()
+
+	var pdsLogins atomic.Int32
+	pds := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case sessionPath:
+			pdsLogins.Add(1)
+			_, _ = w.Write([]byte(`{"accessJwt":"pds-token"}`))
+		case searchPath:
+			if r.Header.Get("Authorization") != "Bearer pds-token" {
+				t.Errorf("search Authorization = %q", r.Header.Get("Authorization"))
+			}
+			_, _ = w.Write([]byte(`{"posts":[]}`))
+		default:
+			t.Errorf("unexpected PDS path %q", r.URL.Path)
+		}
+	}))
+	defer pds.Close()
+	directory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/xrpc/com.atproto.identity.resolveHandle":
+			if r.URL.Query().Get("handle") != "augr.example.com" {
+				t.Errorf("handle = %q", r.URL.Query().Get("handle"))
+			}
+			_, _ = w.Write([]byte(`{"did":"did:plc:abc123"}`))
+		case "/did:plc:abc123":
+			_, _ = w.Write([]byte(`{"service":[{"id":"#atproto_pds","type":"AtprotoPersonalDataServer","serviceEndpoint":"` + pds.URL + `/"}]}`))
+		default:
+			t.Errorf("unexpected directory path %q", r.URL.Path)
+		}
+	}))
+	defer directory.Close()
+
+	provider := NewProvider(nil, "", Credentials{Identifier: "@augr.example.com", AppPassword: "pw"}, nil)
+	provider.resolverURL = directory.URL
+	provider.plcURL = directory.URL
+	if _, err := provider.GetSocialSentiment(context.Background(), "SPY", time.Now().Add(-time.Hour), time.Now()); err != nil {
+		t.Fatalf("GetSocialSentiment() error = %v", err)
+	}
+	if pdsLogins.Load() != 1 {
+		t.Fatalf("PDS logins = %d, want login at the resolved server", pdsLogins.Load())
+	}
+}

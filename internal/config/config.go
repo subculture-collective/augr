@@ -925,7 +925,7 @@ func loadFromEnvironment() (Config, error) {
 			Bluesky: BlueskyConfig{
 				Identifier:  os.Getenv("BLUESKY_IDENTIFIER"),
 				AppPassword: os.Getenv("BLUESKY_APP_PASSWORD"),
-				ServiceURL:  getEnvString("BLUESKY_SERVICE_URL", "https://bsky.social"),
+				ServiceURL:  strings.TrimSpace(os.Getenv("BLUESKY_SERVICE_URL")),
 			},
 			Tradier: TradierConfig{
 				APIKey:  os.Getenv("TRADIER_API_KEY"),
