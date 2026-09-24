@@ -2040,6 +2040,10 @@ func (r *realStrategyRunner) prepareStrategyRun(ctx context.Context, strategy do
 	}
 	prepared.InitialState.Position = r.loadPositionSnapshot(ctx, strategy, executionVersionID)
 
+	prepared.InitialState.Account, err = r.loadAgentAccountContext(ctx, strategy)
+	if err != nil {
+		return nil, agent.PreparedRun{}, nil, nil, err
+	}
 	r.logger.Debug("prepareStrategyRun returning successfully")
 	return runner, prepared, strategyConfig, eventsCh, nil
 }

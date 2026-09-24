@@ -930,3 +930,41 @@ func TestBuildUserPromptStatesCurrentPosition(t *testing.T) {
 		t.Fatal("trader prompt rendered a position without a snapshot")
 	}
 }
+
+func TestAccountContextReachesTradePrompt(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		for _, tc := range []struct {
+			name    string
+			account *agent.AccountContext
+			want    string
+		}{
+			{"unknown", nil, "Cash and holdings are unknown"},
+			{"flat", &agent.AccountContext{Source: "alpaca", IsPaper: true, Cash: 1234, Equity: 1234}, "no direct position in SPY"},
+			{"held", &agent.AccountContext{Source: "alpaca", Positions: []agent.AccountPosition{{Ticker: "SPY", Quantity: 3, Side: "long", AvgEntry: 500}}}, "existing position in SPY"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				mock := &mockProvider{response: &llm.CompletionResponse{Content: `{"action":"hold","ticker":"SPY","confidence":0.5,"rationale":"Stay in cash"}`}}
+				node := NewTrader(mock, "test", "test", nil)
+				if direct {
+					if err := node.Execute(context.Background(), &agent.PipelineState{Ticker: "SPY", Account: tc.account}); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if _, err := node.Trade(context.Background(), agent.TradingInput{Ticker: "SPY", Account: tc.account}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				prompt := mock.lastReq.Messages[1].Content
+				if !strings.Contains(prompt, tc.want) {
+					t.Fatalf("missing %q in prompt: %s", tc.want, prompt)
+				}
+				if tc.name == "flat" && !strings.Contains(prompt, `"cash":1234`) {
+					t.Fatal("cash missing")
+				}
+				if tc.name == "held" && !strings.Contains(prompt, `"quantity":3`) {
+					t.Fatal("quantity missing")
+				}
+			})
+		}
+	}
+}

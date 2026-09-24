@@ -5,6 +5,7 @@ package agent
 // and nil Errors slice.
 func PipelineStateFromView(view StateView) *PipelineState {
 	state := &PipelineState{
+		Account:              CloneAccountContext(view.Account),
 		PipelineRunID:        view.PipelineRunID,
 		PipelineRunTradeDate: view.PipelineRunTradeDate,
 		StrategyID:           view.StrategyID,

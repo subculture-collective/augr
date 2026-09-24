@@ -59,6 +59,7 @@ const (
 
 // PipelineState carries the mutable state shared across all pipeline phases.
 type PipelineState struct {
+	Account              *AccountContext       `json:"account,omitempty"`
 	PipelineRunID        uuid.UUID             `json:"pipeline_run_id"`
 	PipelineRunTradeDate time.Time             `json:"pipeline_run_trade_date"`
 	StrategyID           uuid.UUID             `json:"strategy_id"`

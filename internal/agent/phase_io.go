@@ -43,6 +43,7 @@ type ResearchJudgeOutput struct {
 
 // TradingInput provides the research debate results for the trader node.
 type TradingInput struct {
+	Account        *AccountContext `json:"account,omitempty"`
 	Ticker         string
 	InvestmentPlan string
 	AnalystReports map[AgentRole]string
@@ -61,6 +62,7 @@ type TradingOutput struct {
 
 // RiskJudgeInput provides the risk debate results and trading plan for the risk manager.
 type RiskJudgeInput struct {
+	Account      *AccountContext `json:"account,omitempty"`
 	Ticker       string
 	Rounds       []DebateRound
 	TradingPlan  TradingPlan
@@ -161,6 +163,7 @@ func ApplyDebateOutput(state *PipelineState, role AgentRole, phase Phase, rounds
 // tradingInputFromState constructs a TradingInput from the pipeline state.
 func tradingInputFromState(state *PipelineState) TradingInput {
 	return TradingInput{
+		Account:        CloneAccountContext(state.Account),
 		Ticker:         state.Ticker,
 		InvestmentPlan: state.ResearchDebate.InvestmentPlan,
 		AnalystReports: state.AnalystReports,
@@ -180,6 +183,7 @@ func applyTradingOutput(state *PipelineState, output TradingOutput) {
 // riskJudgeInputFromState constructs a RiskJudgeInput from the pipeline state.
 func riskJudgeInputFromState(state *PipelineState) RiskJudgeInput {
 	return RiskJudgeInput{
+		Account:      CloneAccountContext(state.Account),
 		Ticker:       state.Ticker,
 		Rounds:       state.RiskDebate.Rounds,
 		TradingPlan:  state.TradingPlan,

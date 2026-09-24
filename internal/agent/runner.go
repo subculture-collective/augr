@@ -110,6 +110,7 @@ type RuntimeConfig struct {
 // InitialStateSeed captures pre-fetched pipeline inputs that should be loaded
 // into a run before phase execution starts.
 type InitialStateSeed struct {
+	Account          *AccountContext `json:"account,omitempty"`
 	Market           *MarketData
 	News             []data.NewsArticle
 	Fundamentals     *data.Fundamentals
@@ -145,6 +146,7 @@ type RunWarning struct {
 
 // StateView is the runner result snapshot exposed to callers/tests.
 type StateView struct {
+	Account              *AccountContext `json:"account,omitempty"`
 	PipelineRunID        uuid.UUID
 	PipelineRunTradeDate time.Time
 	StrategyID           uuid.UUID
@@ -750,6 +752,7 @@ func applyInitialStateSeed(state *PipelineState, seed InitialStateSeed) {
 		return
 	}
 
+	state.Account = CloneAccountContext(seed.Account)
 	if seed.Market != nil {
 		state.Market = &MarketData{
 			Bars:       cloneOHLCV(seed.Market.Bars),
@@ -1127,6 +1130,7 @@ func snapshotState(state *PipelineState) StateView {
 	researchRounds := append([]DebateRound(nil), state.ResearchDebate.Rounds...)
 	riskRounds := append([]DebateRound(nil), state.RiskDebate.Rounds...)
 	return StateView{
+		Account:              CloneAccountContext(state.Account),
 		PipelineRunID:        state.PipelineRunID,
 		PipelineRunTradeDate: state.PipelineRunTradeDate,
 		StrategyID:           state.StrategyID,
