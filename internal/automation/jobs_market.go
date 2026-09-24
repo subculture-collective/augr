@@ -135,7 +135,9 @@ func (o *JobOrchestrator) currentDataRefresh(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// The job context is still alive, so a wrapped DeadlineExceeded is
+				// one provider request's HTTP client timeout, not a job deadline.
+				if errors.Is(err, context.Canceled) {
 					return err
 				}
 				o.logger.Warn("current_data_refresh: batch refresh failed",

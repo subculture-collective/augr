@@ -3,6 +3,7 @@ package automation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -38,6 +39,11 @@ func (p *partialResultProvider) GetOHLCV(_ context.Context, ticker string, timef
 	}
 	if ticker == "CANCEL" {
 		return nil, context.Canceled
+	}
+	if ticker == "TIMEOUT" {
+		// net/http reports a client timeout as an error wrapping
+		// context.DeadlineExceeded while the job context is still alive.
+		return nil, fmt.Errorf("polygon: do request: Get %q: %w (Client.Timeout exceeded while awaiting headers)", "https://api.polygon.io/v2/aggs/ticker/TIMEOUT", context.DeadlineExceeded)
 	}
 	if timeframe == data.Timeframe1d && p.emptyDaily {
 		return nil, nil
@@ -272,6 +278,25 @@ func TestCurrentDataRefreshConsumesLivePartialStatsWithoutSystemicError(t *testi
 	}
 }
 
+func TestCurrentDataRefreshProviderRequestTimeoutIsNotSystemic(t *testing.T) {
+	provider := &partialResultProvider{}
+	orch := partialResultOrchestrator([]string{"AAPL", "TIMEOUT"}, partialResultDataService(provider, &partialResultHistoryRepo{}))
+	orch.deps.StrategyRepo = &kalshiStrategyRepoStub{strategies: []domain.Strategy{
+		{Ticker: "AAPL", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive},
+		{Ticker: "TIMEOUT", MarketType: domain.MarketTypeStock, Status: domain.StrategyStatusActive},
+	}}
+	orch.Register("current_data_refresh", "test", currentDataRefreshSpec, orch.currentDataRefresh)
+
+	err := orch.currentDataRefresh(context.Background())
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("currentDataRefresh() = %v, want one request timeout recorded as a provider finding", err)
+	}
+	summary := singleJobStatus(t, orch, "current_data_refresh").LastSummary
+	if summary["errors"] != 0 || summary["provider_failures"] != 1 || summary["daily_provider_failures"] != 1 {
+		t.Fatalf("timeout summary = %#v, want provider findings without systemic errors", summary)
+	}
+}
+
 func TestCurrentDataRefreshNilStatsAreSystemic(t *testing.T) {
 	orch := partialResultOrchestrator([]string{"AAPL"}, data.NewDataService(config.Config{}, nil, nil, nil, nil))
 	orch.deps.PositionRepo = newRecordingPositionRepo(&domain.Position{Ticker: "AAPL", AssetClass: domain.AssetClassEquity})
@@ -381,6 +406,25 @@ func TestHistoryRefreshNilResultIsTerminal(t *testing.T) {
 	}
 	if provider.called("AAPL", data.Timeframe1d.String()) {
 		t.Fatal("provider called despite unavailable historical repository")
+	}
+}
+
+func TestHistoryRefreshProviderRequestTimeoutIsPartialNotTerminal(t *testing.T) {
+	provider := &partialResultProvider{}
+	tickers := []string{"A01", "A02", "A03", "A04", "A05", "TIMEOUT", "A07", "A08", "A09", "A10", "LATER"}
+	orch := partialResultOrchestrator(tickers, partialResultDataService(provider, &partialResultHistoryRepo{}))
+	orch.Register("history_refresh", "test", historyRefreshSpec, orch.historyRefresh)
+
+	err := orch.historyRefresh(context.Background())
+	if !IsDegraded(err) {
+		t.Fatalf("historyRefresh() = %v, want degraded partial coverage after one request timeout", err)
+	}
+	summary := singleJobStatus(t, orch, "history_refresh").LastSummary
+	if summary["updated"] != 10 || summary["failed"] != 1 || summary["batches"] != 2 {
+		t.Fatalf("timeout history summary = %#v", summary)
+	}
+	if !provider.called("LATER", data.Timeframe1d.String()) {
+		t.Fatal("later batch was not attempted after one provider request timed out")
 	}
 }
 
