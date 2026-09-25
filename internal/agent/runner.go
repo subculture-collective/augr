@@ -622,6 +622,7 @@ const (
 	HoldReasonRequiredAnalystMissing = "required_analyst_missing"
 	HoldReasonStructuredOutput       = "structured_output_unparseable"
 	HoldReasonExecutionGate          = "execution_gate_rejected"
+	HoldReasonConfidenceBelowMinimum = "confidence_below_minimum"
 )
 
 // PhaseHold describes why a run was converted to HOLD instead of failing.
@@ -665,18 +666,31 @@ func (r *Runner) holdRun(ctx context.Context, state *PipelineState, prepared Pre
 		state.TradingPlan.PositionSize = 0
 		state.TradingPlan.Rationale = appendRationale(state.TradingPlan.Rationale, fmt.Sprintf("Run converted to HOLD (%s) during %s: %s", hold.Reason, hold.Phase, hold.Detail))
 	}
+	r.recordHold(ctx, state, prepared, hold, nil, warnings, warningsMu)
+}
+
+// recordHold makes a HOLD conversion visible: a run warning, a WARN log, and a
+// pipeline_hold event whose metadata carries the reason code plus any extra
+// fields. It does not change the state; callers apply their own conversion.
+func (r *Runner) recordHold(ctx context.Context, state *PipelineState, prepared PreparedRun, hold PhaseHold, extra map[string]any, warnings *[]RunWarning, warningsMu *sync.Mutex) {
 	if warnings != nil && warningsMu != nil {
 		warningsMu.Lock()
 		*warnings = append(*warnings, RunWarning{Phase: hold.Phase, Message: hold.Reason + ": " + hold.Detail, OccurredAt: r.currentTime().UTC()})
 		warningsMu.Unlock()
 	}
-	r.logger.Warn("agent/runner: run converted to HOLD",
-		slog.String("phase", hold.Phase.String()),
-		slog.String("reason", hold.Reason),
-		slog.String("detail", hold.Detail),
-	)
-	if state == nil {
+	if r.logger != nil {
+		r.logger.Warn("agent/runner: run converted to HOLD",
+			slog.String("phase", hold.Phase.String()),
+			slog.String("reason", hold.Reason),
+			slog.String("detail", hold.Detail),
+		)
+	}
+	if state == nil || r.helper.persister == nil {
 		return
+	}
+	metadata := map[string]any{"phase": hold.Phase.String(), "reason_code": hold.Reason, "detail": hold.Detail}
+	for key, value := range extra {
+		metadata[key] = value
 	}
 	r.helper.persistStructuredEvent(ctx, r.helper.newStructuredEvent(
 		state.RunRef(),
@@ -685,7 +699,7 @@ func (r *Runner) holdRun(ctx context.Context, state *PipelineState, prepared Pre
 		"",
 		"Run converted to HOLD",
 		hold.Detail,
-		map[string]any{"phase": hold.Phase.String(), "reason_code": hold.Reason, "detail": hold.Detail},
+		metadata,
 		[]string{"pipeline", "hold", hold.Reason},
 	))
 }
@@ -728,6 +742,7 @@ func (r *Runner) runExecutionGate(ctx context.Context, state *PipelineState, pre
 		state.TradingPlan.Confidence = state.FinalSignal.Confidence
 	}
 	if signal != domain.PipelineSignalHold && state.TradingPlan.Confidence < prepared.Config.RiskConfig.MinConfidence {
+		vetoed := signal
 		state.FinalSignal.Signal = domain.PipelineSignalHold
 		state.FinalSignal.Confidence = state.TradingPlan.Confidence
 		state.TradingPlan.Action = domain.PipelineSignalHold
@@ -738,6 +753,15 @@ func (r *Runner) runExecutionGate(ctx context.Context, state *PipelineState, pre
 			prepared.Config.RiskConfig.MinConfidence,
 		))
 		signal = domain.PipelineSignalHold
+		r.recordHold(ctx, state, prepared, PhaseHold{
+			Phase:  PhaseExecutionGate,
+			Reason: HoldReasonConfidenceBelowMinimum,
+			Detail: fmt.Sprintf("%s vetoed: confidence %.2f below minimum %.2f", vetoed, state.TradingPlan.Confidence, prepared.Config.RiskConfig.MinConfidence),
+		}, map[string]any{
+			"vetoed_signal":  string(vetoed),
+			"confidence":     state.TradingPlan.Confidence,
+			"min_confidence": prepared.Config.RiskConfig.MinConfidence,
+		}, warnings, warningsMu)
 	}
 	if err := ValidateExecutablePlan(state.TradingPlan, signal, prepared.Config.RiskConfig); err != nil {
 		// An inconsistent actionable plan is not an execution failure; the
