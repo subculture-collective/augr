@@ -53,3 +53,20 @@ func TestLoadRejectsMalformedRoleModels(t *testing.T) {
 		t.Fatalf("Load() error = %v, want an LLM_ROLE_MODELS error", err)
 	}
 }
+
+func TestLoadRedditRequestBudget(t *testing.T) {
+	setMinimalLoadEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DataProviders.Reddit.MaxRequestsPerHour != 20 {
+		t.Fatalf("default budget = %d, want 20", cfg.DataProviders.Reddit.MaxRequestsPerHour)
+	}
+
+	setMinimalLoadEnv(t)
+	t.Setenv("REDDIT_MAX_REQUESTS_PER_HOUR", "-1")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "REDDIT_MAX_REQUESTS_PER_HOUR") {
+		t.Fatalf("Load() error = %v, want a budget validation error", err)
+	}
+}

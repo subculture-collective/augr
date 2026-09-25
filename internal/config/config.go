@@ -183,6 +183,13 @@ type EmbeddingConfig struct {
 	Timeout time.Duration // Per-request timeout (default: 30s).
 }
 
+// RedditConfig bounds unauthenticated Reddit feed traffic.
+type RedditConfig struct {
+	// MaxRequestsPerHour caps feed requests across every Reddit consumer in a
+	// sliding hour (REDDIT_MAX_REQUESTS_PER_HOUR, default 20; 0 disables).
+	MaxRequestsPerHour int
+}
+
 // BlueskyConfig contains optional PDS account credentials for authenticated search.
 type BlueskyConfig struct {
 	Identifier  string
@@ -193,6 +200,7 @@ type BlueskyConfig struct {
 // DataProviderConfigs contains external data provider settings.
 type DataProviderConfigs struct {
 	Bluesky                     BlueskyConfig
+	Reddit                      RedditConfig
 	Polygon                     DataProviderConfig
 	PolygonBulkSnapshotsEnabled bool
 	AlphaVantage                DataProviderConfig
@@ -497,6 +505,11 @@ func loadFromEnvironment() (Config, error) {
 	}
 
 	llmBudgetTokensDay, err := getEnvInt("LLM_BUDGET_TOKENS_DAY", 0)
+	if err != nil {
+		return Config{}, err
+	}
+
+	redditMaxRequestsPerHour, err := getEnvInt("REDDIT_MAX_REQUESTS_PER_HOUR", 20)
 	if err != nil {
 		return Config{}, err
 	}
@@ -904,6 +917,7 @@ func loadFromEnvironment() (Config, error) {
 			Timeout: embeddingTimeout,
 		},
 		DataProviders: DataProviderConfigs{
+			Reddit:                      RedditConfig{MaxRequestsPerHour: redditMaxRequestsPerHour},
 			Bluesky:                     BlueskyConfig{Identifier: strings.TrimSpace(os.Getenv("BLUESKY_IDENTIFIER")), AppPassword: strings.TrimSpace(os.Getenv("BLUESKY_APP_PASSWORD")), PDSURL: getEnvString("BLUESKY_PDS_URL", "https://bsky.social")},
 			PolygonBulkSnapshotsEnabled: polygonBulkSnapshotsEnabled,
 			Polygon: DataProviderConfig{

@@ -99,6 +99,10 @@ func (r *RedditSource) fetchAll(ctx context.Context) []RawSignalEvent {
 			r.logger.Debug("reddit: provider cooldown active; skipping remaining feeds", slog.Duration("remaining", wait.Round(time.Second)))
 			break
 		}
+		if !r.limiter.Acquire(time.Now()) {
+			r.logger.Debug("reddit: hourly request budget spent; skipping remaining feeds", slog.String("subreddit", sub))
+			break
+		}
 		got, err := r.fetchSubreddit(ctx, sub)
 		if err != nil {
 			if retryAfter, ok := signalRedditRetryAfter(err); ok {

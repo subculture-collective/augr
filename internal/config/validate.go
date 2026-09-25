@@ -175,6 +175,10 @@ func Validate(cfg Config) error {
 		errs = append(errs, msg)
 	}
 
+	if cfg.DataProviders.Reddit.MaxRequestsPerHour < 0 {
+		errs = append(errs, "REDDIT_MAX_REQUESTS_PER_HOUR must be >= 0")
+	}
+
 	if _, err := ParseRoleModels(cfg.LLM.RoleModelsRaw); err != nil {
 		errs = append(errs, fmt.Sprintf("LLM_ROLE_MODELS: %v", err))
 	}

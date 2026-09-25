@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/PatrickFanella/get-rich-quick/internal/integration/redditlimit"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
 	"github.com/PatrickFanella/get-rich-quick/internal/domain"
@@ -28,7 +31,19 @@ type Provider struct {
 	posts       []RedditPost
 	postsAt     time.Time
 	postsErr    error
+	// fetch loads the subreddit corpus; tests replace it.
+	fetch func(context.Context, []string) ([]RedditPost, error)
 }
+
+const (
+	// corpusTTL is how long one subreddit corpus serves every ticker. Each
+	// refresh costs one request per subreddit against the shared hourly
+	// Reddit budget, and the corpus is filtered by time window per ticker.
+	corpusTTL = time.Hour
+	// maxThrottledCorpusAge bounds reuse of an older corpus while Reddit is
+	// throttling (Retry-After cooldown, 429, or spent budget).
+	maxThrottledCorpusAge = 3 * time.Hour
+)
 
 // Compile-time check that Provider satisfies data.DataProvider.
 var _ data.DataProvider = (*Provider)(nil)
@@ -42,8 +57,10 @@ func NewProvider(llmProvider llm.Provider, model string, subreddits []string, lo
 	if len(subreddits) == 0 {
 		subreddits = StockSubreddits()
 	}
+	client := NewClient(logger)
 	return &Provider{
-		client:      NewClient(logger),
+		fetch:       client.FetchSubredditsWithError,
+		client:      client,
 		llmProvider: llmProvider,
 		model:       model,
 		subreddits:  subreddits,
@@ -136,10 +153,22 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 func (p *Provider) cachedPosts(ctx context.Context) ([]RedditPost, error) {
 	p.postsMu.Lock()
 	defer p.postsMu.Unlock()
-	if !p.postsAt.IsZero() && time.Since(p.postsAt) < 5*time.Minute {
+	age := time.Since(p.postsAt)
+	if !p.postsAt.IsZero() && age < corpusTTL {
 		return append([]RedditPost(nil), p.posts...), p.postsErr
 	}
-	posts, err := p.client.FetchSubredditsWithError(ctx, p.subreddits)
+	fetch := p.fetch
+	if fetch == nil {
+		fetch = p.client.FetchSubredditsWithError
+	}
+	posts, err := fetch(ctx, p.subreddits)
+	if len(posts) == 0 && err != nil && isThrottled(err) && len(p.posts) > 0 && !p.postsAt.IsZero() && age < maxThrottledCorpusAge {
+		// Keep serving the last corpus rather than reporting no Reddit data
+		// on every ticker until the cooldown or budget clears. postsAt is
+		// not advanced, so the next call tries again.
+		p.logger.Debug("reddit: throttled; reusing recent corpus", slog.Duration("age", age.Round(time.Minute)), slog.Any("error", err))
+		return append([]RedditPost(nil), p.posts...), nil
+	}
 	p.postsErr = err
 	p.posts = append(p.posts[:0], posts...)
 	p.postsAt = time.Now()
@@ -173,4 +202,14 @@ func relevantPosts(ticker string, posts []RedditPost) []RedditPost {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out
+}
+
+// isThrottled reports whether err means Reddit declined or deferred requests
+// (cooldown, spent budget, or HTTP 429) rather than failing for another reason.
+func isThrottled(err error) bool {
+	if errors.Is(err, errCooldownActive) || errors.Is(err, redditlimit.ErrBudgetExhausted) {
+		return true
+	}
+	var status statusError
+	return errors.As(err, &status) && status.status == http.StatusTooManyRequests
 }

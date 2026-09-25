@@ -4,6 +4,7 @@
 package redditlimit
 
 import (
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"time"
@@ -11,12 +12,20 @@ import (
 
 const defaultCooldown = 15 * time.Minute
 
+// ErrBudgetExhausted reports that a feed request was skipped because the
+// shared hourly request budget is spent.
+var ErrBudgetExhausted = errors.New("reddit: hourly request budget exhausted")
+
 // Coordinator stores provider-wide cooldown and freshness state.
 type Coordinator struct {
 	mu          sync.Mutex
 	cooldownTil time.Time
 	lastSuccess time.Time
 	observer    Observer
+	// hourlyBudget caps feed requests across every consumer in a sliding hour;
+	// zero means unlimited. requests holds the timestamps inside that hour.
+	hourlyBudget int
+	requests     []time.Time
 }
 
 // Observer exposes provider freshness and cooldown state without coupling the
@@ -119,4 +128,43 @@ func (c *Coordinator) LastSuccess() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastSuccess
+}
+
+// SetHourlyBudget caps Reddit feed requests across all consumers in any
+// sliding hour. Unauthenticated RSS answers bursts with a 429 and a 15-minute
+// Retry-After, so staying under the budget keeps feeds available. Zero or a
+// negative value removes the cap.
+func (c *Coordinator) SetHourlyBudget(requests int) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hourlyBudget = max(requests, 0)
+}
+
+// Acquire reserves one feed request. It returns false when the hourly budget
+// is spent; callers skip the request instead of sending it.
+func (c *Coordinator) Acquire(now time.Time) bool {
+	if c == nil {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hourlyBudget <= 0 {
+		return true
+	}
+	cutoff := now.Add(-time.Hour)
+	kept := c.requests[:0]
+	for _, at := range c.requests {
+		if at.After(cutoff) {
+			kept = append(kept, at)
+		}
+	}
+	c.requests = kept
+	if len(c.requests) >= c.hourlyBudget {
+		return false
+	}
+	c.requests = append(c.requests, now)
+	return true
 }

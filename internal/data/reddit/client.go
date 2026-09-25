@@ -27,6 +27,10 @@ var feedHosts = []string{
 	"https://old.reddit.com",
 }
 
+// errCooldownActive reports that a feed was skipped during the shared
+// Retry-After cooldown.
+var errCooldownActive = errors.New("reddit: provider cooldown active")
+
 // StockSubreddits returns the default subreddits to scan for equity sentiment.
 func StockSubreddits() []string {
 	return []string{"wallstreetbets", "stocks", "investing", "options", "ETFs", "dividends"}
@@ -87,7 +91,7 @@ func (c *Client) FetchSubredditsWithError(ctx context.Context, subreddits []stri
 			c.logger.Debug("reddit: provider cooldown active; skipping remaining feeds",
 				slog.Duration("remaining", wait.Round(time.Second)),
 			)
-			failures = append(failures, errors.New("reddit: provider cooldown active"))
+			failures = append(failures, errCooldownActive)
 			break
 		}
 		if i > 0 {
@@ -96,6 +100,11 @@ func (c *Client) FetchSubredditsWithError(ctx context.Context, subreddits []stri
 				return posts, ctx.Err()
 			case <-time.After(fetchDelay):
 			}
+		}
+		if !c.limiter.Acquire(time.Now()) {
+			c.logger.Debug("reddit: hourly request budget spent; skipping remaining feeds", slog.String("subreddit", sub))
+			failures = append(failures, redditlimit.ErrBudgetExhausted)
+			break
 		}
 
 		got, err := c.fetchSubreddit(ctx, sub)
