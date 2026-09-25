@@ -121,6 +121,14 @@ type LLMConfig struct {
 	Timeout         time.Duration
 	Providers       LLMProviderConfigs
 
+	// RoleModels overrides the tier model for individual agent roles
+	// (LLM_ROLE_MODELS, e.g. "risk_manager=openai/gpt-6-astra"). Roles without
+	// an entry keep the deep or quick tier model.
+	RoleModels map[string]string
+	// RoleModelsRaw keeps the unparsed LLM_ROLE_MODELS value so Validate can
+	// report malformed entries.
+	RoleModelsRaw string
+
 	// DebateTimeout bounds one debate-round LLM call before the quick model
 	// retry (LLM_DEBATE_TIMEOUT). Zero disables the per-call timeout.
 	DebateTimeout time.Duration
@@ -175,8 +183,24 @@ type EmbeddingConfig struct {
 	Timeout time.Duration // Per-request timeout (default: 30s).
 }
 
+// RedditConfig bounds unauthenticated Reddit feed traffic.
+type RedditConfig struct {
+	// MaxRequestsPerHour caps feed requests across every Reddit consumer in a
+	// sliding hour (REDDIT_MAX_REQUESTS_PER_HOUR, default 20; 0 disables).
+	MaxRequestsPerHour int
+}
+
+// BlueskyConfig contains optional PDS account credentials for authenticated search.
+type BlueskyConfig struct {
+	Identifier  string
+	AppPassword string
+	PDSURL      string
+}
+
 // DataProviderConfigs contains external data provider settings.
 type DataProviderConfigs struct {
+	Bluesky                     BlueskyConfig
+	Reddit                      RedditConfig
 	Polygon                     DataProviderConfig
 	PolygonBulkSnapshotsEnabled bool
 	AlphaVantage                DataProviderConfig
@@ -184,6 +208,13 @@ type DataProviderConfigs struct {
 	FMP                         DataProviderConfig
 	NewsAPI                     DataProviderConfig
 	Tradier                     TradierConfig
+}
+
+// Configured reports whether both login values are present. Without them the
+// Bluesky social provider is not registered, because unauthenticated search
+// is refused.
+func (c BlueskyConfig) Configured() bool {
+	return strings.TrimSpace(c.Identifier) != "" && strings.TrimSpace(c.AppPassword) != ""
 }
 
 // TradierConfig contains Tradier-specific settings.
@@ -474,6 +505,11 @@ func loadFromEnvironment() (Config, error) {
 	}
 
 	llmBudgetTokensDay, err := getEnvInt("LLM_BUDGET_TOKENS_DAY", 0)
+	if err != nil {
+		return Config{}, err
+	}
+
+	redditMaxRequestsPerHour, err := getEnvInt("REDDIT_MAX_REQUESTS_PER_HOUR", 20)
 	if err != nil {
 		return Config{}, err
 	}
@@ -825,8 +861,10 @@ func loadFromEnvironment() (Config, error) {
 		},
 		LLM: LLMConfig{
 			DefaultProvider: getEnvString("LLM_DEFAULT_PROVIDER", "opencode"),
-			DeepThinkModel:  getEnvString("LLM_DEEP_THINK_MODEL", "openai/gpt-5.6-sol"),
-			QuickThinkModel: getEnvString("LLM_QUICK_THINK_MODEL", "openai/gpt-5.6-luna"),
+			DeepThinkModel:  getEnvString("LLM_DEEP_THINK_MODEL", "openai/gpt-6-sol"),
+			QuickThinkModel: getEnvString("LLM_QUICK_THINK_MODEL", "openai/gpt-6-luna"),
+			RoleModels:      parseRoleModelsLenient(os.Getenv("LLM_ROLE_MODELS")),
+			RoleModelsRaw:   os.Getenv("LLM_ROLE_MODELS"),
 			Timeout:         llmTimeout,
 			DebateTimeout:   llmDebateTimeout,
 			Providers: LLMProviderConfigs{
@@ -862,7 +900,7 @@ func loadFromEnvironment() (Config, error) {
 					BaseURL:  getEnvString("OPENCODE_BASE_URL", "http://localhost:4096"),
 					Username: getEnvString("OPENCODE_SERVER_USERNAME", "opencode"),
 					Password: os.Getenv("OPENCODE_SERVER_PASSWORD"),
-					Model:    getEnvString("OPENCODE_MODEL", "openai/gpt-5.6-terra"),
+					Model:    getEnvString("OPENCODE_MODEL", "openai/gpt-6-sol"),
 				},
 			},
 			FallbackProvider:     getEnvString("LLM_FALLBACK_PROVIDER", ""),
@@ -879,6 +917,8 @@ func loadFromEnvironment() (Config, error) {
 			Timeout: embeddingTimeout,
 		},
 		DataProviders: DataProviderConfigs{
+			Reddit:                      RedditConfig{MaxRequestsPerHour: redditMaxRequestsPerHour},
+			Bluesky:                     BlueskyConfig{Identifier: strings.TrimSpace(os.Getenv("BLUESKY_IDENTIFIER")), AppPassword: strings.TrimSpace(os.Getenv("BLUESKY_APP_PASSWORD")), PDSURL: getEnvString("BLUESKY_PDS_URL", "https://bsky.social")},
 			PolygonBulkSnapshotsEnabled: polygonBulkSnapshotsEnabled,
 			Polygon: DataProviderConfig{
 				APIKey: os.Getenv("POLYGON_API_KEY"),

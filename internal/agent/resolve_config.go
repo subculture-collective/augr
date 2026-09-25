@@ -1,12 +1,15 @@
 package agent
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Hardcoded defaults used as the final fallback in ResolveConfig.
 const (
 	defaultLLMProvider        = "opencode"
-	defaultLLMDeepThinkModel  = "openai/gpt-5.6-sol"
-	defaultLLMQuickThinkModel = "openai/gpt-5.6-luna"
+	defaultLLMDeepThinkModel  = "openai/gpt-6-sol"
+	defaultLLMQuickThinkModel = "openai/gpt-6-luna"
 	// One debate round keeps a run inside the scheduler job timeout with
 	// 30-minute LLM calls; strategies or globals may raise it.
 	defaultPipelineDebateRounds   = 1
@@ -52,6 +55,18 @@ type ResolvedLLMConfig struct {
 	DeepThinkModel string
 	// QuickThinkModel is the model used for fast-response tasks.
 	QuickThinkModel string
+	// RoleModels overrides the tier model for individual roles. Nil when no
+	// role has an override.
+	RoleModels map[AgentRole]string
+}
+
+// ModelFor returns the model for role: its role override when one is set,
+// otherwise tierModel (the deep or quick model the role normally uses).
+func (c ResolvedLLMConfig) ModelFor(role AgentRole, tierModel string) string {
+	if model := strings.TrimSpace(c.RoleModels[role]); model != "" {
+		return model
+	}
+	return tierModel
 }
 
 // ResolvedPipelineConfig is the fully-resolved pipeline configuration with no pointer fields.
@@ -139,6 +154,7 @@ func ResolveConfig(strategyConfig *StrategyConfig, globalSettings GlobalSettings
 			Provider:        resolveStringPtr(sLLM.Provider, gLLM.Provider, defaultLLMProvider),
 			DeepThinkModel:  resolveStringPtr(sLLM.DeepThinkModel, gLLM.DeepThinkModel, defaultLLMDeepThinkModel),
 			QuickThinkModel: resolveStringPtr(sLLM.QuickThinkModel, gLLM.QuickThinkModel, defaultLLMQuickThinkModel),
+			RoleModels:      resolveRoleModels(sLLM.RoleModels, gLLM.RoleModels),
 		},
 		PipelineConfig: ResolvedPipelineConfig{
 			DebateRounds:           resolveIntPtr(sPipeline.DebateRounds, gPipeline.DebateRounds, defaultPipelineDebateRounds),
@@ -155,6 +171,29 @@ func ResolveConfig(strategyConfig *StrategyConfig, globalSettings GlobalSettings
 		RequiredAnalystRoles: resolveRequiredAgentRoles(s.RequiredAnalystRoles, globalSettings.RequiredAnalystRoles, resolveAgentRoles(s.AnalystSelection, globalSettings.AnalystSelection)),
 		PromptOverrides:      resolvePromptOverrides(s.PromptOverrides, globalSettings.PromptOverrides),
 	}
+}
+
+// resolveRoleModels merges global role overrides with strategy overrides; a
+// strategy entry wins for its role.
+func resolveRoleModels(strategy, global map[AgentRole]string) map[AgentRole]string {
+	if len(strategy) == 0 && len(global) == 0 {
+		return nil
+	}
+	merged := make(map[AgentRole]string, len(strategy)+len(global))
+	for role, model := range global {
+		if model = strings.TrimSpace(model); model != "" {
+			merged[role] = model
+		}
+	}
+	for role, model := range strategy {
+		if model = strings.TrimSpace(model); model != "" {
+			merged[role] = model
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 func resolveRequiredAgentRoles(strategy, global, selected []AgentRole) []AgentRole {

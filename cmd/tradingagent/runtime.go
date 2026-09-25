@@ -766,6 +766,7 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		WithPersister(ctx, pgrepo.NewSettingsPersister(db.Pool), logger)
 	promptSettingsSvc := api.NewPromptSettingsService().WithPersister(ctx, pgrepo.NewSettingsPersister(db.Pool))
 	redditlimit.Default.SetObserver(appMetrics)
+	redditlimit.Default.SetHourlyBudget(cfg.DataProviders.Reddit.MaxRequestsPerHour)
 
 	deps := api.Deps{
 		Strategies:             strategyRepo,
@@ -966,8 +967,13 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		}
 		stocktwitsData.Register(reg)
 		redditData.Register(reg)
-		reg.Bluesky = func(cfg data.ProviderConfig) data.DataProvider {
-			return bluesky.NewProvider(cfg.LLMProvider, cfg.LLMModel, cfg.Logger)
+		if blueskyCfg := cfg.DataProviders.Bluesky; blueskyCfg.Configured() {
+			blueskyAuth := bluesky.AuthConfig{Identifier: blueskyCfg.Identifier, AppPassword: blueskyCfg.AppPassword, PDSURL: blueskyCfg.PDSURL}
+			reg.Bluesky = func(providerCfg data.ProviderConfig) data.DataProvider {
+				return bluesky.NewProviderWithAuth(providerCfg.LLMProvider, providerCfg.LLMModel, providerCfg.Logger, blueskyAuth)
+			}
+		} else {
+			logger.Info("bluesky social search disabled: Bluesky requires a login for post search; set BLUESKY_IDENTIFIER and BLUESKY_APP_PASSWORD to enable it")
 		}
 
 		var socialTriage *data.SocialTriageConfig
@@ -1556,7 +1562,9 @@ func newAPIServer(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	var signalSources []signal.SignalSource
 	signalSources = append(signalSources,
 		signal.NewRSSSource(signal.DefaultRSSFeeds(), 60*time.Second, logger),
-		signal.NewRedditSource(signal.DefaultSubreddits(), 5*time.Minute, logger),
+		// Hourly: every poll spends one request per subreddit from the shared
+		// Reddit budget that also feeds strategy social sentiment.
+		signal.NewRedditSource(signal.DefaultSubreddits(), time.Hour, logger),
 	)
 	if cfg.Features.EnablePolymarketAutomation {
 		signalSources = append(signalSources, signal.NewPolymarketSource(signal.PolymarketSourceConfig{

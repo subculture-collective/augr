@@ -44,14 +44,13 @@ func (p *DataProvider) GetNews(_ context.Context, _ string, _, _ time.Time) ([]d
 }
 
 // GetSocialSentiment returns sentiment for a ticker from StockTwits message
-// stream. The from/to parameters are accepted but ignored since StockTwits
-// returns current sentiment only.
-func (p *DataProvider) GetSocialSentiment(ctx context.Context, ticker string, _, _ time.Time) ([]data.SocialSentiment, error) {
+// stream, filtered by message timestamps within the requested window.
+func (p *DataProvider) GetSocialSentiment(ctx context.Context, ticker string, from, to time.Time) ([]data.SocialSentiment, error) {
 	if p == nil {
 		return nil, fmt.Errorf("stocktwits: provider is nil")
 	}
 
-	sentiment, err := p.client.GetSymbolSentiment(ctx, ticker)
+	sentiment, err := p.client.GetSymbolSentimentWindow(ctx, ticker, from, to)
 	if err != nil {
 		return nil, fmt.Errorf("stocktwits: GetSocialSentiment %s: %w", ticker, err)
 	}

@@ -1251,3 +1251,37 @@ func TestRunnerRun_TerminalEventFailureFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+func TestRunnerRunStrategy_ConfidenceGateRecordsHoldEvent(t *testing.T) {
+	persister := newRunnerSpyPersister()
+	var holdMetadata map[string]any
+	persister.eventHook = func(_ context.Context, event *domain.AgentEvent) {
+		if event.EventKind == AgentEventKindPipelineHold.String() {
+			_ = json.Unmarshal(event.Metadata, &holdMetadata)
+		}
+	}
+	def := defaultRunnerDefinition()
+	// The 2026-09-25 SPY run: the risk manager approved BUY at 6/10, below the
+	// 0.65 default minimum, and the gate converted it to HOLD without a trace.
+	def.Risk.Judge = stubRiskJudge{name: "risk-manager", role: AgentRoleRiskManager, fn: func(_ context.Context, input RiskJudgeInput) (RiskJudgeOutput, error) {
+		plan := input.TradingPlan
+		plan.Action = PipelineSignalBuy
+		return RiskJudgeOutput{FinalSignal: FinalSignal{Signal: PipelineSignalBuy, Confidence: 0.6}, StoredSignal: `{"action":"BUY","confidence":6}`, TradingPlan: plan}, nil
+	}}
+	runner := NewRunner(def, Dependencies{Persister: persister})
+
+	result, err := runner.RunStrategy(context.Background(), strategyWithDebateRounds(t, "SPY", 1), GlobalSettings{})
+	if err != nil {
+		t.Fatalf("RunStrategy() error = %v", err)
+	}
+	if result.Signal != domain.PipelineSignalHold {
+		t.Fatalf("signal = %s, want HOLD", result.Signal)
+	}
+	if holdMetadata == nil {
+		t.Fatalf("persisted event kinds = %v, want a pipeline_hold event for the confidence veto", persister.eventKinds())
+	}
+	if holdMetadata["reason_code"] != HoldReasonConfidenceBelowMinimum || holdMetadata["vetoed_signal"] != "buy" ||
+		holdMetadata["confidence"] != 0.6 || holdMetadata["min_confidence"] != 0.65 {
+		t.Fatalf("hold metadata = %v", holdMetadata)
+	}
+}

@@ -109,7 +109,7 @@ func (r *ResearchManager) Execute(ctx context.Context, state *agent.PipelineStat
 	output, err := r.JudgeResearch(ctx, agent.DebateInput{
 		Ticker:         state.Ticker,
 		Rounds:         state.ResearchDebate.Rounds,
-		ContextReports: state.AnalystReports,
+		ContextReports: agent.WithPositionContext(state.AnalystReports, state.Position),
 	})
 	if output.InvestmentPlan != "" {
 		state.ResearchDebate.InvestmentPlan = output.InvestmentPlan

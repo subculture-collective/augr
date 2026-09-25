@@ -78,7 +78,7 @@ func (b *BullResearcher) Execute(ctx context.Context, state *agent.PipelineState
 	input := agent.DebateInput{
 		Ticker:         state.Ticker,
 		Rounds:         state.ResearchDebate.Rounds,
-		ContextReports: state.AnalystReports,
+		ContextReports: agent.WithPositionContext(state.AnalystReports, state.Position),
 	}
 	output, err := b.Debate(ctx, input)
 	if err != nil {

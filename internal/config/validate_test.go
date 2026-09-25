@@ -37,6 +37,9 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 	t.Setenv("POLYGON_BULK_SNAPSHOTS_ENABLED", "true")
 	t.Setenv("ALPHA_VANTAGE_RATE_LIMIT_PER_MINUTE", "7")
 	t.Setenv("FINNHUB_RATE_LIMIT_PER_MINUTE", "20")
+	t.Setenv("BLUESKY_IDENTIFIER", "test.example")
+	t.Setenv("BLUESKY_APP_PASSWORD", "synthetic-password")
+	t.Setenv("BLUESKY_PDS_URL", "https://pds.example")
 	t.Setenv("ALPACA_PAPER_MODE", "false")
 	t.Setenv("KALSHI_API_BASE_URL", "https://external-api.demo.kalshi.co/trade-api/v2")
 	t.Setenv("KALSHI_API_KEY_ID", "kalshi-key-id")
@@ -136,6 +139,10 @@ func TestLoadParsesEnvironmentValues(t *testing.T) {
 
 	if cfg.LLM.Providers.XAI.BaseURL != "https://xai.example.com/v1" {
 		t.Fatalf("cfg.LLM.Providers.XAI.BaseURL = %q, want %q", cfg.LLM.Providers.XAI.BaseURL, "https://xai.example.com/v1")
+	}
+
+	if cfg.DataProviders.Bluesky.Identifier != "test.example" || cfg.DataProviders.Bluesky.AppPassword != "synthetic-password" || cfg.DataProviders.Bluesky.PDSURL != "https://pds.example" {
+		t.Fatal("Bluesky environment configuration was not loaded")
 	}
 
 	if cfg.DataProviders.AlphaVantage.RateLimitPerMinute != 7 {
@@ -937,6 +944,9 @@ func clearConfigEnv(t *testing.T) {
 	t.Helper()
 
 	for _, key := range []string{
+		"BLUESKY_IDENTIFIER",
+		"BLUESKY_APP_PASSWORD",
+		"BLUESKY_PDS_URL",
 		"APP_ENV",
 		"APP_HOST",
 		"APP_PORT",
@@ -1042,4 +1052,27 @@ func clearConfigEnv(t *testing.T) {
 		t.Setenv(key, "")
 	}
 	t.Setenv("PROJECTION_ACCOUNT_ID", "00000000-0000-4000-8000-000000000064")
+}
+
+func TestValidateBlueskyCredentialsAndPDS(t *testing.T) {
+	for _, tc := range []struct {
+		name, identifier, password, pds string
+		wantError                       bool
+	}{
+		{"disabled", "", "", "", false},
+		{"missing password", "test.example", "", "https://pds.example", true},
+		{"missing identifier", "", "synthetic-password", "https://pds.example", true},
+		{"valid", "test.example", "synthetic-password", "https://pds.example", false},
+		{"insecure", "test.example", "synthetic-password", "http://pds.example", true},
+		{"embedded credentials", "test.example", "synthetic-password", "https://user:pass@pds.example", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.DataProviders.Bluesky = BlueskyConfig{Identifier: tc.identifier, AppPassword: tc.password, PDSURL: tc.pds}
+			err := Validate(cfg)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("Validate error=%v", err)
+			}
+		})
+	}
 }

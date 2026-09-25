@@ -419,7 +419,10 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// The job context is still alive here, so a wrapped DeadlineExceeded
+			// is one provider request's HTTP client timeout: count it as a
+			// partial batch failure instead of abandoning every later batch.
+			if errors.Is(err, context.Canceled) {
 				return err
 			}
 			if download == nil {
@@ -455,7 +458,7 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				if errors.Is(recoveryErr, context.Canceled) || errors.Is(recoveryErr, context.DeadlineExceeded) {
+				if errors.Is(recoveryErr, context.Canceled) {
 					return recoveryErr
 				}
 				o.logger.Warn("history_refresh: partial full-range recovery", slog.Int("offset", i), slog.Any("error", recoveryErr))
@@ -501,7 +504,7 @@ func (o *JobOrchestrator) historyRefresh(ctx context.Context) error {
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
-				if errors.Is(refreshErr, context.Canceled) || errors.Is(refreshErr, context.DeadlineExceeded) {
+				if errors.Is(refreshErr, context.Canceled) {
 					return refreshErr
 				}
 				if revalidated == nil {

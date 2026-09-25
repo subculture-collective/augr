@@ -230,7 +230,7 @@ const SocialAnalystSystemPrompt = `You are a senior social media sentiment analy
 - Ratio analysis: compare bullish to bearish proportions to determine the dominant positioning.
 
 ### Engagement Volume
-- Post count: total number of social-media posts mentioning the ticker. Higher volumes amplify the reliability of the sentiment signal.
+- Post count: total number of social-media posts mentioning the ticker. These are sampled, classified posts, not total platform volume. Volume alone does not establish reliability or representativeness.
 - Comment count: total number of comments on those posts. High comment counts indicate deeper engagement and discussion.
 - Volume context: a high sentiment score with low engagement is less reliable than one backed by thousands of posts and comments.
 
@@ -300,6 +300,10 @@ func FormatSocialAnalystUserPrompt(ticker string, s *data.SocialSentiment) strin
 	b.WriteString("\n## Social Sentiment Data\n\n")
 	b.WriteString("| Metric | Value |\n")
 	b.WriteString("|--------|-------|\n")
+	fmt.Fprintf(&b, "| Sources | %s |\n", sanitizeCell(s.Source))
+	if s.Partial {
+		b.WriteString("| Coverage | Partial: one or more configured sources failed; do not infer consensus. |\n")
+	}
 	fmt.Fprintf(&b, "| Sentiment Score | %.4f |\n", s.Score)
 	fmt.Fprintf(&b, "| Bullish | %.4f |\n", s.Bullish)
 	fmt.Fprintf(&b, "| Bearish | %.4f |\n", s.Bearish)
@@ -307,6 +311,7 @@ func FormatSocialAnalystUserPrompt(ticker string, s *data.SocialSentiment) strin
 	fmt.Fprintf(&b, "| Comment Count | %d |\n", s.CommentCount)
 	fmt.Fprintf(&b, "| Measured At | %s |\n", s.MeasuredAt.Format(time.DateOnly))
 
+	b.WriteString("\nTreat these observations as a bounded sample. Sources may overlap; one source or partial coverage does not establish market-wide consensus. Measured At is the latest included observation timestamp.\n")
 	b.WriteString("\nProvide your structured social sentiment analysis report.\n")
 
 	return b.String()

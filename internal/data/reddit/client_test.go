@@ -78,3 +78,17 @@ const testAtomFeed = `<?xml version="1.0" encoding="UTF-8"?>
     <updated>2026-05-28T01:00:00Z</updated>
   </entry>
 </feed>`
+
+func TestFetchSubredditsReportsOutageAndCooldown(t *testing.T) {
+	c := NewClient(discardLogger())
+	c.limiter = &redditlimit.Coordinator{}
+	c.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 429, Body: io.NopCloser(strings.NewReader("limited")), Header: make(http.Header)}, nil
+	})}
+	for i := 0; i < 2; i++ {
+		posts, err := c.FetchSubredditsWithError(context.Background(), []string{"stocks"})
+		if err == nil || len(posts) != 0 {
+			t.Fatalf("hidden failure on attempt %d: %v %v", i, posts, err)
+		}
+	}
+}

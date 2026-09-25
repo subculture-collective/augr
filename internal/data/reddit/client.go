@@ -27,9 +27,13 @@ var feedHosts = []string{
 	"https://old.reddit.com",
 }
 
+// errCooldownActive reports that a feed was skipped during the shared
+// Retry-After cooldown.
+var errCooldownActive = errors.New("reddit: provider cooldown active")
+
 // StockSubreddits returns the default subreddits to scan for equity sentiment.
 func StockSubreddits() []string {
-	return []string{"wallstreetbets", "stocks", "investing", "options"}
+	return []string{"wallstreetbets", "stocks", "investing", "options", "ETFs", "dividends"}
 }
 
 // CryptoSubreddits returns the default subreddits to scan for crypto sentiment.
@@ -69,29 +73,43 @@ func NewClient(logger *slog.Logger) *Client {
 // FetchSubreddits fetches posts from multiple subreddits concurrently.
 // A short delay is inserted between requests to respect Reddit rate limits.
 func (c *Client) FetchSubreddits(ctx context.Context, subreddits []string) []RedditPost {
+	posts, _ := c.FetchSubredditsWithError(ctx, subreddits)
+	return posts
+}
+
+// FetchSubredditsWithError retains partial coverage and reports unavailable feeds.
+func (c *Client) FetchSubredditsWithError(ctx context.Context, subreddits []string) ([]RedditPost, error) {
 	if len(subreddits) > maxSubreddits {
 		subreddits = subreddits[:maxSubreddits]
 	}
 
 	var posts []RedditPost
+	var failures []error
 
 	for i, sub := range subreddits {
 		if wait := c.cooldownRemaining(sub); wait > 0 {
 			c.logger.Debug("reddit: provider cooldown active; skipping remaining feeds",
 				slog.Duration("remaining", wait.Round(time.Second)),
 			)
+			failures = append(failures, errCooldownActive)
 			break
 		}
 		if i > 0 {
 			select {
 			case <-ctx.Done():
-				return posts
+				return posts, ctx.Err()
 			case <-time.After(fetchDelay):
 			}
+		}
+		if !c.limiter.Acquire(time.Now()) {
+			c.logger.Debug("reddit: hourly request budget spent; skipping remaining feeds", slog.String("subreddit", sub))
+			failures = append(failures, redditlimit.ErrBudgetExhausted)
+			break
 		}
 
 		got, err := c.fetchSubreddit(ctx, sub)
 		if err != nil {
+			failures = append(failures, fmt.Errorf("reddit %s: %w", sub, err))
 			if retryAfter, ok := redditRetryAfter(err); ok {
 				effective := c.startCooldown(sub, retryAfter)
 				c.logger.Info("reddit: rate limited; provider cooldown started",
@@ -107,7 +125,7 @@ func (c *Client) FetchSubreddits(ctx context.Context, subreddits []string) []Red
 		posts = append(posts, got...)
 	}
 
-	return posts
+	return posts, errors.Join(failures...)
 }
 
 func (c *Client) fetchSubreddit(ctx context.Context, sub string) ([]RedditPost, error) {

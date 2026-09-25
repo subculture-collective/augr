@@ -37,19 +37,53 @@ network.
    ```dotenv
    LLM_FALLBACK_PROVIDER=opencode
    LLM_DEFAULT_PROVIDER=opencode
-   LLM_DEEP_THINK_MODEL=openai/gpt-5.6-sol
-   LLM_QUICK_THINK_MODEL=openai/gpt-5.6-luna
+   LLM_DEEP_THINK_MODEL=openai/gpt-6-sol
+   LLM_QUICK_THINK_MODEL=openai/gpt-6-luna
    LLM_FALLBACK_PROVIDER=opencode
    LLM_FALLBACK_MODEL=openai/gpt-5.6-terra
    OPENCODE_BASE_URL=http://opencode:4096
    OPENCODE_SERVER_USERNAME=opencode
-   OPENCODE_MODEL=openai/gpt-5.6-terra
+   OPENCODE_MODEL=openai/gpt-6-sol
    ```
 
-All OpenCode models use `provider/model` form. Sol handles deep-think work,
-Luna handles high-volume quick-think work, and Terra is the balanced fallback
-for model-specific failures. This fallback does not protect against a complete
+All OpenCode models use `provider/model` form. GPT-6 Sol handles deep-think work,
+GPT-6 Luna handles high-volume quick-think work, and GPT-5.6 Terra is the
+fallback for model-specific failures. GPT-6 has no Terra tier, so the fallback
+stays on the previous generation. `openai/gpt-6-astra` is also available as a
+higher-cost deep-think option.
+
+OpenCode 1.18.32 predates GPT-6 Luna and Sol, so `ops/opencode/opencode.json`
+declares both under `provider.openai.models`. Remove that block once the pinned
+OpenCode image lists them in `opencode models openai`.
+
+`LLM_ROLE_MODELS` overrides the tier model for named roles, for example
+`LLM_ROLE_MODELS=risk_manager=openai/gpt-6-astra`. The risk manager's action,
+confidence, position size, and stop loss override the trader's plan, so it is
+the single call where a stronger model has the most effect; it runs once per
+pipeline run with a short output. A strategy can set the same map as
+`llm_config.role_models`, and its entries win for their roles. This fallback does not protect against a complete
 OpenCode sidecar or OAuth outage.
+
+## When to move off OpenCode
+
+Decision of 2026-09-24: keep OpenCode as the primary backend. Every Augr role
+is a tool-free completion, so OpenCode only supplies the ChatGPT login and an
+HTTP API; custom OpenCode skills or instructions would not change model
+behavior. The Codex CLI is not a candidate because it is an agentic harness
+that would spawn a process for each of the 12 calls in a run.
+
+Move to the direct OpenAI provider (`LLM_DEFAULT_PROVIDER=openai` with
+`OPENAI_API_KEY` and the same model names without the `openai/` prefix) when
+any of these holds:
+
+- subscription rate limits start rejecting or queueing pipeline calls;
+- an OAuth refresh failure costs a scheduled trading run;
+- a needed model is missing from the pinned OpenCode catalog for longer than a
+  config override can cover;
+- the ChatGPT plan terms rule out serving Augr through a third-party proxy.
+
+At list prices and the 2026-09-24 token counts, one run costs about $0.19 on
+the API, before any hidden reasoning tokens.
 
 ## Verify
 

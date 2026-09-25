@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/data"
@@ -18,17 +19,22 @@ import (
 )
 
 const (
-	defaultBaseURL = "https://api.bsky.app"
+	defaultBaseURL = "https://public.api.bsky.app"
 	defaultLimit   = 50
 )
 
 // Provider searches the public Bluesky AppView for ticker cashtags and uses
 // the existing bounded social classifier to derive a source-specific signal.
 type Provider struct {
-	api      *data.APIClient
-	provider llm.Provider
-	model    string
-	logger   *slog.Logger
+	api           *data.APIClient
+	provider      llm.Provider
+	model         string
+	logger        *slog.Logger
+	accessMu      sync.Mutex
+	accessRetryAt time.Time
+	accessErr     error
+	session       *sessionClient
+	limiter       *data.RateLimiter
 }
 
 var _ data.DataProvider = (*Provider)(nil)
@@ -68,6 +74,17 @@ func NewProvider(provider llm.Provider, model string, logger *slog.Logger) *Prov
 	}
 }
 
+// NewProviderWithAuth enables authenticated search when account credentials are
+// configured. Anonymous installations retain the public AppView path.
+func NewProviderWithAuth(provider llm.Provider, model string, logger *slog.Logger, config AuthConfig) *Provider {
+	p := NewProvider(provider, model, logger)
+	if config.Identifier != "" && config.AppPassword != "" {
+		p.session = newSessionClient(config)
+		p.limiter = data.NewRateLimiter(120, time.Minute)
+	}
+	return p
+}
+
 func (p *Provider) GetOHLCV(context.Context, string, data.Timeframe, time.Time, time.Time) ([]domain.OHLCV, error) {
 	return nil, fmt.Errorf("bluesky: GetOHLCV: %w", data.ErrNotImplemented)
 }
@@ -88,9 +105,41 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 	if ticker == "" {
 		return nil, errors.New("bluesky: ticker is required")
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	p.accessMu.Lock()
+	accessErr, retryAt := p.accessErr, p.accessRetryAt
+	p.accessMu.Unlock()
+	if accessErr != nil && time.Now().Before(retryAt) {
+		return nil, accessErr
+	}
 	params := url.Values{"q": {"$" + ticker}, "limit": {fmt.Sprint(defaultLimit)}, "sort": {"latest"}}
-	body, _, err := p.api.Get(ctx, "/xrpc/app.bsky.feed.searchPosts", params)
+	if !from.IsZero() {
+		params.Set("since", from.UTC().Format(time.RFC3339Nano))
+	}
+	if !to.IsZero() {
+		params.Set("until", to.UTC().Format(time.RFC3339Nano))
+	}
+	var body []byte
+	var status int
+	var err error
+	if p.session != nil {
+		if err = p.limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		body, status, err = p.session.search(ctx, params)
+	} else {
+		body, status, err = p.api.Get(ctx, "/xrpc/app.bsky.feed.searchPosts", params)
+	}
 	if err != nil {
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			accessErr := fmt.Errorf("bluesky: search access denied (HTTP %d); check authenticated PDS search configuration or service access policy: %w", status, err)
+			p.accessMu.Lock()
+			p.accessErr, p.accessRetryAt = accessErr, time.Now().Add(15*time.Minute)
+			p.accessMu.Unlock()
+			return nil, accessErr
+		}
 		return nil, fmt.Errorf("bluesky: search %s: %w", ticker, err)
 	}
 	var response searchResponse
@@ -100,10 +149,19 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 
 	posts := make([]reddit.RedditPost, 0, len(response.Posts))
 	engagement := 0
+	var latest time.Time
+	seen := make(map[string]struct{})
 	for _, item := range response.Posts {
 		createdAt, err := time.Parse(time.RFC3339Nano, item.Record.CreatedAt)
 		if err != nil || createdAt.Before(from.UTC()) || createdAt.After(to.UTC()) {
 			continue
+		}
+		if _, duplicate := seen[item.URI]; duplicate {
+			continue
+		}
+		seen[item.URI] = struct{}{}
+		if createdAt.After(latest) {
+			latest = createdAt
 		}
 		posts = append(posts, reddit.RedditPost{Title: item.Record.Text, URL: item.URI, Author: item.Author.Handle, Subreddit: "bluesky", UpdatedAt: createdAt})
 		engagement += item.ReplyCount + item.RepostCount + item.LikeCount
@@ -111,19 +169,19 @@ func (p *Provider) GetSocialSentiment(ctx context.Context, ticker string, from, 
 	if len(posts) == 0 {
 		return nil, nil
 	}
-	result := reddit.ScorePosts(ctx, p.provider, p.model, ticker, posts, p.logger)
+	result, scoreErr := reddit.ScorePostsWithError(ctx, p.provider, p.model, ticker, posts, p.logger)
 	if result.Mentions == 0 {
-		return nil, nil
+		return nil, scoreErr
 	}
 	total := result.Bullish + result.Bearish + result.Neutral
 	if total == 0 {
-		return nil, nil
+		return nil, scoreErr
 	}
 	bullish := float64(result.Bullish) / float64(total)
 	bearish := float64(result.Bearish) / float64(total)
 	return []data.SocialSentiment{{
 		Ticker: ticker, Source: "bluesky", Score: bullish - bearish,
 		Bullish: bullish, Bearish: bearish, PostCount: result.Mentions,
-		CommentCount: engagement, MeasuredAt: time.Now().UTC(),
-	}}, nil
+		CommentCount: engagement, MeasuredAt: latest,
+	}}, scoreErr
 }

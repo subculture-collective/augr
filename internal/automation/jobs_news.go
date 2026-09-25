@@ -274,8 +274,8 @@ func (o *JobOrchestrator) socialScan(ctx context.Context) error {
 		snapshots, err := o.deps.DataService.GetSocialSentimentBySource(ctx, domain.MarketTypeStock, ticker, now.Add(-24*time.Hour), now)
 		if err != nil {
 			summary["errors"]++
+			summary["provider_errors"]++
 			o.logger.Warn("social_scan: aggregate sentiment failed", slog.String("ticker", ticker), slog.Any("error", err))
-			continue
 		}
 		for _, sentiment := range snapshots {
 			source := strings.TrimSpace(sentiment.Source)
@@ -316,6 +316,9 @@ func newsScanCompletionError(summary map[string]int) error {
 func socialScanCompletionError(summary map[string]int) error {
 	if summary["errors"] == 0 {
 		return nil
+	}
+	if summary["sentiment_saved"] > 0 && summary["errors"] == summary["provider_errors"] {
+		return Degradedf("social_scan: saved partial coverage with %d provider or persistence errors", summary["errors"])
 	}
 	return fmt.Errorf("social_scan: completed with %d provider or persistence errors", summary["errors"])
 }

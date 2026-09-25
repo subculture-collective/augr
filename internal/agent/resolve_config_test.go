@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/PatrickFanella/get-rich-quick/internal/agent"
@@ -399,11 +400,11 @@ func TestResolveConfig_HardcodedDefaults(t *testing.T) {
 	if got.LLMConfig.Provider != "opencode" {
 		t.Errorf("Provider = %q, want %q", got.LLMConfig.Provider, "opencode")
 	}
-	if got.LLMConfig.DeepThinkModel != "openai/gpt-5.6-sol" {
-		t.Errorf("DeepThinkModel = %q, want %q", got.LLMConfig.DeepThinkModel, "openai/gpt-5.6-sol")
+	if got.LLMConfig.DeepThinkModel != "openai/gpt-6-sol" {
+		t.Errorf("DeepThinkModel = %q, want %q", got.LLMConfig.DeepThinkModel, "openai/gpt-6-sol")
 	}
-	if got.LLMConfig.QuickThinkModel != "openai/gpt-5.6-luna" {
-		t.Errorf("QuickThinkModel = %q, want %q", got.LLMConfig.QuickThinkModel, "openai/gpt-5.6-luna")
+	if got.LLMConfig.QuickThinkModel != "openai/gpt-6-luna" {
+		t.Errorf("QuickThinkModel = %q, want %q", got.LLMConfig.QuickThinkModel, "openai/gpt-6-luna")
 	}
 	if got.PipelineConfig.DebateRounds != 1 {
 		t.Errorf("DebateRounds = %d, want %d", got.PipelineConfig.DebateRounds, 1)
@@ -475,8 +476,8 @@ func TestResolveConfig_PartialStrategyOverride(t *testing.T) {
 	if got.LLMConfig.DeepThinkModel != "claude-3-7-sonnet-latest" {
 		t.Errorf("DeepThinkModel = %q, want %q", got.LLMConfig.DeepThinkModel, "claude-3-7-sonnet-latest")
 	}
-	if got.LLMConfig.QuickThinkModel != "openai/gpt-5.6-luna" {
-		t.Errorf("QuickThinkModel = %q, want %q (hardcoded default)", got.LLMConfig.QuickThinkModel, "openai/gpt-5.6-luna")
+	if got.LLMConfig.QuickThinkModel != "openai/gpt-6-luna" {
+		t.Errorf("QuickThinkModel = %q, want %q (hardcoded default)", got.LLMConfig.QuickThinkModel, "openai/gpt-6-luna")
 	}
 }
 
@@ -533,7 +534,7 @@ func TestResolveConfig_EdgeCases(t *testing.T) {
 			global:   agent.GlobalSettings{},
 			check: func(t *testing.T, got agent.ResolvedConfig) {
 				t.Helper()
-				if got.LLMConfig.Provider != "opencode" || got.LLMConfig.DeepThinkModel != "openai/gpt-5.6-sol" || got.LLMConfig.QuickThinkModel != "openai/gpt-5.6-luna" {
+				if got.LLMConfig.Provider != "opencode" || got.LLMConfig.DeepThinkModel != "openai/gpt-6-sol" || got.LLMConfig.QuickThinkModel != "openai/gpt-6-luna" {
 					t.Fatalf("LLM defaults = %+v", got.LLMConfig)
 				}
 				if got.PipelineConfig.DebateRounds != 1 || got.PipelineConfig.AnalysisTimeoutSeconds != 1800 || got.PipelineConfig.DebateTimeoutSeconds != 3600 {
@@ -750,5 +751,40 @@ func TestValidateResolvedConfig_EdgeCases(t *testing.T) {
 	rc.RiskConfig.MinConfidence = 1
 	if err := agent.ValidateResolvedConfig(rc); err != nil {
 		t.Errorf("min confidence 1 should be valid: %v", err)
+	}
+}
+
+func TestResolveConfig_RoleModelsStrategyEntryWinsPerRole(t *testing.T) {
+	t.Parallel()
+
+	strategy := agent.StrategyConfig{LLMConfig: &agent.StrategyLLMConfig{RoleModels: map[agent.AgentRole]string{
+		agent.AgentRoleRiskManager: "openai/gpt-6-astra",
+	}}}
+	global := agent.GlobalSettings{LLMConfig: &agent.StrategyLLMConfig{RoleModels: map[agent.AgentRole]string{
+		agent.AgentRoleRiskManager: "openai/gpt-6-sol",
+		agent.AgentRoleInvestJudge: "openai/gpt-6-astra",
+	}}}
+
+	got := agent.ResolveConfig(&strategy, global)
+	if got.LLMConfig.RoleModels[agent.AgentRoleRiskManager] != "openai/gpt-6-astra" {
+		t.Fatalf("risk_manager = %q, want the strategy entry", got.LLMConfig.RoleModels[agent.AgentRoleRiskManager])
+	}
+	if got.LLMConfig.RoleModels[agent.AgentRoleInvestJudge] != "openai/gpt-6-astra" {
+		t.Fatalf("invest_judge = %q, want the global entry", got.LLMConfig.RoleModels[agent.AgentRoleInvestJudge])
+	}
+	if model := got.LLMConfig.ModelFor(agent.AgentRoleTrader, "tier"); model != "tier" {
+		t.Fatalf("ModelFor(trader) = %q, want the tier model", model)
+	}
+	if model := got.LLMConfig.ModelFor(agent.AgentRoleRiskManager, "tier"); model != "openai/gpt-6-astra" {
+		t.Fatalf("ModelFor(risk_manager) = %q, want the override", model)
+	}
+}
+
+func TestValidateStrategyConfig_RejectsUnknownRoleModelRole(t *testing.T) {
+	t.Parallel()
+
+	cfg := agent.StrategyConfig{LLMConfig: &agent.StrategyLLMConfig{RoleModels: map[agent.AgentRole]string{"cfo": "openai/gpt-6-astra"}}}
+	if err := agent.ValidateStrategyConfig(cfg); err == nil || !strings.Contains(err.Error(), "unknown agent role") {
+		t.Fatalf("agent.ValidateStrategyConfig() error = %v, want unknown agent role", err)
 	}
 }

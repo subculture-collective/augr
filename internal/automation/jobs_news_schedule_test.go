@@ -59,3 +59,12 @@ func TestNormalizeStocktwitsSentimentUsesSignedScoreAndRatios(t *testing.T) {
 		t.Fatalf("normalized sentiment = (%f, %f, %f), want signed score and ratios", score, bullish, bearish)
 	}
 }
+
+func TestSocialScanPartialCoverageIsDegradedButPersistenceFailureIsNot(t *testing.T) {
+	if err := socialScanCompletionError(map[string]int{"errors": 1, "provider_errors": 1, "sentiment_saved": 2}); !IsDegraded(err) {
+		t.Fatalf("partial coverage error=%v", err)
+	}
+	if err := socialScanCompletionError(map[string]int{"errors": 2, "provider_errors": 1, "sentiment_saved": 2}); err == nil || IsDegraded(err) {
+		t.Fatalf("persistence failure error=%v", err)
+	}
+}

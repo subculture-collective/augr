@@ -152,9 +152,11 @@ func (t *Trader) Phase() agent.Phase { return agent.PhaseTrading }
 // a default hold plan is stored so the pipeline can proceed.
 func (t *Trader) Execute(ctx context.Context, state *agent.PipelineState) error {
 	input := agent.TradingInput{
+		Account:        agent.CloneAccountContext(state.Account),
 		Ticker:         state.Ticker,
 		InvestmentPlan: state.ResearchDebate.InvestmentPlan,
 		AnalystReports: state.AnalystReports,
+		Position:       state.Position,
 	}
 	output, err := t.Trade(ctx, input)
 	if output.StoredOutput != "" {
@@ -303,11 +305,17 @@ func buildUserPromptFromInput(input agent.TradingInput) string {
 
 	b.WriteString("Ticker: ")
 	b.WriteString(input.Ticker)
+	b.WriteString("\n\n" + agent.AccountContextPrompt(input.Account, input.Ticker))
 	b.WriteString("\n\nInvestment Plan:\n")
 	if input.InvestmentPlan != "" {
 		b.WriteString(input.InvestmentPlan)
 	} else {
 		b.WriteString("No investment plan available.")
+	}
+
+	if position := input.Position.PromptText(); position != "" {
+		b.WriteString("\n\n")
+		b.WriteString(position)
 	}
 
 	b.WriteString("\n\nAnalyst Reports:\n")

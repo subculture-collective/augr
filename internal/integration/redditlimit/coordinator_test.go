@@ -43,3 +43,29 @@ func (o *observerStub) RecordDataSourceSuccess(_ string, at time.Time) { o.lastS
 func (o *observerStub) SetDataSourceCooldown(_ string, until time.Time) {
 	o.cooldownUntil = until
 }
+
+func TestCoordinatorHourlyBudgetIsSharedAndSlides(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 9, 25, 14, 0, 0, 0, time.UTC)
+	c := &Coordinator{}
+	c.SetHourlyBudget(3)
+	for i := range 3 {
+		if !c.Acquire(now.Add(time.Duration(i) * time.Minute)) {
+			t.Fatalf("Acquire #%d denied inside the budget", i+1)
+		}
+	}
+	if c.Acquire(now.Add(10 * time.Minute)) {
+		t.Fatal("fourth request within the hour was allowed")
+	}
+	if !c.Acquire(now.Add(61 * time.Minute)) {
+		t.Fatal("request after the first one aged out was denied")
+	}
+
+	unlimited := &Coordinator{}
+	for range 100 {
+		if !unlimited.Acquire(now) {
+			t.Fatal("a coordinator without a budget denied a request")
+		}
+	}
+}

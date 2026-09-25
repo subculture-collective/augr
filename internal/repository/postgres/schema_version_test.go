@@ -67,7 +67,7 @@ func TestSchemaVersionCompatibilityRequiresRenamedOperatorUser(t *testing.T) {
 	tests := []struct {
 		version int
 		want    bool
-	}{{113, false}, {114, false}, {115, false}, {116, false}, {117, true}, {118, false}}
+	}{{114, false}, {115, false}, {116, false}, {117, false}, {118, true}, {119, false}}
 	for _, tt := range tests {
 		if got := IsSchemaVersionCompatible(tt.version); got != tt.want {
 			t.Fatalf("IsSchemaVersionCompatible(%d) = %t, want %t", tt.version, got, tt.want)
